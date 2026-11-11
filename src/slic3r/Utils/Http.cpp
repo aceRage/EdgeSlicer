@@ -60,6 +60,10 @@ struct CurlGlobalInit
                 message += "\n" + (boost::format("To manually specify the system certificate store, "
                                                  "set the %1% environment variable to the correct CA and restart the application") % SSL_CA_FILE).str();
             }
+        } else {
+            const std::string reason = Http::ssl_cert_file_unusable_reason(ssl_cafile);
+            if (!reason.empty())
+                BOOST_LOG_TRIVIAL(warning) << reason;
         }
 #endif // OPENSSL_CERT_OVERRIDE
 
@@ -230,10 +234,26 @@ std::string Http::ssl_cert_file_fallback_path(const char *env)
     return first_system_ca_bundle();
 }
 
+std::string Http::ssl_cert_file_unusable_reason(const char *env)
+{
+    if (env == nullptr)
+        return {};
+    if (*env == '\0')
+        return "SSL_CERT_FILE is set but empty; OpenSSL will not load a CA bundle from it";
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(env), ec))
+        return std::string("SSL_CERT_FILE is set but the path is missing or not a file: ") + env;
+    return {};
+}
+
 std::string Http::ensure_ssl_cert_file_if_unset()
 {
-    if (::getenv("SSL_CERT_FILE") != nullptr)
+    if (const char *env = ::getenv("SSL_CERT_FILE")) {
+        const std::string reason = ssl_cert_file_unusable_reason(env);
+        if (!reason.empty())
+            BOOST_LOG_TRIVIAL(warning) << reason;
         return {};
+    }
     const std::string bundle = first_system_ca_bundle();
     if (bundle.empty())
         return {};

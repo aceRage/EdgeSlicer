@@ -235,6 +235,9 @@ public:
     // If SSL_CERT_FILE is unset, set it to a system CA bundle (does not overwrite a user-set value).
     // Returns the path written, or empty if the variable was already set or no bundle exists.
     static std::string ensure_ssl_cert_file_if_unset();
+    // Empty when `env` is unset or names an existing regular file. Otherwise a reason that
+    // SSL_CERT_FILE is set but unusable (empty value, or a missing / non-file path).
+    static std::string ssl_cert_file_unusable_reason(const char *env);
 #endif
 
 	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).

@@ -519,66 +519,112 @@ bool parse_marker(const std::string& s, size_t& i)
     }
 }
 
+// uv and the bundled python need a working PATH, TLS, temp, cache, and locale. Drop the rest of
+// the parent environment so plugin-declared install does not inherit tokens, AWS keys, PYTHONPATH,
+// VIRTUAL_ENV, or similar.
+const char* const k_uv_env_keep[] = {
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "XDG_CACHE_HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+#ifdef _WIN32
+    "SYSTEMROOT",
+    "SystemRoot",
+    "WINDIR",
+    "windir",
+    "COMSPEC",
+    "ComSpec",
+    "PATHEXT",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "SystemDrive",
+#endif
+};
+
 boost::process::environment uv_child_environment()
 {
     namespace process = boost::process;
     // Default-constructed environment copies the parent; drop it so uv sees only the keep-list.
     process::environment env;
     env.clear();
-
-    // uv and the bundled python need a working PATH, TLS, temp, and locale. Drop the rest of the
-    // parent environment so plugin-declared install does not inherit tokens, AWS keys, PYTHONPATH,
-    // VIRTUAL_ENV, or similar.
-    static const char* const keep[] = {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LC_MESSAGES",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        "LD_LIBRARY_PATH",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-#ifdef _WIN32
-        "SYSTEMROOT",
-        "SystemRoot",
-        "WINDIR",
-        "windir",
-        "COMSPEC",
-        "ComSpec",
-        "PATHEXT",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "USERNAME",
-        "SystemDrive",
-#endif
-    };
-    for (const char* key : keep) {
+    for (const char* key : k_uv_env_keep) {
         if (const char* v = std::getenv(key))
             env[key] = v;
     }
     return env;
 }
 
+// Refuse local files uv would otherwise install: path separators, and archive suffixes on the
+// whole token so `numpy-1.26.0-py3-none-any.whl` is not treated as the identifier `numpy`.
+// URL / direct references (`://`) stay a generic PEP 508 refusal — they are not local files.
+bool is_archive_or_path_requirement(const std::string& trimmed)
+{
+    if (trimmed.find("://") != std::string::npos)
+        return false;
+
+    if (trimmed.find('/') != std::string::npos || trimmed.find('\\') != std::string::npos)
+        return true;
+
+    std::string lower = trimmed;
+    boost::algorithm::to_lower(lower);
+    static const char* const suffixes[] = {
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".whl", ".zip", ".egg", ".tar"};
+    for (const char* suffix : suffixes) {
+        const size_t n = std::strlen(suffix);
+        if (lower.size() >= n && lower.compare(lower.size() - n, n, suffix) == 0)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
+
+std::vector<std::string> uv_install_args(const std::string&              python_executable,
+                                         const std::string&              target_dir,
+                                         const std::vector<std::string>& pkgs)
+{
+    std::vector<std::string> args = {"pip", "install", "--python", python_executable,
+                                     "--no-python-downloads", "--target", target_dir, "--"};
+    args.insert(args.end(), pkgs.begin(), pkgs.end());
+    return args;
+}
+
+bool uv_child_environment_keeps(const char* key)
+{
+    if (key == nullptr || *key == '\0')
+        return false;
+    for (const char* k : k_uv_env_keep)
+        if (std::strcmp(k, key) == 0)
+            return true;
+    return false;
+}
 
 bool is_pep508_requirement(const std::string& requirement)
 {
@@ -597,6 +643,8 @@ bool is_pep508_requirement(const std::string& requirement)
 
     const std::string s = requirement.substr(start, end - start);
     if (s.front() == '-')
+        return false;
+    if (is_archive_or_path_requirement(s))
         return false;
 
     size_t i = 0;
@@ -637,6 +685,11 @@ bool validate_pep508_requirements(const std::vector<std::string>& pkgs, std::str
         const std::string trimmed = pkg.substr(start, end - start);
         if (trimmed.front() == '-') {
             error = "Refused Python dependency '" + trimmed + "': installer options are not allowed";
+            return false;
+        }
+        if (is_archive_or_path_requirement(trimmed)) {
+            error = "Refused Python dependency '" + trimmed +
+                    "': archive and path-style names (.whl, .tar.gz, .zip, paths) are not allowed";
             return false;
         }
         error = "Refused Python dependency '" + trimmed +
@@ -934,18 +987,48 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
         return false;
     }
 
-    std::vector<std::string> args = {"pip", "install", "--python", python_executable, "--no-python-downloads", "--target", target_dir};
-    args.insert(args.end(), pkgs.begin(), pkgs.end());
+    const std::vector<std::string> args = uv_install_args(python_executable, target_dir, pkgs);
 
     BOOST_LOG_TRIVIAL(info) << "Installing Python packages via uv for " << python_executable << ": "
                             << boost::algorithm::join(pkgs, ", ");
+
+    struct UvCwd
+    {
+        fs::path p;
+        ~UvCwd()
+        {
+            boost::system::error_code rm_ec;
+            if (!p.empty())
+                fs::remove_all(p, rm_ec);
+        }
+    } uv_cwd;
+    {
+        boost::system::error_code tmp_ec;
+        const fs::path            tmp_root = fs::temp_directory_path(tmp_ec);
+        if (tmp_ec) {
+            error = "Failed to create a temporary directory for uv: " + tmp_ec.message();
+            return false;
+        }
+        tmp_ec.clear();
+        uv_cwd.p = tmp_root / fs::unique_path("orca-uv-%%%%-%%%%", tmp_ec);
+        if (tmp_ec) {
+            error = "Failed to create a temporary directory for uv: " + tmp_ec.message();
+            return false;
+        }
+        fs::create_directories(uv_cwd.p, tmp_ec);
+        if (tmp_ec) {
+            error = "Failed to create a temporary directory for uv: " + tmp_ec.message();
+            uv_cwd.p.clear();
+            return false;
+        }
+    }
 
     try {
         namespace process = boost::process;
 
         process::ipstream     std_err;
         process::environment  uv_env = uv_child_environment();
-        process::child        child(uv_path, process::args(args), uv_env,
+        process::child        child(uv_path, process::args(args), uv_env, process::start_dir(uv_cwd.p),
 #ifdef _WIN32
                                 // uv.exe (and the python.exe it spawns) are console-subsystem programs.
                                 // OrcaSlicer is a GUI app with no console of its own, so without this flag

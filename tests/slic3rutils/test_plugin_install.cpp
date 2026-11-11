@@ -18,6 +18,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -189,6 +190,53 @@ TEST_CASE("PEP 723 / Requires-Dist entries that look like uv installer options a
             CHECK(error.find("PEP 508") != std::string::npos);
         }
     }
+
+    SECTION("archive and path-style names")
+    {
+        for (const char* inj : {
+                 "evil.whl",
+                 "numpy-1.26.0-py3-none-any.whl",
+                 "pkg.tar.gz",
+                 "pkg.tgz",
+                 "pkg.tar.bz2",
+                 "pkg.zip",
+                 "pkg.egg",
+                 "pkg.tar",
+                 "/tmp/evil.whl",
+                 "C:\\tmp\\evil.whl",
+                 "./local.whl",
+                 "../outside.zip",
+             }) {
+            INFO(inj);
+            CHECK(refused(inj).find("archive") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("uv pip install argv puts -- before the package list", "[PluginInstall]")
+{
+    using plugin_loader::uv_install_args;
+    const auto args = uv_install_args("/opt/python", "/tmp/target", {"numpy>=1.20", "pillow"});
+    REQUIRE(args.size() >= 4);
+    CHECK(args.front() == "pip");
+    const auto dash = std::find(args.begin(), args.end(), "--");
+    REQUIRE(dash != args.end());
+    REQUIRE(dash + 2 < args.end());
+    CHECK(*(dash + 1) == "numpy>=1.20");
+    CHECK(*(dash + 2) == "pillow");
+    CHECK(std::find(args.begin(), dash, "numpy>=1.20") == dash);
+}
+
+TEST_CASE("uv child environment keep-list includes cache homes", "[PluginInstall]")
+{
+    using plugin_loader::uv_child_environment_keeps;
+    CHECK(uv_child_environment_keeps("XDG_CACHE_HOME"));
+    CHECK(uv_child_environment_keeps("APPDATA"));
+    CHECK(uv_child_environment_keeps("LOCALAPPDATA"));
+    CHECK(uv_child_environment_keeps("PATH"));
+    CHECK_FALSE(uv_child_environment_keeps("AWS_SECRET_ACCESS_KEY"));
+    CHECK_FALSE(uv_child_environment_keeps("PYTHONPATH"));
+    CHECK_FALSE(uv_child_environment_keeps("VIRTUAL_ENV"));
 }
 
 TEST_CASE("valid PEP 508 requirements are accepted for uv install", "[PluginInstall]")
