@@ -150,6 +150,7 @@ modules:
           -DCMAKE_PREFIX_PATH=/app \
           -DDESTDIR=/app \
           -DFLATPAK=ON \
+          -DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS:-OFF}" \
           -DCMAKE_INSTALL_PREFIX=/app \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5
         cmake --build . -j"${FLATPAK_BUILDER_N_JOBS}"
@@ -253,6 +254,13 @@ modules:
         dest: external-packages/OpenSSL
         sha256: a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
 
+      # CPython 3.12.13 (deps/python3/python3.cmake). Flatpak has no network at
+      # configure time, so the archive must be staged here. Built into /app/libpython.
+      - type: file
+        url: https://www.python.org/ftp/python/3.12.13/Python-3.12.13.tar.xz
+        dest: external-packages/python3
+        sha256: c08bc65a81971c1dd5783182826503369466c7e67374d1646519adf05207b684
+
       # OpenVDB
       - type: file
         url: https://github.com/tamasmeszaros/openvdb/archive/a68fd58d0e2b85f01adeb8b13d7555183ab10aa5.zip
@@ -314,6 +322,25 @@ modules:
         dest: external-packages/NanoSVG
         sha256: 1e3f94a052dd2abb139993ed3496c90ed4458d6f907027bf03cbaed889fe2567
 
+  # Bundled uv 0.11.21. Installed to the path EdgePythonPlugins.cmake looks up
+  # as ORCA_UV_FLATPAK_BINARY so the slicer configure does not download (the
+  # sandbox has no network). Flatpak is already bwrap; do not nest another.
+  - name: uv
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 uv /app/share/EdgeSlicer/tools/uv/uv
+    sources:
+      - type: archive
+        only-arches:
+          - x86_64
+        url: https://github.com/astral-sh/uv/releases/download/0.11.21/uv-x86_64-unknown-linux-gnu.tar.gz
+        sha256: 8c88519b0ef0af9801fcdee419bbb12116bd9e6b18e162ae093c932d8b264050
+      - type: archive
+        only-arches:
+          - aarch64
+        url: https://github.com/astral-sh/uv/releases/download/0.11.21/uv-aarch64-unknown-linux-gnu.tar.gz
+        sha256: 88e800834007cc5efd4675f166eb2a51e7e3ad19876d85fa8805a6fb5c922397
+
   - name: Snapmaker_Orca 
     buildsystem: simple
     build-commands:
@@ -333,6 +360,7 @@ modules:
           -DSLIC3R_DESKTOP_INTEGRATION=OFF \
           -DCMAKE_BUILD_TYPE=Release \
           -DFLATPAK=ON \
+          -DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS:-OFF}" \
           -DBBL_RELEASE_TO_PUBLIC=1 \
           -DCMAKE_PREFIX_PATH=/app \
           -DCMAKE_INSTALL_PREFIX=/app \

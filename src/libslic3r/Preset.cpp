@@ -1476,6 +1476,15 @@ static std::vector<std::string> s_Preset_sla_printer_options {
     "inherits"
 };
 
+const char* Preset::plugin_overrides_key(Type type)
+{
+    switch (type) {
+    case TYPE_PRINTER:  return "printer_plugin_config_overrides";
+    case TYPE_FILAMENT: return "filament_plugin_config_overrides";
+    default:            return "print_plugin_config_overrides";
+    }
+}
+
 const std::vector<std::string>& Preset::print_options()          { return s_Preset_print_options; }
 const std::vector<std::string>& Preset::filament_options()       { return s_Preset_filament_options; }
 const std::vector<std::string>& Preset::machine_limits_options() { return s_Preset_machine_limits_options; }

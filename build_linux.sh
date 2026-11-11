@@ -177,6 +177,9 @@ if [[ -n "${BUILD_DEPS}" ]] ; then
     echo "Configuring dependencies..."
     read -r -a BUILD_ARGS <<< "${DEPS_EXTRA_BUILD_ARGS}"
     BUILD_ARGS+=(-DDEP_WX_GTK3=ON)
+    if [[ -n "${EDGE_PYTHON_PLUGINS}" ]]; then
+        BUILD_ARGS+=(-DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS}")
+    fi
     if [[ -n "${CLEAN_BUILD}" ]]
     then
         rm -fr deps/build
@@ -227,6 +230,9 @@ if [[ -n "${BUILD_ORCA}" ]] ; then
     fi
     if [[ -n "${ORCA_UPDATER_SIG_KEY}" ]] ; then
         BUILD_ARGS+=(-DORCA_UPDATER_SIG_KEY="${ORCA_UPDATER_SIG_KEY}")
+    fi
+    if [[ -n "${EDGE_PYTHON_PLUGINS}" ]]; then
+        BUILD_ARGS+=(-DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS}")
     fi
 
     echo "Configuring Snapmaker_Orca..."

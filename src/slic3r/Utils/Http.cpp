@@ -35,47 +35,35 @@ struct CurlGlobalInit
 
 	CurlGlobalInit()
     {
-#ifdef OPENSSL_CERT_OVERRIDE // defined if SLIC3R_STATIC=ON
-
-        // Look for a set of distro specific directories. Don't change the
-        // order: https://bugzilla.redhat.com/show_bug.cgi?id=1053882
-        static const char * CA_BUNDLES[] = {
-            "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL 6
-            "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Gentoo etc.
-            "/usr/share/ssl/certs/ca-bundle.crt",
-            "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
-            "/etc/ssl/cert.pem",
-            "/etc/ssl/ca-bundle.pem"              // OpenSUSE Tumbleweed
-        };
+#ifdef OPENSSL_CERT_OVERRIDE // defined if SLIC3R_STATIC=ON (Linux always; macOS with EDGE_PYTHON_PLUGINS)
 
         // Env var name for the OpenSSL CA bundle (SSL_CERT_FILE nomally)
         const char *const SSL_CA_FILE = X509_get_default_cert_file_env();
         const char * ssl_cafile = ::getenv(SSL_CA_FILE);
 
-        if (!ssl_cafile)
+        // A user-set SSL_CERT_FILE (even empty or a missing path) is left alone. Fall back to a
+        // system bundle only when the variable is unset and OpenSSL's default file is missing.
+        if (ssl_cafile == nullptr) {
             ssl_cafile = X509_get_default_cert_file();
 
-        int replace = true;
-        // ORCA: non-throwing overload; fs_ec is deliberately unread. An existing but unreadable
-        //       path (a static build's baked-in OPENSSLDIR run as another user, say) must fall
-        //       through to CA_BUNDLES, not throw out of this constructor.
-        boost::system::error_code fs_ec;
-        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile), fs_ec)) {
-            const char * bundle = nullptr;
-            for (const char * b : CA_BUNDLES) {
-                if (fs::exists(fs::path(b), fs_ec)) {
-                    ::setenv(SSL_CA_FILE, bundle = b, replace);
-                    break;
-                }
+            // ORCA: non-throwing overload; fs_ec is deliberately unread. An existing but unreadable
+            //       path (a static build's baked-in OPENSSLDIR run as another user, say) must fall
+            //       through to a system bundle, not throw out of this constructor.
+            boost::system::error_code fs_ec;
+            if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile), fs_ec)) {
+                const std::string bundle = Http::ensure_ssl_cert_file_if_unset();
+                if (bundle.empty())
+                    message = "Unable to get system certificate.";
+                else
+                    message = (boost::format("use system SSL certificate: %1%") % bundle).str();
+
+                message += "\n" + (boost::format("To manually specify the system certificate store, "
+                                                 "set the %1% environment variable to the correct CA and restart the application") % SSL_CA_FILE).str();
             }
-
-            if (!bundle)
-                message = "Unable to get system certificate.";
-            else
-                message = (boost::format("use system SSL certificate: %1%") % bundle).str();
-
-             message += "\n" + (boost::format("To manually specify the system certificate store, "
-                                                   "set the %1% environment variable to the correct CA and restart the application") % SSL_CA_FILE).str();
+        } else {
+            const std::string reason = Http::ssl_cert_file_unusable_reason(ssl_cafile);
+            if (!reason.empty())
+                BOOST_LOG_TRIVIAL(warning) << reason;
         }
 #endif // OPENSSL_CERT_OVERRIDE
 
@@ -196,31 +184,88 @@ static const char* NOPROXY_DOMAINS =
     "::1";
 
 #ifndef _WIN32
-// A PEM CA bundle for OpenSSL on Linux and macOS: $SSL_CERT_FILE when it names a file, otherwise
-// the first system bundle that exists. Empty when none does; libcurl then falls back to its own
-// build-time default (and on Linux to OpenSSL's default paths, which CurlGlobalInit points at).
+// Look for a set of distro specific directories. Don't change the
+// order: https://bugzilla.redhat.com/show_bug.cgi?id=1053882
+static const char *const SYSTEM_CA_BUNDLES[] = {
+    "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL 6
+    "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Gentoo etc.
+    "/usr/share/ssl/certs/ca-bundle.crt",
+    "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+    "/etc/ssl/cert.pem",                      // macOS, Alpine, Arch
+    "/etc/ssl/ca-bundle.pem",                 // OpenSUSE Tumbleweed
+    "/usr/local/etc/openssl/cert.pem",        // Homebrew OpenSSL
+    "/opt/homebrew/etc/openssl@3/cert.pem",
+};
+
+static std::string first_system_ca_bundle()
+{
+    boost::system::error_code ec;
+    for (const char *c : SYSTEM_CA_BUNDLES) {
+        if (fs::exists(fs::path(c), ec))
+            return c;
+    }
+    return {};
+}
+
+// A PEM CA bundle for OpenSSL on Linux and macOS: $SSL_CERT_FILE when it names a file.
+// A user-set empty or missing path is not replaced by a system bundle (that would make an
+// untrusted CA silently succeed). Unset falls through to the first system bundle that exists.
 static const std::string& system_ca_bundle()
 {
     static const std::string bundle = []() -> std::string {
         boost::system::error_code ec;
-        if (const char *env = ::getenv("SSL_CERT_FILE"); env != nullptr && *env != '\0' && fs::exists(fs::path(env), ec))
-            return env;
-        static const char *const candidates[] = {
-            "/etc/ssl/cert.pem",                     // macOS, Alpine, Arch, Fedora (link)
-            "/etc/ssl/certs/ca-certificates.crt",    // Debian/Ubuntu/Gentoo
-            "/etc/pki/tls/certs/ca-bundle.crt",      // Fedora/RHEL
-            "/usr/share/ssl/certs/ca-bundle.crt",
-            "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
-            "/etc/ssl/ca-bundle.pem",                // openSUSE
-            "/usr/local/etc/openssl/cert.pem",       // Homebrew OpenSSL
-            "/opt/homebrew/etc/openssl@3/cert.pem",
-        };
-        for (const char *c : candidates)
-            if (fs::exists(fs::path(c), ec))
-                return c;
-        BOOST_LOG_TRIVIAL(warning) << "Http: no system CA bundle found; certificate checks rely on libcurl's built-in default";
-        return {};
+        if (const char *env = ::getenv("SSL_CERT_FILE"); env != nullptr) {
+            // Warn here too: both OPENSSL_CERT_OVERRIDE warn sites are compiled out on a
+            // Mac OFF static build, and this helper still picks the CURLOPT_CAINFO bundle.
+            // Do not swap in a system file over a user-set empty or missing SSL_CERT_FILE.
+            const std::string reason = Http::ssl_cert_file_unusable_reason(env);
+            if (!reason.empty())
+                BOOST_LOG_TRIVIAL(warning) << reason;
+            if (*env != '\0' && fs::exists(fs::path(env), ec))
+                return env;
+            return {};
+        }
+        const std::string found = first_system_ca_bundle();
+        if (found.empty())
+            BOOST_LOG_TRIVIAL(warning) << "Http: no system CA bundle found; certificate checks rely on libcurl's built-in default";
+        return found;
     }();
+    return bundle;
+}
+
+std::string Http::ssl_cert_file_fallback_path(const char *env)
+{
+    if (env != nullptr)
+        return {};
+    return first_system_ca_bundle();
+}
+
+std::string Http::ssl_cert_file_unusable_reason(const char *env)
+{
+    if (env == nullptr)
+        return {};
+    if (*env == '\0')
+        return "SSL_CERT_FILE is set but empty; OpenSSL will not load a CA bundle from it";
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(env), ec))
+        return std::string("SSL_CERT_FILE is set but the path is missing or not a file: ") + env;
+    return {};
+}
+
+std::string Http::ensure_ssl_cert_file_if_unset()
+{
+    if (const char *env = ::getenv("SSL_CERT_FILE")) {
+        const std::string reason = ssl_cert_file_unusable_reason(env);
+        if (!reason.empty())
+            BOOST_LOG_TRIVIAL(warning) << reason;
+        return {};
+    }
+    const std::string bundle = first_system_ca_bundle();
+    if (bundle.empty())
+        return {};
+    // overwrite=0: never replace a user-set SSL_CERT_FILE.
+    if (::setenv("SSL_CERT_FILE", bundle.c_str(), 0) != 0)
+        return {};
     return bundle;
 }
 #endif

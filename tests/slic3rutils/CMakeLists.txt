@@ -11,6 +11,11 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_lifecycle.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_install.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_json_depth.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ultranet_isolation.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
@@ -165,14 +170,12 @@ add_executable(${_TEST_NAME}_tests
 # wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
 # does the same), so the test executable has to carry the same files or it cannot link. The
 # Sentry SDK itself comes with libslic3r_gui (SLIC3R_SENTRY and sentry::sentry are PUBLIC there).
-if (WIN32 OR APPLE)
-    target_sources(${_TEST_NAME}_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
-        )
-    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
-endif ()
+# Linux needs the same objects once GUI_App is rebuilt (EDGE_PYTHON_PLUGINS rebuilds it).
+target_sources(${_TEST_NAME}_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+    )
 if (WIN32)
     target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp
@@ -185,6 +188,34 @@ elseif (APPLE)
 endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
+if (EDGE_PYTHON_PLUGINS)
+    target_link_libraries(${_TEST_NAME}_tests pybind11::embed)
+    if (APPLE)
+        target_link_options(${_TEST_NAME}_tests PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_property(TARGET ${_TEST_NAME}_tests APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+    endif ()
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMENT "Copying bundled Python runtime for plugin tests"
+        VERBATIM)
+    if (WIN32)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+            VERBATIM)
+    endif ()
+    if (ORCA_BUNDLED_UV_EXECUTABLE)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+            COMMENT "Copying bundled uv for plugin tests"
+            VERBATIM)
+    endif ()
+endif ()
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)

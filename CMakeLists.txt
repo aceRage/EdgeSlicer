@@ -282,6 +282,10 @@ option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
 # are unchanged. When ON, builds a standalone probe and Catch2 tests under src/slic3r/plugin/spike
 # that do not link the slicer. Do not use this to start Phase 1 (embedded CPython).
 option(EDGE_PYTHON_PLUGINS_SPIKE "Build the Phase 0 Python-plugin port-map spike (no slicer linkage)" OFF)
+# Phase 1: embedded CPython + local Python plugin packages. OFF by default so the slicer
+# binary, libslic3r G-code, and default builds are unchanged. Does not replace the Phase 0
+# spike option; both may be ON independently.
+option(EDGE_PYTHON_PLUGINS "Embed CPython 3.12 and the Python plugin runtime (Phase 1)" OFF)
 # Ultra: the QuadriFlow-backed quad remesher ("Quad remesh...", Phase 2 of the remesh
 # spec). Optional because QuadriFlow is a new native dependency and CI on macOS/Linux
 # has not been through a deps build with it yet; when the package is missing the whole
@@ -915,6 +919,8 @@ if(SLIC3R_STATIC)
     set(USE_BLOSC TRUE)
 endif ()
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EdgePythonPlugins.cmake")
+
 find_package(OpenVDB 5.0 COMPONENTS openvdb)
 if(OpenVDB_FOUND)
     slic3r_remap_configs(IlmBase::Half RelWithDebInfo Release)
@@ -1193,6 +1199,12 @@ if (WIN32)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")
+    if (EDGE_PYTHON_PLUGINS)
+        install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "python")
+        if (ORCA_BUNDLED_UV_EXECUTABLE)
+            install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "./resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
+        endif ()
+    endif ()
 elseif (SLIC3R_FHS)
     # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
     set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${SLIC3R_APP_KEY}")
@@ -1207,13 +1219,36 @@ elseif (SLIC3R_FHS)
             DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${SIZE}x${SIZE}/apps RENAME Snapmaker_Orca.png
         )
     endforeach()
+    if (EDGE_PYTHON_PLUGINS)
+        install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "libpython")
+        if (ORCA_BUNDLED_UV_EXECUTABLE)
+            set(_orca_uv_fhs_binary "${SLIC3R_FHS_RESOURCES}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}")
+            if (NOT ORCA_BUNDLED_UV_EXECUTABLE_CONFIG STREQUAL _orca_uv_fhs_binary)
+                install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${SLIC3R_FHS_RESOURCES}/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
+            endif ()
+        endif ()
+    endif ()
 elseif (CMAKE_MACOSX_BUNDLE)
     # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/Snapmaker Orca.app/Contents/resources")
+    if (EDGE_PYTHON_PLUGINS)
+        # Contents/MacOS/python matches PythonInterpreter::find_bundled_python_home()
+        # (resources_dir()/../MacOS/python). cmake --install used to skip libpython entirely.
+        install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "${CMAKE_INSTALL_PREFIX}/EdgeSlicer.app/Contents/MacOS/python")
+        if (ORCA_BUNDLED_UV_EXECUTABLE)
+            install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/EdgeSlicer.app/Contents/Resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
+        endif ()
+    endif ()
 else ()
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources"
         REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
     )
+    if (EDGE_PYTHON_PLUGINS)
+        install(DIRECTORY "${CMAKE_PREFIX_PATH}/libpython/" DESTINATION "${CMAKE_INSTALL_PREFIX}/python")
+        if (ORCA_BUNDLED_UV_EXECUTABLE)
+            install(PROGRAMS "${ORCA_BUNDLED_UV_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources/tools/uv" RENAME "${ORCA_BUNDLED_UV_FILENAME}")
+        endif ()
+    endif ()
 endif ()
 
 # EdgeSlicer: the remote hub's camera tools on Linux (the macOS app gets the same two files from

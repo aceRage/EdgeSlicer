@@ -365,6 +365,11 @@ endif()
 include(OCCT/OCCT.cmake)
 include(OpenCV/OpenCV.cmake)
 
+option(EDGE_PYTHON_PLUGINS "Build bundled CPython 3.12 for the Python plugin runtime" OFF)
+if (EDGE_PYTHON_PLUGINS)
+    include(python3/python3.cmake)
+endif()
+
 set(_dep_list
     dep_Boost
     dep_TBB
@@ -388,6 +393,9 @@ set(_dep_list
     ${EXPAT_PKG}
     dep_libnoise
     )
+if (EDGE_PYTHON_PLUGINS)
+    list(APPEND _dep_list dep_python3)
+endif()
 
 if (MSVC)
     # Experimental

@@ -158,6 +158,16 @@ if (NOT WIN32 AND NOT APPLE)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
+if (EDGE_PYTHON_PLUGINS)
+    if (APPLE)
+        target_link_options(Snapmaker_Orca PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_target_properties(Snapmaker_Orca PROPERTIES
+            BUILD_RPATH "$ORIGIN/python/lib;$ORIGIN/../lib/python/lib"
+            INSTALL_RPATH "$ORIGIN/../libpython/lib")
+    endif ()
+endif ()
+
 target_link_libraries(Snapmaker_Orca libslic3r cereal::cereal)
 # target_include_directories(OrcaSlicer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/slic3r)
 if (APPLE)
@@ -370,6 +380,35 @@ else ()
                 VERBATIM)
         endif()
     endif()
+endif ()
+
+if (EDGE_PYTHON_PLUGINS)
+    set(_edge_python_bin_dir "$<TARGET_FILE_DIR:Snapmaker_Orca>")
+    add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${_edge_python_bin_dir}/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${_edge_python_bin_dir}/python"
+        COMMENT "Copying bundled Python runtime next to EdgeSlicer"
+        VERBATIM)
+    if (WIN32)
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
+                "${_edge_python_bin_dir}"
+            COMMENT "Copying Python DLL next to EdgeSlicer"
+            VERBATIM)
+    endif ()
+    if (ORCA_BUNDLED_UV_EXECUTABLE AND EXISTS "${ORCA_BUNDLED_UV_EXECUTABLE}")
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_edge_python_bin_dir}/tools/uv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}" "${_edge_python_bin_dir}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+            COMMENT "Copying bundled uv next to EdgeSlicer"
+            VERBATIM)
+        if (UNIX)
+            add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+                COMMAND chmod +x "${_edge_python_bin_dir}/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+                VERBATIM)
+        endif ()
+    endif ()
 endif ()
 
 # Slic3r binary install target. Default build type is release in case no CMAKE_BUILD_TYPE is provided.

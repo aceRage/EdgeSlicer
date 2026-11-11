@@ -1,0 +1,68 @@
+#pragma once
+
+
+#include <boost/filesystem/path.hpp>
+
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace Slic3r { struct PluginDescriptor; }
+
+namespace Slic3r {
+struct Plugin;
+} // namespace Slic3r
+
+namespace Slic3r::plugin_loader {
+// registration_failed, when given, is set if the plugin's own registration step rejected the load.
+bool load(const PluginDescriptor&                          descriptor,
+          bool                                             skip_deps,
+          const std::vector<std::string>&                  capabilities_to_enable,
+          const std::function<std::string(const Plugin&)>& registry_precheck,
+          Plugin&                                          out,
+          std::string&                                     error,
+          bool*                                            registration_failed = nullptr);
+
+// Run on_unload() on every capability, drop them, and release the module. Safe to call on a
+// not-loaded Plugin, and safe after the interpreter has been finalized (in which case the module
+// reference is deliberately leaked rather than DECREF'd).
+void unload(Plugin& plugin);
+
+// True when `requirement` is a PEP 508 name / extras / version-specifiers / markers requirement.
+// Empty entries, leading dashes (uv/pip installer options), URLs, archive names (.whl, .tar.gz,
+// .zip, …), paths, and other non-requirement forms are refused so PEP 723 / Requires-Dist strings
+// cannot be appended to uv's argv as options or local files.
+bool is_pep508_requirement(const std::string& requirement);
+
+// Validates every entry; a refused dependency writes a clear error and returns false.
+bool validate_pep508_requirements(const std::vector<std::string>& pkgs, std::string& error);
+
+// argv after the uv executable: `pip install --python … --target … -- <pkgs>`.
+std::vector<std::string> uv_install_args(const std::string&              python_executable,
+                                         const std::string&              target_dir,
+                                         const std::vector<std::string>& pkgs);
+
+// True when `key` is on the keep-list copied into uv's child environment.
+bool uv_child_environment_keeps(const char* key);
+
+// Install Python dependencies into the shared packages directory via the bundled uv. Blocks, with
+// a 120 s cap. Each entry must be a valid PEP 508 requirement.
+bool install_packages(const std::vector<std::string>& pkgs, std::string& error);
+
+// Read a local .py/.whl package's metadata without installing it, and report whether a package is
+// already installed under the same directory.
+bool inspect_local_plugin_package(const boost::filesystem::path& filepath,
+                                  PluginDescriptor&              plugin_descriptor,
+                                  bool&                          existing_installation,
+                                  std::string&                   error);
+
+// Copy a .py/.whl package into the plugin directory (the per-user cloud directory when the
+// descriptor carries a cloud UUID and cloud_user_id is non-empty) and write its
+// .install_state.json sidecar, backing up and restoring any existing installation on failure.
+bool install_plugin(const boost::filesystem::path& filepath,
+                    const std::string&             cloud_user_id,
+                    PluginDescriptor&              plugin_descriptor,
+                    std::string&                   error);
+bool install_plugin(const boost::filesystem::path& filepath, const std::string& cloud_user_id, std::string& error);
+
+} // namespace Slic3r::plugin_loader
