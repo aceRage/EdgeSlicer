@@ -11573,7 +11573,25 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         // BBS: for solid infill of initial layer, speed can be higher as long as
         // wall lines have be attached
         // Orca (#13224): the first object layer over a raft takes the first layer speeds too.
-        if (path.role() != erBottomSurface) {
+        if (path.role() == erIroning) {
+            // Ironing is a slow pass over a surface that is already printed, and ironing_speed (or the
+            // filament's override, or support_ironing_speed) is its setting. Initial layer infill speed
+            // is the speed for filling the first layer, as a rule several times the ironing speed, and
+            // giving it to the ironing outright (ironing type "all solid layers" irons the first layer)
+            // ran it at 105 mm/s for the 30 asked for with the Snapmaker U1 presets. So the first layer
+            // speed holds the ironing back where it is the lower of the two and never raises it, which
+            // is what the slow-down ramp below does on the layers that follow: at layer 0 that ramp
+            // gives the first layer speed when it is under the role's speed and the role's speed
+            // otherwise. BambuStudio, Snapmaker Orca, OrcaSlicer and PrusaSlicer hand the ironing a first
+            // layer speed as this did; SuperSlicer takes the lower of the two.
+            const double first_layer_infill_speed = this->process_flow_value(m_config.initial_layer_infill_speed);
+            if (first_layer_infill_speed < speed) {
+                speed = first_layer_infill_speed;
+                // An ironing speed that was unusable is still the setting to report.
+                if (!speed_was_invalid)
+                    speed_setting = "initial_layer_infill_speed";
+            }
+        } else if (path.role() != erBottomSurface) {
             // This OVERRIDES the role speed outright on the first layer, so a bad
             // initial_layer_speed / initial_layer_infill_speed is the culprit here
             // regardless of which role we are printing.
