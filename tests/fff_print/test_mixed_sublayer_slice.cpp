@@ -881,8 +881,10 @@ TEST_CASE("Mixed sublayer: Ratio layers on a prime tower print the tower at its 
 namespace {
 
 // The owner's H3C plate in small: one extruder with a rack 0.4 / 0.8 / 0.8 / 0.4, filament 2 and 3 pinned to the
-// given slots, the mixed filament 2 + 3 at 30 % (filament 5), and a cube assigned to it with a 0.82 mm inner wall.
-const PrintObject *apply_rack_mixed_cube(Print &print, Model &model, const std::vector<int> &slot_pins, bool ratio)
+// given slots, the mixed filament 2 + 3 at 30 % (filament 5), and a cube assigned to it. A mm width is set for the
+// plate's 0.4 nozzle and scaled to the size of the nozzle that prints it (per-nozzle process P6).
+const PrintObject *apply_rack_mixed_cube(Print &print, Model &model, const std::vector<int> &slot_pins, bool ratio,
+                                         const char *inner_wall_width)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_filaments(4);
@@ -895,7 +897,7 @@ const PrintObject *apply_rack_mixed_cube(Print &print, Model &model, const std::
         { "enable_prime_tower", "0" },
         { "layer_height", "0.2" },
         { "initial_layer_print_height", "0.2" },
-        { "inner_wall_line_width", "0.82" },
+        { "inner_wall_line_width", inner_wall_width },
         { "enable_mixed_color_sublayer", ratio ? "1" : "0" },
     });
     MixedFilamentManager mgr;
@@ -927,22 +929,26 @@ double mixed_region_wall_nozzle(const PrintObject &object)
 TEST_CASE("Mixed sublayer: a mixed filament's line widths are checked against its components' nozzle", "[MixedSublayer][Nozzle][Slice]")
 {
     const MixsubAutoGenerateOff auto_generate_off;
-    SECTION("components on the 0.8 slots: a 0.82 mm inner wall is fine")
+    SECTION("components on the 0.8 slots: the inner wall is sized for and checked against the 0.8 nozzle")
     {
         Print              print;
         Model              model;
-        const PrintObject *object = apply_rack_mixed_cube(print, model, { 0, 2, 3, 0 }, false);
+        const PrintObject *object = apply_rack_mixed_cube(print, model, { 0, 2, 3, 0 }, false, "0.41");
         const StringObjectException err = print.validate();
         INFO(err.string);
         CHECK(err.string.find("Line width") == std::string::npos);
         CHECK(err.string.find("too wide") == std::string::npos);
         CHECK_THAT(mixed_region_wall_nozzle(*object), WithinAbs(0.8, 1e-6));
+        // 0.41 mm for the 0.4 nozzle is 0.82 mm on the 0.8 one: the owner's width, accepted.
+        for (const PrintRegion &region : object->all_regions())
+            if (region.config().wall_filament.value == 5)
+                CHECK_THAT(region.flow(*object, frPerimeter, 0.2, false).width(), WithinAbs(0.82, 0.011));
     }
     SECTION("components on the 0.4 slots: the width error names the real nozzle and jumps to the components' tool")
     {
         Print print;
         Model model;
-        apply_rack_mixed_cube(print, model, { 0, 1, 4, 0 }, false);
+        apply_rack_mixed_cube(print, model, { 0, 1, 4, 0 }, false, "0.82");
         const StringObjectException err = print.validate();
         INFO(err.string << " | " << err.opt_key);
         REQUIRE(!err.string.empty());
@@ -955,7 +961,7 @@ TEST_CASE("Mixed sublayer: a mixed filament's line widths are checked against it
     {
         Print print;
         Model model;
-        apply_rack_mixed_cube(print, model, { 0, 2, 4, 0 }, true);
+        apply_rack_mixed_cube(print, model, { 0, 2, 4, 0 }, true, "0.41");
         const StringObjectException err = print.validate();
         INFO(err.string);
         // The cube is assigned whole, so the Ratio row may not be "used" by paint; either the D8 error or the width
