@@ -762,12 +762,6 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
             vertical_lines[i].b = Point{x, y_max};
         }
 
-        if (!vertical_lines.empty()) {
-            vertical_lines.push_back(vertical_lines.back());
-            vertical_lines.back().a = Point{coord_t(bb.min.x() + n_vlines * double(scaled_spacing) + scaled_spacing * 0.5), y_min};
-            vertical_lines.back().b = Point{vertical_lines.back().a.x(), y_max};
-        }
-
         std::vector<Lines> polygon_sections(n_vlines);
 
         for (size_t i = 0; i < n_vlines; i++) {
