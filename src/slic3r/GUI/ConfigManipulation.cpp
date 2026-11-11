@@ -928,7 +928,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_field(el, have_infill || has_solid_infill);
 
     toggle_field("top_shell_thickness", ! has_spiral_vase && has_top_shell_layers);
-    toggle_field("bottom_shell_thickness", ! has_spiral_vase && has_bottom_shell);
+    // A spiral vase's solid bottom follows bottom_shell_thickness as any other bottom shell does
+    // (PrintObject::spiral_vase_bottom_layers), so the field stays editable in vase mode (OrcaSlicer #11496).
+    toggle_field("bottom_shell_thickness", has_bottom_shell);
 
     toggle_field("wall_direction", !has_spiral_vase);
 
