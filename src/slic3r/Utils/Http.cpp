@@ -215,6 +215,12 @@ static const std::string& system_ca_bundle()
     static const std::string bundle = []() -> std::string {
         boost::system::error_code ec;
         if (const char *env = ::getenv("SSL_CERT_FILE"); env != nullptr) {
+            // Warn here too: both OPENSSL_CERT_OVERRIDE warn sites are compiled out on a
+            // Mac OFF static build, and this helper still picks the CURLOPT_CAINFO bundle.
+            // Do not swap in a system file over a user-set empty or missing SSL_CERT_FILE.
+            const std::string reason = Http::ssl_cert_file_unusable_reason(env);
+            if (!reason.empty())
+                BOOST_LOG_TRIVIAL(warning) << reason;
             if (*env != '\0' && fs::exists(fs::path(env), ec))
                 return env;
             return {};
