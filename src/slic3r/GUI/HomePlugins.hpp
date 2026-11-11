@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "slic3r/Utils/HomePluginsLogic.hpp"
@@ -41,13 +42,21 @@ private:
     void reload(const std::string& key, bool clear);
     void remove(const std::string& key);
     void reveal(const std::string& key);
+    void run(const std::string& key);
     void stub(const std::string& text);
 
-    wxWindow*                 m_parent;
-    SendFn                    m_send;
-    std::vector<std::string>  m_keys;
+    struct RunState
+    {
+        std::string state;   // running / success / failure
+        std::string message;
+    };
+
+    wxWindow*                                  m_parent;
+    SendFn                                     m_send;
+    std::vector<std::string>                   m_keys;
     std::map<std::string, std::vector<HomeTab::PluginCapabilityView>> m_listed_caps;
-    std::shared_ptr<bool>     m_alive { std::make_shared<bool>(true) };
+    std::unordered_map<std::string, RunState>  m_run;
+    std::shared_ptr<bool>                      m_alive { std::make_shared<bool>(true) };
 };
 
 } // namespace GUI

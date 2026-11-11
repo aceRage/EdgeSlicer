@@ -16,6 +16,11 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_config.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_json_depth.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ultranet_isolation.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_host_api.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_capability_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_status.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_sort.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_scripts.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp

@@ -5,6 +5,7 @@
 // service header stays free of the manager.
 #include "PluginManager.hpp"
 
+#include "OrcaApiVersion.hpp"
 #include "PluginConfig.hpp"
 #include "PluginFsUtils.hpp"
 #include "PythonInterpreter.hpp"
@@ -786,6 +787,12 @@ bool load(const PluginDescriptor&                          descriptor,
         error = GUI::format(_u8L("Plugin manifest is invalid: %1%"), descriptor.plugin_key);
         if (descriptor.has_error())
             error += " - " + descriptor.normalized_error();
+        return false;
+    }
+
+    std::string api_error;
+    if (!orca_api_version_supported(descriptor.required_orca_api, api_error)) {
+        error = api_error;
         return false;
     }
 

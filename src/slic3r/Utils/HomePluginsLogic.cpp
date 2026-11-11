@@ -3,6 +3,7 @@
 #include "HomeTabLogic.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace Slic3r {
 namespace HomeTab {
@@ -42,6 +43,11 @@ json plugin_card(const PluginView& view)
     card["trust"]               = view.trust; // Phase 5 placeholder
     card["in_process_pipeline"] = view.in_process_pipeline;
     card["can_run"]             = false;
+    card["run_state"]           = (view.run_state == "running" || view.run_state == "success" ||
+                         view.run_state == "failure") ?
+                             view.run_state :
+                             "";
+    card["run_message"]         = sanitize_run_message(view.run_message);
 
     std::vector<std::string> types = view.types;
     types.erase(std::remove(types.begin(), types.end(), std::string()), types.end());
@@ -92,6 +98,48 @@ bool is_listed_capability(const std::string& name, const std::string& type,
             return true;
     }
     return false;
+}
+
+std::string sanitize_run_message(std::string text)
+{
+    auto basename_of = [](const std::string& path) {
+        const auto slash = path.find_last_of("/\\");
+        return slash == std::string::npos ? path : path.substr(slash + 1);
+    };
+    auto is_absolute = [](const std::string& path) {
+        if (path.empty())
+            return false;
+        if (path.front() == '/' || path.front() == '\\')
+            return true;
+        return path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path.front())) != 0 &&
+               path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+    };
+
+    std::string out;
+    out.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        const auto pos = text.find("File \"", i);
+        if (pos == std::string::npos) {
+            out.append(text, i, std::string::npos);
+            break;
+        }
+        out.append(text, i, pos - i);
+        out += "File \"";
+        const auto start = pos + 6;
+        const auto end   = text.find('"', start);
+        if (end == std::string::npos) {
+            out.append(text, start, std::string::npos);
+            break;
+        }
+        const std::string path = text.substr(start, end - start);
+        out += is_absolute(path) ? basename_of(path) : path;
+        out += '"';
+        i = end + 1;
+    }
+    if (out.size() > 400)
+        out.resize(400);
+    return out;
 }
 
 bool plugin_card_leaks_path(const json& card)

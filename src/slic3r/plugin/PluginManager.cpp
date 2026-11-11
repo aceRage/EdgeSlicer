@@ -10,9 +10,11 @@
 #include <optional>
 #include <pybind11/embed.h>
 
+#include "OrcaApiVersion.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginHooks.hpp"
 #include "PluginAuditManager.hpp"
+#include "host/PluginHostUi.hpp"
 #include "PyPluginTrampoline.hpp"
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
@@ -808,27 +810,29 @@ void PluginManager::cancel_and_wait_for_capabilities(
     }
 
     // Script rows are bounded only by their own worker: a cancelled or stalled invocation of another
-    // plugin can no longer couple to this one (each invocation owns a thread). A Script worker is
-    // drained without a deadline — forcing module unload while one is outstanding would leave Python
-    // executing against a freed module, or let a blocking preset selection mutate presets after the
-    // plugin is gone. Non-Script synchronous calls keep the historical bounded grace. On the GUI
-    // thread the event loop is pumped so a modal selection can settle instead of being starved by a
-    // blocking wait.
-    const auto grace_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    // plugin can no longer couple to this one (each invocation owns a thread). The wait is bounded;
+    // after the deadline the drain is abandoned so Disable / Reload / quit cannot hang on a
+    // `while True: sleep` script. On the GUI thread the event loop is pumped so a modal selection
+    // can settle instead of being starved by a blocking wait.
+    const auto deadline = std::chrono::steady_clock::now() + ScriptAsyncRuntime::wait_bound();
     for (;;) {
         const bool all_released = std::all_of(capabilities.begin(), capabilities.end(), [](const auto& capability) {
             return !capability || capability->ref_count() == 0;
         });
         // A cancellation that arrived before the invocation ran skips the ref counter, so an active
-        // worker must also be gone: never unload the module while any Script thread is still live.
+        // worker must also be gone: never unload the module while any Script thread is still live,
+        // until the wait bound expires.
         const bool invocation_active = std::any_of(capabilities.begin(), capabilities.end(), [](const auto& capability) {
             return capability != nullptr && ScriptAsyncRuntime::instance().has_active_run(capability.get());
         });
         if (all_released && !invocation_active)
             return;
 
-        if (!invocation_active && std::chrono::steady_clock::now() >= grace_deadline)
+        if (std::chrono::steady_clock::now() >= deadline) {
+            BOOST_LOG_TRIVIAL(warning) << "Abandoning plugin capability wait after "
+                                       << ScriptAsyncRuntime::wait_bound().count() << " ms";
             break;
+        }
 
         if (wxTheApp != nullptr && wxIsMainThread())
             wxYield();
@@ -870,6 +874,11 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
             invalid        = plugin->descriptor.is_invalid_package();
             already_loaded = plugin->is_loaded();
             invalid_error  = plugin->descriptor.normalized_error();
+            std::string api_error;
+            if (!invalid && !orca_api_version_supported(plugin->descriptor.required_orca_api, api_error)) {
+                invalid       = true;
+                invalid_error = api_error;
+            }
             if (already_loaded) {
                 for (const auto& capability : plugin->capabilities)
                     if (capability)
@@ -1096,6 +1105,8 @@ bool PluginManager::unload_plugin(const std::string& plugin_key)
     }
 
     notify_unload_complete();
+
+    PluginHostUi::close_windows_for_plugin(plugin_key);
 
     cancel_and_wait_for_capabilities(removed.capabilities);
 
@@ -2263,7 +2274,20 @@ namespace {
 // always cleared under the GIL before the worker thread exits.
 thread_local PyObject* tl_script_loop = nullptr;
 
+std::atomic<int> g_script_wait_bound_ms{8000};
+
 } // namespace
+
+void ScriptAsyncRuntime::set_wait_bound_for_testing(std::chrono::milliseconds timeout)
+{
+    g_script_wait_bound_ms.store(static_cast<int>(std::max<std::chrono::milliseconds::rep>(timeout.count(), 1)),
+                                 std::memory_order_relaxed);
+}
+
+std::chrono::milliseconds ScriptAsyncRuntime::wait_bound()
+{
+    return std::chrono::milliseconds(g_script_wait_bound_ms.load(std::memory_order_relaxed));
+}
 
 struct ScriptAsyncRuntime::Impl
 {
@@ -2329,7 +2353,17 @@ void ScriptAsyncRuntime::Impl::run_invocation(const std::shared_ptr<Run>& run)
                 } else {
                     try {
                         pybind11::module_ asyncio = pybind11::module_::import("asyncio");
-                        pybind11::object  loop    = asyncio.attr("new_event_loop")();
+                        pybind11::object  loop;
+                        {
+                            // Keep the plugin's audit scope. Construct the loop from the class
+                            // captured at interpreter init (so a patched new_event_loop / policy
+                            // does not run) and permit only socket.__new__ for the self-pipe.
+                            PyObject* loop_cls = PythonInterpreter::instance().event_loop_class();
+                            if (loop_cls == nullptr)
+                                throw std::runtime_error("asyncio event loop class was not captured at interpreter init");
+                            ScopedEventLoopSocketPermit permit;
+                            loop = pybind11::reinterpret_borrow<pybind11::object>(loop_cls)();
+                        }
                         asyncio.attr("set_event_loop")(loop);
 
                         tl_script_loop = loop.ptr();
@@ -2529,7 +2563,10 @@ void ScriptAsyncRuntime::shutdown()
     }
 
     std::unique_lock<std::mutex> lock(m_impl->mutex);
-    m_impl->cv.wait(lock, [this] { return m_impl->active.empty(); });
+    if (!m_impl->cv.wait_for(lock, wait_bound(), [this] { return m_impl->active.empty(); })) {
+        BOOST_LOG_TRIVIAL(warning) << "Abandoning " << m_impl->active.size()
+                                   << " script worker(s) after wait bound";
+    }
 }
 
 void ScriptAsyncRuntime::reset()

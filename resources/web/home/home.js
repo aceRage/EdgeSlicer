@@ -1515,6 +1515,9 @@
     else if (p.loaded) badges.push({ text: t('loaded', 'Loaded'), cls: 'accent' });
     else if (p.enabled) badges.push({ text: t('enabled', 'Enabled') });
     else badges.push({ text: t('not_loaded', 'Not loaded') });
+    if (p.run_state === 'running') badges.push({ text: t('plugin_running', 'Running'), cls: 'accent' });
+    else if (p.run_state === 'success') badges.push({ text: t('plugin_run_ok', 'Ran'), cls: 'accent' });
+    else if (p.run_state === 'failure') badges.push({ text: t('plugin_run_fail', 'Run failed'), cls: 'warn' });
     if (p.update_available) badges.push({ text: t('update_available', 'Update available'), cls: 'warn' });
     if (p.in_process_pipeline) badges.push({ text: t('in_process_pipeline', 'Early slicing steps run in-process'), cls: 'warn' });
     for (const typ of p.types || []) badges.push({ text: typ });
@@ -1556,7 +1559,7 @@
       name: p.name || p.plugin_key,
       missing: !!p.error,
       badges: badges,
-      lines: [p.version, author, p.error || p.description || ''],
+      lines: [p.version, author, p.run_message || p.error || p.description || ''],
       meta: meta.childNodes.length ? meta : null,
       menu: menu,
     });

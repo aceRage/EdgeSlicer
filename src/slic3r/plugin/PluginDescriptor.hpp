@@ -63,6 +63,10 @@ struct PluginDescriptor
     std::string entry_path;                             // Full path to the installed plugin entry file
     std::string entry_package;                          // Import package/module used for package-based loading
     std::vector<std::string> dependencies;              // Python dependency requirements declared by plugin package metadata
+    // Declared `orca` API requirement from PEP 723 (`requires-orca-api` / `min_orca_api`) or
+    // wheel `Requires-Orca-API`. Empty when the plugin did not ask. Discovery and load refuse a
+    // requirement newer than k_orca_api_version (plan section 11 item 2).
+    std::string required_orca_api;
     std::vector<PluginChangelog> changelog;             // Cloud release changelog, sorted newest-first when available.
 
     std::string error;                     // Blocking error message. Non-empty means the plugin is in an error state.

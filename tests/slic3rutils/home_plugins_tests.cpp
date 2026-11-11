@@ -56,6 +56,40 @@ TEST_CASE("home plugins: a card carries display fields only", "[HomePlugins]")
     CHECK_FALSE(card.contains("path"));
     CHECK_FALSE(card.contains("thumbnail_url"));
     CHECK_FALSE(card.contains("sharing_token"));
+    CHECK(card["run_state"] == "");
+    CHECK(card["run_message"] == "");
+}
+
+TEST_CASE("home plugins: run_state is only running, success, or failure", "[HomePlugins]")
+{
+    PluginView running = sample_view();
+    running.run_state  = "running";
+    json card          = plugin_card(running);
+    CHECK(card["run_state"] == "running");
+    CHECK(card["run_message"] == "");
+
+    PluginView ok     = sample_view();
+    ok.run_state      = "success";
+    ok.run_message    = "sync-ok";
+    card              = plugin_card(ok);
+    CHECK(card["run_state"] == "success");
+    CHECK(card["run_message"] == "sync-ok");
+
+    PluginView fail  = sample_view();
+    fail.run_state   = "failure";
+    fail.run_message = "boom";
+    card             = plugin_card(fail);
+    CHECK(card["run_state"] == "failure");
+    CHECK(card["run_message"] == "boom");
+
+    PluginView junk = sample_view();
+    junk.run_state  = "queued";
+    junk.run_message = std::string(500, 'x');
+    card            = plugin_card(junk);
+    CHECK(card["run_state"] == "");
+    CHECK(card["run_message"].get<std::string>().size() == 400);
+
+    CHECK_FALSE(plugin_card_leaks_path(card));
 }
 
 TEST_CASE("home plugins: sanitize strips host paths", "[HomePlugins]")
@@ -135,6 +169,16 @@ TEST_CASE("home plugins: the page may only name keys the host listed", "[HomePlu
     CHECK_FALSE(is_listed_plugin_key("a/b", { "a/b" }));
 }
 
+TEST_CASE("home plugins: plugin_run only accepts a plugin_key the host listed", "[HomePlugins]")
+{
+    // GUI/HomePlugins.cpp ignores plugin_run unless listed(key), which is is_listed_plugin_key.
+    const std::vector<std::string> listed{ "hello_script" };
+    CHECK(is_listed_plugin_key("hello_script", listed));
+    CHECK_FALSE(is_listed_plugin_key("not_listed", listed));
+    CHECK_FALSE(is_listed_plugin_key("{data_dir}/plugins/hello", listed));
+    CHECK_FALSE(is_listed_plugin_key("C:\\Users\\me\\plugins\\hello", listed));
+}
+
 TEST_CASE("home plugins: capability toggle only names a listed (name, type) triple", "[HomePlugins]")
 {
     const std::vector<PluginCapabilityView> listed{ { "hello", "script", true }, { "pipe", "slicing-pipeline", false } };
@@ -145,4 +189,20 @@ TEST_CASE("home plugins: capability toggle only names a listed (name, type) trip
     CHECK_FALSE(is_listed_capability("", "script", listed));
     CHECK_FALSE(is_listed_capability("missing", "script", listed));
     CHECK_FALSE(is_listed_capability("hello", "script", {}));
+}
+
+TEST_CASE("home plugins: run_message keeps a traceback but strips absolute paths", "[HomePlugins]")
+{
+    const std::string raw =
+        "Traceback (most recent call last):\n"
+        "  File \"/home/me/.config/EdgeSlicer/orca_plugins/Hello/Hello.py\", line 12, in execute\n"
+        "    raise RuntimeError('boom')\n"
+        "RuntimeError: boom\n";
+    const std::string cleaned = sanitize_run_message(raw);
+    CHECK(cleaned.find("/home/me/") == std::string::npos);
+    CHECK(cleaned.find("File \"Hello.py\"") != std::string::npos);
+    CHECK(cleaned.find("RuntimeError: boom") != std::string::npos);
+
+    CHECK(sanitize_run_message("ok") == "ok");
+    CHECK(sanitize_run_message(std::string(500, 'x')).size() == 400);
 }

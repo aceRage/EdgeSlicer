@@ -106,6 +106,11 @@ public:
     // Destructor finalizes Python if shutdown() was not called explicitly.
     ~PythonInterpreter();
 
+    // asyncio loop class captured at interpreter init, before any plugin loads. Script runs
+    // construct loops from this class instead of asyncio.new_event_loop() so a plugin cannot
+    // replace the factory or the policy. Borrowed; nullptr if capture failed.
+    PyObject* event_loop_class() const { return m_event_loop_class; }
+
 private:
     friend class PythonRuntimeLease;
 
@@ -126,6 +131,7 @@ private:
     mutable std::shared_timed_mutex m_runtime_mutex;
     PyThreadState* m_main_thread_state = nullptr; // thread state saved after releasing GIL post-initialize
     std::unique_ptr<pybind11::scoped_interpreter> m_interpreter;
+    PyObject* m_event_loop_class = nullptr;
     std::string m_last_error;
     std::unordered_map<std::string, std::size_t> m_plugin_path_users;
     std::unordered_map<std::string, bool>        m_plugin_path_owned;

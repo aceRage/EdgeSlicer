@@ -1,4 +1,6 @@
 #include "PluginHost.hpp"
+#include "PluginHostBindings.hpp"
+#include "PluginHostUi.hpp"
 
 #include <pybind11/pybind11.h>
 #include <slic3r/plugin/PluginAuditManager.hpp>
@@ -9,9 +11,9 @@
 
 namespace Slic3r {
 
-void PluginHost::RegisterBindings(pybind11::module_& module)
+namespace host_bindings {
+void register_plugin(pybind11::module_& host)
 {
-    auto host        = module.def_submodule("host", "Host application API");
     auto plugin_host = host.def_submodule("plugin", "Plugin host API");
 
     plugin_host.def(
@@ -23,7 +25,28 @@ void PluginHost::RegisterBindings(pybind11::module_& module)
 
             return PluginManager::instance().get_storage_dir(plugin_key);
         },
-        "Return the installed folder of the current plugin.");
+        "Return the per-plugin storage folder under orca_plugins/plugin_data.");
+}
+} // namespace host_bindings
+
+void PluginHost::RegisterBindings(pybind11::module_& module)
+{
+    auto host = module.def_submodule("host", "Host application API");
+
+    // Value types first so the docstring signatures of later registrars
+    // resolve to the bound Python names.
+    host_bindings::register_geometry(host);
+    host_bindings::register_mesh(host);
+    host_bindings::register_presets(host);
+    host_bindings::register_model(host);
+    host_bindings::register_app(host);
+    host_bindings::register_plugin(host);
+
+    PluginHostUi::RegisterBindings(host);
+
+    // Slicing print-graph data model: registered as a stub that raises a clear
+    // "not available in this Edge build" error. Pipeline plugins are Phase 6.
+    host_bindings::register_slicing(host);
 }
 
 } // namespace Slic3r

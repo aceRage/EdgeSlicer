@@ -41,6 +41,9 @@ struct PluginView
     std::string                        trust;
     // Phase 6/8 label: early slicing-pipeline steps stay in-process.
     bool                               in_process_pipeline { false };
+    // Phase 3: Home > Plugins Run. Empty, "running", "success", or "failure".
+    std::string                        run_state;
+    std::string                        run_message;
 };
 
 // One card for the page. Display fields only: never entry_path, plugin_root, or path.
@@ -62,6 +65,10 @@ bool is_listed_capability(const std::string& name, const std::string& type,
 
 // True when `card` still carries a filesystem path key (a defect if a host message has it).
 bool plugin_card_leaks_path(const nlohmann::json& card);
+
+// Keep a Python traceback but replace absolute File "..." paths with the basename so
+// run_message never ships a host filesystem path to the page.
+std::string sanitize_run_message(std::string text);
 
 } // namespace HomeTab
 } // namespace Slic3r

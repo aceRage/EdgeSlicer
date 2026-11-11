@@ -1245,9 +1245,25 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/PluginResolver.cpp
         plugin/PluginResolver.hpp
         plugin/PyPluginTrampoline.hpp
+        plugin/OrcaApiVersion.hpp
         plugin/host/PluginHost.cpp
         plugin/host/PluginHost.hpp
+        plugin/host/PluginHostBindings.hpp
+        plugin/host/PluginHostGeometry.cpp
+        plugin/host/PluginHostMesh.cpp
+        plugin/host/PluginHostMesh.hpp
+        plugin/host/PluginHostModel.cpp
+        plugin/host/PluginHostApp.cpp
+        plugin/host/PluginHostPresets.cpp
+        plugin/host/PluginHostUi.cpp
+        plugin/host/PluginHostUi.hpp
+        plugin/host/PluginHostUnavailable.cpp
         plugin/pluginTypes/script/ScriptPluginCapability.hpp
+        GUI/PluginProgressDialog.cpp
+        GUI/PluginProgressDialog.hpp
+        GUI/PluginSource.hpp
+        GUI/PluginStatus.hpp
+        GUI/PluginSort.hpp
         plugin/pluginTypes/script/ScriptPluginCapability.cpp
         plugin/pluginTypes/script/ScriptPluginCapabilityTrampoline.hpp
         Utils/BoostProcessCompat.hpp
@@ -1315,7 +1331,15 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/PluginAuditManager.cpp
     plugin/PluginResolver.cpp
     plugin/host/PluginHost.cpp
+    plugin/host/PluginHostGeometry.cpp
+    plugin/host/PluginHostMesh.cpp
+    plugin/host/PluginHostModel.cpp
+    plugin/host/PluginHostApp.cpp
+    plugin/host/PluginHostPresets.cpp
+    plugin/host/PluginHostUi.cpp
+    plugin/host/PluginHostUnavailable.cpp
     plugin/pluginTypes/script/ScriptPluginCapability.cpp
+    GUI/PluginProgressDialog.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
     GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/OptionsGroup.cpp                          # titleWidth clash
