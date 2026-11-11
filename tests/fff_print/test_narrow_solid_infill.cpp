@@ -469,3 +469,63 @@ TEST_CASE("Small area flow compensation still thins the short lines of solid inf
     }
 }
 
+// A slab on a post, 5 mm out over the plate all round, on supports with no gap under it: its underside is a bottom
+// surface, 0.2 mm lines of the bottom pattern laid on the support. The compensation's own list of what it thins has
+// the bottom surface in it (SmallAreaInfillFlowCompensator::modify_flow), but the question put before that was "is
+// this the first layer", so a bottom surface anywhere else was never compensated.
+TEST_CASE("Small area flow compensation thins a bottom surface above the first layer", "[NarrowSolidInfill][SmallAreaFlowCompensation]")
+{
+    const TriangleMesh part   = boxes({{5., 5., 0., 15., 15., 3.2}, {0., 0., 3., 20., 20., 4.2}});
+    DynamicPrintConfig config = narrow_config();
+    config.set_deserialize_strict({
+        {"enable_support", "1"},
+        {"support_type", "normal(auto)"},
+        {"support_top_z_distance", "0"},
+        {"support_bottom_z_distance", "0"},
+    });
+    const std::vector<std::map<std::string, Laid>> off = laid_by_layer(slice_with(part, config, false));
+    const std::vector<std::map<std::string, Laid>> on  = laid_by_layer(slice_with(part, config, true));
+    REQUIRE(off.size() == on.size());
+    REQUIRE(off.size() > 16);
+    // The bottom surface on the plate is the post's, lines of at most 11.6 mm: thinned before as well.
+    REQUIRE(off.front().count(BOTTOM_SURFACE) == 1);
+    REQUIRE(on.front().count(BOTTOM_SURFACE) == 1);
+    CHECK(on.front().at(BOTTOM_SURFACE).filament < 0.99 * off.front().at(BOTTOM_SURFACE).filament);
+    // The one above it is the slab's, a frame about 4 mm wide round the post.
+    const Laid above_off = laid(off, BOTTOM_SURFACE, 1), above_on = laid(on, BOTTOM_SURFACE, 1);
+    INFO("above the first layer: " << above_off.length << " mm of lines, " << above_off.filament
+                                   << " mm of filament without the compensation, " << above_on.filament << " mm with it");
+    REQUIRE(above_off.length > 300.);
+    CHECK_THAT(above_on.length, WithinAbs(above_off.length, 1e-6));
+    CHECK(above_on.filament < 0.99 * above_off.filament);
+}
+
+// With no bottom shell and infill at 100% the first layer is solid infill. Set to concentric it is loops, and the
+// compensation has nothing to do with it; but the first layer went by the pattern of the bottom surface, whatever was
+// laid there.
+TEST_CASE("Small area flow compensation goes by the pattern of what is laid on the first layer",
+          "[NarrowSolidInfill][SmallAreaFlowCompensation]")
+{
+    const TriangleMesh part   = make_cube(10., 10., 1.);
+    DynamicPrintConfig config = narrow_config("concentric");
+    config.set_deserialize_strict({
+        {"bottom_shell_layers", "0"},
+        {"top_shell_layers", "0"},
+        {"sparse_infill_density", "100%"},
+        {"bottom_surface_pattern", "monotonic"},
+    });
+    const std::vector<std::map<std::string, Laid>> off = laid_by_layer(slice_with(part, config, false));
+    const std::vector<std::map<std::string, Laid>> on  = laid_by_layer(slice_with(part, config, true));
+    REQUIRE(off.size() == 5);
+    REQUIRE(on.size() == 5);
+    for (size_t layer = 0; layer < off.size(); ++layer) {
+        INFO("layer " << layer);
+        // Solid infill and nothing else but walls, on the first layer as on the others.
+        REQUIRE(off[layer].count(SOLID_INFILL) == 1);
+        REQUIRE(off[layer].count(BOTTOM_SURFACE) == 0);
+        REQUIRE(off[layer].at(SOLID_INFILL).length > 50.);
+        REQUIRE(on[layer].count(SOLID_INFILL) == 1);
+        CHECK_THAT(on[layer].at(SOLID_INFILL).filament, WithinRel(off[layer].at(SOLID_INFILL).filament, 1e-4));
+    }
+}
+
