@@ -287,11 +287,11 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         perimeter_config.outer_wall_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(region_config.outer_wall_filament.value)));
     perimeter_config.sparse_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.sparse_infill_filament.value))));
     perimeter_config.solid_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.solid_infill_filament.value))));
-    // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
+    // In sync with PrintObject::_slice() slicing_mode_normal_below_layer: both ask
+    // PrintObject::spiral_vase_bottom_layers().
     bool spiral_mode = print_config.spiral_mode &&
         //FIXME account for raft layers.
-        (this->layer()->id() >= size_t(region_config.bottom_shell_layers.value) &&
-         this->layer()->print_z >= region_config.bottom_shell_thickness - EPSILON);
+        this->layer()->id() >= this->layer()->object()->spiral_vase_bottom_layers(region_config);
 
     double model_rotation_rad = 0.0;
     if (region_config.align_infill_direction_to_model) {

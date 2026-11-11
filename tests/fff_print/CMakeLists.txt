@@ -48,6 +48,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_printobject.cpp
+	test_spiral_vase_bottom.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp

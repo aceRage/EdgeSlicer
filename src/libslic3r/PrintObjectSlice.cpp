@@ -179,6 +179,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     ModelVolumePtrs                                           model_volumes,
     const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
     const std::vector<float>                                 &zs,
+    // PrintObject::spiral_vase_bottom_layers() of the object being sliced.
+    const std::function<size_t(const PrintRegionConfig&)>    &spiral_vase_bottom_layers,
     const std::function<void()>                              &throw_on_cancel_callback)
 {
     model_volumes_sort_by_id(model_volumes);
@@ -230,11 +232,10 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                         volume_region_it != layer_range_it->volume_regions.end()) {
                         params.mode = MeshSlicingParams::SlicingMode::PositiveLargestContour;
                         // Slice the bottom layers with SlicingMode::Regular.
-                        // This needs to be in sync with LayerRegion::make_perimeters() spiral_mode!
-                        const PrintRegionConfig &region_config = volume_region_it->region->config();
-                        params.slicing_mode_normal_below_layer = size_t(region_config.bottom_shell_layers.value);
-                        for (; params.slicing_mode_normal_below_layer < zs.size() && zs[params.slicing_mode_normal_below_layer] < region_config.bottom_shell_thickness - EPSILON;
-                            ++ params.slicing_mode_normal_below_layer);
+                        // In sync with LayerRegion::make_perimeters() spiral_mode: both ask
+                        // PrintObject::spiral_vase_bottom_layers(). (This one used to hold a layer back while its
+                        // slicing plane was below bottom_shell_thickness and that one while its top was.)
+                        params.slicing_mode_normal_below_layer = spiral_vase_bottom_layers(volume_region_it->region->config());
                     }
                 }
             }
@@ -5497,7 +5498,9 @@ void PrintObject::slice_volumes()
     if (!slice_zs.empty()) {
         objSliceByVolume = slice_volumes_inner(
             print->config(), this->config(), this->trafo_centered(),
-            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback);
+            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs,
+            [this](const PrintRegionConfig &region_config) { return this->spiral_vase_bottom_layers(region_config); },
+            throw_on_cancel_callback);
     }
 
     //BBS: "model_part" volumes are grouded according to their connections
