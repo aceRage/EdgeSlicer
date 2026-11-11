@@ -250,6 +250,10 @@ if (TARGET OpenVDB::openvdb)
 endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)
+# Edge: test_fuzzy_skin.cpp checks libnoise's value noise itself ([FuzzySkin][VoronoiNoise]). libslic3r
+# links noise::noise privately, so the headers do not reach the tests through it.
+find_package(libnoise REQUIRED)
+target_link_libraries(${_TEST_NAME}_tests noise::noise)
 if (WIN32)
     target_link_libraries(${_TEST_NAME}_tests bcrypt.lib crypt32.lib)
 endif()

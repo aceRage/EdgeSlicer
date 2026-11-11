@@ -3219,7 +3219,10 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                 // BOOST_LOG_TRIVIAL(trace) << "Support generator - trim_support_layers_by_object - trimmming non-empty layer " << idx_layer << " of " << nonempty_layers.size();
                 assert(! support_layer.polygons.empty() && support_layer.print_z >= m_slicing_params.raft_contact_top_z + EPSILON);
                 // Find the overlapping object layers including the extra above / below gap.
-                coordf_t z_threshold = support_layer.bottom_print_z() - gap_extra_below + EPSILON;
+                // A bottom contact must not be trimmed by the surface it rests on, even when its gap is rounded down.
+                coordf_t z_threshold = support_layer.layer_type == SupporLayerType::BottomContact
+                    ? support_layer.bottom_z + EPSILON
+                    : support_layer.bottom_print_z() - gap_extra_below + EPSILON;
                 idx_object_layer_overlapping = Layer::idx_higher_or_equal(
                     object.layers().begin(), object.layers().end(), idx_object_layer_overlapping,
                     [z_threshold](const Layer *layer){ return layer->print_z >= z_threshold; });
@@ -3231,16 +3234,23 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                     if (object_layer.bottom_z() > support_layer.print_z + gap_extra_above - EPSILON)
                         break;
 
-                    // Snapmaker #696: skip the object layer directly supported by this top contact layer: its
-                    // lslices cover the overhang itself, so trimming by it would cut away the contact area.
-                    // With variable layer heights the synchronised gap is shorter than the configured gap, so
-                    // this layer used to fall inside the trimming window and removed ~80% of the contact surface.
-                    if (support_layer.layer_type == SupporLayerType::TopContact &&
-                        i == support_layer.idx_object_layer_above)
-                        continue;
-
                     bool is_overlap = is_layers_overlap(support_layer, object_layer);
-                    for (const ExPolygon& expoly : object_layer.lslices) {
+                    // Only relax trimming across the gap to the overhang assigned to this top contact.
+                    // OrcaSlicer #13939, which replaces Snapmaker #696 here: with variable layer heights the
+                    // synchronised gap is shorter than the configured gap, so the supported overhang layer falls
+                    // inside the trimming window and its lslices cut away the contact area. #696 skipped that
+                    // layer outright; trimming by its continuing walls only (the part standing on the layer
+                    // below) keeps the overhang's interface and still clears walls that continue or expand into
+                    // the gap. A layer starting exactly at the contact height keeps its full trimming.
+                    const ExPolygons *trim_source = &object_layer.lslices;
+                    ExPolygons trim_continuous;
+                    if (support_layer.layer_type == SupporLayerType::TopContact && i > 0 &&
+                        i >= support_layer.idx_object_layer_above &&
+                        object_layer.bottom_z() > support_layer.print_z + EPSILON) {
+                        trim_continuous = intersection_ex(object_layer.lslices, object.layers()[i - 1]->lslices);
+                        trim_source = &trim_continuous;
+                    }
+                    for (const ExPolygon& expoly : *trim_source) {
                         // BBS
                         bool is_sharptail = !intersection_ex({ expoly }, object_layer.sharp_tails).empty();
                         coordf_t trimming_offset = is_sharptail ? scale_(sharp_tail_xy_gap) :

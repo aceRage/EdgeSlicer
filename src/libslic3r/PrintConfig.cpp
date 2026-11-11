@@ -12539,16 +12539,11 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         cfg.gcode_flavor.value != gcfRepetier)
         error_message.emplace("use_firmware_retraction","--use-firmware-retraction is only supported by Klipper, Marlin, Smoothie, RepRapFirmware, Repetier and Machinekit firmware");
 
-    // Orca #13812 lets the printer tab keep Wipe on with firmware retraction once the whole retraction happens
-    // before the wipe (retract_before_wipe 100%): the G10 runs first and the wipe is a dry move. Only a partial
-    // retraction before the wipe is incompatible; rejecting every wipe here reported a project saved in the
-    // state the tab allows as invalid when it was opened again, and the CLI refused to slice it.
-    if (cfg.use_firmware_retraction.value)
-        for (size_t i = 0; i < cfg.wipe.values.size(); ++i)
-            if (cfg.wipe.values[i] && cfg.retract_before_wipe.get_at(i) < 100. - EPSILON)
-                error_message.emplace("use_firmware_retraction",
-                                      "--use-firmware-retraction is not compatible with --wipe unless --retract-before-wipe is 100%");
-                
+    // Orca #17302: firmware retraction plus wipe is safe. The whole retraction is a single G10
+    // before the wipe, and the wipe moves no filament, so G11 restores what G10 retracted.
+    // The old check (and the #13812 100%-before-wipe exception) made the CLI refuse to slice
+    // and 3MF loading report invalid values for a combination the printer tab now keeps.
+
     // --gcode-flavor
     if (! print_config_def.get("gcode_flavor")->has_enum_value(cfg.gcode_flavor.serialize())) {
         error_message.emplace("gcode_flavor", L("invalid value ") + cfg.gcode_flavor.serialize());
@@ -14083,6 +14078,39 @@ bool bed_exclude_area_is_rectangles(const Pointfs &points)
     return true;
 }
 
+// OrcaSlicer #17209 rejects a bed exclusion polygon that is not simple (crossing edges, duplicate
+// points, zero area): a crossing outline such as "0x0,6x0,1x220,6x220" (a strip typed in the wrong
+// order) excluded the wrong region and cut supports. Upstream's test is "no two edges meet", which
+// would also reject the lists Edge reads on purpose: vendor rectangle lists with repeated padding
+// points (Bambu's cutter + rail, Qidi, Anycubic) and the Kobra 3 ring, whose connector runs there
+// and back. So: a rectangle list (bed_exclude_area_is_rectangles) is valid as it stands, and one
+// polygon is valid when its signed area equals the area it fills under the non-zero rule. Any
+// crossing of two edges leaves regions of three different winding numbers around the crossing
+// point, so the two areas differ; edges that only touch or run back along each other (the ring's
+// connector) leave every filled region at the same winding and keep them equal.
+bool is_valid_bed_exclude_area(const Pointfs &points)
+{
+    if (points.size() < 3)
+        return false;
+    for (const Vec2d &pt : points)
+        if (!std::isfinite(pt.x()) || !std::isfinite(pt.y()))
+            return false;
+    if (bed_exclude_area_is_rectangles(points))
+        return true;
+
+    Polygon poly;
+    poly.points.reserve(points.size());
+    for (const Vec2d &pt : points)
+        poly.points.emplace_back(scale_(pt.x()), scale_(pt.y()));
+    const double signed_area = std::abs(poly.area());
+    if (signed_area <= 0.)
+        return false;
+    double filled_area = 0.;
+    for (const ExPolygon &ex : union_ex(Polygons{ poly }, ClipperLib::pftNonZero))
+        filled_area += ex.area();
+    return std::abs(signed_area - filled_area) <= 1e-7 * filled_area;
+}
+
 static BoundingBoxf exclude_group_box(const Pointfs &points, size_t first)
 {
     BoundingBoxf bb;
@@ -14096,6 +14124,11 @@ Polygons bed_exclude_area_polygons(const Pointfs &points)
     Polygons out;
     if (points.size() < 3)
         return out;
+    // OrcaSlicer #17209: an invalid list excludes nothing rather than the wrong region.
+    if (!is_valid_bed_exclude_area(points)) {
+        BOOST_LOG_TRIVIAL(warning) << "bed_exclude_area is not a valid polygon, ignored";
+        return out;
+    }
 
     if (bed_exclude_area_is_rectangles(points)) {
         for (size_t i = 0; i + 4 <= points.size(); i += 4) {
@@ -14167,7 +14200,7 @@ Polygons bed_exclude_area_polygons(const Pointfs &points)
 std::vector<BoundingBoxf> bed_exclude_area_boxes(const Pointfs &points)
 {
     std::vector<BoundingBoxf> out;
-    if (points.size() < 3)
+    if (points.size() < 3 || !is_valid_bed_exclude_area(points))
         return out;
     if (bed_exclude_area_is_rectangles(points)) {
         // Unscaled and unfiltered, so a rectangle list gives exactly the boxes PartPlate always

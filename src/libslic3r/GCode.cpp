@@ -43,6 +43,7 @@
 #include <math.h>
 #include <optional>
 #include <memory>
+#include <limits>
 #include <set>
 #include <cstdio>
 #include <stdlib.h>
@@ -688,6 +689,11 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     // Nothing to retract - return early
     if (retraction_length_remaining <= EPSILON)
         return {0., 0., 0.};
+
+    // Orca: the firmware owns the length of a firmware retraction, and its unretract restores only
+    // what it retracted, so the whole retraction happens before the wipe and the wipe moves no filament.
+    if (config.use_firmware_retraction)
+        return { retraction_length_remaining, 0., 0. };
 
     // Calculate retraction before and after wipe distances from the user setting (OrcaSlicer #11015).
     // Keep adding to the retraction before wipe variable any excess retraction needed to be performed
@@ -10963,13 +10969,43 @@ std::string GCode::extrude_perimeters(const Print&                              
                 wipe_support->inner_lines_complete = true;
             }
 
-            for (const ExtrusionEntity* ee : region.perimeters) {
+            auto extrude_one = [&](const ExtrusionEntity *ee) {
                 if (defer_unsupported && waits_for_infill(ee) != unsupported_loops_only)
-                    continue;
+                    return;
                 gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
                                              wipe_support ? &*wipe_support : nullptr);
                 if (wipe_support)
                     wipe_support->append(*ee);
+            };
+
+            // Walls of one group hold one wall sequence, so they stay together in their order. The groups of a region can be spread
+            // over the layer, as with mixed filaments, so always go to the nearest one. Regions filtered per copy for wiping have no groups.
+            std::vector<size_t> group_starts{0};
+            if (region.perimeter_groups.size() == region.perimeters.size())
+                for (size_t i = 1; i < region.perimeters.size(); ++i)
+                    if (region.perimeter_groups[i] != region.perimeter_groups[i - 1])
+                        group_starts.push_back(i);
+            std::vector<char> printed(group_starts.size(), 0);
+            for (size_t num_printed = 0; num_printed < group_starts.size(); ++num_printed) {
+                size_t best          = 0;
+                double best_distance = std::numeric_limits<double>::max();
+                for (size_t i = 0; i < group_starts.size(); ++i) {
+                    if (printed[i])
+                        continue;
+                    const ExtrusionEntity *entity = region.perimeters[group_starts[i]];
+                    // An entity without end points can't be compared. It goes first and takes no travel.
+                    const double distance = !m_last_pos_defined || !extrusion_entity_has_endpoints(entity) ?
+                                                0. :
+                                                (entity->first_point().cast<double>() - m_last_pos.cast<double>()).squaredNorm();
+                    if (distance < best_distance) {
+                        best          = i;
+                        best_distance = distance;
+                    }
+                }
+                printed[best]    = 1;
+                const size_t end = best + 1 < group_starts.size() ? group_starts[best + 1] : region.perimeters.size();
+                for (size_t i = group_starts[best]; i < end; ++i)
+                    extrude_one(region.perimeters[i]);
             }
         }
     return gcode;
@@ -13601,6 +13637,9 @@ void GCode::ObjectByExtruder::Island::Region::append(const Type                 
             perimeters_or_infills->emplace_back(ee);
     } else
         perimeters_or_infills->emplace_back(eec);
+
+    if (type == PERIMETERS)
+        perimeter_groups.resize(new_size, perimeter_groups.empty() ? 0 : perimeter_groups.back() + 1);
 
     if (copies_extruder != nullptr) {
         // Don't reallocate overrides if not needed.

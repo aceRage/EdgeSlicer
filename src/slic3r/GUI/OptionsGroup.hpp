@@ -107,6 +107,10 @@ private:
 
 // Whether a line is a legend line (its first option is a legend); false for a line with no option (a widget-only row).
 bool line_is_legend(const Line& line);
+// The mode from which a line is shown: its first option's mode; comSimple (every mode) for a widget-only row.
+ConfigOptionMode line_mode(const Line& line);
+// The first option's key, or nullptr for a line with no option (a widget-only row or a separator).
+const t_config_option_key* line_first_option_id(const Line& line);
 
 using column_t = std::function<wxWindow*(wxWindow* parent, const Line&)>;
 
