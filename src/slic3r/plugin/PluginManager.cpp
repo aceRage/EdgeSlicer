@@ -1294,6 +1294,19 @@ bool PluginManager::mutate_plugin_permissions(const std::string& plugin_key, con
         return false;
     }
 
+    for (const PluginPermissionMutation::Entry& entry : mutation.add) {
+        if (entry.value.empty())
+            continue;
+        if ((entry.category == PluginPermissionCategory::FsRead ||
+             entry.category == PluginPermissionCategory::FsReadWrite) &&
+            PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(entry.value))) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__
+                                       << ": Refusing a grant covering UltraNet {data_dir}/plugins for "
+                                       << plugin_key << " path=" << entry.value;
+            return false;
+        }
+    }
+
     // Apply against the latest state read under the lock, so a grant another writer added since
     // the caller last looked is kept. Removals run first: a value named in both lists ends present.
     for (const PluginPermissionMutation::Entry& entry : mutation.remove) {

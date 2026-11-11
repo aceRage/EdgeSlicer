@@ -188,7 +188,8 @@ std::vector<CapturedCapability> PythonPluginBridge::finalize_plugin_capture(cons
             const bool has_permission_request =
                 !requested_permissions.fs_read.empty() || !requested_permissions.fs_readwrite.empty() ||
                 !requested_permissions.network_http.empty() || !requested_permissions.network_socket.empty() ||
-                !requested_permissions.process.empty() || requested_permissions.threading;
+                !requested_permissions.process.empty() || requested_permissions.threading ||
+                requested_permissions.full_access;
             if (has_permission_request) {
                 bool granted = false;
                 {
@@ -566,6 +567,7 @@ void bind_python_api(pybind11::module_& m)
            const std::vector<std::string>& network_socket,
            const std::vector<std::string>& process,
            bool                            threading,
+           bool                            full_access,
            const std::vector<std::string>& network) {
             if (g_active_plugin_key.empty())
                 throw py::value_error("request_permissions() called outside plugin discovery context");
@@ -617,6 +619,8 @@ void bind_python_api(pybind11::module_& m)
 
             if (threading && !requested.threading)
                 requested.threading = true;
+            if (full_access)
+                requested.full_access = true;
         },
         py::arg("fs_read") = std::vector<std::string>{},
         py::arg("fs_readwrite") = std::vector<std::string>{},
@@ -624,13 +628,15 @@ void bind_python_api(pybind11::module_& m)
         py::arg("network_socket") = std::vector<std::string>{},
         py::arg("process") = std::vector<std::string>{},
         py::arg("threading") = false,
+        py::arg("full_access") = false,
         py::arg("network") = std::vector<std::string>{},
-        R"pbdoc(Request permissions while OrcaSlicer loads your module.
+        R"pbdoc(Request permissions while EdgeSlicer loads your module.
 
 Each bucket takes the target strings the plugin expects the corresponding audit event to
 report: filesystem paths for fs_read and fs_readwrite, URLs for network_http, socket addresses
 for network_socket, and commands for process. threading=True requests permission to start
-threads. Targets already granted to the plugin are not asked for again.
+threads. full_access=True asks to turn auditing off for this plugin; the confirmation defaults
+to No. Targets already granted to the plugin are not asked for again.
 
 A filesystem target may end in "/*" to grant a whole directory tree, for example
 "/path/to/folder/*". That covers the folder itself and every path beneath it, at any depth.

@@ -35,8 +35,9 @@ struct PluginPermissions
     std::vector<std::string> events;
     // Turns auditing off for the whole plugin: every audited event is allowed without a grant or
     // prompt, except the unconditional denied paths (the install-state sidecar, the app config,
-    // the cloud refresh token), which stay blocked. Stored as a JSON boolean; a missing or
-    // non-boolean value reads as false. This is a Python audit-hook policy, not an OS sandbox.
+    // EdgeSlicer's {data_dir}/plugins UltraNet folder), which stay blocked. Stored as a JSON
+    // boolean; a missing or non-boolean value reads as false. This is a Python audit-hook policy,
+    // not an OS sandbox.
     bool full_access = false;
 };
 

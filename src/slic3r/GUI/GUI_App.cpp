@@ -139,6 +139,9 @@
 #include "slic3r/Utils/PluginLoadDiagnostics.hpp"
 #include "slic3r/Utils/VendorConnector.hpp"
 #include "HomePanel.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginsInspectorDialog.hpp"
+#endif
 #include "PresetMirror.hpp"
 #include "PresetMirrorCore.hpp"
 #include "Tab.hpp"
@@ -2843,11 +2846,14 @@ GUI_App::~GUI_App()
     stop_http_server();
 }
 
-void GUI_App::notify_plugin_permissions_changed(const std::string&)
+void GUI_App::notify_plugin_permissions_changed(const std::string& plugin_key)
 {
 #ifdef EDGE_PYTHON_PLUGINS
     if (mainframe != nullptr && mainframe->m_home != nullptr)
         mainframe->m_home->refresh_plugins();
+    PluginsInspectorDialog::notify_permissions_changed(plugin_key);
+#else
+    (void) plugin_key;
 #endif
 }
 

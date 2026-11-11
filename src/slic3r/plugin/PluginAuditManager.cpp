@@ -827,9 +827,27 @@ bool PluginAuditManager::is_denied_path_keyword(const boost::filesystem::path& c
     return false;
 }
 
+bool PluginAuditManager::is_ultranet_plugins_path(const boost::filesystem::path& candidate) const
+{
+    if (candidate.empty())
+        return false;
+    const std::string data = data_dir();
+    if (data.empty())
+        return false;
+
+    boost::filesystem::path path = candidate;
+    if (path.filename() == "*")
+        path = path.parent_path();
+    if (path.empty())
+        return false;
+
+    const boost::filesystem::path ultranet = boost::filesystem::path(data) / "plugins";
+    return is_inside_allowed_root(path, ultranet);
+}
+
 bool PluginAuditManager::is_denied_path(const boost::filesystem::path& candidate) const
 {
-    return is_denied_filename(candidate) || is_denied_path_keyword(candidate);
+    return is_denied_filename(candidate) || is_denied_path_keyword(candidate) || is_ultranet_plugins_path(candidate);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +876,11 @@ AuditDecision PluginAuditManager::check_path_access(const boost::filesystem::pat
         BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write
                                    << " plugin=" << plugin_key << " reason=denied path keyword";
         return {false, "denied path keyword"};
+    }
+    if (is_ultranet_plugins_path(path)) {
+        BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write
+                                   << " plugin=" << plugin_key << " reason=denied ultranet path";
+        return {false, "denied ultranet path"};
     }
 
     namespace fs = boost::filesystem;
@@ -914,7 +937,7 @@ namespace {
 void append_permission_dialog_tip(wxString& message)
 {
     message += "\n\n";
-    message += _L("Tip: You can review and change this plugin's saved permissions in the Plugins dialog, on the Permissions tab.");
+    message += _L("Tip: You can review and change this plugin's saved permissions from Home > Plugins, using Permissions.");
 }
 
 // The preference affects only the explanatory tip, never the permission decision.
@@ -1714,6 +1737,7 @@ bool persist_grant(const std::string& plugin_key, AuditEventCategory category, b
 
 static PluginAuditManager::PermissionPrompt s_permission_prompt_for_testing;
 static PluginAuditManager::PermissionMessagePrompt s_permission_message_prompt_for_testing;
+static PluginAuditManager::FullAccessPrompt s_full_access_prompt_for_testing;
 
 static const char* audit_category_name(AuditEventCategory category)
 {
@@ -1803,7 +1827,8 @@ int decide_audited_event(PluginAuditManager&             mgr,
 {
     // Full access turns permission auditing off for this plugin, so no grant or prompt applies.
     // This is reached only after audit_plugin_event's unconditional denied-path loop: the
-    // install-state sidecar, the app config and the cloud refresh token stay blocked even here.
+    // install-state sidecar, the app config, EdgeSlicer's network plug-in folder
+    // ({data_dir}/plugins), and the other denied names stay blocked even here.
     // It is a Python audit-hook policy only; the plugin still runs in the host process, so other
     // processes are not restricted.
     if (state.permissions.full_access)
@@ -1938,6 +1963,30 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
     if (state.permissions.full_access)
         return true;
 
+    // Plugins may request Full access during load. "No" is the default. Declining it does not
+    // abort the rest of the declaration: remaining buckets are still prompted.
+    if (requested.full_access) {
+        if (prompt_enable_full_access(descriptor.name.empty() ? plugin_key : descriptor.name)) {
+            bool persisted = false;
+            {
+                std::lock_guard<std::mutex> state_lock(install_state_mutex());
+                PluginInstallState     latest_state;
+                InstallStateReadStatus latest_status =
+                    read_install_state_status(boost::filesystem::path(descriptor.plugin_root), latest_state);
+                if (latest_status == InstallStateReadStatus::Unreadable)
+                    return false;
+                if (latest_status == InstallStateReadStatus::Absent && state_status == InstallStateReadStatus::Readable)
+                    return false;
+                PluginAuditDetail::seed_install_metadata(descriptor, latest_state);
+                latest_state.permissions.full_access = true;
+                persisted = write_install_state(boost::filesystem::path(descriptor.plugin_root), latest_state);
+            }
+            if (persisted)
+                post_permission_changed_notification(plugin_key);
+            return persisted;
+        }
+    }
+
     // Per bucket, keep only the targets that no earlier grant already covers. Dropping these
     // before prompting keeps a repeated declaration from asking again for what is on disk.
     struct MissingBucket {
@@ -1966,6 +2015,12 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
             const std::string target = tree_grant_bucket
                                            ? PluginAuditDetail::absolute_tree_grant(requested_target)
                                            : requested_target;
+            if (tree_grant_bucket &&
+                PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(target))) {
+                BOOST_LOG_TRIVIAL(warning) << "[AUDIT] dropping a declared grant covering UltraNet "
+                                           << "{data_dir}/plugins: " << target;
+                continue;
+            }
             // A saved wildcard already covers a more specific request. Deduplicate inside the
             // request verbatim only: two requested entries may cover different sets.
             const bool already_granted =
@@ -2171,6 +2226,53 @@ void PluginAuditManager::set_permission_prompt_for_testing(PermissionPrompt prom
 void PluginAuditManager::set_permission_message_prompt_for_testing(PermissionMessagePrompt prompt)
 {
     PluginAuditDetail::s_permission_message_prompt_for_testing = std::move(prompt);
+}
+
+void PluginAuditManager::set_full_access_prompt_for_testing(FullAccessPrompt prompt)
+{
+    PluginAuditDetail::s_full_access_prompt_for_testing = std::move(prompt);
+}
+
+bool PluginAuditManager::prompt_enable_full_access(const std::string& plugin_name)
+{
+    if (PluginAuditDetail::s_full_access_prompt_for_testing)
+        return PluginAuditDetail::s_full_access_prompt_for_testing(plugin_name);
+
+    const wxString name = wxString::FromUTF8(plugin_name.c_str());
+    const wxString body = wxString::Format(
+        _L("Enable full access for \"%s\"?\n\n"
+           "Full access turns off permission auditing for this plugin: its file system, network, "
+           "process, thread and event permissions are no longer checked. The plugin can read and "
+           "write most files your user account can access, including startup scripts, SSH keys "
+           "and a writable EdgeSlicer installation. Modifying startup or application files can "
+           "let code run outside these checks. Direct Python access to EdgeSlicer's "
+           "configuration, certificate and install-state paths stays blocked, but "
+           "subprocesses are not restricted. Full access is not a sandbox.\n\n"
+           "Only enable this for a plugin you trust."),
+        name);
+
+    auto show = [](const wxString& message) {
+        GUI::MessageDialog dialog(nullptr, message, _L("Full access"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+        // MsgDialog builds its own buttons in a fixed order and always gives Yes the initial focus;
+        // wxNO_DEFAULT does not change that. Focus No explicitly so Enter cannot grant full access.
+        dialog.SetButtonLabel(wxID_NO, _L("No"), /*set_focus=*/true);
+        return dialog.ShowModal() == wxID_YES;
+    };
+
+    if (wxTheApp == nullptr || GUI::wxGetApp().is_closing())
+        return false;
+    if (wxIsMainThread())
+        return show(body);
+
+    auto result = std::make_shared<std::promise<bool>>();
+    auto future = result->get_future();
+    GUI::wxGetApp().CallAfter([result, body, show]() {
+        if (wxTheApp == nullptr || GUI::wxGetApp().is_closing())
+            result->set_value(false);
+        else
+            result->set_value(show(body));
+    });
+    return future.get();
 }
 
 int PluginAuditManager::audit_hook(const char* event, PyObject* args, void* user_data)

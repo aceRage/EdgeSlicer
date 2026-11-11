@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plugin</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="./index.js"></script>
+</head>
+<body>
+  <div class="app">
+    <div class="tabs" role="tablist">
+      <button class="tab" type="button" data-tab="permissions" role="tab" aria-selected="true">Permissions</button>
+      <button class="tab" type="button" data-tab="config" role="tab" aria-selected="false">Configure</button>
+    </div>
+    <main class="panels">
+      <section class="detail-tab-panel thin-scroll" role="tabpanel" data-panel="permissions">
+        <div id="permissionsContent" class="permissions-content"></div>
+      </section>
+      <section class="detail-tab-panel" role="tabpanel" data-panel="config" hidden>
+        <div id="configEmpty" class="detail-empty">Select a plugin to configure its capabilities</div>
+        <div id="configLayout" class="config-layout" hidden>
+          <div id="configSidebar" class="config-sidebar thin-scroll" role="listbox" aria-label="Configurable capabilities"></div>
+          <div class="config-view">
+            <div id="configError" class="config-error" role="status" aria-live="polite" hidden></div>
+            <div id="configEditor" class="config-editor" hidden>
+              <textarea id="configText" class="config-textarea thin-scroll" spellcheck="false"
+                autocomplete="off" autocapitalize="off" aria-label="Capability configuration (JSON)"></textarea>
+            </div>
+            <iframe id="configCustom" class="config-custom" title="Plugin configuration"
+              sandbox="allow-scripts" referrerpolicy="no-referrer" hidden></iframe>
+            <div id="configFooter" class="config-view-footer" hidden>
+              <span id="configValidation" class="config-validation" role="status" aria-live="polite"></span>
+              <div class="config-actions">
+                <button id="configRestoreBtn" type="button">Restore defaults</button>
+                <button id="configSaveBtn" class="ButtonStyleConfirm" type="button">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <div id="statusBar" class="status-bar is-empty" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="statusText" class="status-text"></span>
+    </div>
+  </div>
+</body>
+</html>

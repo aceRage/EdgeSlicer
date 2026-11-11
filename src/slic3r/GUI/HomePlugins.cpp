@@ -4,6 +4,8 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
+#include "PluginsInspectorDialog.hpp"
+#include "PluginsInspectorLogic.hpp"
 
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/Utils/HomePluginsLogic.hpp"
@@ -183,11 +185,11 @@ bool HomePlugins::handle(const json& msg)
         if (listed(key))
             run(key);
     }
-    else if (command == "plugin_configure" || command == "plugin_config_get" || command == "plugin_config_save" ||
-             command == "plugin_config_restore")
-        stub(_u8L("Configure opens in the Plugins inspector in a later phase."));
-    else if (command == "plugin_permissions" || command == "plugin_permissions_mutate")
-        stub(_u8L("Permissions open in the Plugins inspector in a later phase."));
+    else if (is_inspector_home_command(command)) {
+        if (!listed(key))
+            return true;
+        PluginsInspectorDialog::show_for(m_parent, key, inspector_tab_from_command(command));
+    }
     else if (command == "plugin_update" || command == "plugin_catalog")
         stub(_u8L("The Edge catalog lands in a later phase."));
     else
