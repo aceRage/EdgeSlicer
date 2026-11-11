@@ -11,11 +11,13 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
 
@@ -377,4 +379,183 @@ TEST_CASE("A fixed ironing angle still follows the model rotation when infill is
         CAPTURE(layer, dir, on.at(layer));
         CHECK(angle_diff(on.at(layer), dir) == Approx(30.).margin(1.));
     }
+}
+
+namespace {
+
+// Feed rates (mm/min) of the extruding moves of one feature, per layer Z in microns.
+std::map<int, std::set<int>> feature_feeds_by_layer(const std::string &gcode, const std::string &wanted)
+{
+    std::map<int, std::set<int>> out;
+    std::string                  feature;
+    GCodeReader                  parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        // Either ";TYPE:<Role>" or "; FEATURE: <Role>", per GCodeProcessor::s_IsBBLPrinter.
+        const std::string &raw  = line.raw();
+        const size_t       skip = raw.rfind(";TYPE:", 0) == 0 ? 6 : raw.rfind("; FEATURE: ", 0) == 0 ? 11 : 0;
+        if (skip > 0) {
+            feature = raw.substr(skip);
+            while (!feature.empty() && (feature.back() == '\r' || feature.back() == '\n' || feature.back() == ' '))
+                feature.pop_back();
+        }
+        if (feature == wanted && line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0)
+            out[int(std::lround(double(self.z()) * 1000.))].insert(int(std::lround(double(line.new_F(self)))));
+    });
+    return out;
+}
+
+// A 20 mm cube ironed on every solid layer, with a speed of its own for each role that matters here and
+// nothing else that changes a feed rate: ironing 20 mm/s (F1200), first layer walls 40 (F2400), first layer
+// infill 80 (F4800).
+std::string slice_ironed_cube(Items items)
+{
+    DynamicPrintConfig config = ironing_config({
+        { "ironing_type",                  "solid" },
+        { "gcode_comments",                "1" },
+        { "machine_start_gcode",           "" },
+        { "enable_arc_fitting",            "0" },
+        { "z_hop",                         "0" },
+        { "slow_down_layers",              "0" },
+        { "initial_layer_speed",           "40" },
+        { "initial_layer_infill_speed",    "80" },
+        { "filament_max_volumetric_speed", "100" },
+        { "enable_overhang_speed",         "0" },
+        { "slow_down_for_layer_cooling",   "0" },
+    });
+    config.set_deserialize_strict(items);
+    return slice({ TestMesh::cube_20x20x20 }, config);
+}
+
+} // namespace
+
+TEST_CASE("Ironing on the first layer keeps the ironing speed", "[Ironing][InitialLayerSpeed][GCode]")
+{
+    SECTION("a first layer infill speed above the ironing speed does not raise it") {
+        const std::string gcode   = slice_ironed_cube({});
+        const auto        ironing = feature_feeds_by_layer(gcode, "Ironing");
+        // The first layer and at least the bottom shells above it are ironed.
+        REQUIRE(ironing.size() >= 3);
+        REQUIRE(ironing.begin()->first == 200);
+        for (const auto &[z, feeds] : ironing) {
+            CAPTURE(z, feeds);
+            CHECK(feeds == std::set<int>{ 1200 });
+        }
+        // The rest of the first layer is as it was: its infill at the first layer infill speed, its walls
+        // at the first layer speed.
+        const auto bottom = feature_feeds_by_layer(gcode, "Bottom surface");
+        REQUIRE(bottom.count(200) == 1);
+        CHECK(bottom.at(200) == std::set<int>{ 4800 });
+        const auto outer_wall = feature_feeds_by_layer(gcode, "Outer wall");
+        REQUIRE(outer_wall.count(200) == 1);
+        CHECK(outer_wall.at(200) == std::set<int>{ 2400 });
+    }
+    SECTION("a filament's ironing speed is kept as well") {
+        const auto ironing = feature_feeds_by_layer(slice_ironed_cube({ { "filament_ironing_speed", "15" } }), "Ironing");
+        REQUIRE(ironing.size() >= 3);
+        REQUIRE(ironing.begin()->first == 200);
+        for (const auto &[z, feeds] : ironing) {
+            CAPTURE(z, feeds);
+            CHECK(feeds == std::set<int>{ 900 });
+        }
+    }
+    SECTION("a first layer infill speed below the ironing speed still holds it back") {
+        const auto ironing = feature_feeds_by_layer(slice_ironed_cube({ { "initial_layer_infill_speed", "10" } }), "Ironing");
+        REQUIRE(ironing.size() >= 3);
+        REQUIRE(ironing.begin()->first == 200);
+        CHECK(ironing.at(200) == std::set<int>{ 600 });
+        for (const auto &[z, feeds] : ironing)
+            if (z > 200) {
+                CAPTURE(z, feeds);
+                CHECK(feeds == std::set<int>{ 1200 });
+            }
+    }
+    SECTION("and the slow-down ramp goes on from there") {
+        // 10 mm/s on the first layer, then a quarter of the way to 20 with each of slow_down_layers = 4.
+        const auto ironing = feature_feeds_by_layer(
+            slice_ironed_cube({ { "initial_layer_infill_speed", "10" }, { "slow_down_layers", "4" } }), "Ironing");
+        REQUIRE(ironing.count(200) == 1);
+        REQUIRE(ironing.count(400) == 1);
+        REQUIRE(ironing.count(600) == 1);
+        CHECK(ironing.at(200) == std::set<int>{ 600 });
+        CHECK(ironing.at(400) == std::set<int>{ 750 });
+        CHECK(ironing.at(600) == std::set<int>{ 900 });
+    }
+    SECTION("the first object layer over a raft is no different") {
+        const std::string gcode   = slice_ironed_cube({ { "raft_layers", "2" } });
+        const auto        ironing = feature_feeds_by_layer(gcode, "Ironing");
+        const auto        walls   = feature_feeds_by_layer(gcode, "Outer wall");
+        REQUIRE(!ironing.empty());
+        REQUIRE(!walls.empty());
+        // The lowest ironed layer is the first object layer, the one that takes the first layer speeds.
+        const int first_object_z = walls.begin()->first;
+        REQUIRE(first_object_z > 400);
+        REQUIRE(ironing.begin()->first == first_object_z);
+        CHECK(walls.begin()->second == std::set<int>{ 2400 });
+        CHECK(ironing.begin()->second == std::set<int>{ 1200 });
+    }
+}
+
+TEST_CASE("Regions with the same ironing settings are ironed as one area whatever lies between them in the region list",
+          "[Ironing][IroningParams]")
+{
+    // Three 10 mm cubes in a row as the parts of one object, each a region of its own: the first and the
+    // third differ in the sparse infill density alone, which ironing does not look at, and the second,
+    // between them in the list of regions, is ironed in another pattern. The first and the third stand
+    // side by side (the second is the one at the far end), so ironed as one area their lines run 20 mm.
+    // IroningParams::operator< left the pattern out, the sort then kept the list order, and the two were
+    // ironed apart, no line longer than one cube.
+    DynamicPrintConfig config = ironing_config({
+        { "ironing_angle",       "0" },
+        { "ironing_angle_fixed", "1" },
+        { "skirt_loops",         "0" },
+    });
+    Print        print;
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name = "object.stl";
+    object->add_instance();
+    // Part, its X offset, and what sets its region apart.
+    static constexpr double part_x[] = { 0., 20., 10. };
+    for (size_t i = 0; i < 3; ++i) {
+        TriangleMesh part = make_cube(10., 10., 10.);
+        part.translate(float(part_x[i]), 0.f, 0.f);
+        ModelVolume *volume = object->add_volume(std::move(part), ModelVolumeType::MODEL_PART, false);
+        if (i == 1)
+            volume->config.set_key_value("ironing_pattern", new ConfigOptionEnum<InfillPattern>(ipConcentric));
+        else if (i == 2)
+            volume->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(30.));
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    const Layer *top = print.objects().front()->layers().back();
+    REQUIRE(top->regions().size() == 3);
+
+    // Ironing lines of the top layer: how many regions hold any, and the longest line along X.
+    size_t regions_with_ironing = 0;
+    double longest              = 0.;
+    for (const LayerRegion *region : top->regions()) {
+        const ExtrusionEntityCollection flat = region->fills.flatten();
+        bool                            any  = false;
+        for (const ExtrusionEntity *entity : flat.entities)
+            if (entity->role() == erIroning) {
+                any = true;
+                if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity))
+                    for (const Line &line : path->polyline.lines())
+                        if (std::abs(line.b.y() - line.a.y()) < scaled<coord_t>(0.01))
+                            longest = std::max(longest, unscaled<double>(line.length()));
+            }
+        if (any)
+            ++regions_with_ironing;
+    }
+    CAPTURE(regions_with_ironing, longest);
+    // One area for the first and the third part, stored with the first, and one for the second.
+    CHECK(regions_with_ironing == 2);
+    // 20 mm less half a nozzle at each end.
+    CHECK_THAT(longest, Catch::Matchers::WithinAbs(19.6, 0.2));
 }
