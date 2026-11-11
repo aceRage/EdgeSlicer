@@ -894,7 +894,22 @@ void PrintObject::slice()
     m_print->throw_if_canceled();
     m_typed_slices = false;
     this->clear_layers();
-    m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value));
+    {
+        std::vector<coordf_t> object_layers = generate_object_layers(m_slicing_params, layer_height_profile, m_config.precise_z_height.value);
+        // precise_z_height brings the top of the last layer to the object's height by sharing the difference out
+        // among the last five layers. It cannot when the object has fewer than six layers or when those five are
+        // at the layer height limits, and it used to say nothing.
+        if (m_config.precise_z_height.value && !object_layers.empty() &&
+            !is_approx(object_layers.back(), m_slicing_params.object_print_z_height()))
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Precise Z height could not be applied to \"%1%\": its layers end at %2% mm and the object is %3% mm tall. "
+                                    "The object has fewer than six layers, or its last five layers cannot take up the difference "
+                                    "within the layer height limits."),
+                               this->model_object() ? this->model_object()->name : std::string(),
+                               Slic3r::format("%.3f", object_layers.back()), Slic3r::format("%.3f", m_slicing_params.object_print_z_height())),
+                PrintStateBase::SlicingPreciseZNotApplied);
+        m_layers = new_layers(this, std::move(object_layers));
+    }
     if (has_surface_emboss_mixed_volume(*this)) {
         reset_surface_emboss_mixed_debug_file(*this);
         BOOST_LOG_TRIVIAL(warning) << "Surface emboss mixed debug enabled"
@@ -5793,13 +5808,7 @@ void PrintObject::apply_conical_overhang() {
     const double tan_angle = tan(angle_radians); // the XY-component of the angle
     BOOST_LOG_TRIVIAL(info) << "angle " << angle_radians << " maxHoleArea " << max_hole_area << " tan_angle "
                             << tan_angle;
-    const coordf_t layer_thickness = m_config.layer_height.value;
-    const coordf_t max_dist_from_lower_layer = tan_angle * layer_thickness; // max dist which can be bridged, in MM
-    BOOST_LOG_TRIVIAL(info) << "layer_thickness " << layer_thickness << " max_dist_from_lower_layer "
-                            << max_dist_from_lower_layer;
-
     // Pre-scale config
-    const coordf_t scaled_max_dist_from_lower_layer = -float(scale_(max_dist_from_lower_layer));
     const coordf_t scaled_max_hole_area = float(scale_(scale_(max_hole_area)));
 
 
@@ -5811,6 +5820,12 @@ void PrintObject::apply_conical_overhang() {
         if (upper_layer->empty()) {
           continue;
         }
+
+        // The max dist which can be bridged is the tangent times the height of the layer that overhangs, the upper
+        // one: its own height, not the layer_height setting, which the layers of an object with variable layer
+        // height, a height range modifier or precise_z_height do not all have.
+        const coordf_t max_dist_from_lower_layer        = tan_angle * upper_layer->height; // in MM
+        const coordf_t scaled_max_dist_from_lower_layer = -float(scale_(max_dist_from_lower_layer));
 
         // Skip if entire layer has this disabled
         if (std::all_of(layer->m_regions.begin(), layer->m_regions.end(),

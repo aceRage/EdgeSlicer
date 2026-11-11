@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cassert>
 #include <functional>
+#include <map>
 #include <unordered_set>
 #include <thread>
 #include "libslic3r/AABBTreeLines.hpp"
@@ -1144,8 +1145,10 @@ Polylines reconnect_polylines(const Polylines &polylines, double limit_distance)
     if (polylines.empty())
         return polylines;
 
-    std::unordered_map<size_t, Polyline> connected;
-    connected.reserve(polylines.size());
+    // An ordered map: the result is read out of it below, and has to come in the order of the input (ascending index)
+    // with every standard library. Out of an unordered_map it came last to first with libc++ and libstdc++ and first to
+    // last with the MSVC library, and that order decides the order the extra perimeters are printed in.
+    std::map<size_t, Polyline> connected;
     for (size_t i = 0; i < polylines.size(); i++) {
         if (!polylines[i].empty()) {
             connected.emplace(i, polylines[i]);
@@ -1296,6 +1299,10 @@ ExtrusionPaths sort_extra_perimeters(const ExtrusionPaths& extra_perims, int ind
                     reverse  = true;
                 }
             }
+            // This compares a squared distance with a length, but nothing depends on its outcome: next_idx was reset to
+            // null_idx before the search above, so that search started at path 0 (null_idx + 1 wraps around) and is the
+            // same search, from the same point, as the one at the top of the loop that runs when next_idx is cleared
+            // here. Both pick the same path and direction. Left as it is in PrusaSlicer and OrcaSlicer.
             if (dist > scaled(5.0)) {
                 next_idx = null_idx;
             }
@@ -1497,17 +1504,23 @@ std::tuple<std::vector<ExtrusionPaths>, Polygons> generate_extra_perimeters_over
                 if (!first_overhang_is_closed_and_anchored) {
                     std::reverse(overhang_region.begin(), overhang_region.end());
                 } else {
+                    // Start the loop at its point furthest onto the lower layer (the signed distance is negative inside).
+                    // The loop is a closed polyline, its last point repeats the first: drop that point before turning the
+                    // loop and close it again afterwards, or the old start stays in the path twice and the loop is left
+                    // open at its new start.
+                    Points &loop = overhang_region.front().polyline.points;
+                    loop.pop_back();
                     size_t min_dist_idx = 0;
                     double min_dist = std::numeric_limits<double>::max();
-                    for (size_t i = 0; i < overhang_region.front().polyline.size(); i++) {
-                        Point p = overhang_region.front().polyline[i];
-                        if (double d = lower_layer_aabb_tree.distance_from_lines<true>(p) < min_dist) {
+                    for (size_t i = 0; i < loop.size(); i++) {
+                        // The comparison must not be part of the initializer: "double d = distance < min_dist" made d 0 or 1.
+                        if (double d = lower_layer_aabb_tree.distance_from_lines<true>(loop[i]); d < min_dist) {
                             min_dist = d;
                             min_dist_idx = i;
                         }
                     }
-                    std::rotate(overhang_region.front().polyline.begin(), overhang_region.front().polyline.begin() + min_dist_idx,
-                                overhang_region.front().polyline.end());
+                    std::rotate(loop.begin(), loop.begin() + min_dist_idx, loop.end());
+                    loop.push_back(loop.front());
                 }
                 auto first_unanchored          = std::stable_partition(overhang_region.begin(), overhang_region.end(), is_anchored);
                 int  index_of_first_unanchored = first_unanchored - overhang_region.begin();

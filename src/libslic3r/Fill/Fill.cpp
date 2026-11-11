@@ -2426,6 +2426,14 @@ void Layer::make_ironing()
                 return true;
             if (this->inset > rhs.inset)
                 return false;
+            // operator== compares the pattern, so the order has to as well: without it two entries equal
+            // in all but the pattern compare equivalent, the sort may leave one with another pattern between
+            // two that are equal, and the grouping below, which takes runs of equal entries, irons those two
+            // apart instead of as one area. Last, so that the order of everything else stays as it was.
+            if (int(this->pattern) < int(rhs.pattern))
+                return true;
+            if (int(this->pattern) > int(rhs.pattern))
+                return false;
 			return false;
 		}
 
