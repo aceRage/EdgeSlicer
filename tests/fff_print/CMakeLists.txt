@@ -50,6 +50,7 @@ add_executable(${_TEST_NAME}_tests
 	test_polyholes.cpp
 	test_precise_z_height.cpp
 	test_printobject.cpp
+	test_spiral_vase_bottom.cpp
 	test_second_internal_bridge.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp

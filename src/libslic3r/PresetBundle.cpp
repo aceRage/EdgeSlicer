@@ -5614,6 +5614,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                     //get bed texture
                     model.bed_texture = it.value();
                 }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_DEFAULT_BED_TYPE)) {
+                    //get the default bed type
+                    if (it.value().is_string())
+                        model.default_bed_type = it.value().get<std::string>();
+                }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_HOTEND_MODEL)) {
                     model.hotend_model = it.value();
                 }

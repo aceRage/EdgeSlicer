@@ -566,6 +566,12 @@ public:
     // Orca: XYZ shrinkage compensation has introduced the const Vec3d &object_shrinkage_compensation parameter to the function below
     static SlicingParameters    slicing_parameters(const DynamicPrintConfig &full_config, const ModelObject &model_object, float object_max_z, const Vec3d &object_shrinkage_compensation);
 
+    // How many of this object's layers are the solid bottom of a spiral vase, for a region with these settings:
+    // bottom_shell_layers of them, and as many more as it takes for the bottom to be bottom_shell_thickness thick.
+    // Every place that tells the bottom of a vase from its spiral asks this: the slicing mode of a layer, its
+    // walls, the surfaces and shells that are detected, and the layers the G-code spirals.
+    size_t                      spiral_vase_bottom_layers(const PrintRegionConfig &region_config) const;
+
     size_t                      num_printing_regions() const throw() { return m_shared_regions->all_regions.size(); }
     const PrintRegion&          printing_region(size_t idx) const throw() { return *m_shared_regions->all_regions[idx].get(); }
     //FIXME returing all possible regions before slicing, thus some of the regions may not be slicing at the end.
