@@ -529,3 +529,76 @@ TEST_CASE("Small area flow compensation goes by the pattern of what is laid on t
     }
 }
 
+// ---- how a narrow area is laid ---------------------------------------------------------------------------------------
+
+// A square tube with a wall of 2.5 mm has room between its walls for two loops and no more. The point a loop was to
+// start nearest to, where the one before it ended, was set to the object's origin and never again (FillConcentric
+// sets it after every line): each loop started at its corner nearest the middle of the tube, whichever of the four
+// that came out as, and the nozzle crossed from one to the other.
+TEST_CASE("A loop of a narrow area starts beside where the loop before it ended", "[NarrowSolidInfill]")
+{
+    size_t areas_seen = 0, far = 0;
+    for (double degrees : {0., 10., 25., 45., 60., 80.}) {
+        TriangleMesh part = boxes({{-10., -10., 0., 10., -7.5, 2.},
+                                   {-10., 7.5, 0., 10., 10., 2.},
+                                   {-10., -10., 0., -7.5, 10., 2.},
+                                   {7.5, -10., 0., 10., 10., 2.}});
+        part.rotate_z(float(degrees * M_PI / 180.));
+        Print print;
+        Slic3r::Test::init_and_process_print({part}, print, narrow_config("rectilinear"));
+        const std::vector<SolidArea> areas = solid_areas(print);
+        REQUIRE(areas.size() >= 3);
+        for (const SolidArea& area : areas) {
+            INFO("turned " << degrees << " degrees, layer " << area.layer << ": " << area.paths.size() << " paths, " << area.length()
+                           << " mm");
+            REQUIRE(area.narrow);
+            // Two loops, each about 70 mm.
+            REQUIRE(area.paths.size() >= 2);
+            REQUIRE(area.length() > 120.);
+            // From one loop to the next is a line's width and the seam gap, not the way to another corner.
+            CHECK(area.travel() < 1.5);
+            ++areas_seen;
+            far += area.travel() < 1.5 ? 0 : 1;
+        }
+    }
+    INFO(far << " of " << areas_seen << " narrow areas are laid with a move of more than 1.5 mm between their loops");
+    CHECK(far == 0);
+}
+
+// A bar 3 mm wide has room between its walls for a loop and one line down its middle. With the seam gap at 0.5 mm
+// that line was laid 0.5 mm short at its far end: the gap is there to keep a loop's end off its own start, and was
+// taken off every path of a narrow area.
+TEST_CASE("A line of a narrow area that is no loop keeps its length", "[NarrowSolidInfill]")
+{
+    DynamicPrintConfig config = narrow_config("rectilinear");
+    config.set_deserialize_strict({{"seam_gap", "0.5"}});
+    Print print;
+    Slic3r::Test::init_and_process_print({make_cube(30., 3., 2.)}, print, config);
+    const std::vector<SolidArea> areas = solid_areas(print);
+    REQUIRE(areas.size() >= 3);
+    for (const SolidArea& area : areas) {
+        INFO("layer " << area.layer << ": " << area.paths.size() << " paths, " << area.length() << " mm");
+        REQUIRE(area.narrow);
+        REQUIRE(area.paths.size() == 2);
+        const BoundingBox box   = get_extents(print.objects().front()->get_layer(int(area.layer))->lslices);
+        size_t            loops = 0, lines = 0;
+        for (const ExtrusionPath* path : area.paths) {
+            const Point  first = path->first_point(), last = path->last_point();
+            const double apart = unscaled<double>((last - first).cast<double>().norm());
+            if (apart > 20.) {
+                // The line: as far from one end of the bar as from the other.
+                const double low  = unscaled<double>(std::min(first.x(), last.x()) - box.min.x());
+                const double high = unscaled<double>(box.max.x() - std::max(first.x(), last.x()));
+                INFO("the line's ends are " << low << " mm and " << high << " mm from the ends of the bar");
+                CHECK_THAT(low, WithinAbs(high, 0.05));
+                ++lines;
+            } else {
+                // The loop: it stops the seam gap short of where it began.
+                CHECK_THAT(apart, WithinAbs(0.5, 0.01));
+                ++loops;
+            }
+        }
+        CHECK(loops == 1);
+        CHECK(lines == 1);
+    }
+}

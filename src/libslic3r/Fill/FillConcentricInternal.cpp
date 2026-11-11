@@ -45,15 +45,18 @@ void FillConcentricInternal::fill_surface_extrusion(const Surface* surface, cons
                 all_extrusions.emplace_back(&wall);
         }
 
-        // Split paths using a nearest neighbor search.
-        size_t firts_poly_idx = thick_polylines_out.size();
+        // Split paths using a nearest neighbor search: each loop starts at its point nearest where the line before it
+        // ended, the first at its point nearest the origin (as FillConcentric does). A loop whose width is not the
+        // same at its two ends is not turned and starts where Arachne started it.
         Point  last_pos(0, 0);
         for (const Arachne::ExtrusionLine* extrusion : all_extrusions) {
             if (extrusion->empty())
                 continue;
 
             ThickPolyline thick_polyline = Arachne::to_thick_polyline(*extrusion);
-            if (extrusion->is_closed && thick_polyline.points.front() == thick_polyline.points.back() && thick_polyline.width.front() == thick_polyline.width.back()) {
+            // A loop comes back to its first point.
+            const bool    is_loop        = extrusion->is_closed && thick_polyline.points.front() == thick_polyline.points.back();
+            if (is_loop && thick_polyline.width.front() == thick_polyline.width.back()) {
                 thick_polyline.points.pop_back();
                 assert(thick_polyline.points.size() * 2 == thick_polyline.width.size());
                 int nearest_idx = last_pos.nearest_point_index(thick_polyline.points);
@@ -61,22 +64,16 @@ void FillConcentricInternal::fill_surface_extrusion(const Surface* surface, cons
                 std::rotate(thick_polyline.width.begin(), thick_polyline.width.begin() + 2 * nearest_idx, thick_polyline.width.end());
                 thick_polyline.points.emplace_back(thick_polyline.points.front());
             }
-            thick_polylines_out.emplace_back(std::move(thick_polyline));
-        }
+            last_pos = thick_polyline.points.back();
 
-        // clip the paths to prevent the extruder from getting exactly on the first point of the loop
-        // Keep valid paths only.
-        size_t j = firts_poly_idx;
-        for (size_t i = firts_poly_idx; i < thick_polylines_out.size(); ++i) {
-            thick_polylines_out[i].clip_end(this->loop_clipping);
-            if (thick_polylines_out[i].is_valid()) {
-                if (j < i)
-                    thick_polylines_out[j] = std::move(thick_polylines_out[i]);
-                ++j;
-            }
+            // Clip a loop to prevent the extruder from getting exactly on its first point. A line that is no loop has
+            // no first point to come back to and keeps its length.
+            if (is_loop)
+                thick_polyline.clip_end(this->loop_clipping);
+            // Keep valid paths only.
+            if (thick_polyline.is_valid())
+                thick_polylines_out.emplace_back(std::move(thick_polyline));
         }
-        if (j < thick_polylines_out.size())
-            thick_polylines_out.erase(thick_polylines_out.begin() + int(j), thick_polylines_out.end());
 
         reorder_by_shortest_traverse(thick_polylines_out);
     }
