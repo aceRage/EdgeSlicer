@@ -1367,6 +1367,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 config.set_key_value("wipe_avoid_pos_x", new ConfigOptionFloat(m_heating_tower_bbx.defined ?
                                                                                    bambu_wipe_avoid_pos_x(m_heating_tower_bbx, 3.) : 110.));
             }
+            // BBS (Bambu Studio GCode.cpp append_tcr): M620.10 R / M983.3 R, the incoming extruder's retraction.
+            config.set_key_value("new_extruder_retracted_length",
+                                 new ConfigOptionFloat(gcodegen.incoming_extruder_retracted_length(previous_extruder_id, unsigned(new_extruder_id))));
 
             // At least one chunk, or a flush under half a chunk is dropped from flush_length_1..4.
             int   flush_count = std::clamp((int) std::round(purge_volume / g_purge_volume_one_time), 1, g_max_flush_count);
@@ -3568,6 +3571,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_calib_config.clear();
     m_temp_retract_saved_retract = false;
     m_temp_retract_last_band     = -1;
+    m_parked_retracted.clear();
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
     // Keep inward wiping from masking retraction and pressure advance artifacts.
     switch (print.calib_mode()) {
@@ -13142,6 +13146,33 @@ std::string GCode::reset_adaptive_pa(double pa)
     return {};
 }
 
+// BBS: Bambu Studio GCodeWriter::get_extruder_retracted_length(new_filament), read by the H2C / H2D change_filament
+// templates as M620.10 R / M983.3 R (how far the incoming extruder's filament is retracted). On a
+// single-extruder-multi-material machine Bambu Studio keeps one retraction state per extruder (filament_map),
+// shared by the filaments on it; otherwise each filament has its own. Called once per tool change, after the
+// tool change retraction and before the tool changes.
+double GCode::incoming_extruder_retracted_length(int previous_filament, unsigned int new_filament)
+{
+    if (!m_config.single_extruder_multi_material.value) {
+        for (const Extruder &e : m_writer.extruders())
+            if (e.id() == new_filament)
+                return e.retracted();
+        return 0.;
+    }
+    const std::vector<int> &fmap = m_config.filament_map.values;
+    auto slot = [&fmap](int filament) -> size_t {
+        return filament >= 0 && size_t(filament) < fmap.size() && fmap[size_t(filament)] >= 1 ? size_t(fmap[size_t(filament)] - 1) : size_t(0);
+    };
+    if (previous_filament >= 0 && m_writer.extruder() != nullptr) {
+        const size_t s = slot(previous_filament);
+        if (m_parked_retracted.size() <= s)
+            m_parked_retracted.resize(s + 1, 0.);
+        m_parked_retracted[s] = m_writer.extruder()->retracted();
+    }
+    const size_t s = slot(int(new_filament));
+    return s < m_parked_retracted.size() ? m_parked_retracted[s] : 0.;
+}
+
 std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool by_object, bool defer_temp_wait)
 {
     if (!m_writer.need_toolchange(extruder_id))
@@ -13360,6 +13391,9 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // BBS (H2C rack): BambuStudio GCode.cpp:8170/8208/8247 - outgoing filament's value, 0 with none loaded.
     dyn_config.set_key_value("filament_retract_length_nc",
                              new ConfigOptionFloat(previous_extruder_id >= 0 ? outgoing_filament_retract_length_nc(m_config, previous_extruder_id) : 0.));
+    // BBS (Bambu Studio GCode.cpp set_extruder): the incoming extruder's retraction (M620.10 R / M983.3 R).
+    dyn_config.set_key_value("new_extruder_retracted_length",
+                             new ConfigOptionFloat(incoming_extruder_retracted_length(previous_extruder_id, extruder_id)));
     // BBS (Bambu Studio GCode.cpp set_extruder): no tower to wait beside or to keep clear of on this path (Bambu
     // Studio sets the same fixed values here).
     dyn_config.set_key_value("wipe_avoid_perimeter", new ConfigOptionBool(false));
