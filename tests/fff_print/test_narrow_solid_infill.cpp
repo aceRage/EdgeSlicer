@@ -332,6 +332,32 @@ TEST_CASE("Of short lines running out after a long one only the one beside it st
     CHECK(kept({{stroke(0, 0., 10.)}, {stroke(1, 0., 10.)}}) == std::vector<size_t>{1, 1});
 }
 
+// A short line more than five short lines deep in a run goes. A line reached by two ways is to be as deep as the
+// longer way makes it ("update data in such a way that will maximize the possibility of removing this node"), but the
+// greater count of short lines was written into the count of long lines passed and the count of short lines stayed the
+// first comer's. So how deep a line was depended on which of the two lines before it came first in its section.
+TEST_CASE("A short line reached two ways is as deep in its run as the longer way makes it", "[NarrowSolidInfill]")
+{
+    // A short line, then a long line and a short one side by side, both beside the first, and then four short lines
+    // and a long one, the first of the four beside both. By the short line the fourth is the sixth short line of the
+    // run; by the long line it is the fifth.
+    const Line  first     = stroke(0, 0., 3.9);
+    const Line  long_way  = stroke(1, 2., 9.);
+    const Line  short_way = stroke(1, 0., 1.8);
+    const Lines tail[] = {{stroke(2, 1.5, 2.5)}, {stroke(3, 1.5, 2.5)}, {stroke(4, 1.5, 2.5)}, {stroke(5, 1.5, 2.5)}, {stroke(6, 1., 8.)}};
+    // The four go, and the short line of the second section with them, as it has nothing after it then.
+    const std::vector<size_t> expected{1, 1, 0, 0, 0, 0, 1};
+
+    SECTION("the short way first")
+    {
+        CHECK(kept({{first}, {short_way, long_way}, tail[0], tail[1], tail[2], tail[3], tail[4]}) == expected);
+    }
+    SECTION("the long way first")
+    {
+        CHECK(kept({{first}, {long_way, short_way}, tail[0], tail[1], tail[2], tail[3], tail[4]}) == expected);
+    }
+}
+
 // ---- sliced parts ---------------------------------------------------------------------------------------------------
 
 // The lines across a round disc end against its wall in one line shorter than the rest. Where that line came out

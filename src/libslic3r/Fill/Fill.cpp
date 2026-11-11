@@ -651,8 +651,8 @@ std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_s
                     if (neighbour_line->state.initialized) {
                         // When the state of the node was previously filled, then we need to update data in such a way
                         // that will maximize the possibility of removing this node.
-                        neighbour_line->state.min_skips_taken = std::max(neighbour_line->state.min_skips_taken, neighbour_total_short_lines);
-                        neighbour_line->state.min_skips_taken = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
+                        neighbour_line->state.total_short_lines = std::max(neighbour_line->state.total_short_lines, neighbour_total_short_lines);
+                        neighbour_line->state.min_skips_taken   = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
 
                         // We will keep updating neighbor initial_touches_long_lines until it is equal to false.
                         if (neighbour_line->state.initial_touches_long_lines) {
