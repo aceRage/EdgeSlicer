@@ -7351,8 +7351,10 @@ LayerResult GCode::process_layer(const Print& print,
                       (layer.id() >= (size_t) print.config().skirt_height.value && !print.has_infinite_skirt());
         if (enable) {
             for (const LayerRegion* layer_region : layer.regions())
-                // The bottom of the vase is as many layers here as where it was sliced and filled.
-                if (layer.object()->spiral_vase_bottom_layers(layer_region->region().config()) > layer.id() ||
+                // The bottom of the vase is as many layers here as where it was sliced and filled; the count is of
+                // the object's own layers, and layer.id() starts at the raft's layer count.
+                if (layer.object()->spiral_vase_bottom_layers(layer_region->region().config()) >
+                        layer.id() - std::min(layer.id(), layer.object()->slicing_parameters().raft_layers()) ||
                     layer_region->perimeters.items_count() > 1u || layer_region->fills.items_count() > 0) {
                     enable = false;
                     break;
