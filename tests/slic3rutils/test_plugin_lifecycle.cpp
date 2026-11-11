@@ -656,12 +656,12 @@ TEST_CASE("Python module release removes package submodules and owned sys.path",
         CHECK(PyDict_GetItemString(modules, "reload_helper") != nullptr);
     }
 
-    Plugin loaded;
-    loaded.module           = module;
-    loaded.module_name      = "reload_package";
-    loaded.plugin_sys_paths = paths;
-    loaded.plugin_modules   = modules;
-    loaded.release_module();
+    Plugin first;
+    first.module           = module;
+    first.module_name      = "reload_package";
+    first.plugin_sys_paths = paths;
+    first.plugin_modules   = modules;
+    first.release_module();
 
     {
         PythonGILState gil;
@@ -698,10 +698,13 @@ TEST_CASE("Python module release removes package submodules and owned sys.path",
         }
     }
 
-    paths.clear();
-    modules.clear();
+    // A fresh Plugin and vectors for the second load: reusing the first Plugin after
+    // release_module() clear/reassign of plugin_modules trips ASan's contiguous-container
+    // check when remove_plugin_modules_locked hashes the vector.
+    std::vector<std::string> paths2;
+    std::vector<std::string> modules2;
     module = interpreter.load_module_from_directory(
-        package_root.parent_path().string(), "reload_package", error, &paths, &modules);
+        package_root.parent_path().string(), "reload_package", error, &paths2, &modules2);
     REQUIRE(module != nullptr);
     REQUIRE(error.empty());
 
@@ -713,11 +716,12 @@ TEST_CASE("Python module release removes package submodules and owned sys.path",
         CHECK(std::string(PyUnicode_AsUTF8(value.get())) == "new");
     }
 
-    loaded.module           = module;
-    loaded.module_name      = "reload_package";
-    loaded.plugin_sys_paths = paths;
-    loaded.plugin_modules   = modules;
-    loaded.release_module();
+    Plugin second;
+    second.module           = module;
+    second.module_name      = "reload_package";
+    second.plugin_sys_paths = std::move(paths2);
+    second.plugin_modules   = std::move(modules2);
+    second.release_module();
 }
 
 TEST_CASE("A capability disabled in the sidecar loads disabled", "[PluginLifecycle][Python]")

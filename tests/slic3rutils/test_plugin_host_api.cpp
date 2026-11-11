@@ -347,6 +347,66 @@ fresh_facets = fresh.objects()[0].volumes()[0].facets_count()
     CHECK(locals["fresh_facets"].cast<size_t>() == 12);
 }
 
+TEST_CASE("preset_bundle snapshot sees a second edit while already dirty", "[PluginHost][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    py::gil_scoped_acquire gil;
+
+    PresetBundle live;
+    live.printers.get_edited_preset().config.set("printer_model", "edit-one", true);
+    live.printers.get_edited_preset().set_dirty(true);
+    host_bindings::set_live_preset_bundle_for_testing(&live);
+    struct LiveBundleGuard
+    {
+        ~LiveBundleGuard() { host_bindings::set_live_preset_bundle_for_testing(nullptr); }
+    } live_guard;
+
+    py::module_ host = import_orca_module().attr("host");
+    auto        read_model = [&]() {
+        return host.attr("preset_bundle")()
+            .attr("current_printer_preset")()
+            .attr("config_value")("printer_model")
+            .cast<std::string>();
+    };
+    CHECK(read_model() == "edit-one");
+
+    live.printers.get_edited_preset().config.set("printer_model", "edit-two", true);
+    live.printers.get_edited_preset().set_dirty(true);
+    CHECK(read_model() == "edit-two");
+}
+
+TEST_CASE("preset_bundle snapshot sees an edit-then-save with no read in between", "[PluginHost][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    py::gil_scoped_acquire gil;
+
+    PresetBundle live;
+    live.printers.get_edited_preset().config.set("printer_model", "before-save", true);
+    live.printers.get_edited_preset().set_dirty(true);
+    host_bindings::set_live_preset_bundle_for_testing(&live);
+    struct LiveBundleGuard
+    {
+        ~LiveBundleGuard() { host_bindings::set_live_preset_bundle_for_testing(nullptr); }
+    } live_guard;
+
+    py::module_ host = import_orca_module().attr("host");
+    auto        read_model = [&]() {
+        return host.attr("preset_bundle")()
+            .attr("current_printer_preset")()
+            .attr("config_value")("printer_model")
+            .cast<std::string>();
+    };
+    CHECK(read_model() == "before-save");
+
+    live.printers.get_edited_preset().config.set("printer_model", "after-save", true);
+    live.printers.get_edited_preset().set_dirty(false);
+    CHECK(read_model() == "after-save");
+}
+
 TEST_CASE("Plugin host API exposes TriangleMesh geometry to Python", "[PluginHost][Python]")
 {
     ScopedPluginManager plugin_system;

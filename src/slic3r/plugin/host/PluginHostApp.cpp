@@ -16,7 +16,6 @@
 #include <slic3r/GUI/Plater.hpp>
 
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <wx/app.h>
@@ -164,47 +163,18 @@ std::unique_ptr<Model> snapshot_model()
     });
 }
 
-std::string preset_bundle_fingerprint(const PresetBundle& bundle)
-{
-    std::string fp;
-    fp += bundle.prints.get_selected_preset_name();
-    fp += '\0';
-    fp += bundle.printers.get_selected_preset_name();
-    fp += '\0';
-    for (const std::string& name : bundle.filament_presets) {
-        fp += name;
-        fp += '\0';
-    }
-    fp += bundle.prints.get_edited_preset().is_dirty ? 'D' : 'c';
-    fp += bundle.printers.get_edited_preset().is_dirty ? 'D' : 'c';
-    fp += bundle.filaments.get_edited_preset().is_dirty ? 'D' : 'c';
-    return fp;
-}
-
-struct PresetBundleCache
-{
-    std::mutex                    mutex;
-    std::shared_ptr<PresetBundle> bundle;
-    std::string                   fingerprint;
-};
-
-PresetBundleCache g_preset_bundle_cache;
-
 std::shared_ptr<PresetBundle> snapshot_preset_bundle()
 {
+    // Always copy. A fingerprint of selected names plus is_dirty misses a second edit while
+    // already dirty, an edit-then-save with no read in between, project_config, and
+    // preset add/rename/delete. Holding a full PresetBundle in a process-lifetime cache is
+    // also the wrong shape for a read snapshot.
     if (g_live_bundle_for_testing)
         return std::make_shared<PresetBundle>(*g_live_bundle_for_testing);
     if (wxTheApp == nullptr)
         throw std::runtime_error("OrcaSlicer application is not initialized");
     return plugin_host::run_on_ui_blocking([] {
-        PresetBundle* live = current_preset_bundle();
-        const std::string fp = preset_bundle_fingerprint(*live);
-        std::lock_guard<std::mutex> lock(g_preset_bundle_cache.mutex);
-        if (!g_preset_bundle_cache.bundle || g_preset_bundle_cache.fingerprint != fp) {
-            g_preset_bundle_cache.bundle      = std::make_shared<PresetBundle>(*live);
-            g_preset_bundle_cache.fingerprint = fp;
-        }
-        return g_preset_bundle_cache.bundle;
+        return std::make_shared<PresetBundle>(*current_preset_bundle());
     });
 }
 

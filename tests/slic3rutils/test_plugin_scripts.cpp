@@ -551,7 +551,7 @@ TEST_CASE("Unload abandons a sleeping script after the wait bound", "[PluginScri
     CHECK(wait_for_file(done, std::chrono::seconds(5)));
 }
 
-TEST_CASE("Event-loop socket permit does not unblock writes or subprocess", "[PluginScripts][Python]")
+TEST_CASE("Event-loop socket permit does not unblock writes, subprocess, connect or bind", "[PluginScripts][Python]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
@@ -562,10 +562,15 @@ TEST_CASE("Event-loop socket permit does not unblock writes or subprocess", "[Pl
     ScopedEventLoopSocketPermit   socket_permit;
     py::dict                      locals;
     py::exec(R"PY(
+import socket
 wrote = False
 spawned = False
+connected = False
+bound = False
 write_err = ''
 spawn_err = ''
+connect_err = ''
+bind_err = ''
 try:
     open('/tmp/edgeslicer-permit-should-not-write', 'w').write('x')
     wrote = True
@@ -577,11 +582,30 @@ try:
     spawned = True
 except Exception as e:
     spawn_err = type(e).__name__
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.1)
+    s.connect(('127.0.0.1', 1))
+    connected = True
+    s.close()
+except Exception as e:
+    connect_err = type(e).__name__
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    bound = True
+    s.close()
+except Exception as e:
+    bind_err = type(e).__name__
 )PY",
              py::globals(), locals);
 
     CHECK_FALSE(locals["wrote"].cast<bool>());
     CHECK_FALSE(locals["spawned"].cast<bool>());
+    CHECK_FALSE(locals["connected"].cast<bool>());
+    CHECK_FALSE(locals["bound"].cast<bool>());
     CHECK(locals["write_err"].cast<std::string>() == "PermissionError");
     CHECK(locals["spawn_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["connect_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["bind_err"].cast<std::string>() == "PermissionError");
 }
