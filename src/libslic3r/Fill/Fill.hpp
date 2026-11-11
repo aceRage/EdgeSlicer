@@ -29,6 +29,11 @@ double calculate_infill_rotation_angle(const PrintObject *object, size_t layer_i
 // Declared here for the unit tests.
 std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_sections);
 
+// The lines the filter left, joined across the sections into the polygons of the area that is filled with lines
+// (`scaled_spacing` is the distance between two sections). Each line is used for one polygon.
+// Declared here for the unit tests.
+Polygons trace_solid_infill_sections(const std::vector<Lines> &polygon_sections, coord_t scaled_spacing);
+
 // An interface class to Perl, aggregating an instance of a Fill and a FillData.
 class Filler
 {

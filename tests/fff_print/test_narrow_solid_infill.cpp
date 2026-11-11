@@ -13,6 +13,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -22,6 +23,8 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Fill/Fill.hpp"
@@ -355,6 +358,60 @@ TEST_CASE("A short line reached two ways is as deep in its run as the longer way
     SECTION("the long way first")
     {
         CHECK(kept({{first}, {long_way, short_way}, tail[0], tail[1], tail[2], tail[3], tail[4]}) == expected);
+    }
+}
+
+// ---- joining the lines that are left into polygons ------------------------------------------------------------------
+
+// The lines the filter left are joined across the sections into polygons. A polygon looks in the next section for the
+// first line beside it that no polygon has taken yet, and then went on with the first line beside it, taken or not
+// (item 3): where two polygons meet one line and a second line is free, the second polygon was drawn over the line
+// the first had, and the free line began a polygon of its own. Together they cover the same ground either way, so no
+// sliced part shows it; what shows it is that the polygons lie over one another.
+TEST_CASE("Lines joined into polygons are each used for one polygon", "[NarrowSolidInfill]")
+{
+    const coord_t spacing = scaled<coord_t>(0.45);
+    // What the polygons cover counted once, and counted polygon by polygon, in mm2.
+    auto covered = [](const Polygons& polygons) { return area(union_ex(polygons)) * SCALING_FACTOR * SCALING_FACTOR; };
+    auto summed  = [](const Polygons& polygons) {
+        double out = 0.;
+        for (const Polygon& polygon : polygons)
+            out += std::abs(polygon.area()) * SCALING_FACTOR * SCALING_FACTOR;
+        return out;
+    };
+
+    SECTION("two lines that go on as two lines")
+    {
+        // Nothing to choose: one polygon for each. As before.
+        const Polygons polygons = trace_solid_infill_sections({{stroke(0, 0., 10.), stroke(0, 12., 30.)},
+                                                               {stroke(1, 0., 10.), stroke(1, 12., 30.)}}, spacing);
+        CHECK(polygons.size() == 2);
+        CHECK_THAT(summed(polygons), WithinAbs(covered(polygons), 1e-3));
+    }
+    SECTION("the gap between two lines ends where another begins")
+    {
+        // Lines from 0 to 10 and from 12 to 30 mm, and in the next section from 0 to 20 and from 22 to 30 mm. The
+        // lower polygon takes the line from 0 to 20. That line is the first beside the upper polygon too, and the one
+        // from 22 to 30 is free: the upper polygon goes on with it.
+        const Polygons polygons = trace_solid_infill_sections({{stroke(0, 0., 10.), stroke(0, 12., 30.)},
+                                                               {stroke(1, 0., 20.), stroke(1, 22., 30.)}}, spacing);
+        INFO(polygons.size() << " polygons cover " << covered(polygons) << " mm2 and are " << summed(polygons) << " mm2 together");
+        // Two polygons, not three.
+        CHECK(polygons.size() == 2);
+        // And none of them over another: with the upper polygon drawn over the line from 0 to 20 as well they were
+        // 4.6 mm2 more together (half a spacing by that line's 20.45 mm) than what they cover.
+        CHECK_THAT(summed(polygons), WithinAbs(covered(polygons), 1e-3));
+        // What they cover is the lines, each half a spacing longer at both ends: a spacing wide in the first section
+        // and half a spacing in the last.
+        CHECK_THAT(covered(polygons), WithinAbs(0.45 * (10.45 + 18.45) + 0.225 * (20.45 + 8.45), 1e-3));
+    }
+    SECTION("and with a third line above")
+    {
+        const Polygons polygons = trace_solid_infill_sections({{stroke(0, 0., 10.), stroke(0, 12., 30.)},
+                                                               {stroke(1, 0., 20.), stroke(1, 22., 25.), stroke(1, 27., 30.)}}, spacing);
+        // The upper polygon goes on with the first free line and the last begins one of its own.
+        CHECK(polygons.size() == 3);
+        CHECK_THAT(summed(polygons), WithinAbs(covered(polygons), 1e-3));
     }
 }
 
