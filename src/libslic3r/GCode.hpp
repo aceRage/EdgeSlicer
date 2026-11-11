@@ -851,9 +851,9 @@ private:
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
     // BBS (new_extruder_retracted_length): the retraction each extruder was left with when the head last
-    // switched away from it, by logical extruder (filament_map - 1). Bambu Studio keeps one retraction state per
-    // extruder on single-extruder-multi-material machines; Edge's Extruder keeps one shared scalar, so the
-    // parked values are tracked here for the change_filament template only.
+    // switched away from it, by logical extruder (filament_map - 1), as Bambu Studio's per-extruder retraction
+    // state on its (single-extruder-multi-material) H2C / H2D profiles. Tracked here for the change_filament
+    // template only; the writer's own retract / unretract bookkeeping is unchanged.
     std::vector<double> m_parked_retracted;
     double incoming_extruder_retracted_length(int previous_filament, unsigned int new_filament);
     // Ultra (H2C 3MF schema): the order filaments were entered, and the logical nozzle each

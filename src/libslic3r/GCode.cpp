@@ -13152,18 +13152,14 @@ std::string GCode::reset_adaptive_pa(double pa)
 }
 
 // BBS: Bambu Studio GCodeWriter::get_extruder_retracted_length(new_filament), read by the H2C / H2D change_filament
-// templates as M620.10 R / M983.3 R (how far the incoming extruder's filament is retracted). On a
-// single-extruder-multi-material machine Bambu Studio keeps one retraction state per extruder (filament_map),
-// shared by the filaments on it; otherwise each filament has its own. Called once per tool change, after the
-// tool change retraction and before the tool changes.
+// templates as M620.10 R / M983.3 R (how far the incoming extruder's filament is retracted). Bambu Studio's
+// H2C / H2D / H2D Pro profiles are single-extruder-multi-material, so it keeps one retraction state per extruder
+// (filament_map), shared by the filaments on it. Edge's profiles for them are not (single_extruder_multi_material
+// 0 from fdm_machine_common), so the per-extruder state is kept here whatever that option says: the retraction
+// the outgoing filament is left with (after the tool change retraction) becomes its extruder's, and the incoming
+// extruder's is returned (0 before its first use). Called once per tool change, before the tool changes.
 double GCode::incoming_extruder_retracted_length(int previous_filament, unsigned int new_filament)
 {
-    if (!m_config.single_extruder_multi_material.value) {
-        for (const Extruder &e : m_writer.extruders())
-            if (e.id() == new_filament)
-                return e.retracted();
-        return 0.;
-    }
     const std::vector<int> &fmap = m_config.filament_map.values;
     auto slot = [&fmap](int filament) -> size_t {
         return filament >= 0 && size_t(filament) < fmap.size() && fmap[size_t(filament)] >= 1 ? size_t(fmap[size_t(filament)] - 1) : size_t(0);
