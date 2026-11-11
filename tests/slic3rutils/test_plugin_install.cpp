@@ -211,6 +211,19 @@ TEST_CASE("PEP 723 / Requires-Dist entries that look like uv installer options a
             CHECK(refused(inj).find("archive") != std::string::npos);
         }
     }
+
+    SECTION("archive suffix on the parsed PEP 508 name, not the whole token")
+    {
+        for (const char* inj : {
+                 "evil.whl; python_version>'3'",
+                 "evil.whl ; python_version > \"3\"",
+                 "numpy-1.26.0-py3-none-any.whl; python_version>='3.8'",
+                 "pkg.tar.gz; os_name=='posix'",
+             }) {
+            INFO(inj);
+            CHECK(refused(inj).find("archive") != std::string::npos);
+        }
+    }
 }
 
 TEST_CASE("uv pip install argv puts -- before the package list", "[PluginInstall]")
