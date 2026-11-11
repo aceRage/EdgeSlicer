@@ -4241,11 +4241,14 @@ void PrintObject::bridge_over_infill()
                                     next_new_surfaces.emplace_back(tmp, ep);
                                 }
                                 
-                                // Calculate leftover polygons = s->expolygon - bridging_union
-                                ExPolygons leftover = diff_ex(s->expolygon, bridging_union, ApplySafetyOffset::Yes);
-                                // Shrink + expand to remove trivial polygons
-                                leftover = offset_ex(shrink_ex(leftover, offset_distance), offset_distance);
-                                
+                                // Calculate leftover polygons = s->expolygon - the second bridge made above.
+                                // Everything of the surface that is not second bridge stays what it was. The leftover
+                                // used to be s->expolygon - bridging_union put through the same shrink + expand as the
+                                // bridge: that sieve is for bridges too small to matter, and on the leftover it dropped
+                                // whatever was narrower than two lines from the layer, with nothing printed in its
+                                // place. So did taking bridging_union off, for the overlap the sieve had refused.
+                                ExPolygons leftover = diff_ex(s->expolygon, overlap, ApplySafetyOffset::Yes);
+
                                 // Leftover polygons exist. Add them to the new surface maintaining their original attributes
                                 if (!leftover.empty()) {
                                     ExPolygons unified_leftover = union_safety_offset_ex(leftover);
