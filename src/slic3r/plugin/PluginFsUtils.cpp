@@ -1060,7 +1060,7 @@ void seed_install_metadata(PluginInstallState& state, const PluginDescriptor& en
         return;
 
     apply_install_metadata(state, entry);
-    state.enabled = true;
+    state.enabled = false;
 }
 
 bool write_install_state(const boost::filesystem::path& plugin_dir, const PluginInstallState& state)
@@ -1121,9 +1121,10 @@ bool write_install_state(const boost::filesystem::path& plugin_dir, const Plugin
 bool write_install_state(const boost::filesystem::path& plugin_dir, const PluginDescriptor& entry)
 {
     // Install-time writer: the package is not loaded, so its capabilities are not known yet and the
-    // sidecar is (re)initialized to "auto-load, nothing disabled". This intentionally resets
-    // permissions on a fresh install/reinstall. PluginManager writes the real per-capability flags
-    // while preserving permissions once the package is loaded, via the overload above.
+    // sidecar is (re)initialized to "not auto-loaded, nothing disabled". The user must Enable it
+    // from Home. This intentionally resets permissions on a fresh install/reinstall. PluginManager
+    // writes the real per-capability flags while preserving permissions once the package is loaded,
+    // via the overload above.
     PluginInstallState state;
     seed_install_metadata(state, entry);
     return write_install_state(plugin_dir, state);

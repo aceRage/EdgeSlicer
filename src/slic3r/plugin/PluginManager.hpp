@@ -238,6 +238,10 @@ public:
 
     void set_capability_enabled(const PluginCapabilityId& id, bool enabled);
 
+    // Writes enabled=false on the sidecar (seeding a missing file). Used after install so an
+    // unloaded package shows Enable, not Disable, and by Home when the user turns a package off.
+    void mark_plugin_install_state_disabled(const std::string& plugin_key);
+
     // Sets the cloud user whose _subscribed/{user_id} directory is scanned and installed into.
     void set_cloud_user(const std::string& user_id);
 
@@ -341,7 +345,6 @@ private:
 
     // Writes the sidecar for a loaded plugin (enabled=true plus the current per-capability flags).
     void write_loaded_plugin_install_state(const std::string& plugin_key);
-    void mark_plugin_install_state_disabled(const std::string& plugin_key);
     // Revoke permissions after a package replacement so the new package must request them again.
     void revoke_plugin_permissions(const std::string& plugin_key);
 

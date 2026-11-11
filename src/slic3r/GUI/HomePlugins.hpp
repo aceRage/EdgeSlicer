@@ -2,10 +2,13 @@
 #define slic3r_GUI_HomePlugins_hpp_
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "slic3r/Utils/HomePluginsLogic.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +34,7 @@ public:
 
 private:
     bool listed(const std::string& key) const;
+    bool listed_capability(const std::string& key, const std::string& name, const std::string& type) const;
     void notice(const std::string& text, bool error = false);
     void install();
     void toggle(const std::string& key, bool enable);
@@ -50,6 +54,7 @@ private:
     wxWindow*                                  m_parent;
     SendFn                                     m_send;
     std::vector<std::string>                   m_keys;
+    std::map<std::string, std::vector<HomeTab::PluginCapabilityView>> m_listed_caps;
     std::unordered_map<std::string, RunState>  m_run;
     std::shared_ptr<bool>                      m_alive { std::make_shared<bool>(true) };
 };

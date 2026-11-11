@@ -16,7 +16,6 @@
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 
-#include <mutex>
 #include <utility>
 
 #include <wx/filedlg.h>
@@ -92,8 +91,11 @@ HomePlugins::HomePlugins(wxWindow* parent, SendFn send)
 {
     auto refresh = [this, alive = m_alive](const std::string&) {
         wxGetApp().CallAfter([this, alive]() {
-            if (*alive)
-                send_state();
+            if (!*alive)
+                return;
+            if (wxTheApp == nullptr || wxGetApp().is_closing())
+                return;
+            send_state();
         });
     };
     PluginManager& mgr = PluginManager::instance();
@@ -107,6 +109,14 @@ HomePlugins::~HomePlugins() { *m_alive = false; }
 
 bool HomePlugins::listed(const std::string& key) const { return HomeTab::is_listed_plugin_key(key, m_keys); }
 
+bool HomePlugins::listed_capability(const std::string& key, const std::string& name, const std::string& type) const
+{
+    auto it = m_listed_caps.find(key);
+    if (it == m_listed_caps.end())
+        return false;
+    return HomeTab::is_listed_capability(name, type, it->second);
+}
+
 void HomePlugins::notice(const std::string& text, bool error)
 {
     m_send({ { "type", "plugin_notice" }, { "text", text }, { "error", error } });
@@ -118,6 +128,7 @@ void HomePlugins::send_state()
 {
     PluginManager& mgr = PluginManager::instance();
     m_keys.clear();
+    m_listed_caps.clear();
     std::vector<HomeTab::PluginView> items;
     if (mgr.is_discovery_in_progress()) {
         m_send(HomeTab::plugins_message({}, true, mgr.get_discovery_error()));
@@ -127,13 +138,14 @@ void HomePlugins::send_state()
         if (d.plugin_key.empty() || !HomeTab::is_listed_plugin_key(d.plugin_key, { d.plugin_key }))
             continue;
         m_keys.push_back(d.plugin_key);
-        HomeTab::PluginView v = view_of(mgr, d);
+        HomeTab::PluginView view = view_of(mgr, d);
+        m_listed_caps[d.plugin_key] = view.capabilities;
         auto it = m_run.find(d.plugin_key);
         if (it != m_run.end()) {
-            v.run_state   = it->second.state;
-            v.run_message = it->second.message;
+            view.run_state   = it->second.state;
+            view.run_message = it->second.message;
         }
-        items.push_back(std::move(v));
+        items.push_back(std::move(view));
     }
     m_send(HomeTab::plugins_message(items, false, mgr.get_discovery_error()));
 }
@@ -156,7 +168,7 @@ bool HomePlugins::handle(const json& msg)
         if (listed(key))
             toggle(key, msg.value("enabled", false));
     } else if (command == "plugin_capability_toggle") {
-        if (listed(key))
+        if (listed(key) && listed_capability(key, name, type))
             capability_toggle(key, name, type, msg.value("enabled", false));
     } else if (command == "plugin_reload") {
         if (listed(key))
@@ -218,17 +230,7 @@ void HomePlugins::toggle(const std::string& key, bool enable)
         send_state();
         return;
     }
-    PluginDescriptor d;
-    if (!mgr.try_get_plugin_descriptor(key, d) || d.plugin_root.empty())
-        return;
-    {
-        std::lock_guard<std::mutex> lock(install_state_mutex());
-        PluginInstallState          state;
-        if (read_install_state(fs::path(d.plugin_root), state)) {
-            state.enabled = false;
-            write_install_state(fs::path(d.plugin_root), state);
-        }
-    }
+    mgr.mark_plugin_install_state_disabled(key);
     mgr.rescan_plugins();
     send_state();
 }
@@ -276,14 +278,16 @@ void HomePlugins::reveal(const std::string& key)
     PluginDescriptor d;
     if (!PluginManager::instance().try_get_plugin_descriptor(key, d))
         return;
-    const fs::path root = resolve_plugin_root_from_descriptor(d);
-    if (root.empty()) {
-        notice(_u8L("The plugin folder could not be found."), true);
+    fs::path    resolved;
+    std::string error;
+    if (!resolve_allowed_plugin_root(d, get_plugin_directories({}),
+                                     _u8L("The plugin folder is outside the allowed plugin directories."),
+                                     resolved, error)) {
+        notice(error.empty() ? _u8L("The plugin folder could not be found.") : error, true);
         return;
     }
-    fs::path p = root;
-    p.make_preferred();
-    desktop_open_any_folderEx(p.string());
+    resolved.make_preferred();
+    desktop_open_any_folderEx(resolved.string());
 }
 
 void HomePlugins::run(const std::string& key)

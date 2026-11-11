@@ -325,14 +325,9 @@ else()
     # OpenSSL 3.x `./config --prefix=${DESTDIR}` on linux-x86_64 installs the
     # static archives under lib64. CPython's --with-openssl looks in PREFIX/lib
     # and the link test still "succeeds" via the distro libssl.so, producing
-    # _ssl_failed/*.so at module-link time. Put the real archive dir on LDFLAGS
-    # so -lssl binds the bundled static OpenSSL (and still works when the
-    # archives live in lib/).
-    if(EXISTS "${DESTDIR}/lib64/libssl.a")
-        set(_python_openssl_libdir "${DESTDIR}/lib64")
-    else()
-        set(_python_openssl_libdir "${DESTDIR}/lib")
-    endif()
+    # _ssl_failed/*.so at module-link time. Always put both lib64 and lib on
+    # LDFLAGS: this file is parsed at deps-configure time, before OpenSSL is
+    # installed, so an EXISTS check here would miss lib64.
     # The rpath points at libpython's real install dir, so the interpreter runs
     # in-tree pre-relocation -- and, critically, it reserves enough RUNPATH
     # bytes for the in-place $ORIGIN rewrite at install time (Flatpak's
@@ -346,7 +341,7 @@ else()
         --disable-test-modules
         # Tcl/Tk 9.0 is incompatible with CPython 3.12's _tkinter; not needed here.
         py_cv_module__tkinter=n/a
-        "LDFLAGS=-Wl,-rpath,${_python_prefix}/lib -L${_python_openssl_libdir}"
+        "LDFLAGS=-Wl,-rpath,${_python_prefix}/lib -L${DESTDIR}/lib64 -L${DESTDIR}/lib"
     )
     set(_build_cmd make -j${NPROC})
     set(_install_cmd make install

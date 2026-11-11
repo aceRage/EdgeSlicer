@@ -150,7 +150,7 @@ modules:
           -DCMAKE_PREFIX_PATH=/app \
           -DDESTDIR=/app \
           -DFLATPAK=ON \
-          -DEDGE_PYTHON_PLUGINS=ON \
+          -DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS:-OFF}" \
           -DCMAKE_INSTALL_PREFIX=/app \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5
         cmake --build . -j"${FLATPAK_BUILDER_N_JOBS}"
@@ -360,7 +360,7 @@ modules:
           -DSLIC3R_DESKTOP_INTEGRATION=OFF \
           -DCMAKE_BUILD_TYPE=Release \
           -DFLATPAK=ON \
-          -DEDGE_PYTHON_PLUGINS=ON \
+          -DEDGE_PYTHON_PLUGINS="${EDGE_PYTHON_PLUGINS:-OFF}" \
           -DBBL_RELEASE_TO_PUBLIC=1 \
           -DCMAKE_PREFIX_PATH=/app \
           -DCMAKE_INSTALL_PREFIX=/app \

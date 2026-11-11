@@ -59,6 +59,10 @@ nlohmann::json plugins_message(const std::vector<PluginView>& items, bool loadin
 // refused even if they appear in `listed`: the page names opaque plugin_keys, not files.
 bool is_listed_plugin_key(const std::string& key, const std::vector<std::string>& listed);
 
+// True when `(name, type)` is a capability the host last listed. Empty names are refused.
+bool is_listed_capability(const std::string& name, const std::string& type,
+                          const std::vector<PluginCapabilityView>& listed);
+
 // True when `card` still carries a filesystem path key (a defect if a host message has it).
 bool plugin_card_leaks_path(const nlohmann::json& card);
 

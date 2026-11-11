@@ -87,6 +87,18 @@ bool is_listed_plugin_key(const std::string& key, const std::vector<std::string>
     return is_listed(key, listed);
 }
 
+bool is_listed_capability(const std::string& name, const std::string& type,
+                          const std::vector<PluginCapabilityView>& listed)
+{
+    if (name.empty())
+        return false;
+    for (const PluginCapabilityView& cap : listed) {
+        if (cap.name == name && cap.type == type)
+            return true;
+    }
+    return false;
+}
+
 bool plugin_card_leaks_path(const json& card)
 {
     if (!card.is_object())

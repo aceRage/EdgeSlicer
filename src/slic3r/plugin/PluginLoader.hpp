@@ -28,8 +28,16 @@ bool load(const PluginDescriptor&                          descriptor,
 // reference is deliberately leaked rather than DECREF'd).
 void unload(Plugin& plugin);
 
+// True when `requirement` is a PEP 508 name / extras / version-specifiers / markers requirement.
+// Empty entries, leading dashes (uv/pip installer options), URLs, and other non-requirement forms
+// are refused so PEP 723 / Requires-Dist strings cannot be appended to uv's argv as options.
+bool is_pep508_requirement(const std::string& requirement);
+
+// Validates every entry; a refused dependency writes a clear error and returns false.
+bool validate_pep508_requirements(const std::vector<std::string>& pkgs, std::string& error);
+
 // Install Python dependencies into the shared packages directory via the bundled uv. Blocks, with
-// a 120 s cap.
+// a 120 s cap. Each entry must be a valid PEP 508 requirement.
 bool install_packages(const std::vector<std::string>& pkgs, std::string& error);
 
 // Read a local .py/.whl package's metadata without installing it, and report whether a package is

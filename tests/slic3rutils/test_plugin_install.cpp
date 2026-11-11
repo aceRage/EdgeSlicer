@@ -130,6 +130,94 @@ class DeclaringPackage(orca.base):
 
 } // namespace
 
+TEST_CASE("PEP 723 / Requires-Dist entries that look like uv installer options are refused", "[PluginInstall]")
+{
+    using plugin_loader::is_pep508_requirement;
+    using plugin_loader::validate_pep508_requirements;
+    using plugin_loader::install_packages;
+
+    const auto refused = [](const std::string& req) {
+        CHECK_FALSE(is_pep508_requirement(req));
+        std::string error;
+        REQUIRE_FALSE(validate_pep508_requirements({req}, error));
+        REQUIRE_FALSE(error.empty());
+        std::string install_error;
+        REQUIRE_FALSE(install_packages({req}, install_error));
+        CHECK(install_error == error);
+        return error;
+    };
+
+    SECTION("empty entries")
+    {
+        CHECK(refused("").find("empty") != std::string::npos);
+        CHECK(refused("   ").find("empty") != std::string::npos);
+        CHECK(refused("\t").find("empty") != std::string::npos);
+    }
+
+    SECTION("leading-dash installer options")
+    {
+        for (const char* inj : {
+                 "--index-url=https://evil.example/simple",
+                 "--index-url",
+                 "-r",
+                 "-r/tmp/requirements.txt",
+                 "--target",
+                 "--target=/tmp/evil",
+                 "--python",
+                 "--find-links=https://evil.example",
+                 "-c",
+                 "--no-deps",
+             }) {
+            INFO(inj);
+            CHECK(refused(inj).find("installer options") != std::string::npos);
+        }
+    }
+
+    SECTION("non-requirement forms")
+    {
+        for (const char* inj : {
+                 "numpy --index-url=https://evil.example/simple",
+                 "foo @ https://evil.example/foo.whl",
+                 "pip @ file:///etc/passwd",
+                 "http://evil.example/foo.whl",
+                 "numpy>=1.0; extra == 'x'\n--index-url=https://evil.example",
+             }) {
+            INFO(inj);
+            CHECK_FALSE(is_pep508_requirement(inj));
+            std::string error;
+            REQUIRE_FALSE(validate_pep508_requirements({inj}, error));
+            CHECK(error.find("PEP 508") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("valid PEP 508 requirements are accepted for uv install", "[PluginInstall]")
+{
+    using plugin_loader::is_pep508_requirement;
+    using plugin_loader::validate_pep508_requirements;
+
+    for (const char* req : {
+             "numpy",
+             "Pillow",
+             "package-name",
+             "numpy>=1.20,<2",
+             "requests[security]>=2.8.1",
+             "requests[security,socks]>=2.8.1,<3",
+             "pillow ; python_version >= \"3.8\"",
+             "foo>=1.0; extra == 'bar' and os_name == \"posix\"",
+             "bar (==1.2.3)",
+             "  Baz.Quux[extra]~=1.0  ",
+         }) {
+        INFO(req);
+        CHECK(is_pep508_requirement(req));
+    }
+
+    std::string error;
+    REQUIRE(validate_pep508_requirements(
+        {"numpy>=1.20,<2", "requests[security]>=2.8.1", "pillow ; python_version >= \"3.8\""}, error));
+    CHECK(error.empty());
+}
+
 TEST_CASE("install_plugin rejects a cloud UUID containing path traversal", "[PluginInstall]")
 {
     ScopedDataDir data_dir_guard("cor2");
@@ -189,6 +277,9 @@ TEST_CASE("install_plugin accepts a side-loaded .py with complete PEP 723 metada
     // Positive control: a complete side-loaded .py must still install (guards against over-rejection).
     REQUIRE(installed);
     CHECK(error.empty());
+    PluginInstallState state;
+    REQUIRE(read_install_state(fs::path(descriptor.plugin_root), state));
+    CHECK_FALSE(state.enabled);
 }
 
 TEST_CASE("a .py plugin's PEP 723 dependencies split only at the commas between items", "[PluginInstall][PluginFsUtils]")
@@ -811,4 +902,27 @@ TEST_CASE("extract_zip_to_directory rejects an entry that escapes the destinatio
     CHECK_FALSE(extract_zip_to_directory(wheel, dir.path() / "out", error));
     CHECK_THAT(error, Catch::Matchers::Contains("escapes the plugin package"));
     CHECK_FALSE(fs::exists(dir.path() / "escape.txt"));
+}
+
+TEST_CASE("resolve_allowed_plugin_root refuses a folder outside the allowed dirs", "[PluginInstall][PluginFsUtils]")
+{
+    ScopedDataDir data_dir_guard("reveal-scope");
+    const std::vector<std::string> allowed = get_plugin_directories({});
+
+    PluginDescriptor inside;
+    inside.plugin_root = (fs::path(get_orca_plugins_dir()) / "inside").string();
+    fs::create_directories(inside.plugin_root);
+    fs::path    resolved;
+    std::string error;
+    REQUIRE(resolve_allowed_plugin_root(inside, allowed, "outside the allowed plugin directories", resolved, error));
+    CHECK(error.empty());
+
+    PluginDescriptor outside;
+    outside.plugin_root = (data_dir_guard.dir / "not-plugins").string();
+    fs::create_directories(outside.plugin_root);
+    fs::path    resolved_out;
+    std::string err_out;
+    REQUIRE_FALSE(resolve_allowed_plugin_root(outside, allowed, "outside the allowed plugin directories",
+                                              resolved_out, err_out));
+    CHECK_THAT(err_out, Catch::Matchers::Contains("outside the allowed plugin directories"));
 }

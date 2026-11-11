@@ -48,7 +48,7 @@ struct PluginInstallState {
 
     PluginPermissions permissions;
 
-    bool enabled = true;
+    bool enabled = false;
     std::vector<std::pair<std::string, bool>> capabilities; // name -> enabled, ordered
 };
 

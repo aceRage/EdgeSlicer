@@ -178,3 +178,15 @@ TEST_CASE("home plugins: plugin_run only accepts a plugin_key the host listed", 
     CHECK_FALSE(is_listed_plugin_key("{data_dir}/plugins/hello", listed));
     CHECK_FALSE(is_listed_plugin_key("C:\\Users\\me\\plugins\\hello", listed));
 }
+
+TEST_CASE("home plugins: capability toggle only names a listed (name, type) triple", "[HomePlugins]")
+{
+    const std::vector<PluginCapabilityView> listed{ { "hello", "script", true }, { "pipe", "slicing-pipeline", false } };
+    CHECK(is_listed_capability("hello", "script", listed));
+    CHECK(is_listed_capability("pipe", "slicing-pipeline", listed));
+    CHECK_FALSE(is_listed_capability("hello", "slicing-pipeline", listed));
+    CHECK_FALSE(is_listed_capability("hello", "", listed));
+    CHECK_FALSE(is_listed_capability("", "script", listed));
+    CHECK_FALSE(is_listed_capability("missing", "script", listed));
+    CHECK_FALSE(is_listed_capability("hello", "script", {}));
+}
