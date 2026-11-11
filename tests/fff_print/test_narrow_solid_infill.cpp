@@ -594,7 +594,7 @@ TEST_CASE("Small area flow compensation goes by the pattern of what is laid on t
 // that came out as, and the nozzle crossed from one to the other.
 TEST_CASE("A loop of a narrow area starts beside where the loop before it ended", "[NarrowSolidInfill]")
 {
-    size_t areas_seen = 0, far = 0;
+    size_t areas_seen = 0, far_apart = 0;
     for (double degrees : {0., 10., 25., 45., 60., 80.}) {
         TriangleMesh part = boxes({{-10., -10., 0., 10., -7.5, 2.},
                                    {-10., 7.5, 0., 10., 10., 2.},
@@ -615,11 +615,11 @@ TEST_CASE("A loop of a narrow area starts beside where the loop before it ended"
             // From one loop to the next is a line's width and the seam gap, not the way to another corner.
             CHECK(area.travel() < 1.5);
             ++areas_seen;
-            far += area.travel() < 1.5 ? 0 : 1;
+            far_apart += area.travel() < 1.5 ? 0 : 1;
         }
     }
-    INFO(far << " of " << areas_seen << " narrow areas are laid with a move of more than 1.5 mm between their loops");
-    CHECK(far == 0);
+    INFO(far_apart << " of " << areas_seen << " narrow areas are laid with a move of more than 1.5 mm between their loops");
+    CHECK(far_apart == 0);
 }
 
 // A bar 3 mm wide has room between its walls for a loop and one line down its middle. With the seam gap at 0.5 mm
