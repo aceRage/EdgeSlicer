@@ -1231,8 +1231,15 @@ void GLCanvas3D::Labels::render(const std::vector<const ModelInstance*>& sorted_
         float x = 0.0f;
         float y = 0.0f;
         if (camera.get_type() == Camera::EType::Perspective) {
-            x = (0.5f + 0.001f * 0.5f * (float)screen_box_center(0)) * viewport[2];
-            y = (0.5f - 0.001f * 0.5f * (float)screen_box_center(1)) * viewport[3];
+            // world_to_screen is an affine transform and leaves out the division by w, which in perspective is
+            // how far in front of the eye the point is. 0.001 stood in for it: right for a point 1000 in front
+            // of the eye, where the camera's target is by default, and for no other, so a label slid off its
+            // object the nearer or further the object was than the target.
+            const double w = -owner.eye_center_z;
+            if (w <= 0.0)
+                continue; // behind the eye
+            x = (0.5f + 0.5f * (float)(screen_box_center(0) / w)) * viewport[2];
+            y = (0.5f - 0.5f * (float)(screen_box_center(1) / w)) * viewport[3];
         } else {
             x = (0.5f + 0.5f * (float)screen_box_center(0)) * viewport[2];
             y = (0.5f - 0.5f * (float)screen_box_center(1)) * viewport[3];
@@ -10909,7 +10916,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         default:
         case BuildVolume_Type::Convex:
         case BuildVolume_Type::Custom: {
-            m_volumes.set_print_volume({ static_cast<int>(type),
+            // -1: neither a rectangle (0) nor a circle (1), so the shader tests nothing against it. `type` was
+            // passed here, which in this function is the render pass (opaque 0, transparent 1, all 2), not the
+            // build volume's type: on a bed of another shape the transparent pass tested against a circle of
+            // radius FLT_MAX about (-FLT_MAX, -FLT_MAX) and darkened every volume that is partly off the bed.
+            m_volumes.set_print_volume({ -1,
                 { -FLT_MAX, -FLT_MAX, FLT_MAX, FLT_MAX },
                 { -FLT_MAX, FLT_MAX } }
             );

@@ -47,8 +47,11 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_width_tower.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
+	test_polyholes.cpp
+	test_precise_z_height.cpp
 	test_printobject.cpp
 	test_spiral_vase_bottom.cpp
+	test_second_internal_bridge.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
@@ -60,6 +63,7 @@ add_executable(${_TEST_NAME}_tests
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
+	test_extra_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
