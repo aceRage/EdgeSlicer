@@ -10,6 +10,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <cmath>
 #include <map>
 #include <memory>
 #include <regex>
@@ -159,10 +160,11 @@ std::vector<Point2> m620_14(const std::vector<std::string> &lines)
     return out;
 }
 
-// The X of each "G1 X<x> F30000" right after the template's move to Y320 ({if wipe_avoid_perimeter}).
+// The X of each "G1 X<x> [F30000]" right after the template's move to Y320 ({if wipe_avoid_perimeter}); the
+// writer drops an F equal to the one before it.
 std::vector<double> avoid_xs(const std::vector<std::string> &lines, const std::string &y320)
 {
-    static const std::regex re(R"(^G1 X([-\d.]+) F30000$)");
+    static const std::regex re(R"(^G1 X([-\d.]+)( F30000)?$)");
     std::vector<double>     out;
     for (size_t i = 0; i + 1 < lines.size(); ++i) {
         std::smatch m;
@@ -241,8 +243,10 @@ TEST_CASE("H2C: M620.14 waits 2 mm beside the prime tower, at print start and on
             const Point2 &p = all[i];
             INFO("M620.14 X" << p.x << " Y" << p.y << " tower X" << tower.min.x() << ".." << tower.max.x() << " Y" << tower.min.y() << ".."
                              << tower.max.y());
-            const bool left_of  = p.x >= tower.min.x() - 3. && p.x <= tower.min.x() + 0.5;
-            const bool right_of = p.x >= tower.max.x() - 0.5 && p.x <= tower.max.x() + 3.;
+            // 2 mm out from the tower wall where the change starts; the first-layer box also holds the brim, so
+            // the point may sit over the brim's footprint.
+            const bool left_of  = std::abs(p.x - tower.min.x()) <= 3.;
+            const bool right_of = std::abs(p.x - tower.max.x()) <= 3.;
             CHECK((left_of || right_of));
             CHECK(p.y >= tower.min.y() - 0.5);
             CHECK(p.y <= tower.max.y() + 0.5);
