@@ -6366,6 +6366,18 @@ void PrintObject::compute_adaptive_merge_groups()
     const double min_nozzle = adaptive_band_reference_nozzle(print_config, plate_wall_filament_ids(*this->print()));
     if (min_nozzle <= EPSILON)
         return;
+    // A mixed region that is not a Ratio row (Subdivide, gradient, cadence kept on its virtual id) is never banded: its
+    // Local-Z passes split one layer, not a merged band. nozzle_diameter_for_filament() now resolves a mixed filament to
+    // its components' nozzle, so pin these regions to the band reference (a ladder of one), as they printed before.
+    {
+        const MixedFilamentManager &mgr          = this->print()->mixed_filament_manager();
+        const size_t                num_physical = print_config.filament_colour.size();
+        for (size_t region_id = 0; region_id < region_count; ++region_id) {
+            const unsigned int wall = (unsigned int) this->printing_region(region_id).config().wall_filament.value;
+            if (mgr.is_mixed(wall, num_physical) && adaptive_merge_region_filament(*this->print(), wall) == wall)
+                region_nozzles[region_id] = min_nozzle;
+        }
+    }
 
     // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
     // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that

@@ -8,10 +8,12 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedSublayer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/miniz_extension.hpp"
@@ -913,4 +915,79 @@ TEST_CASE("Mixed sublayer: Bambu export writes a three-colour row as the planner
         CHECK_THAT(written[i], WithinAbs(comps[i].ratio, 1e-4));
     // No component is written twice.
     CHECK(e.slots.components[3].find("1,2,1") == std::string::npos);
+}
+
+// ---- A mixed filament's nozzle (owner hand test on #937) -------------------------------------------------
+
+namespace {
+
+// An H3C-like single extruder with a rack 0.4 / 0.8 / 0.8 / 0.4, four filaments, filament 2 pinned to slot 2 and
+// filament 3 to slot 3 (both 0.8), and the mixed filament 2 + 3 at 30 % as filament 5.
+DynamicPrintConfig rack_mixed_config(const std::vector<int> &slot_pins)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(4);
+    const std::vector<std::string> colours { "#FF0000", "#00FF00", "#0000FF", "#FFFF00" };
+    config.option<ConfigOptionStrings>("filament_colour", true)->values                = colours;
+    config.option<ConfigOptionFloats>("nozzle_diameter", true)->values                  = { 0.4 };
+    config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.8,0.8,0.4" };
+    config.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values          = slot_pins;
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(2, 3, 30, colours);
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: a mixed filament prints through its components' nozzle", "[MixedSublayer][Nozzle]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    SECTION("components pinned to the 0.8 slots")
+    {
+        const DynamicPrintConfig config = rack_mixed_config({ 0, 2, 3, 0 });
+        REQUIRE_THAT(nozzle_diameter_for_filament(config, 2), WithinAbs(0.8, 1e-9));
+        CHECK(nozzle_filament_of(config, 5) == 2);
+        CHECK_THAT(nozzle_diameter_for_filament(config, 5), WithinAbs(0.8, 1e-9));
+        CHECK(filament_rack_slot(config, 5) == filament_rack_slot(config, 2));
+        CHECK(nozzle_filament_tool_id(config, 5) == nozzle_filament_tool_id(config, 2));
+        CHECK(nozzle_for_filament(config, 5) == nozzle_for_filament(config, 2));
+        // Physical filaments are untouched.
+        for (unsigned int f = 1; f <= 4; ++f)
+            CHECK(nozzle_filament_of(config, f) == f);
+    }
+    SECTION("components on the 0.4 slots")
+    {
+        const DynamicPrintConfig config = rack_mixed_config({ 0, 1, 4, 0 });
+        CHECK_THAT(nozzle_diameter_for_filament(config, 5), WithinAbs(0.4, 1e-9));
+    }
+    SECTION("components on different diameters: the finest")
+    {
+        const DynamicPrintConfig config = rack_mixed_config({ 0, 2, 4, 0 });
+        CHECK(nozzle_filament_of(config, 5) == 3);
+        CHECK_THAT(nozzle_diameter_for_filament(config, 5), WithinAbs(0.4, 1e-9));
+    }
+    SECTION("no mixed filament: an id past the physical ones is returned as given")
+    {
+        DynamicPrintConfig config = rack_mixed_config({ 0, 2, 3, 0 });
+        config.set_key_value("mixed_filament_definitions", new ConfigOptionString(""));
+        CHECK(nozzle_filament_of(config, 5) == 5);
+    }
+}
+
+TEST_CASE("Mixed sublayer: per-nozzle filament arrays get an entry per mixed filament", "[MixedSublayer][Nozzle]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    DynamicPrintConfig config = rack_mixed_config({ 0, 2, 3, 0 });
+    config.option<ConfigOptionFloatsOrPercents>("nozzle_inner_wall_line_width", true)->values = {
+        FloatOrPercent{ 0.45, false }, FloatOrPercent{ 0.82, false }, FloatOrPercent{ 0.83, false }, FloatOrPercent{ 0.46, false } };
+    config.option<ConfigOptionStrings>("nozzle_region_values", true)->values = { "a", "b", "c", "d" };
+    REQUIRE(extend_nozzle_filament_values_to_mixed(config));
+    const auto &widths = config.option<ConfigOptionFloatsOrPercents>("nozzle_inner_wall_line_width")->values;
+    REQUIRE(widths.size() == 5);
+    CHECK_THAT(widths[4].value, WithinAbs(0.82, 1e-9)); // filament 2's: the 0.8 slot's process
+    CHECK(config.option<ConfigOptionStrings>("nozzle_region_values")->values == std::vector<std::string>{ "a", "b", "c", "d", "b" });
+    // A second call leaves the extended arrays alone.
+    CHECK_FALSE(extend_nozzle_filament_values_to_mixed(config));
+    CHECK(config.option<ConfigOptionFloatsOrPercents>("nozzle_inner_wall_line_width")->values.size() == 5);
 }

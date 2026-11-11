@@ -13,6 +13,7 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedSublayer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -873,4 +874,92 @@ TEST_CASE("Mixed sublayer: Ratio layers on a prime tower print the tower at its 
         }
     INFO("tower extrusions off the tower layers, first Z values: " << off_layer_z.str());
     CHECK(off_layer == 0);
+}
+
+// ---- A mixed filament's nozzle in validation and flows (owner hand test on #937) -------------------------
+
+namespace {
+
+// The owner's H3C plate in small: one extruder with a rack 0.4 / 0.8 / 0.8 / 0.4, filament 2 and 3 pinned to the
+// given slots, the mixed filament 2 + 3 at 30 % (filament 5), and a cube assigned to it with a 0.82 mm inner wall.
+const PrintObject *apply_rack_mixed_cube(Print &print, Model &model, const std::vector<int> &slot_pins, bool ratio)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(4);
+    const std::vector<std::string> colours { "#FF0000", "#00FF00", "#0000FF", "#FFFF00" };
+    config.option<ConfigOptionStrings>("filament_colour", true)->values                = colours;
+    config.option<ConfigOptionFloats>("nozzle_diameter", true)->values                  = { 0.4 };
+    config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.8,0.8,0.4" };
+    config.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values          = slot_pins;
+    config.set_deserialize_strict({
+        { "enable_prime_tower", "0" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "inner_wall_line_width", "0.82" },
+        { "enable_mixed_color_sublayer", ratio ? "1" : "0" },
+    });
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(2, 3, 30, colours);
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    ModelObject *object = model.add_object();
+    object->name        = "mixed_cube";
+    object->add_volume(TriangleMesh(its_make_cube(10., 10., 3.)));
+    object->volumes.front()->config.set("extruder", 5);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.apply(model, config);
+    REQUIRE(!print.objects().empty());
+    return print.objects().front();
+}
+
+// The nozzle the region of filament 5 sizes its walls with.
+double mixed_region_wall_nozzle(const PrintObject &object)
+{
+    for (const PrintRegion &region : object.all_regions())
+        if (region.config().wall_filament.value == 5)
+            return region.flow(object, frPerimeter, 0.2, false).nozzle_diameter();
+    return 0.;
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: a mixed filament's line widths are checked against its components' nozzle", "[MixedSublayer][Nozzle][Slice]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    SECTION("components on the 0.8 slots: a 0.82 mm inner wall is fine")
+    {
+        Print              print;
+        Model              model;
+        const PrintObject *object = apply_rack_mixed_cube(print, model, { 0, 2, 3, 0 }, false);
+        const StringObjectException err = print.validate();
+        INFO(err.string);
+        CHECK(err.string.find("Line width") == std::string::npos);
+        CHECK(err.string.find("too wide") == std::string::npos);
+        CHECK_THAT(mixed_region_wall_nozzle(*object), WithinAbs(0.8, 1e-6));
+    }
+    SECTION("components on the 0.4 slots: the width error names the real nozzle and jumps to the components' tool")
+    {
+        Print print;
+        Model model;
+        apply_rack_mixed_cube(print, model, { 0, 1, 4, 0 }, false);
+        const StringObjectException err = print.validate();
+        INFO(err.string << " | " << err.opt_key);
+        REQUIRE(!err.string.empty());
+        CHECK((err.string.find("0.4") != std::string::npos));
+        CHECK(err.opt_key.rfind("inner_wall_line_width", 0) == 0);
+        if (const size_t at = err.opt_key.find('@'); at != std::string::npos)
+            CHECK(err.opt_key.substr(at + 1) == nozzle_filament_tool_id(print.config(), 2));
+    }
+    SECTION("components on different diameters, Ratio: refused by the same-diameter rule, no crash")
+    {
+        Print print;
+        Model model;
+        apply_rack_mixed_cube(print, model, { 0, 2, 4, 0 }, true);
+        const StringObjectException err = print.validate();
+        INFO(err.string);
+        // The cube is assigned whole, so the Ratio row may not be "used" by paint; either the D8 error or the width
+        // check against the finest component's nozzle refuses the plate.
+        CHECK(!err.string.empty());
+    }
 }
