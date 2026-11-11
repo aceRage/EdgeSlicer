@@ -2774,8 +2774,11 @@ Sidebar::Sidebar(Plater *parent)
             bed_type_value = 1;
         }
 
-        int bed_type_idx = bed_type_value - 1;
-        m_bed_type_list->Select(bed_type_idx);
+        // By key, not by value - 1: the list is not in the order of the BedType enum (Supertack Plate, 7, is its
+        // sixth row and Graphic Effect Plate, 6, is not in it), so value - 1 showed Supertack for Graphic Effect
+        // and nothing for Supertack. A plate this list does not have is left unselected;
+        // update_all_preset_comboboxes() fills the list for the printer and selects again.
+        on_bed_type_change(BedType(bed_type_value));
 
         // 布局Bed type控件
         bed_type_sizer->Add(bed_type_title, 0, wxLEFT | wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(10));
@@ -4501,6 +4504,15 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         return 0;
     };
 
+    // A plate the list above does not have cannot be shown: get_selection_index() selects the first row for it
+    // while the project keeps the plate, and the slice then uses a plate the sidebar does not show. The U1 maps
+    // such a plate to one of its own below (its default, Textured PEI, or Cool Plate for Cool Steel); for every
+    // other printer it becomes the printer's default plate (PlateBedTypes::listed_bed_type).
+    auto listed_bed_type = [&](BedType bt) -> BedType {
+        return PlateBedTypes::listed_bed_type(bt, m_bed_type_combo_enum_values,
+                                              preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle));
+    };
+
     if (is_bbl_vendor || support_multi_bed_types || is_snapmaker_u1) {
         m_bed_type_list->Enable();
         // Orca: don't update bed type if loading project
@@ -4536,6 +4548,10 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     wxGetApp().app_config->set("curr_bed_type", std::to_string(int(bed_type_to_use)));
                     wxGetApp().app_config->set_printer_setting(printer_name, "curr_bed_type", std::to_string(int(bed_type_to_use)));
                 }
+            } else if (const BedType listed = listed_bed_type(bed_type_to_use); listed != bed_type_to_use) {
+                bed_type_to_use = listed;
+                wxGetApp().app_config->set("curr_bed_type", std::to_string(int(bed_type_to_use)));
+                wxGetApp().app_config->set_printer_setting(printer_name, "curr_bed_type", std::to_string(int(bed_type_to_use)));
             }
 
             wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type_to_use));
@@ -4550,11 +4566,15 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     m_bed_type_list->SetSelection(get_selection_index());
                 } else
                     m_bed_type_list->SetSelection(get_selection_index());
-            } else
+            } else {
+                const BedType curr = wxGetApp().preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
+                if (const BedType listed = listed_bed_type(curr); listed != curr)
+                    wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(listed));
                 m_bed_type_list->SetSelection(get_selection_index());
+            }
         }
     } else {
-        BedType default_bed_type = preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle);
+        BedType default_bed_type = listed_bed_type(preset_bundle.printers.get_edited_preset().get_default_bed_type(&preset_bundle));
         wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(default_bed_type));
         m_bed_type_list->SetSelection(get_selection_index());
         m_bed_type_list->Disable();
@@ -18720,8 +18740,15 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
             if (marker == PresetComboBox::LABEL_ITEM_PRINTER_MODELS) {
                 auto preset = wxGetApp().preset_bundle->get_similar_printer_preset(preset_name, {});
                 if (preset == nullptr) {
-                    MessageDialog dlg(this->sidebar, _L(""), _L(""));
+                    // No system preset of this model (get_similar_printer_preset looks at system presets alone
+                    // here). This showed a dialog with no text and then used the null pointer; say what is
+                    // wrong, put the combo back on the printer that is selected and leave everything as it is.
+                    BOOST_LOG_TRIVIAL(error) << "on_select_preset: no system printer preset for the model " << preset_name;
+                    MessageDialog dlg(this->sidebar, _L("The printer preset was not found, please reselect."),
+                                      wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Warning"), wxOK | wxICON_WARNING);
                     dlg.ShowModal();
+                    combo->update();
+                    return;
                 }
                 preset->is_visible = true; // force visible
                 preset_name = preset->name;

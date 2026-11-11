@@ -36,6 +36,7 @@
 #include <libslic3r/miniz_extension.hpp>
 #include <libslic3r/Utils.hpp>
 #include "CreatePresetsDialog.hpp"
+#include <algorithm>
 #include <mutex>
 #include <vector>
 #include <tbb/parallel_for.h>
@@ -1215,36 +1216,50 @@ int GuideFrame::LoadProfileData()
         if (m_destroy)
             return 0;
 
+        // The vendors are read by name, not in the order the folder lists them: that order is the file
+        // system's (by name on NTFS, not on APFS or ext4), and it is the order of m_ProfileJson["model"],
+        // which is the order of the printer table until a column is sorted.
+        const auto entries_by_name = [](const boost::filesystem::path &dir) {
+            std::vector<boost::filesystem::directory_entry> entries;
+            for (boost::filesystem::directory_iterator iter(dir), end; iter != end; ++iter)
+                entries.emplace_back(*iter);
+            std::sort(entries.begin(), entries.end(), [](const boost::filesystem::directory_entry &a, const boost::filesystem::directory_entry &b) {
+                const std::string name_a = a.path().filename().string(), name_b = b.path().filename().string();
+                if (boost::ilexicographical_compare(name_a, name_b) != boost::ilexicographical_compare(name_b, name_a))
+                    return boost::ilexicographical_compare(name_a, name_b);
+                return name_a < name_b;
+            });
+            return entries;
+        };
+
         //load custom bundle from user data path
-        boost::filesystem::directory_iterator endIter;
-        for (boost::filesystem::directory_iterator iter(vendor_dir); iter != endIter; iter++) {
-            if (!boost::filesystem::is_directory(*iter)) {
-                wxString strVendor = from_u8(iter->path().string()).BeforeLast('.');
+        for (const boost::filesystem::directory_entry &entry : entries_by_name(vendor_dir)) {
+            if (!boost::filesystem::is_directory(entry)) {
+                wxString strVendor = from_u8(entry.path().string()).BeforeLast('.');
                 strVendor          = strVendor.AfterLast('\\');
                 strVendor          = strVendor.AfterLast('/');
 
-                wxString strExtension = from_u8(iter->path().string()).AfterLast('.').Lower();
+                wxString strExtension = from_u8(entry.path().string()).AfterLast('.').Lower();
                 if(strExtension.CmpNoCase("json") != 0 || loaded_vendors.find(w2s(strVendor)) != loaded_vendors.end())
                     continue;
 
-                LoadProfileFamily(w2s(strVendor), iter->path().string());
+                LoadProfileFamily(w2s(strVendor), entry.path().string());
                 loaded_vendors.insert(w2s(strVendor));
             }
             if (m_destroy)
                 return 0;
         }
 
-        boost::filesystem::directory_iterator others_endIter;
-        for (boost::filesystem::directory_iterator iter(rsrc_vendor_dir); iter != others_endIter; iter++) {
-            if (!boost::filesystem::is_directory(*iter)) {
-                wxString strVendor = from_u8(iter->path().string()).BeforeLast('.');
+        for (const boost::filesystem::directory_entry &entry : entries_by_name(rsrc_vendor_dir)) {
+            if (!boost::filesystem::is_directory(entry)) {
+                wxString strVendor = from_u8(entry.path().string()).BeforeLast('.');
                 strVendor          = strVendor.AfterLast('\\');
                 strVendor          = strVendor.AfterLast('/');
-                wxString strExtension = from_u8(iter->path().string()).AfterLast('.').Lower();
+                wxString strExtension = from_u8(entry.path().string()).AfterLast('.').Lower();
                 if (strExtension.CmpNoCase("json") != 0 || loaded_vendors.find(w2s(strVendor)) != loaded_vendors.end())
                     continue;
 
-                LoadProfileFamily(w2s(strVendor), iter->path().string());
+                LoadProfileFamily(w2s(strVendor), entry.path().string());
                 loaded_vendors.insert(w2s(strVendor));
             }
             if (m_destroy)
