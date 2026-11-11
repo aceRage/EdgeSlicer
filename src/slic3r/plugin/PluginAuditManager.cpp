@@ -2196,6 +2196,9 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
             const std::string target = tree_grant_bucket
                                            ? PluginAuditDetail::absolute_tree_grant(requested_target)
                                            : requested_target;
+            // Every filesystem target: exact files ({data_dir}/Plugins/lib.dylib) as well as
+            // /* trees, including case variants. Dropped before prompting so they are neither
+            // shown nor saved.
             if (tree_grant_bucket &&
                 PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(target))) {
                 BOOST_LOG_TRIVIAL(warning) << "[AUDIT] dropping a declared grant covering UltraNet "

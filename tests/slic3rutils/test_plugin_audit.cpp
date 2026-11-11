@@ -2543,7 +2543,12 @@ TEST_CASE("A Plugins tree grant is refused by PluginManager and request_permissi
     if (!harness.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
-    harness.approve = [](const Prompt&) { return true; };
+
+    bool prompted = false;
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted](const std::string&) {
+        prompted = true;
+        return true;
+    });
 
     const std::string tree = (fs::path(data_dir()) / "Plugins" / "*").string();
 
@@ -2555,7 +2560,46 @@ TEST_CASE("A Plugins tree grant is refused by PluginManager and request_permissi
     PluginPermissions requested;
     requested.fs_readwrite = {tree};
     CHECK(PluginAuditManager::instance().request_permissions(PLUGIN, requested));
+    CHECK_FALSE(prompted);
     CHECK(harness.saved_permissions(PLUGIN).fs_readwrite.empty());
+    PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
+}
+
+TEST_CASE("An exact UltraNet file grant is neither prompted nor saved", "[audit]")
+{
+    AuditHarness harness;
+    if (!harness.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    harness.add_plugin(PLUGIN);
+
+    bool prompted = false;
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted](const std::string&) {
+        prompted = true;
+        return true;
+    });
+
+    const std::string exact = (fs::path(data_dir()) / "Plugins" / "lib.dylib").string();
+    const std::string upper = (fs::path(data_dir()) / "PLUGINS" / "lib.dylib").string();
+    const std::string mixed = (fs::path(data_dir()) / "pLuGiNs" / "libbambu_networking.dylib").string();
+
+    PluginPermissionMutation mutation;
+    mutation.add.push_back({PluginPermissionCategory::FsReadWrite, exact});
+    CHECK_FALSE(PluginManager::instance().mutate_plugin_permissions(PLUGIN, mutation));
+    CHECK(harness.saved_permissions(PLUGIN).fs_readwrite.empty());
+
+    mutation.add.clear();
+    mutation.add.push_back({PluginPermissionCategory::FsRead, upper});
+    CHECK_FALSE(PluginManager::instance().mutate_plugin_permissions(PLUGIN, mutation));
+    CHECK(harness.saved_permissions(PLUGIN).fs_read.empty());
+
+    PluginPermissions requested;
+    requested.fs_readwrite = {exact, mixed};
+    requested.fs_read      = {upper};
+    CHECK(PluginAuditManager::instance().request_permissions(PLUGIN, requested));
+    CHECK_FALSE(prompted);
+    CHECK(harness.saved_permissions(PLUGIN).fs_readwrite.empty());
+    CHECK(harness.saved_permissions(PLUGIN).fs_read.empty());
+    PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
 }
 
 TEST_CASE("Case-variant UltraNet open and write stay denied from Python", "[audit][Python]")
