@@ -741,7 +741,7 @@ bool adjust_layer_series_to_align_object_height(const SlicingParameters &slicing
         last_5_layers_heght.emplace_back(layer_series[layer_size - 10 + 2 * i + 1] - layer_series[layer_size - 10 + 2 * i]);
     }
 
-    coordf_t gap = abs(layer_series.back() - object_height);
+    coordf_t gap = std::abs(layer_series.back() - object_height);
     std::vector<bool> can_adjust(5, true); // to record whether every layer can adjust layer height
     bool taller_than_object = layer_series.back() < object_height;
 
@@ -757,6 +757,11 @@ bool adjust_layer_series_to_align_object_height(const SlicingParameters &slicing
         coordf_t delta_gap = gap / get_valid_size();
         coordf_t remain_gap = 0;
         for (size_t i = 0; i < last_5_layers_heght.size(); ++i) {
+            // A layer already at the limit takes no part in a later round. Without this it fell through to the
+            // last branch below and was given a share all the same, which put it past the limit and the series
+            // past the object's height, by that share for each such layer.
+            if (!can_adjust[i])
+                continue;
             coordf_t& l_height = last_5_layers_heght[i];
             if (taller_than_object) {
                 if (can_adjust[i] && is_approx(l_height, slicing_params.max_layer_height)) {

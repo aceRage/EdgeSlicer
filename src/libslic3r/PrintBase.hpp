@@ -136,7 +136,10 @@ public:
         SlicingModifierOverriddenByPaint,
         // H2C (two-extruder rack): the plate's nozzle grouping uses two or more nozzle diameters on one extruder's rack,
         // which the firmware refuses to swap mid-print. Raised during export_gcode; appended, own id.
-        SlicingRackMixedDiameter
+        SlicingRackMixedDiameter,
+        // precise_z_height could not bring an object's last layer to the object's height (fewer than six
+        // layers, or the last five at the layer height limits). Appended; own id.
+        SlicingPreciseZNotApplied
     };
 
     typedef size_t TimeStamp;
