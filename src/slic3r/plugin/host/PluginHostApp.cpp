@@ -1,4 +1,5 @@
 #include "PluginHostBindings.hpp"
+#include "PluginHostUiMarshal.hpp"
 
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
@@ -14,6 +15,7 @@
 #include <slic3r/GUI/OpenGLManager.hpp>
 #include <slic3r/GUI/Plater.hpp>
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <wx/app.h>
@@ -24,6 +26,9 @@ namespace py = pybind11;
 
 namespace Slic3r {
 namespace {
+
+Model*        g_live_model_for_testing  = nullptr;
+PresetBundle* g_live_bundle_for_testing = nullptr;
 
 GUI::Plater* current_plater()
 {
@@ -49,17 +54,25 @@ PresetBundle* current_preset_bundle()
     return preset_bundle;
 }
 
-GUI::GUI_App& current_app()
+struct AppInfoSnapshot
 {
-    if (wxTheApp == nullptr)
-        throw std::runtime_error("OrcaSlicer application is not initialized");
-    return GUI::wxGetApp();
-}
+    std::string version;
+    std::string mode;
+    std::string language;
+    bool        stealth_mode = false;
+};
 
-void require_main_thread(const char* function_name)
+AppInfoSnapshot snapshot_app_info()
 {
-    if (!wxIsMainThread())
-        throw std::runtime_error(std::string(function_name) + "() must be called from the UI thread");
+    return plugin_host::run_on_ui_blocking([] {
+        GUI::GUI_App&   app = GUI::wxGetApp();
+        AppInfoSnapshot out;
+        out.version  = Snapmaker_VERSION;
+        out.mode     = app.is_editor() ? "editor" : "gcode viewer";
+        out.language = GUI::into_u8(app.current_language_code_safe());
+        out.stealth_mode = app.app_config != nullptr && app.app_config->get_stealth_mode();
+        return out;
+    });
 }
 
 py::object gl_info()
@@ -86,17 +99,18 @@ py::object gl_info()
 
 py::dict app_info()
 {
-    GUI::GUI_App& app = current_app();
-    require_main_thread("app_info");
-    py::dict out;
-    out["version"]  = Snapmaker_VERSION;
+    if (wxTheApp == nullptr)
+        throw std::runtime_error("OrcaSlicer application is not initialized");
+    const AppInfoSnapshot snap = snapshot_app_info();
+    py::dict              out;
+    out["version"]  = snap.version;
     out["build"]    = std::string();
-    out["mode"]     = app.is_editor() ? "editor" : "gcode viewer";
-    out["language"] = GUI::into_u8(app.current_language_code_safe());
+    out["mode"]     = snap.mode;
+    out["language"] = snap.language;
     // App-config version is not exposed on Edge's GUI_App; leave empty rather than adding a
     // getter that would change the EDGE_PYTHON_PLUGINS=OFF binary.
     out["app_config_version"] = std::string();
-    out["stealth_mode"]       = app.app_config != nullptr && app.app_config->get_stealth_mode();
+    out["stealth_mode"]       = snap.stealth_mode;
     // Orca Cloud / Bambu account and the Bambu network plug-in are not part of this Edge build.
     out["is_signed_in"]           = false;
     out["is_bambu_signed_in"]     = false;
@@ -108,11 +122,36 @@ py::dict app_info()
 
 py::object selected_printer()
 {
-    current_app();
-    require_main_thread("selected_printer");
+    if (wxTheApp == nullptr)
+        throw std::runtime_error("OrcaSlicer application is not initialized");
+    plugin_host::run_on_ui_blocking([] {
+        (void) GUI::wxGetApp();
+    });
     // Device identity (name, serial, address, access code) is withheld. A richer printer-connection
     // surface is Phase 10; this accessor exists so scripts can tell whether a machine is selected.
     return py::none();
+}
+
+std::unique_ptr<Model> snapshot_model()
+{
+    if (g_live_model_for_testing)
+        return std::make_unique<Model>(*g_live_model_for_testing);
+    if (wxTheApp == nullptr)
+        throw std::runtime_error("OrcaSlicer application is not initialized");
+    return plugin_host::run_on_ui_blocking([] {
+        return std::make_unique<Model>(current_plater()->model());
+    });
+}
+
+std::unique_ptr<PresetBundle> snapshot_preset_bundle()
+{
+    if (g_live_bundle_for_testing)
+        return std::make_unique<PresetBundle>(*g_live_bundle_for_testing);
+    if (wxTheApp == nullptr)
+        throw std::runtime_error("OrcaSlicer application is not initialized");
+    return plugin_host::run_on_ui_blocking([] {
+        return std::make_unique<PresetBundle>(*current_preset_bundle());
+    });
 }
 
 void export_3mf_copy(GUI::Plater&, const std::string&)
@@ -122,25 +161,35 @@ void export_3mf_copy(GUI::Plater&, const std::string&)
 
 } // namespace
 
+void host_bindings::set_live_model_for_testing(Model* model) { g_live_model_for_testing = model; }
+
+void host_bindings::set_live_preset_bundle_for_testing(PresetBundle* bundle)
+{
+    g_live_bundle_for_testing = bundle;
+}
+
 void host_bindings::register_app(py::module_& host)
 {
     py::class_<GUI::Plater, std::unique_ptr<GUI::Plater, py::nodelete>>(host, "Plater")
-        .def("model", static_cast<Model& (GUI::Plater::*)()>(&GUI::Plater::model), py::return_value_policy::reference_internal)
+        .def("model", [](GUI::Plater& plater) {
+            return plugin_host::run_on_ui_blocking([&] {
+                return std::make_unique<Model>(plater.model());
+            });
+        })
         .def("is_project_dirty", &GUI::Plater::is_project_dirty)
         .def("is_presets_dirty", &GUI::Plater::is_presets_dirty)
         .def("inside_snapshot_capture", &GUI::Plater::inside_snapshot_capture)
         .def("project_path", [](GUI::Plater& plater) {
-            require_main_thread("project_path");
-            return GUI::into_u8(plater.get_project_filename(".3mf"));
+            return plugin_host::run_on_ui_blocking([&] {
+                return GUI::into_u8(plater.get_project_filename(".3mf"));
+            });
         })
         .def("export_3mf_copy", &export_3mf_copy, py::arg("path"),
              "Not available in this Edge build (needs the 3D view thumbnail path).");
 
     host.def("plater", &current_plater, py::return_value_policy::reference);
-    host.def("model", []() -> Model& {
-        return current_plater()->model();
-    }, py::return_value_policy::reference);
-    host.def("preset_bundle", &current_preset_bundle, py::return_value_policy::reference);
+    host.def("model", &snapshot_model);
+    host.def("preset_bundle", &snapshot_preset_bundle);
     host.def("app_info", &app_info,
              "The running app: version, build, mode, language, stealth_mode, orca_api_version. "
              "Cloud sign-in and network-plugin fields are empty on Edge.");

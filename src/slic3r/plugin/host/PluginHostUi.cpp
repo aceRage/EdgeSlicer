@@ -1,4 +1,5 @@
 #include "PluginHostUi.hpp"
+#include "PluginHostUiMarshal.hpp"
 
 #include "slic3r/plugin/OrcaApiVersion.hpp"
 #include "slic3r/plugin/PluginAuditManager.hpp"
@@ -203,56 +204,8 @@ private:
     int                                                                      m_next_id{1};
 };
 
-bool app_closing() { return wxTheApp == nullptr || GUI::wxGetApp().is_closing(); }
-
-enum : int { UiCallPending, UiCallClaimed, UiCallAbandoned };
-
-template<typename Fn>
-auto run_on_ui_blocking(Fn&& fn) -> std::invoke_result_t<Fn&>
-{
-    using R = std::invoke_result_t<Fn&>;
-    if (wxTheApp == nullptr)
-        throw std::runtime_error("OrcaSlicer application is not initialized");
-
-    if (wxIsMainThread()) {
-        py::gil_scoped_release nogil;
-        return fn();
-    }
-
-    if (app_closing())
-        throw std::runtime_error("OrcaSlicer is closing");
-
-    struct Call
-    {
-        std::promise<R>  prom;
-        std::atomic<int> state{UiCallPending};
-    };
-    auto           call = std::make_shared<Call>();
-    std::future<R> fut  = call->prom.get_future();
-
-    py::gil_scoped_release nogil;
-    GUI::wxGetApp().CallAfter([call, &fn]() {
-        int expected = UiCallPending;
-        if (!call->state.compare_exchange_strong(expected, UiCallClaimed))
-            return;
-        try {
-            if constexpr (std::is_void_v<R>) {
-                fn();
-                call->prom.set_value();
-            } else {
-                call->prom.set_value(fn());
-            }
-        } catch (...) {
-            call->prom.set_exception(std::current_exception());
-        }
-    });
-    while (fut.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
-        int expected = UiCallPending;
-        if (app_closing() && call->state.compare_exchange_strong(expected, UiCallAbandoned))
-            throw std::runtime_error("OrcaSlicer is closing");
-    }
-    return fut.get();
-}
+using plugin_host::app_closing;
+using plugin_host::run_on_ui_blocking;
 
 wxWindow* ui_parent()
 {

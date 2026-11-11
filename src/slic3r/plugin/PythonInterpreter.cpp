@@ -701,6 +701,24 @@ bool PythonInterpreter::initialize()
 
         PluginAuditManager::instance().install_hook();
 
+        // Capture the selector loop class before any plugin can patch asyncio.new_event_loop or
+        // the event-loop policy. Script runs construct loops from this class.
+        try {
+            pybind11::object loop_cls;
+            try {
+                loop_cls = pybind11::module_::import("asyncio.unix_events").attr("_UnixSelectorEventLoop");
+            } catch (pybind11::error_already_set& err) {
+                err.restore();
+                PyErr_Clear();
+                loop_cls = pybind11::module_::import("asyncio").attr("SelectorEventLoop");
+            }
+            m_event_loop_class = loop_cls.release().ptr();
+        } catch (pybind11::error_already_set& err) {
+            err.restore();
+            PyErr_Clear();
+            BOOST_LOG_TRIVIAL(warning) << "Failed to capture asyncio event loop class at interpreter init";
+        }
+
         // Persist Python stderr (plugin tracebacks, including uncaught
         // background-thread exceptions) to <data_dir>/log/python_*.log.
         install_python_stderr_redirect();
@@ -767,6 +785,7 @@ void PythonInterpreter::shutdown()
     log_and_restore_python_stdio();
 
     BOOST_LOG_TRIVIAL(info) << "Finalizing Python interpreter";
+    Py_CLEAR(m_event_loop_class);
     m_interpreter.reset();
     BOOST_LOG_TRIVIAL(info) << "Python interpreter finalized";
 
@@ -782,6 +801,7 @@ void PythonInterpreter::abandon()
     // New leases fail from here on. Releasing the scoped_interpreter without destroying it skips
     // Py_Finalize, here and in the static destructor; the process exit ends the interpreter.
     m_initialized.store(false, std::memory_order_release);
+    m_event_loop_class = nullptr;
     static_cast<void>(m_interpreter.release());
 }
 

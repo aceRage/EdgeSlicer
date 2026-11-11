@@ -190,3 +190,19 @@ TEST_CASE("home plugins: capability toggle only names a listed (name, type) trip
     CHECK_FALSE(is_listed_capability("missing", "script", listed));
     CHECK_FALSE(is_listed_capability("hello", "script", {}));
 }
+
+TEST_CASE("home plugins: run_message keeps a traceback but strips absolute paths", "[HomePlugins]")
+{
+    const std::string raw =
+        "Traceback (most recent call last):\n"
+        "  File \"/home/me/.config/EdgeSlicer/orca_plugins/Hello/Hello.py\", line 12, in execute\n"
+        "    raise RuntimeError('boom')\n"
+        "RuntimeError: boom\n";
+    const std::string cleaned = sanitize_run_message(raw);
+    CHECK(cleaned.find("/home/me/") == std::string::npos);
+    CHECK(cleaned.find("File \"Hello.py\"") != std::string::npos);
+    CHECK(cleaned.find("RuntimeError: boom") != std::string::npos);
+
+    CHECK(sanitize_run_message("ok") == "ok");
+    CHECK(sanitize_run_message(std::string(500, 'x')).size() == 400);
+}

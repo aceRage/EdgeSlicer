@@ -19,15 +19,15 @@ namespace py = pybind11;
 namespace Slic3r {
 namespace {
 
-py::list current_filament_presets(PresetBundle& bundle)
+py::list current_filament_presets(const PresetBundle& bundle)
 {
     py::list presets;
     for (const std::string& preset_name : bundle.filament_presets) {
-        Preset* preset = bundle.filaments.find_preset(preset_name);
+        const Preset* preset = bundle.filaments.find_preset(preset_name);
         if (preset == nullptr)
             presets.append(py::none());
         else
-            presets.append(py::cast(preset, py::return_value_policy::reference));
+            presets.append(Preset(*preset));
     }
     return presets;
 }
@@ -123,7 +123,7 @@ void host_bindings::register_presets(py::module_& host)
     preset.attr("printer")  = py::cast(PresetEditor{Preset::TYPE_PRINTER});
     preset.attr("filament") = py::cast(PresetEditor{Preset::TYPE_FILAMENT});
 
-    py::class_<Preset, std::unique_ptr<Preset, py::nodelete>>(host, "Preset")
+    py::class_<Preset>(host, "Preset")
         .def_readonly("type", &Preset::type)
         .def_readonly("name", &Preset::name)
         .def_readonly("alias", &Preset::alias)
@@ -144,28 +144,23 @@ void host_bindings::register_presets(py::module_& host)
 
     py::class_<PresetCollection, std::unique_ptr<PresetCollection, py::nodelete>>(host, "PresetCollection")
         .def("size", &PresetCollection::size)
-        .def("get_selected_preset", [](PresetCollection& collection) -> Preset& {
-            return collection.get_selected_preset();
-        }, py::return_value_policy::reference_internal)
-        .def("selected_preset", [](PresetCollection& collection) -> Preset& {
-            return collection.get_selected_preset();
-        }, py::return_value_policy::reference_internal)
+        .def("get_selected_preset", [](const PresetCollection& collection) -> Preset { return collection.get_selected_preset(); })
+        .def("selected_preset", [](const PresetCollection& collection) -> Preset { return collection.get_selected_preset(); })
         .def("get_selected_preset_name", &PresetCollection::get_selected_preset_name)
         .def("selected_preset_name", &PresetCollection::get_selected_preset_name)
-        .def("get_edited_preset", [](PresetCollection& collection) -> Preset& {
-            return collection.get_edited_preset();
-        }, py::return_value_policy::reference_internal)
-        .def("edited_preset", [](PresetCollection& collection) -> Preset& {
-            return collection.get_edited_preset();
-        }, py::return_value_policy::reference_internal)
-        .def("preset", [](PresetCollection& collection, size_t index) -> Preset& {
+        .def("get_edited_preset", [](const PresetCollection& collection) -> Preset { return collection.get_edited_preset(); })
+        .def("edited_preset", [](const PresetCollection& collection) -> Preset { return collection.get_edited_preset(); })
+        .def("preset", [](PresetCollection& collection, size_t index) -> Preset {
             if (index >= collection.size())
                 throw py::index_error("preset index out of range");
             return collection.preset(index);
-        }, py::return_value_policy::reference_internal)
-        .def("find_preset", [](PresetCollection& collection, const std::string& name) -> Preset* {
-            return collection.find_preset(name);
-        }, py::return_value_policy::reference_internal)
+        })
+        .def("find_preset", [](PresetCollection& collection, const std::string& name) -> py::object {
+            Preset* preset = collection.find_preset(name);
+            if (preset == nullptr)
+                return py::none();
+            return py::cast(Preset(*preset));
+        })
         .def("preset_names", [](const PresetCollection& collection) {
             std::vector<std::string> names;
             names.reserve(collection.get_presets().size());
@@ -174,7 +169,7 @@ void host_bindings::register_presets(py::module_& host)
             return names;
         });
 
-    py::class_<PresetBundle, std::unique_ptr<PresetBundle, py::nodelete>>(host, "PresetBundle")
+    py::class_<PresetBundle>(host, "PresetBundle")
         .def_property_readonly("prints", [](PresetBundle& bundle) -> PresetCollection& {
             return bundle.prints;
         }, py::return_value_policy::reference_internal)
@@ -188,15 +183,9 @@ void host_bindings::register_presets(py::module_& host)
         .def_property_readonly("sla_materials", [](PresetBundle& bundle) -> PresetCollection& {
             return bundle.sla_materials;
         }, py::return_value_policy::reference_internal)
-        .def("current_process_preset", [](PresetBundle& bundle) -> Preset& {
-            return bundle.prints.get_edited_preset();
-        }, py::return_value_policy::reference_internal)
-        .def("current_print_preset", [](PresetBundle& bundle) -> Preset& {
-            return bundle.prints.get_edited_preset();
-        }, py::return_value_policy::reference_internal)
-        .def("current_printer_preset", [](PresetBundle& bundle) -> Preset& {
-            return bundle.printers.get_edited_preset();
-        }, py::return_value_policy::reference_internal)
+        .def("current_process_preset", [](const PresetBundle& bundle) -> Preset { return bundle.prints.get_edited_preset(); })
+        .def("current_print_preset", [](const PresetBundle& bundle) -> Preset { return bundle.prints.get_edited_preset(); })
+        .def("current_printer_preset", [](const PresetBundle& bundle) -> Preset { return bundle.printers.get_edited_preset(); })
         .def("current_filament_preset_names", [](PresetBundle& bundle) {
             return bundle.filament_presets;
         })

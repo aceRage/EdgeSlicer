@@ -605,6 +605,17 @@ thread_local int PluginAuditManager::m_releasing_frames = 0;
 thread_local bool PluginAuditManager::m_audit_denial_pending = false;
 thread_local bool PluginAuditManager::m_has_last_violation = false;
 thread_local AuditViolation PluginAuditManager::m_last_violation;
+thread_local int g_event_loop_socket_permit = 0;
+
+ScopedEventLoopSocketPermit::ScopedEventLoopSocketPermit() { ++g_event_loop_socket_permit; }
+
+ScopedEventLoopSocketPermit::~ScopedEventLoopSocketPermit()
+{
+    if (g_event_loop_socket_permit > 0)
+        --g_event_loop_socket_permit;
+}
+
+bool ScopedEventLoopSocketPermit::active() { return g_event_loop_socket_permit > 0; }
 
 ScopedPluginAuditContext::ScopedPluginAuditContext(const std::string& plugin_key,
                                                    const std::string& capability_name)
@@ -2182,6 +2193,12 @@ int PluginAuditManager::audit_hook(const char* event, PyObject* args, void* user
         BOOST_LOG_TRIVIAL(trace) << "[AUDIT] event=" << event_name << " bypassed (no plugin context)";
         return 0;
     }
+
+    // Host-owned asyncio loop construction needs the selector self-pipe (socketpair →
+    // socket.__new__). Keep the plugin's scope; only this event is permitted, and only while
+    // ScopedEventLoopSocketPermit is live.
+    if (ScopedEventLoopSocketPermit::active() && event_name == "socket.__new__")
+        return 0;
 
     // the open function can take in different flags that determine if it is a read or readwrite.
     const AuditEventCategory event_type =

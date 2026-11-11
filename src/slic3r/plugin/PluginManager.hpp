@@ -405,7 +405,7 @@ private:
 //   * a PythonRuntimeLease plus the GIL, so the interpreter cannot finalize underneath it;
 //   * the capability's audit scope (ScopedPluginAuditContext),
 // which keeps plugin unload and interpreter shutdown from tearing the module out from under a
-// suspended run. Unload cancels the run and drains it (it never force-unloads after a timeout).
+// suspended run. Unload cancels the run and waits up to the wait bound, then abandons.
 //
 // Interface for host awaitables (see plugin/host/): a host awaitable is constructed inside the
 // Script coroutine, i.e. on the worker thread with that invocation's loop running, so it can
@@ -440,9 +440,13 @@ public:
     // True while a run for `capability` is active.
     bool has_active_run(const PluginCapabilityInterface* capability) const;
 
-    // Stops accepting runs and waits for every in-flight invocation worker. Nothing is torn down
-    // by force.
+    // Stops accepting runs and waits for every in-flight invocation worker, up to the wait bound,
+    // then abandons any that are still running.
     void shutdown();
+
+    // Bound used by unload drain and shutdown. Production default is 8 seconds.
+    static void set_wait_bound_for_testing(std::chrono::milliseconds timeout);
+    static std::chrono::milliseconds wait_bound();
 
     // Re-arms the runtime after a shutdown() so a later initialize() in the same process can
     // start runs again.

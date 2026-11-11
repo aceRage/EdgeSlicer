@@ -297,14 +297,20 @@ void HomePlugins::run(const std::string& key)
     if (running != m_run.end() && running->second.state == "running")
         return;
 
-    if (!mgr.is_plugin_loaded(key) && !mgr.is_plugin_load_in_progress(key))
-        mgr.load_plugin(key);
+    if (!mgr.is_plugin_loaded(key) && !mgr.is_plugin_load_in_progress(key)) {
+        m_run[key] = { "failure", _u8L("Enable the plugin first") };
+        notice(m_run[key].message, true);
+        send_state();
+        return;
+    }
 
     auto caps = mgr.get_plugin_capabilities(key, PluginCapabilityType::Script, true);
-    if (caps.empty())
-        caps = mgr.get_plugin_capabilities(key, PluginCapabilityType::Script, false);
     if (caps.empty() || !caps.front()) {
-        m_run[key] = { "failure", _u8L("This plugin has no script capability to run.") };
+        const auto disabled = mgr.get_plugin_capabilities(key, PluginCapabilityType::Script, false);
+        if (!disabled.empty() && disabled.front())
+            m_run[key] = { "failure", _u8L("Enable the script capability first.") };
+        else
+            m_run[key] = { "failure", _u8L("This plugin has no script capability to run.") };
         notice(m_run[key].message, true);
         send_state();
         return;
@@ -319,17 +325,20 @@ void HomePlugins::run(const std::string& key)
             wxGetApp().CallAfter([this, alive, key, completion]() {
                 if (!*alive)
                     return;
+                if (wxTheApp == nullptr || wxGetApp().is_closing())
+                    return;
                 if (completion.cancelled) {
                     m_run.erase(key);
                 } else if (!completion.error.empty() ||
                            (completion.result.status != PluginResult::Success &&
                             completion.result.status != PluginResult::Skipped)) {
-                    const std::string msg = !completion.error.empty() ? completion.error : completion.result.message;
+                    const std::string msg = HomeTab::sanitize_run_message(
+                        !completion.error.empty() ? completion.error : completion.result.message);
                     m_run[key] = { "failure", msg };
                     if (!msg.empty())
                         notice(msg, true);
                 } else {
-                    m_run[key] = { "success", completion.result.message };
+                    m_run[key] = { "success", HomeTab::sanitize_run_message(completion.result.message) };
                 }
                 send_state();
             });

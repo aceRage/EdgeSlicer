@@ -26,8 +26,8 @@ namespace py = pybind11;
 namespace Slic3r {
 
 // The scene/document graph: Model -> ModelObject -> ModelInstance/ModelVolume.
-// Everything is bound py::nodelete — non-owning references into a graph owned
-// by the app (the live Plater model) or by a Print's model snapshot.
+// Model is an owned snapshot (unique_ptr). Objects, instances and volumes stay
+// nodelete pointers into that snapshot, never into the live Plater model.
 void host_bindings::register_model(py::module_& host)
 {
     py::enum_<ModelVolumeType>(host, "ModelVolumeType")
@@ -195,7 +195,7 @@ void host_bindings::register_model(py::module_& host)
             return config_value_or_none(object.config.get(), key);
         });
 
-    py::class_<Model, std::unique_ptr<Model, py::nodelete>>(host, "Model")
+    py::class_<Model>(host, "Model")
         .def("id", [](const Model& model) { return model.id().id; })
         .def("object_count", [](const Model& model) {
             return model.objects.size();
