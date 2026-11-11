@@ -1803,14 +1803,15 @@ int decide_audited_event(PluginAuditManager&             mgr,
     const bool                     threading_category = category == AuditEventCategory::Threading;
     std::vector<std::string>*      permission_list = permission_list_for(category, by_event, state.permissions);
 
-    std::vector<std::string> unresolved = keys;
+    // A fresh vector (not clear()+reassign into leftover capacity): libc++ ASan annotates the
+    // old allocation and reports a container-overflow on the copy-assign after clear().
+    std::vector<std::string> unresolved;
     if (permission_list || is_network_category(category) || threading_category) {
-        unresolved.clear();
         if (threading_category) {
             // Threading is a boolean grant rather than a target list. The event still reports the
             // fixed sentinel target so it is not treated as a targetless event grant.
             if (!state.permissions.threading)
-                unresolved = keys;
+                unresolved = std::vector<std::string>(keys);
         } else {
             for (const auto& key : keys) {
                 // A network grant authorizes a specific host, except for a targetless event such as
@@ -1825,6 +1826,8 @@ int decide_audited_event(PluginAuditManager&             mgr,
         }
         if (unresolved.empty())
             return 0;
+    } else {
+        unresolved = std::vector<std::string>(keys);
     }
 
     // Letting a root frame go runs finalizers inside a scope destructor or another event's hook,
