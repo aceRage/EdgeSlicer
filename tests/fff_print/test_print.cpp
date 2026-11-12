@@ -2514,6 +2514,36 @@ TEST_CASE("Print::validate refuses a flow ratio of 0 on the filament the plate p
     CHECK(err.string.find("filament 2") != std::string::npos);
 }
 
+// A color change (M600) on the layer slider, read from a project made elsewhere, is not printed: its output
+// was removed upstream (BBS). It used to be written as an empty ";CUSTOM_GCODE" block, with nothing said.
+TEST_CASE("A layer color change writes no empty custom G-code block and is warned about", "[Print][CustomGCode][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n")); // validate() relative-E reset
+
+    Slic3r::Model model;
+    Slic3r::Print print;
+    ModelObject  *object = model.add_object();
+    object->add_volume(Slic3r::Test::mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    object->ensure_on_bed();
+    CustomGCode::Info &custom_gcodes = model.plates_custom_gcodes[model.curr_plate_index];
+    custom_gcodes.mode = CustomGCode::SingleExtruder;
+    custom_gcodes.gcodes.push_back(CustomGCode::Item{ 5., CustomGCode::ColorChange, 1, "#00FF00", "" });
+    custom_gcodes.gcodes.push_back(CustomGCode::Item{ 10., CustomGCode::PausePrint, 1, "", "" });
+    print.apply(model, config);
+
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const bool warned = std::any_of(warnings.begin(), warnings.end(),
+                                    [](const StringObjectException &w) { return w.string.find("color change (M600)") != std::string::npos; });
+    CHECK(warned);
+
+    const std::string gcode = Test::gcode(print);
+    CHECK(gcode.find(";PAUSE_PRINT") != std::string::npos); // the pause is still written
+    CHECK(gcode.find(";CUSTOM_GCODE") == std::string::npos);
+}
+
 // Edge: without flow variants, GCode::_extrude scales and divides every extrusion by filament 1's ratio
 // (ResolvedFilamentFlow::uncached_flow_ratio keeps get_at(0)), so a 0 there still writes NaN for a plate
 // that prints only filament 2.

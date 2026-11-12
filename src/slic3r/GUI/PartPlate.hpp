@@ -710,6 +710,9 @@ class PartPlateList : public ObjectBase
     // Every plate's print history, by PartPlate::m_history_key. Not part of the undo snapshot and
     // not cleared by undo/redo's reset(false): only a new or reloaded project empties it.
     std::map<std::string, PlateHistory::History> m_print_histories;
+    // Layer custom G-codes of deleted plates, by PartPlate::m_history_key, for an undo that brings the
+    // plate back. Kept and cleared like m_print_histories.
+    std::map<std::string, CustomGCode::Info> m_custom_gcodes_of_removed_plates;
 
     void init();
     //compute the origin for printable plate with index i
@@ -880,6 +883,11 @@ public:
 
     //move the plate to position index
     int move_plate_to_index(int old_index, int new_index);
+
+    // Layer custom G-codes (Model::plates_custom_gcodes, filed by plate index) follow their plate when
+    // the plate list changes: take them by plate key before the change, file them by index after it.
+    std::map<std::string, CustomGCode::Info> detach_plates_custom_gcodes() const;
+    void attach_plates_custom_gcodes(std::map<std::string, CustomGCode::Info> by_key);
 
     //lock plate
     int lock_plate(int index, bool state);

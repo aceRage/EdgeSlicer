@@ -43,6 +43,7 @@
 #include "PartPlate.hpp"
 #include "BedTexturePool.hpp"
 #include "PlatePrintSlots.hpp"
+#include "PlateCustomGCodes.hpp"
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -4354,6 +4355,7 @@ void PartPlateList::reinit()
 {
 	clear(true, true);
 	m_print_histories.clear();
+	m_custom_gcodes_of_removed_plates.clear();
 
 	init();
 
@@ -4576,7 +4578,10 @@ int PartPlateList::delete_plate(int index)
 	int cols = compute_colum_count(m_plate_list.size() - 1);
 	int old_cols = compute_colum_count(m_plate_list.size());
 
+	// The deleted plate's layer custom G-codes go with it; the later plates keep theirs.
+	std::map<std::string, CustomGCode::Info> custom_gcodes = detach_plates_custom_gcodes();
 	m_plate_list.erase(m_plate_list.begin() + index);
+	attach_plates_custom_gcodes(std::move(custom_gcodes));
 	update_plate_cols();
 	//update this plate
 	//move this plate's instance to the end
@@ -4906,6 +4911,7 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 		delta = -1;
 	}
 
+	std::map<std::string, CustomGCode::Info> custom_gcodes = detach_plates_custom_gcodes();
 	PartPlate* plate = m_plate_list[old_index];
 	//update the plates between old_index and new_index
 	for (unsigned int i = (unsigned int)old_index; i != (unsigned int)new_index; i = i + delta)
@@ -4920,11 +4926,33 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 	m_plate_list[new_index] = plate;
 	plate->set_index(new_index);
 	plate->set_pos_and_size(origin, m_plate_width, m_plate_depth, m_plate_height, true);
+	attach_plates_custom_gcodes(std::move(custom_gcodes));
 
 	//update the new plate index
 	m_current_plate = new_index;
 
 	return ret;
+}
+
+std::map<std::string, CustomGCode::Info> PartPlateList::detach_plates_custom_gcodes() const
+{
+	if (m_model == nullptr)
+		return {};
+	std::vector<std::string> keys;
+	for (const PartPlate* plate : m_plate_list)
+		keys.push_back(plate->m_history_key);
+	return plate_custom_gcodes_by_key(m_model->plates_custom_gcodes, keys, m_custom_gcodes_of_removed_plates);
+}
+
+void PartPlateList::attach_plates_custom_gcodes(std::map<std::string, CustomGCode::Info> by_key)
+{
+	if (m_model == nullptr)
+		return;
+	std::vector<std::string> keys;
+	for (const PartPlate* plate : m_plate_list)
+		keys.push_back(plate->m_history_key);
+	m_model->plates_custom_gcodes     = plate_custom_gcodes_by_index(by_key, keys);
+	m_custom_gcodes_of_removed_plates = std::move(by_key);
 }
 
 //lock plate
@@ -6364,6 +6392,7 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 	clear(true, true);
 	// A different project: nothing of the previous one's print history carries over.
 	m_print_histories.clear();
+	m_custom_gcodes_of_removed_plates.clear();
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);

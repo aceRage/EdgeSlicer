@@ -1024,10 +1024,13 @@ void StackImpl::load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GU
 		std::vector<bool> previous_slice_result;
 		std::vector<std::string> previous_gcode_paths;
 		plate_list.get_sliced_result(previous_slice_result, previous_gcode_paths);
+		// Layer custom G-codes are not in the snapshot: they stay as they are, each with its plate.
+		std::map<std::string, Slic3r::CustomGCode::Info> custom_gcodes = plate_list.detach_plates_custom_gcodes();
 
 		plate_list.reset(false);
 		this->load_mutable_object<Slic3r::GUI::PartPlateList>(plate_list.id(), plate_list);
 		plate_list.rebuild_plates_after_deserialize(previous_slice_result, previous_gcode_paths);
+		plate_list.attach_plates_custom_gcodes(std::move(custom_gcodes));
 	}
 	this->m_active_snapshot_time = timestamp;
 	assert(this->valid());

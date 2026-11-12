@@ -2831,6 +2831,16 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
+    // A colour change (M600) on the layer slider, read from a project made elsewhere: the colour change
+    // output was removed (BBS), so it is left out of the G-code. The slice is unchanged; the user is told.
+    {
+        const CustomGCode::Info custom_gcodes = m_model.get_curr_plate_custom_gcodes();
+        if (std::any_of(custom_gcodes.gcodes.begin(), custom_gcodes.gcodes.end(),
+                        [](const CustomGCode::Item &item) { return item.type == CustomGCode::ColorChange; }))
+            warn(L("This plate has a color change (M600) on the layer slider, which is not printed: it is left out of the G-code. "
+                   "Use a pause or a custom G-code at that layer instead."));
+    }
+
     // ORCA #16719: a filament flow ratio of 0 makes GCode::_extrude divide 0 by 0 and write NaN (or a huge E)
     // into the G-code. Refuse it for every filament the plate prints, plus filament 1 when no flow variants
     // are active, because _extrude then scales and divides every extrusion by filament 1's ratio

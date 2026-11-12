@@ -6975,6 +6975,10 @@ static std::string emit_custom_gcode_per_print_z(GCode&                   gcodeg
             }
             else {
 #endif
+        // With the colour change output gone, a colour change writes nothing, not an empty custom
+        // G-code block. Print::validate() tells the user it is left out.
+        if (color_change)
+            return gcode;
         if (gcode_type == CustomGCode::PausePrint) // Pause print
         {
             // add tag for processor
