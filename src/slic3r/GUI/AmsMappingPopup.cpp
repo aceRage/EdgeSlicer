@@ -534,6 +534,12 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
         // A filament sliced for one extruder is only offered that extruder's AMS units.
         if (only_physical_extruder >= 0 && nozzle_id != only_physical_extruder)
             continue;
+        // A rack AMS (the H3C's AMS 3H) cannot be mapped to yet: its slots are not offered
+        // (MachineObject::mapping_blocked_ams_id; BambuSendMapping::compose drops them as well).
+        if (ams_iter->second->is_rack()) {
+            BOOST_LOG_TRIVIAL(info) << "ams_mapping: " << GUI::AmsTypes::display_name(ams_type) << " slots are not offered, mapping to it is not supported yet";
+            continue;
+        }
 
         if (ams_type >=1 || ams_type <= 3) { //1:ams 2:ams-lite 3:n3f
 
@@ -660,6 +666,8 @@ std::vector<TrayData> AmsMapingPopup::parse_ams_mapping(std::map<std::string, Am
 
         auto ams_indx = atoi(ams_iter->first.c_str());
         Ams* ams_group = ams_iter->second;
+        if (ams_group && ams_group->is_rack())
+            continue; // not a mapping target yet (H3C AMS 3H)
         std::vector<TrayData>                      tray_datas;
         std::map<std::string, AmsTray*>::iterator tray_iter;
 
