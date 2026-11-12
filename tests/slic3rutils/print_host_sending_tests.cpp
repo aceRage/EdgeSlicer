@@ -401,6 +401,11 @@ TEST_CASE("Moonraker retries an upload on port 8080 unless Moonraker refused it 
     }
 }
 
+// Not on Windows: a Moonraker host cannot be made in a test there. Its constructor takes the WCP_Logger
+// singleton, which holds a wxSocketClient, and wxWidgets sockets need a wxApp on Windows: without one the
+// construction never returns (seen on the VM, 2026-11-12). The application always has its wxApp. The rule
+// itself is tested above on every platform.
+#ifndef WIN32
 // Moonraker::upload picks one of these two paths; on Windows it first asks the application's config whether
 // to resolve a host name (an address with a port is never taken for an IP there), which a test has none of,
 // so the paths are called directly.
@@ -505,6 +510,7 @@ TEST_CASE("A Moonraker upload is retried on port 8080 of the same host, but not 
     boost::system::error_code ec;
     fs::remove(file, ec);
 }
+#endif // !WIN32
 
 // ---- 9: OctoPrint's test with an answer that is not OctoPrint's ----
 
