@@ -4,10 +4,16 @@
 // read before them leaves std::byte and the SDK's byte ambiguous (see bambu_reprint_tests.cpp).
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
+#include "slic3r/GUI/AmsDualLayout.hpp"
+#include "slic3r/GUI/AmsTypes.hpp"
+#include "slic3r/GUI/BambuSendMapping.hpp"
+#include "slic3r/GUI/Plater.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 
 #include <stdexcept>
 
 using namespace Slic3r;
+using namespace Slic3r::GUI;
 using nlohmann::json;
 
 // MachineObject::parse_json reads a push_status print report in this order: print.ams
@@ -225,6 +231,21 @@ TEST_CASE("Report bitmasks are read as 64-bit hex and bad values never throw", "
         CHECK_THROWS_AS(std::stol("F0000000", nullptr, 16), std::out_of_range);
 }
 
+// The H3C as parse_json leaves it: the AMS report, then the new-protocol fields. vir_slot is read by
+// parse_json itself (not headless), so the nine rack spool holders are set as it would set them.
+static void parse_h3c(MachineObject& obj)
+{
+    const json print = n10_print();
+    obj.printer_type = "N10";
+    obj.parse_ams_report(print, false);
+    obj.parse_new_info(print);
+    obj.vir_slots.clear();
+    for (const json& vs : print["vir_slot"]) {
+        AmsTray t(vs["id"].get<std::string>());
+        obj.vir_slots.push_back(t);
+    }
+}
+
 TEST_CASE("An H3C report with the AMS 3H loaded is read to the end", "[BambuAmsReport]")
 {
     MachineObject obj { nullptr, "fake-h3c", "FAKEN100000001", "127.0.0.1" };
@@ -239,9 +260,6 @@ TEST_CASE("An H3C report with the AMS 3H loaded is read to the end", "[BambuAmsR
     CHECK(obj.tray_reading_bits == 0);
     CHECK(obj.ams_version == 9340);
     CHECK(obj.m_tray_tar == "1");
-    // Phase 0 keeps the AMS 3H out of the AMS list: its slots must not reach the mapping or the
-    // filament sync until its slot numbering is ported.
-    CHECK(obj.amsList.empty());
 
     // What parse_json reads after the AMS block, which the overflow used to skip.
     REQUIRE_NOTHROW(obj.parse_new_info(print));
@@ -255,18 +273,217 @@ TEST_CASE("An H3C report with the AMS 3H loaded is read to the end", "[BambuAmsR
     CHECK(obj.chamber_temp == Approx(24.0f));
     CHECK(obj.sdcard_state == MachineObject::SdcardState::HAS_SDCARD_NORMAL);
 
-    // A second push changes nothing and still keeps the AMS 3H out.
+    // A second push changes nothing.
     REQUIRE_NOTHROW(obj.parse_ams_report(print, false));
     CHECK_FALSE(obj.is_ams_need_update);
-    CHECK(obj.amsList.empty());
 }
 
-TEST_CASE("A rack AMS that was listed earlier is dropped from the AMS list", "[BambuAmsReport]")
+TEST_CASE("The AMS 3H is listed with its nine slots, zones and filaments", "[BambuAmsReport]")
 {
     MachineObject obj { nullptr, "fake-h3c", "FAKEN100000002", "127.0.0.1" };
-    obj.amsList["32"] = new Ams("32", 0, 6);
-    REQUIRE_NOTHROW(obj.parse_ams_report(n10_print(), false));
-    CHECK(obj.amsList.empty());
+    parse_h3c(obj);
+
+    REQUIRE(obj.amsList.size() == 1);
+    Ams* ams = obj.amsList["32"];
+    REQUIRE(ams != nullptr);
+    CHECK(ams->type == GUI::AmsTypes::RACK_A);
+    CHECK(ams->is_rack());
+    CHECK(ams->nozzle == 0);   // extruder bits 0 in "240002006"
+    CHECK(ams->is_exists);     // ams_exist_bits bit 13
+    CHECK(obj.has_rack_ams());
+    CHECK(GUI::AmsTypes::display_name(ams->type) == "AMS 3H");
+
+    REQUIRE(ams->trayList.size() == 9);
+    for (int s = 0; s < 9; ++s) {
+        AmsTray* t = ams->trayList[std::to_string(s)];
+        REQUIRE(t != nullptr);
+        CHECK(t->is_exists == (s < 4)); // tray bits 28..31
+        CHECK(t->state == (s < 4 ? 27 : 160));
+    }
+    AmsTray* black = ams->trayList["0"];
+    AmsTray* red   = ams->trayList["1"];
+    CHECK(black->type == "PLA");
+    CHECK(black->setting_id == "GFA00");
+    CHECK(black->color == "000000FF");
+    CHECK(black->is_tray_info_ready());
+    CHECK(red->color == "DE4343FF");
+    CHECK(red->remain_g == -1);
+    // Slots 3 and 4 are loaded but not identified: shown as "?".
+    CHECK(ams->trayList["2"]->is_exists);
+    CHECK_FALSE(ams->trayList["2"]->is_tray_info_ready());
+    CHECK_FALSE(ams->trayList["3"]->is_tray_info_ready());
+
+    // Two drying zones; the unit itself reports no humidity or temperature, so it shows the
+    // dampest zone's (50 %, level 1, 25.7 C).
+    REQUIRE(ams->zones.size() == 2);
+    CHECK(ams->zones[0].id == 0);
+    CHECK(ams->zones[0].slots == std::vector<int>({ 5, 7 }));
+    CHECK(ams->zones[1].slots == std::vector<int>({ 0, 1, 2, 3, 4, 6, 8 }));
+    CHECK(ams->zones[1].humidity_raw == 47);
+    CHECK(ams->humidity_raw == 50);
+    CHECK(ams->humidity == 1);
+    CHECK(ams->current_temperature == Approx(25.7f));
+}
+
+TEST_CASE("AMS 3H slots and the rack's spool holders are labelled as Bambu Studio labels them", "[BambuAmsReport]")
+{
+    namespace AD = GUI::AmsDual;
+    AD::UnitRef rack;
+    rack.ams_id      = "32";
+    rack.type        = AD::UNIT_RACK_A;
+    rack.slot_count  = 9;
+    CHECK(AD::slot_label(rack, 0) == "1");
+    CHECK(AD::slot_label(rack, 8) == "9");
+
+    // One extruder, the AMS 3H and nine holders: one side, the AMS first, then "1-Ext".."9-Ext".
+    std::vector<AD::UnitRef> units { rack };
+    for (int id = 247; id <= 255; ++id) {
+        AD::UnitRef u;
+        u.ams_id = std::to_string(id);
+        u.type   = AD::UNIT_EXT_SPOOL;
+        units.push_back(u);
+    }
+    const std::vector<AD::Side> sides = AD::group_units(units, 1);
+    REQUIRE(sides.size() == 1);
+    REQUIRE(sides[0].units.size() == 10);
+    CHECK(sides[0].units[0].ams_id == "32");
+    CHECK(sides[0].units[1].ams_id == "255");
+    CHECK(AD::slot_label(sides[0].units[1], 0) == "1-Ext");
+    CHECK(AD::slot_label(sides[0].units[9], 0) == "9-Ext");
+    CHECK(sides[0].pages.front() == std::vector<int>({ 0 })); // the AMS 3H has a page of its own
+
+    // A two-extruder printer's two holders stay "Ext" (H2D, H2C, X2D).
+    AD::UnitRef r255, r254;
+    r255.ams_id = "255";
+    r255.type   = AD::UNIT_EXT_SPOOL;
+    r254.ams_id = "254";
+    r254.type   = AD::UNIT_EXT_SPOOL;
+    const std::vector<AD::Side> h2d = AD::group_units({ r255, r254 }, 2);
+    for (const AD::Side& s : h2d)
+        for (const AD::UnitRef& u : s.units)
+            CHECK(AD::slot_label(u, 0) == "Ext");
+
+    CHECK(BambuExtruderMap::ams_list_entry("32", "1", true).key == 129);
+    CHECK(BambuExtruderMap::ams_list_entry("32", "1", true).tray_name == "2");
+    CHECK(BambuExtruderMap::ams_list_entry("0", "1").tray_name == "A2");
+}
+
+TEST_CASE("Sync filaments takes the AMS 3H's loaded slots", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000003", "127.0.0.1" };
+    parse_h3c(obj);
+
+    const std::map<int, DynamicPrintConfig> list = GUI::Sidebar::build_filament_ams_list(&obj);
+    REQUIRE(list.size() == 9); // the nine slots, keyed 128..136 (ams 32 * 4 + slot)
+    CHECK(list.begin()->first == 128);
+    CHECK(list.rbegin()->first == 136);
+
+    const DynamicPrintConfig& s1 = list.at(128);
+    CHECK(s1.opt_string("filament_id", 0u) == "GFA00");
+    CHECK(s1.opt_string("filament_type", 0u) == "PLA");
+    CHECK(s1.opt_string("tray_name", 0u) == "1");
+    CHECK(s1.opt<ConfigOptionBools>("filament_exist")->get_at(0));
+    const DynamicPrintConfig& s2 = list.at(129);
+    CHECK(s2.opt_string("filament_id", 0u) == "GFA00");
+    CHECK(s2.opt_string("tray_name", 0u) == "2");
+    // Slots 3 and 4: loaded, but no filament id, so the sync keeps the preset that is there.
+    CHECK(list.at(130).opt_string("filament_id", 0u).empty());
+    CHECK(list.at(130).opt<ConfigOptionBools>("filament_exist")->get_at(0));
+    // Slots 5..9: empty.
+    CHECK_FALSE(list.at(132).opt<ConfigOptionBools>("filament_exist")->get_at(0));
+    CHECK(list.at(136).opt_string("tray_name", 0u) == "9");
+}
+
+static FilamentInfo job_filament(int id, const std::string& colour)
+{
+    FilamentInfo f;
+    f.id          = id;
+    f.type        = "PLA";
+    f.color       = colour;
+    f.filament_id = "GFA00";
+    f.tray_id     = -1;
+    return f;
+}
+
+static FilamentInfo picked(int id, const std::string& ams, const std::string& slot, int tray)
+{
+    FilamentInfo f = job_filament(id, "#000000FF");
+    f.ams_id       = ams;
+    f.slot_id      = slot;
+    f.tray_id      = tray;
+    return f;
+}
+
+TEST_CASE("No send mapping can name an AMS 3H slot or a rack spool holder", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000004", "127.0.0.1" };
+    parse_h3c(obj);
+
+    CHECK(obj.mapping_blocked_ams_id("32"));
+    CHECK(obj.mapping_blocked_ams_id("255"));
+    CHECK(obj.mapping_blocked_ams_id("247"));
+    CHECK_FALSE(obj.mapping_blocked_ams_id("0"));
+    CHECK(obj.slot_actions_blocked("32"));
+
+    // The automatic mapping: the black and the red PLA match slots 1 and 2 exactly, and still
+    // nothing is mapped to them.
+    const std::vector<FilamentInfo> job { job_filament(0, "#000000FF"), job_filament(1, "#DE4343FF") };
+    std::vector<FilamentInfo>       result;
+    BambuSendMapping::auto_map(&obj, job, {}, {}, result);
+    for (const FilamentInfo& r : result) {
+        CHECK(r.ams_id != "32");
+        CHECK((r.tray_id < 128 || r.tray_id > 136));
+    }
+
+    // A pick made any other way (the popup, the phone, a reprint): refused and taken out.
+    std::vector<FilamentInfo> manual { picked(0, "32", "0", 128), picked(1, "", "", 130), picked(2, "250", "0", 250) };
+    CHECK_FALSE(obj.is_valid_mapping_result(manual, false));
+    for (const FilamentInfo& r : manual) {
+        CHECK(r.tray_id == -1);
+        CHECK(r.ams_id.empty());
+    }
+
+    // The last gate: what compose writes for the printer never names the AMS 3H.
+    BambuSendMapping::ComposeInput in;
+    in.project_filament_count = 2;
+    in.filament_ids           = { "GFA00", "GFA00" };
+    in.blocked_ams_ids        = obj.mapping_blocked_ams_ids();
+    std::string v0, v1, info;
+    // Both on the AMS 3H: nothing is written at all.
+    const std::vector<FilamentInfo> both { picked(0, "32", "0", 128), picked(1, "32", "1", 129) };
+    CHECK_FALSE(BambuSendMapping::compose(both, job, in, v0, v1, info));
+    CHECK(v0.empty());
+    CHECK(v1.empty());
+    // One on another unit, one on the AMS 3H: the strings are written, the AMS 3H entry as "none".
+    const std::vector<FilamentInfo> mixed { picked(0, "0", "0", 0), picked(1, "32", "1", 129) };
+    CHECK_FALSE(BambuSendMapping::compose(mixed, job, in, v0, v1, info)); // not every filament mapped
+    CHECK(v0 == "[0,-1]");
+    CHECK(v1.find("\"ams_id\":32") == std::string::npos);
+    CHECK(v1.find("\"ams_id\":255") != std::string::npos);
+    CHECK(info.find("129") == std::string::npos);
+}
+
+TEST_CASE("A printer without a rack AMS maps as before", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h2d", "FAKEH2D0000002", "127.0.0.1" };
+    json print;
+    print["ams"] = {
+        { "ams", json::array({ unit("0", "3", 4, 3), unit("128", "104", 1, 1) }) },
+        { "ams_exist_bits", "11" },
+        { "tray_exist_bits", "10007" },
+        { "version", 2 },
+    };
+    REQUIRE_NOTHROW(obj.parse_ams_report(print, false));
+    CHECK_FALSE(obj.has_rack_ams());
+    CHECK(obj.mapping_blocked_ams_ids().empty());
+    CHECK(obj.amsList["0"]->zones.empty());
+
+    std::vector<FilamentInfo> result;
+    BambuSendMapping::auto_map(&obj, { job_filament(0, "#FFFFFFFF") }, {}, {}, result);
+    REQUIRE(result.size() == 1);
+    CHECK_FALSE(result[0].ams_id.empty());
+    CHECK(result[0].tray_id >= 0);
+    CHECK(obj.is_valid_mapping_result(result, true));
 }
 
 TEST_CASE("An H2D-style AMS report parses as before", "[BambuAmsReport]")
