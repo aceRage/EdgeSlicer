@@ -112,12 +112,12 @@ Upstream listing at `9612260bb5`. Split by phase. Cloud subscribe types are list
 
 | Upstream | Adapt notes |
 |---|---|
-| `pluginTypes/slicingPipeline/*` | Live `Print *` in-process. Label on the Home card. |
-| `PluginHooks.cpp/.hpp` | Installs `Print::set_slicing_pipeline_hook_fn`, lifecycle hook, capability resolver. |
-| `libslic3r/LifecycleEvents.hpp` | **Missing on Edge.** Add as a libslic3r seam; some events fire from the engine. |
-| `libslic3r/Print.hpp` `SlicingPipelineStepPlugin`, `set_slicing_pipeline_hook_fn`, `run_pipeline_hook` | **Missing on Edge.** Add next to existing `PrintStep` / `PrintObjectStep`. Default hook is empty so goldens stay identical until a plugin is enabled. |
-| `libslic3r/GCode/PostProcessor.cpp` | Orca #17095 retry is **already on Edge**. Add the `psGCodePostProcess` plugin call with a scoped write root on the G-code folder. |
-| PrintConfig `slicing_pipeline_plugin` + dynamic `plugins` manifest | **Missing.** Preset fields must survive 3MF round-trips. `ConfigBase::set_resolve_capability_fn` / `collect_plugin_manifest` are Orca-only today. |
+| `pluginTypes/slicingPipeline/*` | Landed on `feature/plugins-p6-pipeline`. Live `Print *` in-process. Home card: "Early slicing steps run unsandboxed in-process". |
+| `PluginHooks.cpp/.hpp` | Landed. Installs `Print::set_slicing_pipeline_hook_fn`, lifecycle hook, capability resolver, G-code post-process hook. |
+| `libslic3r/LifecycleEvents.hpp` | Landed in earlier plugin phases. |
+| `libslic3r/Print.hpp` `SlicingPipelineStepPlugin`, `set_slicing_pipeline_hook_fn`, `run_pipeline_hook` | Landed. Default hook is empty so goldens stay identical until a plugin is enabled. |
+| `libslic3r/GCode/PostProcessor.cpp` | Landed. `psGCodePostProcess` plugin call with a scoped write root on the G-code folder. #17095 retry was already on Edge. |
+| PrintConfig `slicing_pipeline_plugin` + dynamic `plugins` manifest | Landed. Survives 3MF round-trips. `ConfigBase::set_resolve_capability_fn` / `collect_plugin_manifest` are GUI-resolver only. |
 
 **Phase 9**
 

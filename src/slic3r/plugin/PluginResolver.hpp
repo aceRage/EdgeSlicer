@@ -87,6 +87,10 @@ std::vector<PluginCapabilityId> capabilities_in_use(const PresetBundle& preset_b
 
 bool check_capability_in_use(const std::string& capability_refs);
 
+// Human-readable text for #16929. Empty when nothing is missing.
+std::string missing_plugins_warning_message();
+std::string unresolved_plugins_save_message(const std::vector<ConfigBase::UnresolvedPluginCapability>& unresolved);
+
 } // namespace Slic3r
 
 #endif

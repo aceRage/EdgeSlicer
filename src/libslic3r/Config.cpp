@@ -42,6 +42,8 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
+ConfigBase::ResolveCapabilityFn ConfigBase::resolve_capability_fn = nullptr;
+
 //BBS: add json support
 //static const std::string CONFIG_VERSION_KEY = "version";
 //static const std::string CONFIG_NAME_KEY = "name";
@@ -2048,6 +2050,18 @@ void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const s
         }
     }
 
+    // Serialize the top-level "plugins" manifest: the individual plugin-backed options keep bare
+    // capability names; the full "name;uuid;capability" references are derived here. Only with a
+    // resolver (GUI); without one (CLI/headless) leave whatever the "plugins" option already
+    // serialized above, so a round-trip never drops the manifest.
+    if (resolve_capability_fn) {
+        std::vector<std::string> unique_refs = this->collect_plugin_manifest();
+        if (unique_refs.empty())
+            j.erase("plugins");
+        else
+            j["plugins"] = unique_refs;
+    }
+
     // 4-space indent matches the previous std::setw(4) << j file format.
     os << j.dump(4, ' ', false, replace_invalid_utf8 ? json::error_handler_t::replace : json::error_handler_t::strict) << std::endl;
 }
@@ -2062,6 +2076,69 @@ void ConfigBase::save(const std::string &file) const
     c.close();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;
+}
+
+void ConfigBase::for_each_plugin_capability(const std::function<void(const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name)>& fn) const
+{
+    const ConfigDef* def = this->def();
+    if (def == nullptr)
+        return;
+
+    for (const std::string& opt_key : this->keys()) {
+        const ConfigOptionDef* opt_def = def->get(opt_key);
+        const ConfigOption*    opt     = this->option(opt_key);
+        if (opt_def == nullptr || opt == nullptr || !opt_def->is_plugin_backed())
+            continue;
+
+        if (const auto* scalar_option = dynamic_cast<const ConfigOptionString*>(opt)) {
+            if (!scalar_option->value.empty())
+                fn(opt_key, opt_def->plugin_type, scalar_option->value);
+        } else if (const auto* vector_option = dynamic_cast<const ConfigOptionVectorBase*>(opt)) {
+            for (const std::string& capability_name : vector_option->vserialize())
+                if (!capability_name.empty())
+                    fn(opt_key, opt_def->plugin_type, capability_name);
+        }
+    }
+}
+
+std::vector<std::string> ConfigBase::collect_plugin_manifest() const
+{
+    std::vector<std::string> refs;
+    if (!resolve_capability_fn)
+        return refs;
+
+    this->for_each_plugin_capability([&refs](const std::string& /* opt_key */, const std::string& plugin_type, const std::string& capability_name) {
+        std::string ref = resolve_capability_fn(capability_name, plugin_type);
+        if (!ref.empty() && std::find(refs.begin(), refs.end(), ref) == refs.end())
+            refs.emplace_back(std::move(ref));
+    });
+    return refs;
+}
+
+std::vector<ConfigBase::UnresolvedPluginCapability> ConfigBase::unresolved_plugin_capabilities() const
+{
+    std::vector<UnresolvedPluginCapability> unresolved;
+    if (!resolve_capability_fn)
+        return unresolved;
+
+    this->for_each_plugin_capability([&unresolved](const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name) {
+        if (!resolve_capability_fn(capability_name, plugin_type).empty())
+            return;
+        const auto matches = [&opt_key, &capability_name](const UnresolvedPluginCapability& entry) {
+            return entry.opt_key == opt_key && entry.capability_name == capability_name;
+        };
+        if (std::none_of(unresolved.begin(), unresolved.end(), matches))
+            unresolved.push_back(UnresolvedPluginCapability{ opt_key, capability_name });
+    });
+    return unresolved;
+}
+
+void ConfigBase::update_plugin_manifest()
+{
+    if (!resolve_capability_fn)
+        return;
+    if (auto* manifest = this->option<ConfigOptionStrings>("plugins", true))
+        manifest->values = this->collect_plugin_manifest();
 }
 
 // Set all the nullable values to nils.

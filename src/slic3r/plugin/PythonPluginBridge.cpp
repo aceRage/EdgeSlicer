@@ -26,6 +26,7 @@
 #include "PyPluginPackage.hpp"
 #include "PyPluginTrampoline.hpp"
 #include "pluginTypes/script/ScriptPluginCapability.hpp"
+#include "pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp"
 #include <pybind11/pytypes.h>
 #include <pybind11/gil.h>
 #include "slic3r/GUI/I18N.hpp"
@@ -532,6 +533,7 @@ void bind_python_api(pybind11::module_& m)
 
     // Make sure you register your bindings here
     ScriptPluginCapability::RegisterBindings(m);
+    SlicingPipelinePluginCapability::RegisterBindings(m);
     PluginHost::RegisterBindings(m);
     register_unported_capability_types(m);
     BOOST_LOG_TRIVIAL(debug) << "Registered ScriptPluginCapability Python bindings";

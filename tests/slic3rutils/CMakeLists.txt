@@ -24,6 +24,9 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_audit.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_permission_validation.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_trust.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_capabilities_in_use.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_phase6.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp

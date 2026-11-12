@@ -1519,7 +1519,7 @@
     else if (p.run_state === 'success') badges.push({ text: t('plugin_run_ok', 'Ran'), cls: 'accent' });
     else if (p.run_state === 'failure') badges.push({ text: t('plugin_run_fail', 'Run failed'), cls: 'warn' });
     if (p.update_available) badges.push({ text: t('update_available', 'Update available'), cls: 'warn' });
-    if (p.in_process_pipeline) badges.push({ text: t('in_process_pipeline', 'Early slicing steps run in-process'), cls: 'warn' });
+    if (p.in_process_pipeline) badges.push({ text: t('in_process_pipeline', 'Early slicing steps run unsandboxed in-process'), cls: 'warn' });
     for (const typ of p.types || []) badges.push({ text: typ });
     badges.push({ text: p.source === 'catalog' ? t('source_catalog', 'Catalog') : t('source_local', 'Local file') });
 

@@ -1,6 +1,7 @@
 #ifndef slic3r_GCode_PostProcessor_hpp_
 #define slic3r_GCode_PostProcessor_hpp_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,14 @@
 #include "../PrintConfig.hpp"
 
 namespace Slic3r {
+
+// Cross-layer injection: the plugin layer registers a dispatcher that runs
+// SlicingPipelinePluginCapability at psGCodePostProcess. libslic3r stays free of pybind11.
+using GCodePostProcessPluginFn = std::function<void(const std::string& gcode_path,
+                                                    const std::string& host,
+                                                    const std::string& output_name,
+                                                    const DynamicPrintConfig& config)>;
+void set_gcode_post_process_plugin_fn(GCodePostProcessPluginFn fn);
 
 // Run post processing script / scripts if defined.
 // Returns true if a post-processing script was executed.

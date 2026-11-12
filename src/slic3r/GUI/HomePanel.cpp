@@ -725,7 +725,7 @@ void HomePanel::send_init()
     s["update_available"]     = _u8L("Update available");
     s["source_local"]         = _u8L("Local file");
     s["source_catalog"]       = _u8L("Catalog");
-    s["in_process_pipeline"]  = _u8L("Early slicing steps run in-process");
+    s["in_process_pipeline"]  = _u8L("Early slicing steps run unsandboxed in-process");
     s["plugin_deleted"]       = _u8L("Plugin deleted.");
 #endif
 

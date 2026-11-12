@@ -1266,7 +1266,13 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/host/PluginHostUi.cpp
         plugin/host/PluginHostUi.hpp
         plugin/host/PluginHostUnavailable.cpp
+        plugin/host/PluginHostSlicing.cpp
         plugin/pluginTypes/script/ScriptPluginCapability.hpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.cpp
+        plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapabilityTrampoline.hpp
+        GUI/PluginWarnings.cpp
+        GUI/PluginWarnings.hpp
         GUI/PluginProgressDialog.cpp
         GUI/PluginProgressDialog.hpp
         GUI/PluginSource.hpp
@@ -1350,7 +1356,10 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/host/PluginHostPresets.cpp
     plugin/host/PluginHostUi.cpp
     plugin/host/PluginHostUnavailable.cpp
+    plugin/host/PluginHostSlicing.cpp
     plugin/pluginTypes/script/ScriptPluginCapability.cpp
+    plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.cpp
+    GUI/PluginWarnings.cpp
     GUI/PluginProgressDialog.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
     GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox

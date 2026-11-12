@@ -2002,6 +2002,10 @@ public:
         legend,
         // Vector value, but edited as a single string.
         one_string,
+        // Plugin capability picker (bare capability names). Falls through to a text field until a picker UI exists.
+        plugin_picker,
+        // Plugin capability config JSON, edited through a dialog rather than typed.
+        plugin_config,
     };
 
 	// Identifier of this option. It is stored here so that it is accessible through the by_serialization_key_ordinal map.
@@ -2444,12 +2448,27 @@ public:
     // is_custom is the Ultra is_custom_defined header; the file overload passes it through so preset files stay unchanged.
     void save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8 = false, const std::string is_custom = "") const;
 
+    // Plugin-backed option helpers. A resolver (GUI/plugin layer) turns a bare capability name
+    // into the full "name;uuid;capability" reference stored in the "plugins" manifest. Without a
+    // resolver (CLI / EDGE_PYTHON_PLUGINS OFF) the manifest is left as loaded.
+    using ResolveCapabilityFn = std::function<std::string(std::string capability_name, std::string plugin_type)>;
+    static void set_resolve_capability_fn(ResolveCapabilityFn fn) { resolve_capability_fn = std::move(fn); }
+    std::vector<std::string> collect_plugin_manifest() const;
+    struct UnresolvedPluginCapability {
+        std::string opt_key;
+        std::string capability_name;
+    };
+    std::vector<UnresolvedPluginCapability> unresolved_plugin_capabilities() const;
+    void update_plugin_manifest();
+
 	// Set all the nullable values to nils.
     void null_nullables();
 
     static size_t load_from_gcode_string_legacy(ConfigBase& config, const char* str, ConfigSubstitutionContext& substitutions);
 
 private:
+    static ResolveCapabilityFn resolve_capability_fn;
+    void for_each_plugin_capability(const std::function<void(const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name)>& fn) const;
     // Set a configuration value from a string.
     bool set_deserialize_raw(const t_config_option_key& opt_key_src, const std::string& value, ConfigSubstitutionContext& substitutions, bool append);
 };
