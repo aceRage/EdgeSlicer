@@ -28390,21 +28390,8 @@ void Plater::on_filaments_delete(size_t num_filaments, size_t filament_id, int r
     }
 
     // update customize gcode
-    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item) {
-        auto iter = std::remove_if(item->second.gcodes.begin(), item->second.gcodes.end(), [filament_id](const CustomGCode::Item& gcode_item) {
-            return (gcode_item.type == CustomGCode::Type::ToolChange && gcode_item.extruder == filament_id + 1);
-        });
-        if (replace_filament_id == -1)
-            item->second.gcodes.erase(iter, item->second.gcodes.end());
-        else if (iter != item->second.gcodes.end()) {
-            iter->extruder = replace_filament_id + 1;
-        }
-
-        for (auto& item : item->second.gcodes) {
-            if (item.type == CustomGCode::Type::ToolChange && item.extruder > filament_id)
-                item.extruder--;
-        }
-    }
+    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item)
+        CustomGCode::update_tool_changes_when_delete_filament(item->second, filament_id, replace_filament_id);
 }
 
 

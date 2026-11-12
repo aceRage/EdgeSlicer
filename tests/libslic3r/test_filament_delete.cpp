@@ -2,8 +2,11 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+
+#include <string>
 
 using namespace Slic3r;
 
@@ -48,4 +51,45 @@ TEST_CASE("Deleting a filament removes its own flushing volumes", "[FilamentDele
         CHECK(project.option<ConfigOptionFloats>("flush_volumes_matrix")->values == matrix(kept));
         CHECK(project.option<ConfigOptionFloats>("flush_volumes_vector")->values == vector_of(kept));
     }
+}
+
+// Plater::on_filaments_delete() -> CustomGCode::update_tool_changes_when_delete_filament(). When a
+// filament was merged into another, std::remove_if moved the other items forward and left the
+// filament changes to the merged filament in an unspecified tail: only the first slot of that tail
+// got the target, the tail stayed in the list, and that slot was then numbered down a second time.
+TEST_CASE("Merging a filament retargets every layer filament change to it once", "[FilamentDelete][CustomGCode]")
+{
+    using CustomGCode::Item;
+    using CustomGCode::ToolChange;
+    using CustomGCode::ColorChange;
+    auto items = [](std::initializer_list<std::pair<double, int>> list) {
+        CustomGCode::Info info;
+        for (const auto &[z, extruder] : list)
+            info.gcodes.push_back(Item{ z, ToolChange, extruder, "", "" });
+        return info;
+    };
+    // "print_z:filament" of each item, in order.
+    auto extruders = [](const CustomGCode::Info &info) {
+        std::string out;
+        for (const Item &item : info.gcodes)
+            out += (out.empty() ? "" : " ") + std::to_string(int(item.print_z)) + ":" + std::to_string(item.extruder);
+        return out;
+    };
+
+    // Four filaments; filament 2 (0-based 1) merges into filament 4, which is filament 3 (0-based 2)
+    // after the deletion.
+    CustomGCode::Info info = items({ { 1., 2 }, { 2., 3 }, { 3., 2 }, { 4., 4 }, { 5., 1 }, { 6., 2 } });
+    info.gcodes.push_back(Item{ 7., ColorChange, 2, "#00FF00", "" }); // not a filament change: kept as is
+    CustomGCode::update_tool_changes_when_delete_filament(info, 1, 2);
+    CHECK(extruders(info) == "1:3 2:2 3:3 4:3 5:1 6:3 7:2");
+
+    // Merged into a filament before it: filament 3 (0-based 2) into filament 1.
+    info = items({ { 1., 3 }, { 2., 4 }, { 3., 3 }, { 4., 2 } });
+    CustomGCode::update_tool_changes_when_delete_filament(info, 2, 0);
+    CHECK(extruders(info) == "1:1 2:3 3:1 4:2");
+
+    // Deleted, not merged: its filament changes go, the later filaments are numbered down.
+    info = items({ { 1., 2 }, { 2., 3 }, { 3., 2 }, { 4., 1 } });
+    CustomGCode::update_tool_changes_when_delete_filament(info, 1, -1);
+    CHECK(extruders(info) == "2:2 4:1");
 }
