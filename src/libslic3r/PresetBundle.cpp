@@ -6373,6 +6373,12 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     if (num_filaments != old_number_of_filaments) {
         // First verify if purging volumes presets for each extruder matches number of extruders
         std::vector<double>& filaments = this->project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values;
+        // A deleted filament takes its own pair of volumes and its own row and column of the matrix
+        // along, not the last ones.
+        const size_t deleted = (deleting_filament && old_number_of_filaments == num_filaments + 1 && to_delete_filament_id < old_number_of_filaments) ?
+            to_delete_filament_id : size_t(-1);
+        if (deleted != size_t(-1) && filaments.size() == 2 * old_number_of_filaments)
+            filaments.erase(filaments.begin() + 2 * deleted, filaments.begin() + 2 * deleted + 2);
         while (filaments.size() < 2* num_filaments) {
             filaments.push_back(filaments.size()>1 ? filaments[0] : 140.);  // copy the values from the first extruder
             filaments.push_back(filaments.size()>1 ? filaments[1] : 140.);
@@ -6385,9 +6391,11 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
         std::vector<double> new_matrix;
         for (unsigned int i=0;i< num_filaments;++i)
             for (unsigned int j=0;j< num_filaments;++j) {
+                const size_t old_i = i >= deleted ? i + 1 : i;
+                const size_t old_j = j >= deleted ? j + 1 : j;
                 // append the value for this pair from the old matrix (if it's there):
-                if (i < old_number_of_filaments && j < old_number_of_filaments)
-                    new_matrix.push_back(old_matrix[i* old_number_of_filaments + j]);
+                if (old_i < old_number_of_filaments && old_j < old_number_of_filaments)
+                    new_matrix.push_back(old_matrix[old_i * old_number_of_filaments + old_j]);
                 else
                     new_matrix.push_back( i == j ? 0. : filaments[2 * i] + filaments[2 * j + 1]); // so it matches new extruder volumes
             }
