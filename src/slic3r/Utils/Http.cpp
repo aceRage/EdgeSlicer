@@ -851,6 +851,18 @@ bool Http::url_scheme_is(const std::string &url, const char *scheme)
 	return boost::iequals(url.substr(0, sep), scheme);
 }
 
+std::string Http::url_without_userinfo(const std::string &url)
+{
+    const size_t scheme_end = url.find("://");
+    const size_t start      = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    const size_t end        = std::min(url.find_first_of("/?#", start), url.size());
+    // The last '@' of the authority: a password may hold an '@' of its own.
+    const size_t at = url.rfind('@', end == 0 ? 0 : end - 1);
+    if (at == std::string::npos || at < start)
+        return url;
+    return url.substr(0, start) + url.substr(at + 1);
+}
+
 std::string Http::url_host(const std::string &url)
 {
     const size_t scheme_end = url.find("://");

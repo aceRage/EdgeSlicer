@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
     qidi_send_policy_tests.cpp
     slot_send_policy_tests.cpp
     printhost_error_tests.cpp
+    print_host_secrets_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
