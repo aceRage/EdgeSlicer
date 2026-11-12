@@ -738,13 +738,26 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
 }
 
 // Orca: rebuild the stored wipe path while preserving Polyline's boundary deduplication.
-void Wipe::update_path(const ExtrusionPaths &paths, bool reverse)
+void Wipe::update_path(const ExtrusionPaths &paths, bool reverse, double base_z)
 {
     reset_path();
-    for (const ExtrusionPath& extrusion_path : paths)
+    const bool contoured = std::any_of(paths.begin(), paths.end(), [](const ExtrusionPath &p) { return p.z_contoured(); });
+    for (const ExtrusionPath& extrusion_path : paths) {
+        const size_t first_new = path.points.size();
         path.append(extrusion_path.polyline);
-    if (reverse)
+        if (contoured) {
+            // As GCode::_extrude lays it: the path's own base Z, plus its contour where it has one.
+            const double path_z = base_z + double(extrusion_path.z_offset) * double(extrusion_path.height);
+            for (size_t i = first_new; i < path.points.size(); ++i)
+                heights.push_back(path_z + (extrusion_path.z_contoured() ? double(extrusion_path.z_contour->z_at(path.points[i])) : 0.));
+        }
+    }
+    if (heights.size() != path.points.size())
+        heights.clear();
+    if (reverse) {
         path.reverse();
+        std::reverse(heights.begin(), heights.end());
+    }
 }
 
 std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_last)
@@ -773,8 +786,30 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
         Polyline wipe_path;
         wipe_path.append(gcodegen.last_pos());
         wipe_path.append(this->path.points.begin() + 1, this->path.points.end());
+        // ZAA: the heights of the wipe's points, where the line it goes back along was contoured.
+        std::vector<double> wipe_heights;
+        if (this->heights.size() == this->path.points.size() && this->path.points.size() >= 2) {
+            // The first point is where the nozzle is; Polyline::append left out a second point equal to it.
+            const size_t skipped = wipe_path.points.size() < this->path.points.size() ? 1 : 0;
+            wipe_heights.push_back(gcodegen.writer().get_position().z());
+            wipe_heights.insert(wipe_heights.end(), this->heights.begin() + 1 + skipped, this->heights.end());
+        }
+        const Points unclipped = wipe_path.points;
 
         wipe_path.clip_end(wipe_path.length() - wipe_dist);
+
+        // The height of the wipe's point `idx`: a point it kept, or the one clip_end put on the line after it.
+        auto wipe_height_at = [&wipe_heights, &unclipped, &wipe_path](size_t idx) {
+            const Point &p = wipe_path.points[idx];
+            if (idx < unclipped.size() && unclipped[idx] == p)
+                return wipe_heights[idx];
+            const Vec2d  a = unclipped[idx - 1].cast<double>(), b = unclipped[idx].cast<double>();
+            const double len = (b - a).norm();
+            const double t   = len > 0. ? std::clamp((p.cast<double>() - a).norm() / len, 0., 1.) : 1.;
+            return wipe_heights[idx - 1] + t * (wipe_heights[idx] - wipe_heights[idx - 1]);
+        };
+        const bool follow_heights = wipe_heights.size() == unclipped.size() && !wipe_path.empty() &&
+                                    wipe_path.points.size() <= unclipped.size();
 
         // subdivide the retraction in segments
         if (!wipe_path.empty()) {
@@ -794,14 +829,21 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
                 cooling_mark = /*gcodegen.config().role_based_wipe_speed ? ";_EXTERNAL_PERIMETER" : */ ";_WIPE";
 
             gcode += gcodegen.writer().set_speed(_wipe_speed * 60, "", cooling_mark);
-            for (const Line& line : wipe_path.lines()) {
+            const Lines wipe_lines = wipe_path.lines();
+            for (size_t i = 0; i < wipe_lines.size(); ++i) {
+                const Line &line = wipe_lines[i];
                 double segment_length = line.length();
                 double dE             = length * (segment_length / wipe_dist);
                 // BBS: fix this FIXME
                 // FIXME one shall not generate the unnecessary G1 Fxxx commands, here wipe_speed is a constant inside this cycle.
                 //  Is it here for the cooling markers? Or should it be outside of the cycle?
                 // gcode += gcodegen.writer().set_speed(wipe_speed * 60, "", gcodegen.enable_cooling_markers() ? ";_WIPE" : "");
-                gcode += gcodegen.writer().extrude_to_xy(gcodegen.point_to_gcode(line.b), -dE, "wipe and retract");
+                if (follow_heights) {
+                    // ZAA: over a contoured line, at the line's own height there, as it was laid.
+                    const Vec2d to = gcodegen.point_to_gcode(line.b);
+                    gcode += gcodegen.writer().extrude_to_xyz(Vec3d(to.x(), to.y(), wipe_height_at(i + 1)), -dE, "wipe and retract");
+                } else
+                    gcode += gcodegen.writer().extrude_to_xy(gcodegen.point_to_gcode(line.b), -dE, "wipe and retract");
             }
             // add tag for processor
             gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End) + "\n";
@@ -10685,6 +10727,14 @@ std::string GCode::extrude_loop(
     if (circle_compensation && m_config.apply_scarf_seam_on_circles.value && !m_config.spiral_mode && layer_id() > 0)
         enable_seam_slope = true;
 
+    // ZAA (Z contouring): a wall contoured in height has a height of its own at every point, and gets no scarf; it
+    // is closed with the seam gap. _extrude lays a contoured path by its contour before it looks for a slope, so a
+    // scarf's sloped paths, which keep the contour, were both laid flat along it at full flow: the joint's stretch
+    // twice. (ContourZ.cpp leaves sloped paths alone for the same reason, but the scarf is made after contouring.)
+    if (enable_seam_slope &&
+        std::any_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &path) { return path.z_contoured(); }))
+        enable_seam_slope = false;
+
     // A scarf of no length has no slope to lay: seam_slope_min_length at 0 "effectively disables the scarf".
     // The loop is then a plain one and keeps its seam gap; decided here, before the clip, since a loop that
     // is to get a scarf is not clipped.
@@ -10897,7 +10947,7 @@ std::string GCode::extrude_loop(
 
     // Orca: store loop paths in print order because inward offsets use this orientation.
     if (m_wipe.enable) {
-        m_wipe.update_path(paths);
+        m_wipe.update_path(paths, false, m_nominal_z);
 
         // A loop's role is its first path's role. An overhanging start must
         // not hide ordinary external-wall segments elsewhere in the loop.
@@ -10946,6 +10996,8 @@ std::string GCode::extrude_loop(
                     // Only the stored geometry changes. Like the regular wipe, the path
                     // runs when travel planning retracts and is skipped on short travels.
                     m_wipe.path = std::move(inward_path);
+                    // Off the line: its heights do not apply.
+                    m_wipe.heights.clear();
                 }
             }
         }
@@ -10996,7 +11048,7 @@ std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string 
 
     // BBS
     if (m_wipe.enable) {
-        m_wipe.update_path(multipath.paths, true);
+        m_wipe.update_path(multipath.paths, true, m_nominal_z);
     }
 
     return gcode;
@@ -11027,9 +11079,13 @@ std::string GCode::extrude_path(ExtrusionPath path, std::string description, dou
     //    description += ExtrusionEntity::role_to_string(path.role());
     std::string gcode = this->_extrude(path, description, speed);
     if (m_wipe.enable) {
-        m_wipe.reset_path();
-        m_wipe.path = std::move(path.polyline);
-        m_wipe.path.reverse();
+        if (path.z_contoured()) {
+            m_wipe.update_path({path}, true, m_nominal_z);
+        } else {
+            m_wipe.reset_path();
+            m_wipe.path = std::move(path.polyline);
+            m_wipe.path.reverse();
+        }
     }
 
     return gcode;
@@ -12003,7 +12059,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // grading and curled-perimeter slowdown in new_points below (which sets its own per-point F,
     // scaled here in turn), small-perimeter / resonance avoidance, the initial-layer ramp, and the
     // filament_max_volumetric_speed cap that `speed` has already been clamped to.
-    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value;
+    // Not ironing: its flow is not scaled for the local height (contour_z_extrusion_ratio), and its path.height is
+    // the ironing line's own few thousandths of a mm, not a layer's, so the ratio would slow it to a crawl.
+    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value && path.role() != erIroning;
     const double zaa_h_nominal     = double(path.height);
     const double zaa_max_vol       = filament_max_volumetric_speed;
     // The local height that set the F currently in force, mm; <= 0 means "no scaled F emitted yet
