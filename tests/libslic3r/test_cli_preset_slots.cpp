@@ -121,7 +121,7 @@ TEST_CASE("A filament set to high flow reads its high-flow values from a preset 
     CHECK(temperature_of(config, 0) == 215);
     CHECK(temperature_of(config, 1) == 260);
     const auto *ratio = config.option<ConfigOptionFloats>("filament_flow_ratio");
-    CHECK(ratio->get_at(get_config_idx(config, ConfigFlowDomain::Filament, 1)) == Approx(0.94));
+    CHECK_THAT(ratio->get_at(get_config_idx(config, ConfigFlowDomain::Filament, 1)), Catch::Matchers::WithinRel(0.94, 1e-9));
     CHECK(config.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{215, 260});
 }
 
@@ -182,6 +182,6 @@ TEST_CASE("A preset given to the CLI falls back to its first value as the applic
         const auto *opt = config.option<ConfigOptionFloatsNullable>("filament_retraction_length");
         REQUIRE(opt != nullptr);
         REQUIRE(!opt->is_nil(0));
-        CHECK(opt->get_at(0) == Approx(0.8));
+        CHECK_THAT(opt->get_at(0), Catch::Matchers::WithinRel(0.8, 1e-9));
     }
 }
