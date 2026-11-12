@@ -839,8 +839,11 @@ public:
                         (i1.height != i2.height ? (i1.height < i2.height) : (i1.area() > i2.area()));
             }
             else {
+                // By the first filament only: telling lists apart by all their filaments but ordering
+                // them by the first made {1} and {1, 2} compare neither way, not a strict weak ordering.
+                auto first_filament = [](const Item &i) { return i.extrude_ids.empty() ? -1 : i.extrude_ids.front(); };
                 return i1.bed_temp != i2.bed_temp ? (i1.bed_temp > i2.bed_temp) :
-                    (i1.extrude_ids != i2.extrude_ids ? (i1.extrude_ids.front() < i2.extrude_ids.front()) : (i1.area() > i2.area()));
+                    (first_filament(i1) != first_filament(i2) ? (first_filament(i1) < first_filament(i2)) : (i1.area() > i2.area()));
             }
         };
 
@@ -849,7 +852,8 @@ public:
 
     template<class It> inline void operator()(It from, It to) {
         m_rtree.clear();
-        m_item_count += size_t(to - from);
+        // The items to place: the fixed ones (prime towers, excluded areas) are never "left to place".
+        m_item_count += size_t(std::count_if(from, to, [](const Item &itm) { return !itm.isFixed(); }));
         m_pck.execute(from, to);
         m_item_count = 0;
     }
@@ -862,8 +866,6 @@ public:
             Item& itm = fixeditems[idx];
             itm.markAsFixedInBin(itm.binId());
         }
-
-        m_item_count += fixeditems.size();
     }
 };
 
@@ -1032,7 +1034,8 @@ void _arrange(
     // polygon nesting, a convex hull needs to be calculated.
     if (params.allow_rotations) {
         for (auto &itm : shapes) {
-            itm.rotation(min_area_boundingbox_rotation(itm.transformedShape()));
+            // Measured on the outline as already turned, so it adds to the object's turn.
+            itm.rotate(min_area_boundingbox_rotation(itm.transformedShape()));
 
             // If the item is too big, try to find a rotation that makes it fit
             if constexpr (std::is_same_v<BinT, Box>) {
