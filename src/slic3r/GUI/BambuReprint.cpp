@@ -245,6 +245,7 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
         int ams_id = -1;
         try { ams_id = std::stoi(kv.first); } catch (...) { continue; }
         if (BambuExtruderMap::is_external_spool_ams_id(ams_id)) continue;
+        if (a->is_rack()) continue; // a rack AMS (H3C AMS 3H) is not a mapping target yet
         for (const auto& tk : a->trayList) {
             AmsTray* t = tk.second;
             if (!t) continue;
@@ -576,6 +577,7 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         in.project_filament_count = job.project_filament_count;
         in.filament_ids           = job.filament_ids;
         if (job.dual()) in.nozzle_filament_map = job.filament_map;
+        in.blocked_ams_ids = pr.blocked_ams_ids;
         if (problems.empty())
             BambuSendMapping::compose(ev.result, filaments, in, ev.ams_mapping, ev.ams_mapping2, ev.ams_mapping_info);
     } else if (!ev.use_ams && !filaments.empty()) {
@@ -757,6 +759,7 @@ Printer snapshot(MachineObject* obj, const Job& job)
         pr.nozzle_hrc.push_back(hrc);
     }
     pr.trays   = trays_of(obj, job.physical_extruder_map);
+    pr.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     pr.nozzles = DualNozzle::printer_state(obj).nozzles;
     return pr;
 }

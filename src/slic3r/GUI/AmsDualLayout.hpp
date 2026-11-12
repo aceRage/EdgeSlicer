@@ -22,6 +22,9 @@ enum UnitType : int {
     UNIT_AMS_LITE  = 2, // AMS lite (4 slots)
     UNIT_N3F       = 3, // AMS 2 Pro (4 slots, heated)
     UNIT_N3S       = 4, // AMS HT (1 slot, heated)
+    UNIT_LITE_MIXED = 5, // AMS lite on an N9
+    UNIT_RACK_A    = 6, // AMS 3H (H3C: 9 slots, one per rack nozzle; labelled "1".."9")
+    UNIT_RACK_B    = 7, // AMS-B (rack, labelled by number)
 };
 
 constexpr int MAIN_EXTRUDER   = 0; // right-hand extruder on two-extruder machines
@@ -57,6 +60,9 @@ struct UnitRef
     int         type        = UNIT_AMS;
     int         extruder_id = MAIN_EXTRUDER;
     int         slot_count  = 4;
+    // An external spool holder of a printer with more holders than extruders (a nozzle rack's,
+    // 255 down to 247): labelled "1-Ext".."9-Ext" as Bambu Studio does. Set by group_units().
+    bool        numbered_ext = false;
 };
 
 // Which extruder an external spool feeds on a machine with `extruder_count` extruders.
@@ -83,7 +89,8 @@ int page_of_unit(const Side &side, const std::string &ams_id);
 // Index into group_units()'s result of the side that holds `ams_id`, or -1.
 int side_of_unit(const std::vector<Side> &sides, const std::string &ams_id);
 
-// Label drawn above a slot: "A1".."D4" for 4-slot units, "A".."H" for AMS HT, "Ext" for a spool.
+// Label drawn above a slot: "A1".."D4" for 4-slot units, "A".."H" for AMS HT, "1".."9" for a rack
+// AMS (AMS 3H), "Ext" for a spool ("1-Ext".."9-Ext" for a nozzle rack's numbered holders).
 std::string slot_label(const UnitRef &unit, int slot_index);
 
 // The extruder's "snow" (slot now) pair decoded by DeviceManager: an unloaded extruder reports
