@@ -1056,8 +1056,23 @@ void SelectMachineDialog::finish_mode()
 }
 
 
+// The spool holders the slot picker offers: a two-extruder printer's 254 / 255, or a nozzle rack's
+// holders 255 down to 247 (the H3C; the picker keeps those a rack nozzle is fed from).
+static std::vector<AmsTray> mapping_spools(MachineObject* obj)
+{
+    if (!obj)
+        return {};
+    if (obj->is_rack_printer())
+        return obj->vir_slots;
+    return obj->external_spools();
+}
+
 void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &result)
 {
+    bool rack_printer = false;
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            rack_printer = obj->is_rack_printer();
     if (result.empty()) {
         BOOST_LOG_TRIVIAL(trace) << "ams_mapping result is empty";
         for (auto it = m_materialList.begin(); it != m_materialList.end(); it++) {
@@ -1082,7 +1097,7 @@ void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &res
                 wxColour ams_col;
 
                 if (f->tray_id >= 0) {
-                    ams_id = wxGetApp().transition_tridid(f->tray_id);
+                    ams_id = wxGetApp().transition_tridid(f->tray_id, rack_printer); // "1".."9" / "N-Ext" on the H3C
                     //ams_id = wxString::Format("%02d", f->tray_id + 1);
                 } else {
                     ams_id = "-";
@@ -1591,7 +1606,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
             continue;
         }
         auto ams_it = obj_->amsList.find(std::to_string(it->second.ams_id));
-        if (ams_it == obj_->amsList.end() || !ams_it->second || ams_it->second->is_rack()) // never the H3C's AMS 3H yet
+        if (ams_it == obj_->amsList.end() || !ams_it->second)
             continue;
         // Only a tray that feeds the extruder the G-code prints this filament with.
         if (r.id >= 0 && r.id < (int) fil_map.size() &&
@@ -1601,7 +1616,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         if (tray_it == ams_it->second->trayList.end() || !tray_it->second || !tray_it->second->is_exists)
             continue;
         AmsTray* t = tray_it->second;
-        r.tray_id        = it->second.ams_id * 4 + it->second.slot_id;
+        r.tray_id        = obj_->tray_index_of(it->second.ams_id, it->second.slot_id); // 28 + slot on the AMS 3H
         r.ams_id         = std::to_string(it->second.ams_id);
         r.slot_id        = std::to_string(it->second.slot_id);
         r.color          = t->color;
@@ -3962,7 +3977,7 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(extruder));
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots());
                     m_mapping_popup.Popup();
                 }
             }
@@ -4388,7 +4403,7 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(fo.id));
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots());
                     m_mapping_popup.Popup();
                 }
             }

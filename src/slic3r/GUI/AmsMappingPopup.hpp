@@ -63,6 +63,7 @@ struct TrayData
 
     int             ams_id = 0;
     int             slot_id = 0;
+    bool            rack = false; // an H3C AMS 3H slot or rack spool holder: labelled the H3C's way
 };
 
 class MaterialItem: public wxPanel
@@ -176,8 +177,10 @@ public:
      * each offered on its own extruder's side. only_physical_extruder >= 0 shows only the AMS units
      * and the holder of that physical extruder - the one the filament was sliced for - as
      * BambuStudio's picker does; -1 shows everything (one-extruder printers, unknown side). */
+    /* rack_bound: on a nozzle rack's printer (H3C), the slots a rack nozzle is fed from
+     * (MachineObject::rack_bound_slots); only those AMS 3H slots and spool holders are offered. */
     void         update_ams_data(std::map<std::string, Ams *> amsList, const std::vector<AmsTray> &ext_spools = {},
-                                 int only_physical_extruder = -1);
+                                 int only_physical_extruder = -1, const std::vector<std::pair<int, int>> &rack_bound = {});
     void         update_ams_data_multi_machines();
     void         add_ams_mapping(std::vector<TrayData> tray_data, wxWindow* container, wxBoxSizer* sizer);
     void         set_current_filament_id(int id){m_current_filament_id = id;};

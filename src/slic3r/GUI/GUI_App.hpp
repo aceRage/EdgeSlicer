@@ -638,6 +638,8 @@ public:
     void            load_gcode(wxWindow* parent, wxString& input_file) const;
 
     wxString transition_tridid(int trid_id);
+    // rack_printer: the H3C's numbering (GUI::AmsTypes::rack_tray_label: "1".."9", "1-Ext".."9-Ext").
+    wxString transition_tridid(int trid_id, bool rack_printer);
     void            ShowUserGuide();
     // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). Everything that
     // used to offer that download - sign-in, the Device tab, the setup wizard, Preferences, the
