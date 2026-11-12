@@ -25,6 +25,7 @@
 #include "SsdpConnectType.hpp"
 #include "BindListRefresh.hpp"
 #include "AmsDrying.hpp"
+#include "AmsTypes.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
 #include "NozzleInfo.hpp"
@@ -177,6 +178,8 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
+    int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
@@ -306,6 +309,8 @@ public:
     bool            is_exists = false;
     int             hold_count = 0;
     int             remain = 0;         // filament remain: 0 ~ 100
+    int             remain_g = -1;      // grams left as the printer counts them, -1 = not reported
+    int             state = -1;         // the tray's "state" (H3C: 27 loaded, 160 empty), -1 = not reported
 
     AmsRoadPosition road_position;
     AmsStep         step_state;
@@ -345,9 +350,24 @@ public:
     std::map<std::string, AmsTray *> trayList;
 
     int nozzle;
-    int type{1}; // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+    int type{1}; // GUI::AmsTypes: 0 dummy, 1 AMS, 2 AMS Lite, 3 AMS 2 Pro, 4 AMS HT, 5 AMS Lite (N9), 6 AMS 3H, 7 AMS-B
     // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
     GUI::AmsDrying::DryState dry;
+
+    // The drying zones of an AMS 3H (zone_info[]): each has its own slots, humidity and temperature,
+    // and the unit itself reports neither (Bambu Studio DevAms::DevAmsZone).
+    struct Zone
+    {
+        int              id{-1};
+        std::vector<int> slots;
+        int              humidity{-1};     // level 1..5, larger is drier; -1 = not reported
+        int              humidity_raw{-1}; // percent, -1 = not reported
+        float            temperature{INVALID_AMS_TEMPERATURE};
+        int              left_dry_time{0};
+    };
+    std::vector<Zone> zones;
+
+    bool is_rack() const { return GUI::AmsTypes::is_rack_ams(type); }
 };
 
 enum PrinterFirmwareType {
@@ -646,11 +666,13 @@ public:
 
     /* ams properties */
     std::map<std::string, Ams*> amsList;    // key: ams[id], start with 0
-    long  ams_exist_bits = 0;
-    long  tray_exist_bits = 0;
-    long  tray_is_bbl_bits = 0;
-    long  tray_read_done_bits = 0;
-    long  tray_reading_bits = 0;
+    // 64-bit like BambuStudio's (DeviceManager.hpp, "[N10] support N10"): the H3C's AMS 3H reports its
+    // nine slots as tray bits 28..36, past a 32-bit long (MSVC), and stol threw on them.
+    long long ams_exist_bits = 0;
+    long long tray_exist_bits = 0;
+    long long tray_is_bbl_bits = 0;
+    long long tray_read_done_bits = 0;
+    long long tray_reading_bits = 0;
     int   ams_rfid_status = 0;
     bool  ams_insert_flag { false };
     bool  ams_power_on_flag { false };
@@ -1350,6 +1372,9 @@ public:
     /*for parse new info*/
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
+    // print.ams of a push_status report (jj = the "print" object). May throw; parse_json catches it
+    // on its own so the rest of the report is still read.
+    void parse_ams_report(const json& jj, bool key_field_only);
     bool is_nozzle_data_invalid();
     // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
     // the printer has not reported it (Orca #12814).
@@ -1374,6 +1399,44 @@ public:
     std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
     std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
+    // A hex bitmask from the status report ("ams_exist_bits", "tray_exist_bits", ...) into 64 bits.
+    // Never throws: a value that is not hex, or does not fit, leaves `bits` as it was and returns false.
+    static bool parse_hex_bits(const json& value, long long& bits);
+    // Bit `index` of a 64-bit report mask; an index outside 0..63 is not set.
+    static bool hex_bit_set(long long bits, int index) { return index >= 0 && index < 64 && ((bits >> index) & 1LL) != 0; }
+
+    // Rack AMS units (the H3C's AMS 3H, GUI::AmsTypes::is_rack_ams): each slot feeds one rack nozzle.
+    bool has_rack_ams() const;
+    // A printer with a nozzle rack's spool holders (one per rack position, ids 255 down to 247).
+    bool is_rack_printer() const { return has_rack_ams() || vir_slots.size() > 2; }
+    // zone_info[] of one AMS unit into ams.zones (strings or numbers, never throws).
+    static void parse_ams_zones(const json& zone_info, Ams& ams);
+    bool is_rack_ams_id(const std::string& ams_id) const;
+    // The tray number a send mapping names (ams_id, slot_id) by (GUI::AmsTypes::mapping_tray_index):
+    // 28 + slot on the AMS 3H, the holder's own id for a spool holder, ams_id * 4 + slot otherwise.
+    int  tray_index_of(const std::string& ams_id, const std::string& slot_id) const;
+    int  tray_index_of(int ams_id, int slot_id) const { return tray_index_of(std::to_string(ams_id), std::to_string(slot_id)); }
+    // The inverse: false when the number names no unit this printer reports.
+    bool decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const;
+    // Whether the printer reports that slot (Bambu Studio get_tray: a spool holder ignores the slot).
+    bool slot_reported(int ams_id, int slot_id) const;
+    // The slot each rack nozzle is fed from (GUI::AmsTypes::bound_slot): what the send mapping may
+    // map to on a rack printer. A spool holder comes back as (holder id, 0).
+    std::vector<std::pair<int, int>> rack_bound_slots() const;
+    // Kept as the one switch for slots that cannot be sent to: none since the AMS 3H numbering and the
+    // rack pairing are ported (phase 2). The gates that call it stay in place.
+    bool mapping_blocked_ams_id(const std::string& ams_id) const;
+    std::set<std::string> mapping_blocked_ams_ids() const;
+    // Takes every entry that names a blocked slot out of a mapping result (tray -1, no ams/slot) and
+    // returns how many it took out.
+    int strip_blocked_mapping(std::vector<FilamentInfo>& result) const;
+    // Device page actions (load, unload, edit, RFID re-read) refused on that slot: none since phase 2.
+    bool slot_actions_blocked(const std::string& ams_id) const { return mapping_blocked_ams_id(ams_id); }
+    // Load / unload on a rack AMS slot or rack spool holder, as Bambu Studio's hotend page sends it
+    // (GUI::FilamentCommands::rack_change_filament_json).
+    int command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp);
+    // RFID re-read of one rack AMS slot (Bambu Studio command_ams_refresh_rfid2, mode 0).
+    int command_ams_get_rfid(int ams_id, int slot_id, int mode = 0);
 
     /* Device Filament Check */
     struct FilamentData

@@ -96,6 +96,7 @@ struct Prepared
     std::string fil_ams, fil_slot;
     int         fil_old_temp { -1 }, fil_new_temp { -1 };
     bool        multi_extruders { false };
+    bool        rack { false }; // an H3C AMS 3H slot or rack spool holder: Bambu Studio's hotend-page command
     // How long a Moonraker command may take: a filament load or unload runs for minutes and the
     // printer answers the script only when it is done.
     int         timeout_s { 15 };

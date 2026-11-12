@@ -831,12 +831,14 @@ private:
         Point       safe_pos{DefaultTimelapsePos};
     };
     // BambuStudio's generate_timelapse_gcode: expands time_lapse_gcode for the active filament, with
-    // the picked safe position (none when skip_pos_pick: the inline farthest-point photo).
-    TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false);
+    // the picked safe position (none when skip_pos_pick: the inline farthest-point photo). curr_filament >= 0
+    // names the filament the photo is taken for when the writer has not switched to it yet (a tool change).
+    TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false,
+                                                  int curr_filament = -1);
     // Orca #16680: the time_lapse_gcode placeholders (layer, extruders, safe spot) for every printer.
     // The picker runs when always_pick or when the template names its results. Requires an active filament.
     DynamicConfig timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
-                                         bool always_pick, Point *safe_pos = nullptr);
+                                         bool always_pick, Point *safe_pos = nullptr, int curr_filament = -1);
     // Inline farthest-point photo: called with the end point of every extrusion move.
     void check_and_insert_inline_timelapse(std::string &gcode, const Point &endpoint_scaled);
 

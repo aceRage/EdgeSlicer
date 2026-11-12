@@ -300,6 +300,10 @@ struct PrintInstance
 
 typedef std::vector<PrintInstance> PrintInstances;
 
+// Bridge over infill: the direction (radians) a bridge over bridged_area is to run in when nothing else sets it, by a
+// vote of the nearest of the anchors every 2 mm or so along its outline. Declared here for the unit tests.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors);
+
 class PrintObjectRegions
 {
 public:
