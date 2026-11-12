@@ -3052,7 +3052,7 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
 
     const auto                t0     = std::chrono::steady_clock::now();
     const HeadCollisionReport report = check_head_collisions(result.moves, *head, HeadCollisionParams(),
-                                                             [&print]() { print.throw_if_canceled(); });
+                                                             [&print]() { if (print.canceled()) throw CanceledException(); });
     BOOST_LOG_TRIVIAL(info) << "Head clearance check (" << head->id << "): " << report.moves_checked << " moves, "
                             << report.hit_moves << " with contact, deepest " << report.max_depth << " mm, "
                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s";
@@ -4707,7 +4707,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!thumbnails.empty())
                 GCodeThumbnails::export_thumbnails_to_file(
                     thumbnail_cb, print.get_plate_index(), thumbnails, [&file](const char* sz) { file.write(sz); },
-                    [&print]() { print.throw_if_canceled(); });
+                    [&print]() { if (print.canceled()) throw CanceledException(); });
         }
     }
 
