@@ -104,3 +104,126 @@ TEST_CASE("Head clearance: shipped data files load and cover the first printers"
         CHECK(n == 1);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Collision checker
+// ---------------------------------------------------------------------------------------------
+
+#include <libslic3r/GCode/HeadCollisionCheck.hpp>
+
+namespace {
+
+using MV = GCodeProcessorResult::MoveVertex;
+
+MV vertex(EMoveType type, float x, float y, float z, unsigned layer = 0, ExtrusionRole role = erExternalPerimeter)
+{
+    MV m;
+    m.type           = type;
+    m.position       = Vec3f(x, y, z);
+    m.layer_id       = layer;
+    m.extrusion_role = type == EMoveType::Extrude ? role : erNone;
+    m.delta_extruder = type == EMoveType::Extrude ? 0.1f : 0.f;
+    m.width          = 0.4f;
+    m.height         = 0.2f;
+    return m;
+}
+
+HeadClearance test_head()
+{
+    auto head = parse_head_clearance_json(MINIMAL_HEAD);
+    REQUIRE(head.has_value());
+    return *head;
+}
+
+// A 10 mm square patch of parallel lines at height z, line spacing 0.4.
+void add_patch(std::vector<MV> &moves, float x0, float y0, float z, unsigned layer, ExtrusionRole role = erTopSolidInfill)
+{
+    for (int i = 0; i <= 25; ++i) {
+        const float y = y0 + 0.4f * i;
+        moves.push_back(vertex(EMoveType::Travel, x0, y, z, layer));
+        moves.push_back(vertex(EMoveType::Extrude, x0 + 10.f, y, z, layer, role));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Head collision check: planar layers never hit", "[HeadClearance]")
+{
+    std::vector<MV> moves;
+    moves.push_back(vertex(EMoveType::Travel, 0, 0, 0.2f));
+    for (unsigned l = 0; l < 5; ++l)
+        add_patch(moves, 0.f, 0.f, 0.2f * (l + 1), l);
+    const HeadCollisionReport r = check_head_collisions(moves, test_head());
+    CHECK(r.ran);
+    CHECK(r.moves_checked > 200);
+    CHECK(r.hit_moves == 0);
+    CHECK(r.hits.empty());
+}
+
+TEST_CASE("Head collision check: travel across raised material hits the nozzle", "[HeadClearance]")
+{
+    std::vector<MV> moves;
+    moves.push_back(vertex(EMoveType::Travel, 0, 0, 0.4f));
+    // A contoured bead raised to 0.7 while the layer's nominal top is 0.4.
+    moves.push_back(vertex(EMoveType::Travel, 5.f, 0.f, 0.7f, 1));
+    moves.push_back(vertex(EMoveType::Extrude, 5.f, 10.f, 0.7f, 1));
+    // Back down to the nominal Z, then a travel straight through it.
+    moves.push_back(vertex(EMoveType::Travel, 0.f, 5.f, 0.4f, 1));
+    moves.push_back(vertex(EMoveType::Travel, 10.f, 5.f, 0.4f, 1));
+    const HeadCollisionReport r = check_head_collisions(moves, test_head());
+    REQUIRE(r.hit_moves >= 1);
+    const HeadCollisionHit &h = r.hits.back();
+    CHECK(h.travel);
+    CHECK(h.part == "nozzle");
+    CHECK(h.layer_id == 1);
+    CHECK(h.depth == Approx(0.3).margin(0.02));
+    CHECK(r.max_depth == Approx(0.3).margin(0.02));
+
+    // The same travel lifted clear of it (Z hop) does not hit.
+    moves[3].position.z() = 1.0f;
+    moves[4].position.z() = 1.0f;
+    CHECK(check_head_collisions(moves, test_head()).hit_moves == 0);
+}
+
+TEST_CASE("Head collision check: tolerance absorbs small steps", "[HeadClearance]")
+{
+    std::vector<MV> moves;
+    moves.push_back(vertex(EMoveType::Travel, 0, 0, 0.4f));
+    moves.push_back(vertex(EMoveType::Travel, 5.f, 0.f, 0.45f, 1));
+    moves.push_back(vertex(EMoveType::Extrude, 5.f, 10.f, 0.45f, 1));
+    moves.push_back(vertex(EMoveType::Travel, 0.f, 5.f, 0.4f, 1));
+    moves.push_back(vertex(EMoveType::Travel, 10.f, 5.f, 0.4f, 1));
+    CHECK(check_head_collisions(moves, test_head()).hit_moves == 0);
+}
+
+TEST_CASE("Head collision check: a tall neighbour reaches a box", "[HeadClearance]")
+{
+    std::vector<MV> moves;
+    moves.push_back(vertex(EMoveType::Travel, 20.f, 0.f, 6.f));
+    // A tall bead 6 mm high at x = 20 (only its top matters to the height map).
+    moves.push_back(vertex(EMoveType::Extrude, 20.f, 10.f, 6.f, 29));
+    // A low move 5 mm beside it: clear of the nozzle (radius 3), inside the duct box (|x| <= 10, z >= 4).
+    moves.push_back(vertex(EMoveType::Travel, 15.f, 0.f, 1.f, 4));
+    moves.push_back(vertex(EMoveType::Extrude, 15.f, 10.f, 1.f, 4));
+    const HeadCollisionReport r = check_head_collisions(moves, test_head());
+    REQUIRE(r.hit_moves >= 1);
+    CHECK(r.hits.front().part == "duct");
+    CHECK(r.hits.front().depth == Approx(1.).margin(0.05));
+}
+
+TEST_CASE("Head collision check: ironing and start G-code are not reported", "[HeadClearance]")
+{
+    std::vector<MV> moves;
+    // Start G-code purge line far above everything, then lowered: prepare_stage moves are ignored.
+    MV purge_a = vertex(EMoveType::Travel, 0.f, 5.f, 3.f);
+    MV purge_b = vertex(EMoveType::Extrude, 10.f, 5.f, 3.f);
+    purge_a.prepare_stage = purge_b.prepare_stage = true;
+    moves.push_back(purge_a);
+    moves.push_back(purge_b);
+    moves.push_back(vertex(EMoveType::Travel, 5.f, 0.f, 0.6f, 1));
+    moves.push_back(vertex(EMoveType::Extrude, 5.f, 10.f, 0.6f, 1));
+    // Ironing deliberately rubs: below the bead by 0.2, no nozzle report.
+    moves.push_back(vertex(EMoveType::Extrude, 0.f, 5.f, 0.4f, 1, erIroning));
+    moves.push_back(vertex(EMoveType::Extrude, 10.f, 5.f, 0.4f, 1, erIroning));
+    CHECK(check_head_collisions(moves, test_head()).hit_moves == 0);
+}

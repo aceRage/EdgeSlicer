@@ -139,7 +139,10 @@ public:
         SlicingRackMixedDiameter,
         // precise_z_height could not bring an object's last layer to the object's height (fewer than six
         // layers, or the last five at the layer height limits). Appended; own id.
-        SlicingPreciseZNotApplied
+        SlicingPreciseZNotApplied,
+        // Head clearance check (GCode/HeadCollisionCheck.hpp): a Z-contoured print has moves where the
+        // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
+        SlicingHeadCollision
     };
 
     typedef size_t TimeStamp;

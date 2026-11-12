@@ -752,6 +752,10 @@ public:
     size_t get_id() const { return m_id; }
     void set_id(size_t id) { m_id = id; }
 
+    // ZAA (Z contouring): whether posContouring contours this object at all (some region has
+    // zaa_enabled and no guard forbids it). Public for the G-code head clearance check.
+    bool need_z_contouring() const;
+
   private:
     // to be called from Print only.
     friend class Print;
@@ -792,7 +796,6 @@ private:
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();
-    bool need_z_contouring() const;
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
