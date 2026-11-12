@@ -3349,9 +3349,8 @@ static void organic_smooth_branches_avoid_collisions(
                             // a little bit of hysteresis to detect end of
                             ++ num_moved;
                         // Limit collision-avoidance nudge per iteration.
-                        double nudge_dist = std::min(std::max(0., collision_sphere.last_collision_depth + collision_extra_gap), max_nudge_collision_avoidance);
-                        Vec2d nudge_vector = (to_2d(collision_sphere.position) - to_2d(collision_sphere.last_collision)).cast<double>().normalized() * nudge_dist;
-                        Vec2d candidate = to_2d(collision_sphere.position).cast<double>() + nudge_vector * nudge_dist;
+                        Vec2d candidate = organic_collision_nudge(to_2d(collision_sphere.position).cast<double>(), to_2d(collision_sphere.last_collision).cast<double>(),
+                                                                  collision_sphere.last_collision_depth, collision_extra_gap, max_nudge_collision_avoidance);
                         candidate = limit_candidate_to_linked_layers(collision_sphere_id, candidate);
                         collision_sphere.position.head<2>() = candidate.cast<float>();
                     }

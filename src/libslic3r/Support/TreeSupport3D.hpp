@@ -308,6 +308,16 @@ using SupportElements = std::deque<SupportElement>;
     return support_element_collision_radius(settings, elem.state);
 }
 
+// Organic smoothing (organic_smooth_branches_avoid_collisions()): a branch's collision sphere centred
+// at `position` reaches `collision_depth` into the part at its nearest point `collision` (all in mm).
+// Its centre moves straight away from that point by the depth and `extra_gap`, but at most
+// `max_nudge` in one iteration.
+[[nodiscard]] inline Vec2d organic_collision_nudge(const Vec2d &position, const Vec2d &collision, double collision_depth, double extra_gap, double max_nudge)
+{
+    const double nudge_dist = std::min(std::max(0., collision_depth + extra_gap), max_nudge);
+    return position + (position - collision).normalized() * nudge_dist;
+}
+
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
 void organic_draw_branches(
     PrintObject                     &print_object,
