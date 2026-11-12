@@ -2,7 +2,11 @@
 
 #include <catch2/catch.hpp>
 
+#include <map>
+
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -169,4 +173,72 @@ TEST_CASE("Tree support holds up both overhangs that join a cluster on the same 
         CHECK(left > 0.5);
         CHECK(right > 0.5);
     }
+}
+
+// Organic trees: a branch that rests on the part away from a placeable area (on a slope, say) is
+// carried a few layers further down (organic_draw_branches(), "bottom_extra_slices"). The first of
+// those layers was cut by the collision of the layer above it, which leaves out the part within the
+// bottom Z gap below the new layer, so that layer could lie right on the part: support fused to the
+// part. On the Benchy (supports everywhere, 0.2 mm layers and a 0.2 mm bottom gap) 36 mm of support
+// lines lay on the part's layer just below them.
+TEST_CASE("Organic tree support carried down keeps the bottom Z gap", "[TreeSupport][TreeSupportFixes]")
+{
+    Model model;
+    {
+        DynamicPrintConfig        cfg;
+        ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+        PlateDataPtrs             plate_data;
+        std::vector<Preset *>     presets;
+        bool                      is_bbl = false;
+        Semver                    version;
+        const std::string path = std::string(TEST_DATA_DIR) + "/../../resources/handy_models/3DBenchy.3mf";
+        REQUIRE(load_bbs_3mf(path.c_str(), &cfg, &ctxt, &model, &plate_data, &presets, &is_bbl, &version, nullptr, LoadStrategy::LoadModel));
+        release_PlateData_list(plate_data);
+        REQUIRE(! model.objects.empty());
+        for (ModelObject *object : model.objects)
+            object->ensure_on_bed();
+    }
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_support", 1 },
+        { "support_type", "tree(auto)" },
+        { "support_style", "organic" },
+        { "support_on_build_plate_only", 0 },
+        { "support_threshold_angle", 30 },
+        { "support_top_z_distance", 0.2 },
+        { "support_bottom_z_distance", 0.2 },
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_generator", "classic" },
+    });
+    Print print;
+    print.set_status_silent();
+    for (ModelObject *object : model.objects)
+        print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.process();
+
+    double length = 0., on_part = 0.;
+    for (const PrintObject *object : print.objects()) {
+        std::map<long, size_t> layer_of_z;
+        for (const Layer *layer : object->layers())
+            layer_of_z[lround(layer->print_z * 1000.)] = layer->id();
+        for (const SupportLayer *support_layer : object->support_layers()) {
+            Polylines lines = support_layer->support_fills.as_polylines();
+            for (const auto &by_extruder : support_layer->interface_by_extruder)
+                append(lines, by_extruder.second.as_polylines());
+            for (const Polyline &pl : lines)
+                length += unscale<double>(pl.length());
+            auto it = layer_of_z.find(lround(support_layer->print_z * 1000.));
+            if (it == layer_of_z.end() || it->second == 0)
+                continue;
+            // The part's layer just below, 0.05 mm inside its outline: the 0.2 mm bottom gap is one layer.
+            const ExPolygons below = offset_ex(object->get_layer(int(it->second) - 1)->lslices, -scaled<float>(0.05));
+            for (const Polyline &pl : intersection_pl(lines, below))
+                on_part += unscale<double>(pl.length());
+        }
+    }
+    INFO("support lines " << length << " mm, of which " << on_part << " mm lie on the part with no gap");
+    REQUIRE(length > 10000.);
+    CHECK(on_part == 0.);
 }
