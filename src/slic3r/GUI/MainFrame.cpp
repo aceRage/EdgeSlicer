@@ -1656,19 +1656,23 @@ void MainFrame::init_tabpanel() {
         int sel = m_tabpanel->GetSelection();
         //wxString page_text = m_tabpanel->GetPageText(sel);
         m_last_selected_tab = m_tabpanel->GetSelection();
+        // A project switch (ProjectStrip) moves pages while it swaps the project: the selection wx makes on its own
+        // there (the page before a removed Device page is Showcase) must not switch the project's view; the strip puts
+        // the tab the user was on back, and its view, when the switch is done (ProjectStrip::restore_tab).
+        const bool strip_switching = m_project_strip != nullptr && m_project_strip->switching();
         if (panel == m_plater) {
             if (sel == tp3DEditor) {
-                if (!m_plater || !m_plater->is_view3D_shown())
+                if (!strip_switching && (!m_plater || !m_plater->is_view3D_shown()))
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_3D));
                 m_param_panel->OnActivate();
             }
             else if (sel == tpPreview) {
-                if (!m_plater || m_plater->is_view3D_shown() || m_plater->is_showcase_shown())
+                if (!strip_switching && (!m_plater || m_plater->is_view3D_shown() || m_plater->is_showcase_shown()))
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_PREVIEW));
                 m_param_panel->OnActivate();
             }
             else if (sel == tpShowcase) {
-                if (m_plater && !m_plater->is_showcase_shown())
+                if (!strip_switching && m_plater && !m_plater->is_showcase_shown())
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_SHOWCASE));
             }
         }

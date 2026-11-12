@@ -367,6 +367,43 @@ long long ProjectStrip::show_slot(int id)
     return ms_since(started);
 }
 
+void ProjectStrip::remember_tab()
+{
+    Notebook *tabs    = m_frame != nullptr ? m_frame->m_tabpanel : nullptr;
+    m_tab_before      = tabs != nullptr ? tabs->GetSelection() : -1;
+    m_tab_page_before = tabs != nullptr && m_tab_before >= 0 ? tabs->GetCurrentPage() : nullptr;
+}
+
+// Owner report 2026-11-11: a switch from Device landed on Showcase, from Preview too. The tab on screen is kept (it is not
+// the next project's own one), whatever the switch did to the notebook meanwhile: restoring the next project's presets
+// can swap the Device page for another kind of device page (MainFrame::show_device), and wx then moves the selection to
+// the page before the removed one, which is Showcase.
+void ProjectStrip::restore_tab()
+{
+    Plater   *p    = plater();
+    Notebook *tabs = m_frame != nullptr ? m_frame->m_tabpanel : nullptr;
+    if (p == nullptr || tabs == nullptr)
+        return;
+    const int before = m_tab_before;
+    // Where the same page window is now (the plater pages and Device are told apart by position instead).
+    const int page_now = m_tab_page_before != nullptr ? tabs->FindPage(m_tab_page_before) : -1;
+    m_tab_before       = -1;
+    m_tab_page_before  = nullptr;
+    const int want     = MainTabs::tab_after_switch(before, page_now == wxNOT_FOUND ? -1 : page_now, int(tabs->GetPageCount()));
+    if (tabs->GetSelection() != want)
+        m_frame->select_tab(size_t(want));
+    // This Plater shows the view of the tab the user is on (it kept its own until now): line them up as a tab change does.
+    // Preview of a plate that cannot be sliced (an empty new project) shows its empty state without slicing, as the Preview
+    // button does.
+    if (MainTabs::hosts_plater(want) && tab_for_view(*p) != want) {
+        const int plate = p->get_partplate_list().get_curr_plate_index();
+        if (want == int(MainTabs::Preview))
+            p->select_view_3D("Preview", !p->is_plate_sliceable(plate));
+        else
+            p->select_view_3D(want == int(MainTabs::Showcase) ? "Showcase" : "3D");
+    }
+}
+
 bool ProjectStrip::switch_to(int id, const char *mode)
 {
     if (id == m_sessions.active_id())
@@ -375,6 +412,7 @@ bool ProjectStrip::switch_to(int id, const char *mode)
         return false;
     const auto started    = std::chrono::steady_clock::now();
     long long  presets_ms = 0;
+    remember_tab();
     {
         SwitchScope scope(*this, true);
         BOOST_LOG_TRIVIAL(info) << "project strip: switching from slot " << m_sessions.active_id() << " to slot " << id;
@@ -388,19 +426,8 @@ bool ProjectStrip::switch_to(int id, const char *mode)
 
 void ProjectStrip::after_switch(int id, std::chrono::steady_clock::time_point started, long long presets_ms, const char *mode)
 {
-    ProjectSlot *slot = m_sessions.find(id);
-    Plater      *p    = plater();
-    if (slot != nullptr && p != nullptr && m_frame != nullptr && m_frame->m_tabpanel != nullptr) {
-        // On a plater tab: the tab of the project's own view (it kept it). On Home or Device: stay there.
-        if (MainTabs::hosts_plater(m_frame->m_tabpanel->GetSelection())) {
-            const int want = MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : tab_for_view(*p);
-            if (m_frame->m_tabpanel->GetSelection() != want)
-                m_frame->select_tab(size_t(want));
-            else if (tab_for_view(*p) != want)
-                // The tab is the same but this Plater shows another view: line them up as a tab change does.
-                p->select_view_3D(want == int(MainTabs::Preview) ? "Preview" : want == int(MainTabs::Showcase) ? "Showcase" : "3D");
-        }
-    }
+    Plater *p = plater();
+    restore_tab();
     if (p != nullptr) {
         if (GLCanvas3D *canvas = p->get_current_canvas3D())
             canvas->set_as_dirty();
@@ -475,6 +502,7 @@ void ProjectStrip::new_project()
         return;
     const auto started = std::chrono::steady_clock::now();
     int        id      = -1;
+    remember_tab();
     {
         // A brand-new project starts as File > New does: no swap guard (its nozzles come from the printer's memory).
         SwitchScope scope(*this, false);
@@ -522,6 +550,7 @@ void ProjectStrip::open_project(const wxString &file_in)
         return;
     const auto started = std::chrono::steady_clock::now();
     int        id      = -1;
+    remember_tab();
     {
         // Opening a file is opening a file: its 3MF brings its printer and nozzles as always (no swap guard).
         SwitchScope scope(*this, false);
@@ -619,6 +648,7 @@ bool ProjectStrip::close_project(int id)
     const int successor = m_sessions.successor_on_close(id);
     if (successor < 0) {
         // The last project: an empty one takes its place in the same Plater, the strip always has one.
+        remember_tab();
         pl->new_project(true);
         remove_slot_files(id);
         m_sessions.close(id);
@@ -627,11 +657,14 @@ bool ProjectStrip::close_project(int id)
         m_extra[fresh].plater  = pl;
         m_sessions.select(fresh);
         sync_active();
+        // A new project goes to Prepare; the tab the user was on stays.
+        restore_tab();
         Refresh();
         return true;
     }
     const auto started    = std::chrono::steady_clock::now();
     long long  presets_ms = 0;
+    remember_tab();
     {
         SwitchScope scope(*this, true);
         presets_ms = show_slot(successor);
