@@ -1461,3 +1461,58 @@ TEST_CASE("The final purge travel lifts before moving even with z_hop_when_prime
     const std::string window = out.substr(from, last_travel - from);
     CHECK(window.find("lift Z") != std::string::npos);
 }
+
+// A single extruder multi-material print with two filaments whose ram sets pressure advance to
+// ramming_pressure_advance_value (enable_change_pressure_when_wiping).
+static std::string slice_ramming_pressure_advance(const std::vector<std::pair<std::string, std::string>> &keys)
+{
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"wipe_tower_type", "type2"},
+        {"gcode_flavor", "marlin2"},
+        {"enable_filament_ramming", "1"},
+        {"enable_change_pressure_when_wiping", "1"},
+        {"ramming_pressure_advance_value", "0.02"},
+        {"pressure_advance", "0.05,0.06"},
+    });
+    for (const auto &[key, value] : keys)
+        config.set_deserialize_strict(key, value);
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    set_both_filaments(model);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.has_wipe_tower());
+    return gcode(print);
+}
+
+// The K values of the M900 lines, in order.
+static std::vector<std::string> m900_values(const std::string &gcode)
+{
+    std::vector<std::string> values;
+    for (const std::string &line : split_lines(gcode))
+        if (line.rfind("M900 K", 0) == 0)
+            values.emplace_back(line.substr(6, line.find_first_of(" ;", 6) - 6));
+    return values;
+}
+
+TEST_CASE("The ram changes a pressure advance that the filament start G-code sets", "[WipeTower][RammingPressureAdvance]")
+{
+    // Prusa's profiles: the filament start G-code sets pressure advance after every tool change,
+    // so the ram keeps its own value as upstream does. The tower writes it with four decimals like
+    // the G-code writer, not std::to_string's six.
+    const std::string out = slice_ramming_pressure_advance({
+        {"enable_pressure_advance", "0,0"},
+        {"filament_start_gcode", "\"M900 K0.04\";\"M900 K0.04\""},
+    });
+    const std::vector<std::string> values = m900_values(out);
+    CHECK(std::count(values.begin(), values.end(), "0.0200") > 0);
+    CHECK(std::count(values.begin(), values.end(), "0.04") > 0);
+}

@@ -830,13 +830,13 @@ public:
     WipeTowerWriter2& disable_linear_advance_value(float value = 0.0)
     {
         if (m_gcode_flavor == gcfRepRapSprinter || m_gcode_flavor == gcfRepRapFirmware)
-            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + std::to_string(value) + "\n");
+            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + Slic3r::float_to_string_decimal_point(value, 4) + "\n");
         else if (m_gcode_flavor == gcfKlipper) {
             m_gcode += "SET_PRESSURE_ADVANCE ADVANCE=" + Slic3r::float_to_string_decimal_point(value, 4) + "\n"; // Snapmaker U1
         }
 
         else
-            m_gcode += "M900 K" + std::to_string(value) + "\n";
+            m_gcode += "M900 K" + Slic3r::float_to_string_decimal_point(value, 4) + "\n";
         return *this;
     }
 
