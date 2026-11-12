@@ -254,7 +254,8 @@ public:
     // BBS
     void on_bed_type_change(BedType bed_type);
     void load_ams_list(std::string const & device, MachineObject* obj);
-    std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
+    // Static: reads only the printer, so the unit tests can build it with no window.
+    static std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
     // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
     // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
