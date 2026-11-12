@@ -7,6 +7,7 @@
 #include "plugin_test_utils.hpp"
 
 #include <libslic3r/Utils.hpp>
+#include <libslic3r/Zipper.hpp>
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginLoader.hpp>
@@ -154,6 +155,102 @@ ScriptCompletion wait_for_script(PluginManager& manager, const std::string& plug
     std::unique_lock<std::mutex> lock(mutex);
     REQUIRE(cv.wait_for(lock, std::chrono::seconds(60), [&] { return done; }));
     return completion;
+}
+
+const char* const k_plugin_source_with_helper = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "Trust Echo"
+# version = "1.0.0"
+# type = "script"
+# ///
+import helper_token
+import orca
+
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        return orca.ExecutionResult.success(helper_token.TOKEN)
+
+@orca.plugin
+class EchoPackage(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY";
+
+void write_helper_wheel(const fs::path& wheel, const std::string& token)
+{
+    const std::string payload = "TOKEN = \"" + token + "\"\n";
+    Zipper            zipper(wheel.string(), Zipper::NO_COMPRESSION);
+    zipper.add_entry("helper_token.py", payload.data(), payload.size());
+    zipper.finalize();
+}
+
+void plant_unchecked_pyc(const fs::path& py_path, const std::string& tampered_source)
+{
+    const fs::path tmp = py_path.parent_path() / (py_path.stem().string() + ".planted.py");
+    write_file(tmp, tampered_source);
+
+    PythonGILState gil;
+    REQUIRE(gil);
+
+    PyObjectPtr util(PyImport_ImportModule("importlib.util"));
+    REQUIRE(util);
+    PyObjectPtr source(PyUnicode_DecodeFSDefault(py_path.string().c_str()));
+    REQUIRE(source);
+    PyObjectPtr cached(PyObject_CallMethod(util.get(), "cache_from_source", "O", source.get()));
+    REQUIRE(cached);
+    const char* cached_utf8 = PyUnicode_AsUTF8(cached.get());
+    REQUIRE(cached_utf8);
+    const fs::path cache_path(cached_utf8);
+    boost::system::error_code mk_ec;
+    fs::create_directories(cache_path.parent_path(), mk_ec);
+
+    PyObjectPtr compile_mod(PyImport_ImportModule("py_compile"));
+    REQUIRE(compile_mod);
+    PyObjectPtr mode_enum(PyObject_GetAttrString(compile_mod.get(), "PycInvalidationMode"));
+    REQUIRE(mode_enum);
+    PyObjectPtr unchecked(PyObject_GetAttrString(mode_enum.get(), "UNCHECKED_HASH"));
+    REQUIRE(unchecked);
+    PyObjectPtr compile_fn(PyObject_GetAttrString(compile_mod.get(), "compile"));
+    REQUIRE(compile_fn);
+
+    PyObjectPtr tmp_s(PyUnicode_DecodeFSDefault(tmp.string().c_str()));
+    PyObjectPtr cache_s(PyUnicode_DecodeFSDefault(cache_path.string().c_str()));
+    REQUIRE(tmp_s);
+    REQUIRE(cache_s);
+
+    PyObjectPtr kwargs(PyDict_New());
+    REQUIRE(kwargs);
+    REQUIRE(PyDict_SetItemString(kwargs.get(), "cfile", cache_s.get()) == 0);
+    REQUIRE(PyDict_SetItemString(kwargs.get(), "dfile", source.get()) == 0);
+    REQUIRE(PyDict_SetItemString(kwargs.get(), "invalidation_mode", unchecked.get()) == 0);
+
+    PyObjectPtr args(PyTuple_Pack(1, tmp_s.get()));
+    REQUIRE(args);
+    const fs::path conventional = py_path.parent_path() / "__pycache__" / cache_path.filename();
+    fs::create_directories(conventional.parent_path());
+
+    auto compile_to = [&](const fs::path& dest) {
+        PyObjectPtr dest_s(PyUnicode_DecodeFSDefault(dest.string().c_str()));
+        REQUIRE(dest_s);
+        REQUIRE(PyDict_SetItemString(kwargs.get(), "cfile", dest_s.get()) == 0);
+        PyObjectPtr compiled(PyObject_Call(compile_fn.get(), args.get(), kwargs.get()));
+        if (!compiled)
+            PyErr_Print();
+        REQUIRE(compiled);
+        REQUIRE(fs::exists(dest));
+    };
+
+    compile_to(conventional);
+    if (!mk_ec)
+        compile_to(cache_path);
+
+    boost::system::error_code ec;
+    fs::remove(tmp, ec);
 }
 
 } // namespace
@@ -643,4 +740,165 @@ TEST_CASE("signed label uses the pinned key name not the sidecar publisher", "[P
     CHECK(state.publisher != "Attacker");
     CHECK(state.publisher.empty());
     CHECK(state.label == "Signed by unknown publisher");
+}
+
+TEST_CASE("canonical payload does not bind empty permissions_digest", "[PluginTrust]")
+{
+    pt::SignedMetadata meta;
+    meta.name                 = "Trust Echo";
+    meta.version              = "1.0.0";
+    meta.types                = {"script"};
+    meta.min_orca_version     = "1.0.0";
+    meta.plugin_key           = "echo";
+    const std::string payload = pt::canonical_payload(std::string(64, 'a'), meta);
+    CHECK(payload.find("permissions_digest") == std::string::npos);
+    CHECK(payload.find("plugin_key=echo") != std::string::npos);
+}
+
+TEST_CASE("escaping symlink is Untrusted", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-escape-symlink");
+    const fs::path plugin_dir = data.dir / "plug";
+    const fs::path entry      = plugin_dir / "echo.py";
+    write_file(entry, k_plugin_source);
+    const fs::path outside = data.dir / "outside.txt";
+    write_file(outside, "not-in-plugin\n");
+
+    PluginDescriptor d = descriptor_for(entry, "echo");
+    d.plugin_root      = plugin_dir.string();
+    REQUIRE(pt::evaluate(d).kind == pt::TrustKind::Untrusted);
+
+    const std::string hash = tree_hash_of(plugin_dir);
+    std::string       pin_error;
+    REQUIRE(pt::pin_hash("echo", hash, pin_error));
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::ApprovedLocally);
+
+    boost::system::error_code ec;
+    fs::create_symlink(fs::path("..") / "outside.txt", plugin_dir / "escape.py", ec);
+    if (ec)
+        SKIP("Cannot create a file symlink here: " + ec.message());
+    if (!fs::is_symlink(fs::symlink_status(plugin_dir / "escape.py")))
+        SKIP("create_symlink did not produce a symlink");
+
+    std::string       hash_error;
+    const std::string escaped = pt::sha256_plugin_tree(plugin_dir, hash_error);
+    INFO("hash_error=" << hash_error);
+    INFO("target=" << fs::read_symlink(plugin_dir / "escape.py"));
+    CHECK(escaped.empty());
+    CHECK(hash_error.find("escapes") != std::string::npos);
+
+    const pt::TrustState state = pt::evaluate(d);
+    CHECK(state.kind != pt::TrustKind::ApprovedLocally);
+    CHECK(state.kind == pt::TrustKind::Untrusted);
+    CHECK_FALSE(state.allowed());
+}
+
+TEST_CASE("trust.json missing version key is corrupt", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-missing-version");
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const PluginDescriptor d    = descriptor_for(package, "echo");
+    const std::string      hash = tree_hash_of(package);
+
+    fs::create_directories(data.plugins_dir());
+    write_file(data.plugins_dir() / "trust.json",
+               std::string("{\"publishers\":[],\"pins\":[{\"sha256\":\"") + hash + "\",\"plugin_key\":\"echo\"}]}\n");
+
+    const pt::TrustStore store = pt::load_trust_store();
+    CHECK(store.user_file_corrupt);
+    CHECK(store.pins.empty());
+    CHECK_FALSE(pt::is_hash_pinned(store, "echo", hash));
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::Untrusted);
+}
+
+TEST_CASE("reload after extract-dir tamper still imports hashed wheel bytes", "[PluginTrust][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir  data("plugin-trust-extract-tamper");
+    const fs::path plugin_dir = data.plugins_dir() / "Trust_Echo";
+    write_file(plugin_dir / "Trust_Echo.py", k_plugin_source_with_helper);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    PluginDescriptor d;
+    REQUIRE(manager.try_get_plugin_descriptor("Trust_Echo", d));
+    const fs::path root = d.plugin_root.empty() ? fs::path(d.entry_path).parent_path() : fs::path(d.plugin_root);
+    write_helper_wheel(root / "helper_token-1.0-py3-none-any.whl", "from-wheel");
+    const std::string hash = tree_hash_of(root);
+    std::string       pin_error;
+    REQUIRE(pt::pin_hash("Trust_Echo", hash, pin_error));
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::ApprovedLocally);
+
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Trust_Echo", error));
+    REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
+
+    const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
+    CHECK(first.error.empty());
+    CHECK(first.result.message == "from-wheel");
+
+    const fs::path extracted = root / "__whl_extracted__" / "helper_token-1.0-py3-none-any" / "helper_token.py";
+    REQUIRE(fs::exists(extracted));
+    write_file(extracted, "TOKEN = \"tampered\"\n");
+
+    manager.unload_plugin("Trust_Echo");
+    REQUIRE(load_and_wait(manager, "Trust_Echo", error));
+    REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
+
+    const ScriptCompletion second = wait_for_script(manager, "Trust_Echo", "Echo");
+    CHECK(second.error.empty());
+    CHECK(second.result.message == "from-wheel");
+    CHECK(second.result.message != "tampered");
+    CHECK(read_text(extracted) == "TOKEN = \"from-wheel\"");
+}
+
+TEST_CASE("planted pyc is not used on reload", "[PluginTrust][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir  data("plugin-trust-planted-pyc");
+    const fs::path plugin_dir = data.plugins_dir() / "Trust_Echo";
+    const fs::path entry      = plugin_dir / "Trust_Echo.py";
+    write_file(entry, k_plugin_source);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    PluginDescriptor d;
+    REQUIRE(manager.try_get_plugin_descriptor("Trust_Echo", d));
+    const std::string hash = tree_hash_of(d.plugin_root.empty() ? fs::path(d.entry_path) : fs::path(d.plugin_root));
+    std::string       pin_error;
+    REQUIRE(pt::pin_hash("Trust_Echo", hash, pin_error));
+
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Trust_Echo", error));
+    REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
+
+    const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
+    CHECK(first.error.empty());
+    CHECK(first.result.message == "trust-ok");
+
+    std::string tampered = k_plugin_source;
+    const auto  needle   = tampered.find("trust-ok");
+    REQUIRE(needle != std::string::npos);
+    tampered.replace(needle, std::string("trust-ok").size(), "planted-ok");
+    plant_unchecked_pyc(entry, tampered);
+    CHECK(read_text(entry).find("trust-ok") != std::string::npos);
+    CHECK(read_text(entry).find("planted-ok") == std::string::npos);
+
+    manager.unload_plugin("Trust_Echo");
+    REQUIRE(load_and_wait(manager, "Trust_Echo", error));
+    REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
+
+    const ScriptCompletion second = wait_for_script(manager, "Trust_Echo", "Echo");
+    CHECK(second.error.empty());
+    CHECK(second.result.message == "trust-ok");
+    CHECK(second.result.message != "planted-ok");
 }

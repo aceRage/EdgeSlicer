@@ -48,7 +48,6 @@ struct SignedMetadata
     std::string              min_orca_version;
     std::string              plugin_key;
     std::vector<std::string> dependencies;
-    std::string              permissions_digest; // SHA-256 of the canonical requested-permissions form
 };
 
 struct Signature
@@ -89,6 +88,9 @@ std::string sha256_file(const boost::filesystem::path& path, std::string& error)
 // part of this tree.
 std::string sha256_plugin_tree(const boost::filesystem::path& root, std::string& error);
 
+// Binds name, version, types, min_orca_version, plugin_key, and declared deps. Requested
+// permissions are not on the descriptor at sign/evaluate time (they come from
+// request_permissions() at first load), so they are not part of this payload.
 std::string    canonical_payload(const std::string& sha256, const SignedMetadata& metadata);
 SignedMetadata metadata_from_descriptor(const PluginDescriptor& descriptor);
 bool           metadata_matches(const SignedMetadata& signed_meta, const PluginDescriptor& descriptor);

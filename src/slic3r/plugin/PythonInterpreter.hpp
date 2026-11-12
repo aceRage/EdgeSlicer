@@ -88,6 +88,10 @@ public:
     // removed when the final plugin using it is unloaded.
     bool add_plugin_sys_path(const std::string& path, std::string& error);
 
+    // Unlink importlib cache files (including sys.pycache_prefix) for every .py under plugin_root
+    // so a planted .pyc cannot shadow the hashed source.
+    void invalidate_plugin_bytecode_caches(const std::string& plugin_root);
+
     // Load a Python module from file path
     PyObject* load_module_from_file(const std::string& file_path,
                                     std::string&       error,

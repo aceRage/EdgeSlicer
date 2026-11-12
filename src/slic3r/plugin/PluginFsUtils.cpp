@@ -811,6 +811,54 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
     return true;
 }
 
+void discard_stale_plugin_import_artifacts(const boost::filesystem::path& plugin_root)
+{
+    namespace fs = boost::filesystem;
+    if (plugin_root.empty())
+        return;
+
+    boost::system::error_code ec;
+    fs::remove_all(plugin_root / "__whl_extracted__", ec);
+
+    std::vector<fs::path> dirs{plugin_root};
+    std::vector<fs::path> kill;
+    while (!dirs.empty()) {
+        const fs::path dir = dirs.back();
+        dirs.pop_back();
+        fs::directory_iterator it(dir, ec);
+        if (ec)
+            continue;
+        const fs::directory_iterator end;
+        for (; it != end; it.increment(ec)) {
+            if (ec)
+                break;
+            const fs::path    path = it->path();
+            const std::string name = path.filename().string();
+            ec.clear();
+            const fs::file_status st = fs::symlink_status(path, ec);
+            if (ec)
+                continue;
+            if (name == "__pycache__") {
+                kill.push_back(path);
+                continue;
+            }
+            if (fs::is_directory(st) && !fs::is_symlink(st)) {
+                dirs.push_back(path);
+                continue;
+            }
+            if (!fs::is_regular_file(st) || name.size() < 4)
+                continue;
+            const std::string ext = name.substr(name.size() - 4);
+            if (ext == ".pyc" || ext == ".pyo")
+                kill.push_back(path);
+        }
+    }
+    for (const fs::path& path : kill) {
+        ec.clear();
+        fs::remove_all(path, ec);
+    }
+}
+
 bool read_install_state(const boost::filesystem::path& plugin_dir, PluginDescriptor& entry)
 {
     PluginInstallState state;

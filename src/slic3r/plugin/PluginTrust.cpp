@@ -256,31 +256,6 @@ bool collect_tree_entries(const boost::filesystem::path& root, std::vector<TreeE
     return true;
 }
 
-std::string permissions_digest_of(const PluginPermissions& permissions)
-{
-    auto dump_list = [](std::ostringstream& out, const char* key, std::vector<std::string> values) {
-        std::sort(values.begin(), values.end());
-        out << key << '=';
-        for (size_t i = 0; i < values.size(); ++i) {
-            if (i != 0)
-                out << ',';
-            out << values[i];
-        }
-        out << '\n';
-    };
-    std::ostringstream out;
-    dump_list(out, "fs_read", permissions.fs_read);
-    dump_list(out, "fs_readwrite", permissions.fs_readwrite);
-    dump_list(out, "network_http", permissions.network_http);
-    dump_list(out, "network_socket", permissions.network_socket);
-    dump_list(out, "process", permissions.process);
-    dump_list(out, "events", permissions.events);
-    out << "threading=" << (permissions.threading ? '1' : '0') << '\n';
-    out << "full_access=" << (permissions.full_access ? '1' : '0') << '\n';
-    const std::string text = out.str();
-    return sha256_hex(reinterpret_cast<const unsigned char*>(text.data()), text.size());
-}
-
 bool user_sidecar_version_ok(const nlohmann::json& user)
 {
     const auto it = user.find("version");
@@ -377,6 +352,15 @@ bool atomic_replace_file(const boost::filesystem::path& target, const std::strin
 #else
     if (boost::nowide::rename(tmp_path.string().c_str(), target.string().c_str()) != 0)
         return fail(std::error_code(errno, std::generic_category()).message());
+    {
+        const fs::path parent = target.parent_path().empty() ? fs::path(".") : target.parent_path();
+        const int      dirfd  = ::open(parent.string().c_str(), O_RDONLY | O_DIRECTORY);
+        if (dirfd >= 0) {
+            // Best-effort: a failed directory fsync must not roll back a completed rename.
+            ::fsync(dirfd);
+            ::close(dirfd);
+        }
+    }
 #endif
     return true;
 }
@@ -574,21 +558,19 @@ std::string canonical_payload(const std::string& sha256, const SignedMetadata& m
         << "min_orca_version=" << metadata.min_orca_version << '\n'
         << "plugin_key=" << metadata.plugin_key << '\n'
         << "deps=" << deps_text << '\n'
-        << "deps_digest=" << deps_digest << '\n'
-        << "permissions_digest=" << ascii_lower(metadata.permissions_digest) << '\n';
+        << "deps_digest=" << deps_digest << '\n';
     return out.str();
 }
 
 SignedMetadata metadata_from_descriptor(const PluginDescriptor& descriptor)
 {
     SignedMetadata meta;
-    meta.name               = descriptor.name;
-    meta.version            = descriptor.installed_version.empty() ? descriptor.version : descriptor.installed_version;
-    meta.types              = normalized_types(descriptor.display_types);
-    meta.min_orca_version   = descriptor.required_orca_api;
-    meta.plugin_key         = descriptor.plugin_key;
-    meta.dependencies       = normalized_deps(descriptor.dependencies);
-    meta.permissions_digest = permissions_digest_of(PluginPermissions{});
+    meta.name             = descriptor.name;
+    meta.version          = descriptor.installed_version.empty() ? descriptor.version : descriptor.installed_version;
+    meta.types            = normalized_types(descriptor.display_types);
+    meta.min_orca_version = descriptor.required_orca_api;
+    meta.plugin_key       = descriptor.plugin_key;
+    meta.dependencies     = normalized_deps(descriptor.dependencies);
     return meta;
 }
 
@@ -597,8 +579,7 @@ bool metadata_matches(const SignedMetadata& signed_meta, const PluginDescriptor&
     const SignedMetadata live = metadata_from_descriptor(descriptor);
     return signed_meta.name == live.name && signed_meta.version == live.version && normalized_types(signed_meta.types) == live.types &&
            signed_meta.min_orca_version == live.min_orca_version && signed_meta.plugin_key == live.plugin_key &&
-           normalized_deps(signed_meta.dependencies) == live.dependencies &&
-           ascii_lower(signed_meta.permissions_digest) == live.permissions_digest;
+           normalized_deps(signed_meta.dependencies) == live.dependencies;
 }
 
 bool public_key_from_seed(const std::string& seed_hex, std::string& public_hex, std::string& error)
@@ -691,7 +672,6 @@ bool write_signature_file(const boost::filesystem::path& package, const Signatur
         {"min_orca_version", sig.metadata.min_orca_version},
         {"plugin_key", sig.metadata.plugin_key},
         {"dependencies", normalized_deps(sig.metadata.dependencies)},
-        {"permissions_digest", ascii_lower(sig.metadata.permissions_digest)},
     };
     nlohmann::json root = {
         {"version", 1},
@@ -729,12 +709,11 @@ bool read_signature_file(const boost::filesystem::path& package, Signature& sig,
         sig.publisher      = root.value("publisher", std::string());
         const auto meta_it = root.find("metadata");
         if (meta_it != root.end() && meta_it->is_object()) {
-            sig.metadata.name               = meta_it->value("name", std::string());
-            sig.metadata.version            = meta_it->value("version", std::string());
-            sig.metadata.min_orca_version   = meta_it->value("min_orca_version", std::string());
-            sig.metadata.plugin_key         = meta_it->value("plugin_key", std::string());
-            sig.metadata.permissions_digest = ascii_lower(meta_it->value("permissions_digest", std::string()));
-            const auto types_it             = meta_it->find("types");
+            sig.metadata.name             = meta_it->value("name", std::string());
+            sig.metadata.version          = meta_it->value("version", std::string());
+            sig.metadata.min_orca_version = meta_it->value("min_orca_version", std::string());
+            sig.metadata.plugin_key       = meta_it->value("plugin_key", std::string());
+            const auto types_it           = meta_it->find("types");
             if (types_it != meta_it->end() && types_it->is_array()) {
                 for (const nlohmann::json& t : *types_it)
                     if (t.is_string())

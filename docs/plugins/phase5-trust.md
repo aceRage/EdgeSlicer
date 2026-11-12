@@ -38,8 +38,9 @@ A package may carry a sibling `{file}.py.sig` / `{file}.whl.sig` JSON sidecar:
   that escape the plugin root fail the hash. **uv-installed dependencies are unpinned** — they live
   outside the plugin root and are not part of this digest.
 - Ed25519 signature over a canonical payload: `edge-plugin-sig-v1` plus the tree hash, name, version,
-  capability types, min orca version, `plugin_key`, declared deps (and their digest), and a digest of
-  requested permissions
+  capability types, min orca version, `plugin_key`, and declared deps (and their digest). Requested
+  permissions are not bound: they are not on the descriptor at sign/evaluate time (they come from
+  `request_permissions()` at first load).
 - The signer's 32-byte public key (64 hex chars)
 
 Verification uses the in-tree OpenSSL EVP Ed25519 API (`EVP_PKEY_ED25519`,
@@ -57,11 +58,11 @@ app trusts ship in `resources/python_plugins/trust_keys.json` (empty until catal
 - user-added publisher keys
 - pinned content hashes keyed by `plugin_key` (an empty `plugin_key` is refused)
 
-It is written with the same atomic replace as `.install_state.json` (unique temp, fsync, then POSIX
-`rename` / `MoveFileExW` REPLACE). A missing file is empty-trust. A corrupt or unparseable file, a
-missing `version`, or any version other than `1` is empty-trust (no user pins, no user keys), never
-a crash; shipped keys still apply. Mutators refuse to overwrite a corrupt sidecar until
-`reset_corrupt_trust_store` rewrites an empty valid file.
+It is written with the same atomic replace as `.install_state.json` (unique temp, fsync the file,
+POSIX `rename` then fsync the parent directory / `MoveFileExW` REPLACE). A missing file is
+empty-trust. A corrupt or unparseable file, a missing `version`, or any version other than `1` is
+empty-trust (no user pins, no user keys), never a crash; shipped keys still apply. Mutators refuse
+to overwrite a corrupt sidecar until `reset_corrupt_trust_store` rewrites an empty valid file.
 
 This path is **never** `{data_dir}/plugins` (UltraNet). Writes that resolve there are refused.
 The case-insensitive / NFC/NFD / dangling-symlink / `equivalent()` checks are the same
@@ -75,7 +76,12 @@ sibling `.sig` when present) into `{data_dir}/orca_plugins` and pins the tree SH
 `Signed by …` name comes from the shipped or user-added key file, never from the unsigned `.sig`
 sidecar.
 
-Enable / load re-hashes the plugin root immediately before the trust check.
+Enable / load re-hashes the plugin root immediately before the trust check. After that check
+passes, load discards `__whl_extracted__`, `__pycache__`, and loose `.pyc`/`.pyo`, re-extracts
+sibling wheels to a fresh directory, and unlinks importlib cache files (including those under
+`sys.pycache_prefix`) so the bytes imported are the hashed `.py` / `.whl` bytes. Plugin interpreter
+init sets `PyConfig.write_bytecode = 0` and `sys.dont_write_bytecode`; existing cache files are
+still deleted because turning off writes does not stop CPython from reading a planted `.pyc`.
 
 ## Known limitations
 
@@ -85,3 +91,10 @@ Enable / load re-hashes the plugin root immediately before the trust check.
 - No trust check on permission mutation. Changing grants in `.install_state.json` does not
   re-prompt and does not change the tree hash (that sidecar is excluded).
 - uv-installed Python dependencies are unpinned.
+- Small evaluate-then-import window: the tree can change after `evaluate()` and before import.
+- Full-file reads on every evaluate (the tree hash reads every included file).
+- NFC/NFD path variants fail closed (a pin recorded under one Unicode normalization does not
+  match the other).
+- Home's already-pinned check hashes the source file/tree before copy; the installed plugin-root
+  tree can differ (excluded host files aside), which re-prompts even when the same package is
+  already pinned.

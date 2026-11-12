@@ -187,13 +187,13 @@ bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
             continue;
 
         const fs::path dep_dir = plugin_dir / "__whl_extracted__" / it->path().stem().string();
-        if (!fs::exists(dep_dir)) {
-            std::string extract_error;
-            if (!extract_zip_to_directory(it->path(), dep_dir, extract_error)) {
-                // TRN %1% is the dependency file, %2% the error detail.
-                error = GUI::format(_u8L("Failed to extract plugin .whl dependency %1%: %2%"), it->path().string(), extract_error);
-                return false;
-            }
+        boost::system::error_code ec;
+        fs::remove_all(dep_dir, ec);
+        std::string extract_error;
+        if (!extract_zip_to_directory(it->path(), dep_dir, extract_error)) {
+            // TRN %1% is the dependency file, %2% the error detail.
+            error = GUI::format(_u8L("Failed to extract plugin .whl dependency %1%: %2%"), it->path().string(), extract_error);
+            return false;
         }
 
         std::string syspath_error;
@@ -835,6 +835,11 @@ bool load(const PluginDescriptor&                          descriptor,
     plugin.descriptor  = descriptor;
     plugin.module_name = plugin_module_name(descriptor);
 
+    const boost::filesystem::path import_root = !descriptor.plugin_root.empty() ?
+        boost::filesystem::path(descriptor.plugin_root) :
+        boost::filesystem::path(descriptor.entry_path).parent_path();
+    discard_stale_plugin_import_artifacts(import_root);
+
     if (!skip_deps) {
         std::string pkg_install_error;
         if (!install_packages(descriptor.dependencies, pkg_install_error)) {
@@ -852,6 +857,8 @@ bool load(const PluginDescriptor&                          descriptor,
         error = std::move(wheel_error);
         return false;
     }
+
+    interpreter.invalidate_plugin_bytecode_caches(import_root.string());
 
     std::string load_error;
     PyObject*   module = import_plugin_module(descriptor, plugin.plugin_sys_paths, plugin.plugin_modules, load_error);
