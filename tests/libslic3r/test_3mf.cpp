@@ -3088,14 +3088,14 @@ TEST_CASE("The small plate thumbnail of a picture wider than tall is the picture
     REQUIRE(store_bbs_3mf(sp));
 
     const std::string big   = extract_zip_entry(test_file, "Metadata/plate_1.png");
-    const std::string small = extract_zip_entry(test_file, "Metadata/plate_1_small.png");
+    const std::string small_png = extract_zip_entry(test_file, "Metadata/plate_1_small.png");
     boost::system::error_code ec;
     boost::filesystem::remove(test_file, ec);
     REQUIRE_FALSE(big.empty());
-    REQUIRE_FALSE(small.empty());
+    REQUIRE_FALSE(small_png.empty());
     png::ImageColorscale big_img, small_img;
     REQUIRE(png::decode_colored_png(png::ReadBuf{big.data(), big.size()}, big_img));
-    REQUIRE(png::decode_colored_png(png::ReadBuf{small.data(), small.size()}, small_img));
+    REQUIRE(png::decode_colored_png(png::ReadBuf{small_png.data(), small_png.size()}, small_img));
     REQUIRE(big_img.cols == 512);
     REQUIRE(big_img.rows == 256);
     REQUIRE(small_img.cols == 128);
