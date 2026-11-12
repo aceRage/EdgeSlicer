@@ -7,6 +7,8 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/trim.hpp>
+#include <boost/locale.hpp>
+#include <boost/locale/encoding_utf.hpp>
 #include <boost/filesystem/file_status.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -43,6 +45,7 @@
 #include <wx/string.h>
 #include <wx/thread.h>
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/Utils/ASCIIFolding.hpp"
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include <Python.h>
 
@@ -576,6 +579,178 @@ bool suffix_inside_root(const boost::filesystem::path& canonical_candidate,
     return true;
 }
 
+static bool is_combining_mark(uint32_t cp)
+{
+    return (cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x1AB0 && cp <= 0x1AFF) ||
+           (cp >= 0x1DC0 && cp <= 0x1DFF) || (cp >= 0x20D0 && cp <= 0x20FF) ||
+           (cp >= 0xFE20 && cp <= 0xFE2F);
+}
+
+// NFC and NFD spellings of data_dir must match. Bundled Boost.Locale's normalize() is a no-op
+// (no ICU backend), so compose by stripping combining marks then folding Latin-1 precomposed
+// letters to ASCII (café / café → cafe). Fail closed: similar lookalikes under data_dir deny.
+std::string ultranet_unicode_fold(const std::string& raw)
+{
+    try {
+        const std::wstring wstr = boost::locale::conv::utf_to_utf<wchar_t>(raw);
+        std::wstring       stripped;
+        stripped.reserve(wstr.size());
+        for (wchar_t c : wstr) {
+            if (!is_combining_mark(static_cast<uint32_t>(static_cast<unsigned int>(c))))
+                stripped.push_back(c);
+        }
+        return ascii_lower(fold_utf8_to_ascii(boost::locale::conv::utf_to_utf<char>(stripped)));
+    } catch (...) {
+        return ascii_lower(raw);
+    }
+}
+
+std::vector<std::string> ultranet_component_keys(const boost::filesystem::path& component)
+{
+    std::vector<std::string> keys;
+    const std::string        raw = component.string();
+    keys.push_back(ascii_lower(raw));
+    try {
+        const std::string nfc = ascii_lower(normalize_utf8_nfc(raw.c_str()));
+        if (nfc != keys.front())
+            keys.push_back(nfc);
+    } catch (...) {
+    }
+    const std::string folded = ultranet_unicode_fold(raw);
+    if (std::find(keys.begin(), keys.end(), folded) == keys.end())
+        keys.push_back(folded);
+    return keys;
+}
+
+bool ultranet_components_match(const boost::filesystem::path& lhs, const boost::filesystem::path& rhs)
+{
+    const auto a = ultranet_component_keys(lhs);
+    const auto b = ultranet_component_keys(rhs);
+    for (const auto& x : a)
+        for (const auto& y : b)
+            if (x == y)
+                return true;
+    return false;
+}
+
+// Case-insensitive, NFC-aware containment used only for the UltraNet deny. Grants still use
+// same_path_component() (case-insensitive on Windows only). This one fails closed on every
+// platform: {data_dir}/Plugins is the same folder as {data_dir}/plugins.
+bool ultranet_casefold_inside(const boost::filesystem::path& candidate, const boost::filesystem::path& root)
+{
+    auto cand_it  = candidate.begin();
+    auto cand_end = candidate.end();
+    auto root_it  = root.begin();
+    auto root_end = root.end();
+
+    while (root_it != root_end && cand_it != cand_end && ultranet_components_match(*root_it, *cand_it)) {
+        ++root_it;
+        ++cand_it;
+    }
+    if (root_it != root_end)
+        return false;
+    for (auto it = cand_it; it != cand_end; ++it) {
+        if (*it == "..")
+            return false;
+    }
+    return true;
+}
+
+boost::filesystem::path nearest_existing_ancestor(const boost::filesystem::path& path)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+    fs::path                  cur = path;
+    while (!cur.empty()) {
+        // symlink_status does not follow: a dangling link still counts as present so the
+        // caller can resolve it lexically instead of skipping the deny.
+        const fs::file_status status = fs::symlink_status(cur, ec);
+        if (!ec && status.type() != fs::file_not_found && status.type() != fs::status_error)
+            return cur;
+        fs::path parent = cur.parent_path();
+        if (parent.empty() || parent == cur)
+            break;
+        cur = std::move(parent);
+    }
+    return {};
+}
+
+// Walk candidate ancestors (from the nearest existing one) asking equivalent() against the
+// UltraNet folder. Covers a not-yet-existing file under an existing plugins directory and a
+// same-inode case alias on APFS/NTFS. Does not walk equivalent() against data_dir() itself.
+bool ultranet_equivalent_inside(const boost::filesystem::path& candidate, const boost::filesystem::path& ultranet)
+{
+    namespace fs = boost::filesystem;
+    const fs::path existing = nearest_existing_ancestor(candidate);
+    if (existing.empty())
+        return false;
+
+    boost::system::error_code ec;
+    for (fs::path p = existing;;) {
+        ec.clear();
+        if (fs::equivalent(p, ultranet, ec) && !ec)
+            return true;
+        fs::path parent = p.parent_path();
+        if (parent.empty() || parent == p)
+            break;
+        p = std::move(parent);
+    }
+    return false;
+}
+
+boost::filesystem::path lexical_symlink_target(const boost::filesystem::path& link)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+    fs::path                  target = fs::read_symlink(link, ec);
+    if (ec)
+        return {};
+    if (target.is_relative())
+        target = link.parent_path() / target;
+    return target.lexically_normal();
+}
+
+bool is_ultranet_plugins_target(boost::filesystem::path path, const boost::filesystem::path& ultranet, int depth = 0)
+{
+    namespace fs = boost::filesystem;
+    if (path.empty() || ultranet.empty())
+        return false;
+    if (depth > 8)
+        return true; // symlink cycle: fail closed
+
+    const fs::path canonical_path     = canonical_for_comparison(path);
+    const fs::path canonical_ultranet = canonical_for_comparison(ultranet);
+    if (ultranet_casefold_inside(canonical_path, canonical_ultranet) ||
+        ultranet_casefold_inside(path, ultranet))
+        return true;
+    if (ultranet_equivalent_inside(path, ultranet) || ultranet_equivalent_inside(canonical_path, canonical_ultranet))
+        return true;
+
+    // A dangling symlink is left unresolved by weakly_canonical / exists(). Resolve it
+    // lexically and deny if the target would land in UltraNet. Grant matching fails closed
+    // the other way (not inside), which would skip this deny.
+    boost::system::error_code ec;
+    const fs::file_status     status = fs::symlink_status(path, ec);
+    if (!ec && fs::is_symlink(status) && !fs::exists(path, ec)) {
+        const fs::path target = lexical_symlink_target(path);
+        if (target.empty() || target == path)
+            return true; // cannot resolve: fail closed
+        return is_ultranet_plugins_target(target, ultranet, depth + 1);
+    }
+    const fs::path existing = nearest_existing_ancestor(path);
+    if (!existing.empty() && existing != path) {
+        const fs::file_status ancestor_status = fs::symlink_status(existing, ec);
+        if (!ec && fs::is_symlink(ancestor_status) && !fs::exists(existing, ec)) {
+            const fs::path target = lexical_symlink_target(existing);
+            if (target.empty())
+                return true;
+            const fs::path remainder = path.lexically_relative(existing);
+            return is_ultranet_plugins_target(target / remainder, ultranet, depth + 1);
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 bool is_inside_allowed_root(const boost::filesystem::path& candidate, const boost::filesystem::path& allowed_root)
@@ -827,9 +1002,27 @@ bool PluginAuditManager::is_denied_path_keyword(const boost::filesystem::path& c
     return false;
 }
 
+bool PluginAuditManager::is_ultranet_plugins_path(const boost::filesystem::path& candidate) const
+{
+    if (candidate.empty())
+        return false;
+    const std::string data = data_dir();
+    if (data.empty())
+        return false;
+
+    boost::filesystem::path path = candidate;
+    if (path.filename() == "*" || path.filename().empty())
+        path = path.parent_path();
+    if (path.empty())
+        return false;
+
+    const boost::filesystem::path ultranet = boost::filesystem::path(data) / "plugins";
+    return is_ultranet_plugins_target(path, ultranet);
+}
+
 bool PluginAuditManager::is_denied_path(const boost::filesystem::path& candidate) const
 {
-    return is_denied_filename(candidate) || is_denied_path_keyword(candidate);
+    return is_denied_filename(candidate) || is_denied_path_keyword(candidate) || is_ultranet_plugins_path(candidate);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +1051,11 @@ AuditDecision PluginAuditManager::check_path_access(const boost::filesystem::pat
         BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write
                                    << " plugin=" << plugin_key << " reason=denied path keyword";
         return {false, "denied path keyword"};
+    }
+    if (is_ultranet_plugins_path(path)) {
+        BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << path.string() << " is_write=" << is_write
+                                   << " plugin=" << plugin_key << " reason=denied ultranet path";
+        return {false, "denied ultranet path"};
     }
 
     namespace fs = boost::filesystem;
@@ -914,7 +1112,7 @@ namespace {
 void append_permission_dialog_tip(wxString& message)
 {
     message += "\n\n";
-    message += _L("Tip: You can review and change this plugin's saved permissions in the Plugins dialog, on the Permissions tab.");
+    message += _L("Tip: You can review and change this plugin's saved permissions from Home > Plugins, using Permissions.");
 }
 
 // The preference affects only the explanatory tip, never the permission decision.
@@ -1714,6 +1912,7 @@ bool persist_grant(const std::string& plugin_key, AuditEventCategory category, b
 
 static PluginAuditManager::PermissionPrompt s_permission_prompt_for_testing;
 static PluginAuditManager::PermissionMessagePrompt s_permission_message_prompt_for_testing;
+static PluginAuditManager::FullAccessPrompt s_full_access_prompt_for_testing;
 
 static const char* audit_category_name(AuditEventCategory category)
 {
@@ -1803,7 +2002,8 @@ int decide_audited_event(PluginAuditManager&             mgr,
 {
     // Full access turns permission auditing off for this plugin, so no grant or prompt applies.
     // This is reached only after audit_plugin_event's unconditional denied-path loop: the
-    // install-state sidecar, the app config and the cloud refresh token stay blocked even here.
+    // install-state sidecar, the app config, EdgeSlicer's network plug-in folder
+    // ({data_dir}/plugins), and the other denied names stay blocked even here.
     // It is a Python audit-hook policy only; the plugin still runs in the host process, so other
     // processes are not restricted.
     if (state.permissions.full_access)
@@ -1894,6 +2094,9 @@ int audit_plugin_event(PluginAuditManager& mgr, const std::string& event_name, A
             return 0;
     }
 
+    // Sidecar grants (and a revoke) are re-read for each new top-level event. A nested event
+    // already covered by a recorded root frame is not re-checked, so a revoke takes effect on
+    // the next audited call, not on an operation already in flight.
     PluginInstallState state;
     const bool have_install_state = PluginManager::instance().get_install_state(mgr.current_plugin(), state);
     if (!have_install_state) {
@@ -1941,6 +2144,30 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
     if (state.permissions.full_access)
         return true;
 
+    // Plugins may request Full access during load. "No" is the default. Declining it does not
+    // abort the rest of the declaration: remaining buckets are still prompted.
+    if (requested.full_access) {
+        if (prompt_enable_full_access(descriptor.name.empty() ? plugin_key : descriptor.name)) {
+            bool persisted = false;
+            {
+                std::lock_guard<std::mutex> state_lock(install_state_mutex());
+                PluginInstallState     latest_state;
+                InstallStateReadStatus latest_status =
+                    read_install_state_status(boost::filesystem::path(descriptor.plugin_root), latest_state);
+                if (latest_status == InstallStateReadStatus::Unreadable)
+                    return false;
+                if (latest_status == InstallStateReadStatus::Absent && state_status == InstallStateReadStatus::Readable)
+                    return false;
+                PluginAuditDetail::seed_install_metadata(descriptor, latest_state);
+                latest_state.permissions.full_access = true;
+                persisted = write_install_state(boost::filesystem::path(descriptor.plugin_root), latest_state);
+            }
+            if (persisted)
+                post_permission_changed_notification(plugin_key);
+            return persisted;
+        }
+    }
+
     // Per bucket, keep only the targets that no earlier grant already covers. Dropping these
     // before prompting keeps a repeated declaration from asking again for what is on disk.
     struct MissingBucket {
@@ -1969,6 +2196,15 @@ bool PluginAuditManager::request_permissions(const std::string& plugin_key, cons
             const std::string target = tree_grant_bucket
                                            ? PluginAuditDetail::absolute_tree_grant(requested_target)
                                            : requested_target;
+            // Every filesystem target: exact files ({data_dir}/Plugins/lib.dylib) as well as
+            // /* trees, including case variants. Dropped before prompting so they are neither
+            // shown nor saved.
+            if (tree_grant_bucket &&
+                PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(target))) {
+                BOOST_LOG_TRIVIAL(warning) << "[AUDIT] dropping a declared grant covering UltraNet "
+                                           << "{data_dir}/plugins: " << target;
+                continue;
+            }
             // A saved wildcard already covers a more specific request. Deduplicate inside the
             // request verbatim only: two requested entries may cover different sets.
             const bool already_granted =
@@ -2174,6 +2410,53 @@ void PluginAuditManager::set_permission_prompt_for_testing(PermissionPrompt prom
 void PluginAuditManager::set_permission_message_prompt_for_testing(PermissionMessagePrompt prompt)
 {
     PluginAuditDetail::s_permission_message_prompt_for_testing = std::move(prompt);
+}
+
+void PluginAuditManager::set_full_access_prompt_for_testing(FullAccessPrompt prompt)
+{
+    PluginAuditDetail::s_full_access_prompt_for_testing = std::move(prompt);
+}
+
+bool PluginAuditManager::prompt_enable_full_access(const std::string& plugin_name)
+{
+    if (PluginAuditDetail::s_full_access_prompt_for_testing)
+        return PluginAuditDetail::s_full_access_prompt_for_testing(plugin_name);
+
+    const wxString name = wxString::FromUTF8(plugin_name.c_str());
+    const wxString body = wxString::Format(
+        _L("Enable full access for \"%s\"?\n\n"
+           "Full access turns off permission auditing for this plugin: its file system, network, "
+           "process, thread and event permissions are no longer checked. The plugin can read and "
+           "write most files your user account can access, including startup scripts, SSH keys "
+           "and a writable EdgeSlicer installation. Modifying startup or application files can "
+           "let code run outside these checks. Direct Python access to EdgeSlicer's "
+           "configuration, certificate and install-state paths stays blocked, but "
+           "subprocesses are not restricted. Full access is not a sandbox.\n\n"
+           "Only enable this for a plugin you trust."),
+        name);
+
+    auto show = [](const wxString& message) {
+        GUI::MessageDialog dialog(nullptr, message, _L("Full access"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+        // MsgDialog builds its own buttons in a fixed order and always gives Yes the initial focus;
+        // wxNO_DEFAULT does not change that. Focus No explicitly so Enter cannot grant full access.
+        dialog.SetButtonLabel(wxID_NO, _L("No"), /*set_focus=*/true);
+        return dialog.ShowModal() == wxID_YES;
+    };
+
+    if (wxTheApp == nullptr || GUI::wxGetApp().is_closing())
+        return false;
+    if (wxIsMainThread())
+        return show(body);
+
+    auto result = std::make_shared<std::promise<bool>>();
+    auto future = result->get_future();
+    GUI::wxGetApp().CallAfter([result, body, show]() {
+        if (wxTheApp == nullptr || GUI::wxGetApp().is_closing())
+            result->set_value(false);
+        else
+            result->set_value(show(body));
+    });
+    return future.get();
 }
 
 int PluginAuditManager::audit_hook(const char* event, PyObject* args, void* user_data)

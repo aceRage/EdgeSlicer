@@ -179,6 +179,18 @@ TEST_CASE("home plugins: plugin_run only accepts a plugin_key the host listed", 
     CHECK_FALSE(is_listed_plugin_key("C:\\Users\\me\\plugins\\hello", listed));
 }
 
+TEST_CASE("home plugins: Permissions and Configure only name a listed plugin_key", "[HomePlugins]")
+{
+    // HomePlugins.cpp opens the inspector for plugin_permissions / plugin_configure only when
+    // listed(key). The page posts {command, key}; it never sees plugin_root or {data_dir}/plugins.
+    const std::vector<std::string> listed{ "hello_script" };
+    CHECK(is_listed_plugin_key("hello_script", listed));
+    CHECK_FALSE(is_listed_plugin_key("not_listed", listed));
+    CHECK_FALSE(is_listed_plugin_key("{data_dir}/plugins/hello", listed));
+    CHECK_FALSE(is_listed_plugin_key("C:\\Users\\me\\plugins\\hello", listed));
+    CHECK_FALSE(is_listed_plugin_key("../plugins/ultranet", listed));
+}
+
 TEST_CASE("home plugins: capability toggle only names a listed (name, type) triple", "[HomePlugins]")
 {
     const std::vector<PluginCapabilityView> listed{ { "hello", "script", true }, { "pipe", "slicing-pipeline", false } };

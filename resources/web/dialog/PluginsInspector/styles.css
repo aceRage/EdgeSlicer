@@ -1,0 +1,679 @@
+/* Plugins inspector. Light by default; html.dark from the slicer User-Agent. */
+:root {
+  --bg: #f4f4f4;
+  --fg: #262e30;
+  --mute: #6b6b6a;
+  --line: #e4e4e4;
+  --ctl: #ffffff;
+  --ctl-line: #dbdbdb;
+  --hover: #eef7f6;
+  --accent: #009688;
+  --accent-soft: #e0f2f1;
+  --warn-bg: #fff4e0;
+  --warn-fg: #8a5a00;
+  --danger: #c0392b;
+  color-scheme: light;
+}
+html.dark {
+  --bg: #2b2b2b;
+  --fg: #f0f0f0;
+  --mute: #aaaaaa;
+  --line: #3d3d3d;
+  --ctl: #3a3a3a;
+  --ctl-line: #4d4d4d;
+  --hover: #37403f;
+  --accent: #26a69a;
+  --accent-soft: #24403d;
+  --warn-bg: #3d3320;
+  --warn-fg: #f0c674;
+  --danger: #e88;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+  font: 13px/1.4 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+.app { display: flex; flex-direction: column; height: 100%; }
+.tabs { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--line); }
+.tab { padding: 8px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: var(--mute); font-weight: 600; }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.panels { flex: 1; min-height: 0; overflow: auto; }
+.detail-tab-panel { height: 100%; }
+.permissions-content { padding: 8px 16px 24px; }
+.status-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--line); min-height: 28px; color: var(--mute); }
+.status-bar.is-empty { display: none; }
+.status-bar.level-error { color: var(--danger); }
+.status-bar.level-warn { color: var(--warn-fg); }
+.status-bar.level-success { color: var(--accent); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.detail-empty { padding: 24px; color: var(--mute); }
+.config-textarea { flex: 1; min-height: 180px; width: 100%; resize: vertical; padding: 8px; border: 1px solid var(--ctl-line); border-radius: 6px; background: var(--ctl); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.config-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.config-actions button, .permission-form button {
+  min-height: 32px; padding: 6px 12px; border: 1px solid var(--ctl-line); border-radius: 6px;
+  background: var(--ctl); cursor: pointer;
+}
+.config-actions button:hover, .permission-form button:hover:not(:disabled) { border-color: var(--accent); }
+.ButtonStyleConfirm { background: var(--accent) !important; color: #fff !important; border-color: var(--accent) !important; }
+.config-custom { flex: 1; min-height: 180px; width: 100%; border: 1px solid var(--line); background: var(--bg); }
+.thin-scroll { overflow: auto; }
+
+.permission-console-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 8px 0 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.permission-console-plugin {
+  margin: 0;
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.permission-console-title {
+  margin: 4px 0 0;
+  color: var(--fg);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.permission-overview {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.permission-full-access-help {
+  margin: 0;
+  color: var(--mute);
+}
+
+.permissions-content label.permission-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0;
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.permission-access-card {
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--permission-surface);
+}
+
+.permission-access-card.is-active {
+  border-color: var(--warn-fg);
+}
+
+.permission-access-card.is-disabled,
+.permission-editor:disabled {
+  opacity: 0.55;
+}
+
+.permission-access-card.is-disabled .permission-checkbox-inset input[type="checkbox"]:disabled + .permission-switch-track {
+  opacity: 1;
+}
+
+.permission-checkbox-inset {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 32px;
+}
+
+.permission-checkbox-inset input[type="checkbox"] {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.permission-switch-track {
+  position: relative;
+  box-sizing: border-box;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 2px solid var(--fg);
+  border-radius: 999px;
+  background: var(--bg);
+  transition: background-color 120ms ease;
+  pointer-events: none;
+}
+
+.permission-switch-track::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.permission-checkbox-inset input[type="checkbox"]:checked + .permission-switch-track {
+  background: var(--fg);
+}
+
+.permission-checkbox-inset input[type="checkbox"]:checked + .permission-switch-track::before {
+  transform: translateX(18px);
+  background: var(--bg);
+}
+
+.permission-checkbox-inset input[type="checkbox"]:disabled {
+  cursor: default;
+}
+
+.permission-checkbox-inset input[type="checkbox"]:disabled + .permission-switch-track {
+  opacity: 0.55;
+}
+
+.permission-editor {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.permission-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  align-items: start;
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.permission-rows {
+  display: grid;
+  gap: 12px;
+}
+
+.permission-group {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--permission-surface);
+}
+
+.permission-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.permission-group-header::-webkit-details-marker { display: none; }
+.permission-group-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.permission-group-chevron {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--mute);
+  border-bottom: 1.5px solid var(--mute);
+  transform: rotate(-45deg);
+}
+
+.permission-group[open] .permission-group-chevron { transform: rotate(45deg); }
+
+.permission-group-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.permission-group-body {
+  padding: 0 16px 16px;
+}
+
+.permission-group-body .permission-section:first-child,
+.permission-group-guidance + .permission-section {
+  border-top: 0;
+}
+
+.permission-description,
+.permission-controls {
+  min-width: 0;
+}
+
+.permission-heading {
+  margin: 0 0 4px;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.permission-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.permission-notice {
+  margin: 3px 0 8px;
+  color: var(--mute);
+}
+
+.permission-access-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn-fg);
+  border-radius: 6px;
+  background: var(--permission-surface);
+  color: var(--fg);
+}
+
+.permission-guidance {
+  margin: 0 0 8px;
+  color: var(--mute);
+}
+
+.permission-group-guidance {
+  margin: 8px 0 12px;
+}
+
+.permission-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.permission-form[hidden] {
+  display: none;
+}
+
+.permission-edit-status {
+  flex-basis: 100%;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+
+.permission-filesystem {
+  min-width: 0;
+}
+
+.permission-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.permission-filesystem-bucket + .permission-filesystem-bucket { margin-top: 17px; }
+
+.permissions-content label.permission-thread-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  margin: 0 0 6px;
+  color: var(--fg);
+}
+
+.permission-form input {
+  flex: 1 1 180px;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--ctl-line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.permission-form button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--ctl-line);
+  border-radius: 6px;
+  background: var(--ctl);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.permission-form button[hidden] {
+  display: none;
+}
+
+.permission-form button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.permission-form :focus-visible,
+.permission-checkbox-inset input[type="checkbox"]:focus-visible + .permission-switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.permission-form button:disabled {
+  cursor: not-allowed;
+  border-style: dashed;
+  color: var(--mute);
+  background: var(--bg);
+}
+
+@media (max-width: 700px) {
+  .permission-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}
+
+@container (max-width: 700px) {
+  .permission-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .permission-switch-track,
+  .permission-switch-track::before {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .permission-switch-track {
+    border-color: CanvasText;
+    background: Canvas;
+  }
+  .permission-switch-track::before {
+    background: CanvasText;
+  }
+  .permission-checkbox-inset input[type="checkbox"]:checked + .permission-switch-track {
+    background: CanvasText;
+  }
+  .permission-checkbox-inset input[type="checkbox"]:checked + .permission-switch-track::before {
+    background: Canvas;
+  }
+}
+
+
+/* Config tab: fixed-width capability sidebar + the capability's configuration view. */
+.config-layout {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+.config-layout[hidden] {
+  display: none;
+}
+
+.config-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  border-right: 1px solid var(--line);
+}
+
+.config-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-cap:hover {
+  background: var(--hover);
+}
+
+.config-cap.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.config-cap-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-cap-type {
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.config-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.config-error {
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12px;
+}
+
+.config-error[hidden] {
+  display: none;
+}
+
+.config-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.config-editor[hidden] {
+  display: none;
+}
+
+.config-textarea {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  box-sizing: border-box;
+  /* common.css applies `user-select: none` to *, so without this the user could type into the
+     editor but not select, drag or copy what they had typed. (What blocks typing is the global
+     onkeydown guard in common.js — see the keydown handler in index.js.) */
+  -webkit-user-select: text;
+  user-select: text;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+}
+
+.config-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.config-view-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.config-view-footer[hidden] {
+  display: none;
+}
+
+/* Restore sits immediately left of Save, both pinned right; the validation message takes the
+   remaining space on the left. */
+.config-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-actions > button[hidden] {
+  display: none;
+}
+
+.config-validation {
+  color: var(--mute);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-validation.invalid {
+  color: var(--plugin-status-danger);
+}
+
+.config-custom {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.config-custom[hidden] {
+  display: none;
+}
+
+.detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.detail-table th,
+.detail-table td {
+  padding: 8px 10px;
+  border-right: 1px solid var(--col-sep);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.detail-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  color: var(--mute);
+  font-weight: 600;
+}
+
+.detail-table th:last-child,
+.detail-table td:last-child {
+  border-right: 0;
+}
+
+.changelog-table th:nth-child(1) {
+  width: 120px;
+}
+
+.changelog-table th:nth-child(2) {
+  width: 110px;
+}
+
+.changelog-changes {
+  line-height: 1.4;
+}
+
+#descriptionPanel .detail-description {
+  margin: 0;
+}
+
+#diagnosticsPanel .detail-status-body {
+  overflow: visible;
+  padding-right: 0;
+}
+
+.capability-run-btn {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+}
+
+.capability-run-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 700px) {
+  .detail-tab {
+    padding-right: 5px;
+    padding-left: 5px;
+    font-size: 11px;
+  }
+
+  .plugin-info-layout {
+    grid-template-columns: minmax(90px, 0.6fr) minmax(0, 2fr);
+    gap: 12px;
+  }
+
+}

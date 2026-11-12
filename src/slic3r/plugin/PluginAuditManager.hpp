@@ -131,10 +131,19 @@ public:
     // registered "conf" keyword also blocks .conf/.ini file components.
     bool is_denied_path_keyword(const boost::filesystem::path& candidate) const;
 
-    // is_denied_filename(candidate) || is_denied_path_keyword(candidate). Convenience for
-    // call sites that only need to know whether a path is categorically off-limits, not which
-    // specific rule fired.
+    // is_denied_filename(candidate) || is_denied_path_keyword(candidate) ||
+    // is_ultranet_plugins_path(candidate). Convenience for call sites that only need to know
+    // whether a path is categorically off-limits, not which specific rule fired.
     bool is_denied_path(const boost::filesystem::path& candidate) const;
+
+    // UltraNet's native network plug-ins live in {data_dir}/plugins. Python plugin grants and
+    // audited filesystem events must never reach that folder, even under full access or a
+    // data_dir() allowed root. A trailing "/*" tree marker is stripped before the comparison.
+    // Matching is case-insensitive on every platform (APFS/NTFS aliases and a Linux folder
+    // named Plugins are both denied), NFC-normalizes data_dir spellings, uses equivalent()
+    // from the nearest existing ancestor so a not-yet-existing file is covered, and resolves
+    // dangling symlinks lexically. Fail closed when Unicode normalize or symlink read fails.
+    bool is_ultranet_plugins_path(const boost::filesystem::path& candidate) const;
 
     // --- policy checks ---
     // Shared core for every audited filesystem event.  The deny checks are consulted above the
@@ -225,6 +234,13 @@ public:
     // Production never sets it.
     using PermissionMessagePrompt = std::function<bool(const std::string& message)>;
     static void set_permission_message_prompt_for_testing(PermissionMessagePrompt prompt);
+
+    // Answers the Full access confirmation in place of the native dialog. Production never sets it.
+    using FullAccessPrompt = std::function<bool(const std::string& plugin_name)>;
+    static void set_full_access_prompt_for_testing(FullAccessPrompt prompt);
+
+    // Native Full access confirmation. "No" is the default button. Tests use the seam above.
+    static bool prompt_enable_full_access(const std::string& plugin_name);
 
     bool verbose_events = true;
 

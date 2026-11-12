@@ -1242,6 +1242,12 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/PluginManager.hpp
         plugin/PluginAuditManager.cpp
         plugin/PluginAuditManager.hpp
+        GUI/PluginPermissionValidation.cpp
+        GUI/PluginPermissionValidation.hpp
+        GUI/PluginsInspectorLogic.cpp
+        GUI/PluginsInspectorLogic.hpp
+        GUI/PluginsInspectorDialog.cpp
+        GUI/PluginsInspectorDialog.hpp
         plugin/PluginResolver.cpp
         plugin/PluginResolver.hpp
         plugin/PyPluginTrampoline.hpp
@@ -1329,6 +1335,9 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/PluginHooks.cpp
     plugin/PluginManager.cpp
     plugin/PluginAuditManager.cpp
+    GUI/PluginPermissionValidation.cpp
+    GUI/PluginsInspectorLogic.cpp
+    GUI/PluginsInspectorDialog.cpp
     plugin/PluginResolver.cpp
     plugin/host/PluginHost.cpp
     plugin/host/PluginHostGeometry.cpp
