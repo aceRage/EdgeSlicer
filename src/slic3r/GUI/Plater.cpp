@@ -10898,7 +10898,8 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
                 << boost::format(": ams %1% tray %2% id %3% color %4%") % ams.first % tray.first % tray.second->setting_id % tray.second->color;
             // Keyed by the whole ams id: keying by its first digit put an AMS HT (ams "128") on
             // the key of AMS "1" slot 1, and an H2C with two AMS 2 Pro units lost its HT.
-            const BambuExtruderMap::AmsListEntry entry = BambuExtruderMap::ams_list_entry(ams.first, tray.first);
+            // A rack AMS (the H3C's AMS 3H) names its slots "1".."9".
+            const BambuExtruderMap::AmsListEntry entry = BambuExtruderMap::ams_list_entry(ams.first, tray.first, ams.second && ams.second->is_rack());
             if (entry.key < 0) {
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": invalid ams " << ams.first << " tray " << tray.first;
                 continue;
@@ -16963,7 +16964,7 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
             if (!t || !t->is_tray_info_ready() || !t->is_exists) continue;
             int slot_no = 0;
             try { slot_no = std::stoi(tv.first); } catch (...) {}
-            const std::string tray_name = BambuExtruderMap::tray_name(ams_no, slot_no);
+            const std::string tray_name = a->is_rack() ? BambuExtruderMap::rack_tray_name(slot_no) : BambuExtruderMap::tray_name(ams_no, slot_no);
             DynamicPrintConfig cfg;
             cfg.set_key_value("filament_type",   new ConfigOptionStrings{ t->get_filament_type() });
             cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + t->color).GetAsString(wxC2S_HTML_SYNTAX)) });

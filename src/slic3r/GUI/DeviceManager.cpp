@@ -952,6 +952,9 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         return -1;
 
     auto feeds_requested_extruder = [only_physical_extruder](const Ams *ams) {
+        // A rack AMS (H3C AMS 3H) is never a mapping target yet: see has_rack_ams().
+        if (ams && ams->is_rack())
+            return false;
         return only_physical_extruder < 0 || (ams && ams->nozzle == only_physical_extruder);
     };
 
@@ -1250,6 +1253,10 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
 {
     bool valid_ams_mapping_result = true;
     if (result.empty()) return false;
+
+    // A rack AMS slot or rack spool holder is never valid yet (strip_blocked_mapping).
+    if (strip_blocked_mapping(result) > 0)
+        valid_ams_mapping_result = false;
 
     for (int i = 0; i < result.size(); i++) {
         // invalid mapping result
@@ -3664,18 +3671,16 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                     nozzle_id = get_flag_bits(info, 8, 4);
                 }
 
+                /* A rack AMS (the H3C's AMS 3H, Bambu Studio ZMULTI_A / ZMULTI_B) feeds the one toolhead
+                 * through the nozzle rack: extruder 0xE there means the main extruder (Bambu Studio
+                 * DevFilaSystemParser::ParseAmsInfo). It is listed for the Device page and the filament
+                 * sync; the send mapping leaves it out (MachineObject::mapping_blocked_ams_id). */
+                const bool rack_ams = GUI::AmsTypes::is_rack_ams(type_id);
+                if (rack_ams && nozzle_id == 0xE)
+                    nozzle_id = MAIN_NOZZLE_ID;
+
                 /*AMS without initialization*/
                 if (nozzle_id == 0xE) {
-                    continue;
-                }
-
-                /* A rack AMS (Bambu Studio DevAmsType ZMULTI_A = 6, the H3C's AMS 3H; ZMULTI_B = 7) is not
-                 * supported yet. Its slots use another numbering (tray bits 28 + slot, mapping index 28 + slot,
-                 * nine slots, drying zones), so listing it would give the mapping and the filament sync wrong
-                 * slot numbers for the printer. Leave it out until that numbering is ported. */
-                if (type_id == 6 || type_id == 7) {
-                    if (log_first_time("rack_ams_skipped|" + dev_id + "|" + std::to_string(type_id)))
-                        BOOST_LOG_TRIVIAL(info) << "parse_json: rack AMS (type " << type_id << ") not supported yet, not listed";
                     continue;
                 }
 
@@ -3700,12 +3705,7 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                 try {
                     if (!ams_id.empty()) {
                         int ams_id_int = atoi(ams_id.c_str());
-
-                        if (type_id < 4) {
-                            curr_ams->is_exists = hex_bit_set(ams_exist_bits, ams_id_int);
-                        } else {
-                            curr_ams->is_exists = hex_bit_set(ams_exist_bits, 4 + (ams_id_int - 128));
-                        }
+                        curr_ams->is_exists = hex_bit_set(ams_exist_bits, GUI::AmsTypes::unit_exist_bit(type_id, ams_id_int));
                     }
                 } catch (...) {
                     ;
@@ -3778,6 +3778,28 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                     catch (...)
                     {
                         curr_ams->current_temperature = INVALID_AMS_TEMPERATURE;
+                    }
+                }
+
+                /* zone_info: the AMS 3H's drying zones (Bambu Studio DevFilaSystemParser::ParseAmsInfo).
+                 * The unit reports no humidity or temperature of its own; it takes the dampest zone's. */
+                curr_ams->zones.clear();
+                if (it->contains("zone_info") && (*it)["zone_info"].is_array()) {
+                    parse_ams_zones((*it)["zone_info"], *curr_ams);
+                    const bool unit_humidity = it->contains("humidity") || it->contains("humidity_raw");
+                    const bool unit_temp     = it->contains("temp");
+                    const Ams::Zone* damp = nullptr;
+                    for (const Ams::Zone& z : curr_ams->zones)
+                        if (!damp || z.humidity_raw > damp->humidity_raw || (z.humidity_raw == damp->humidity_raw && z.humidity >= 1 && z.humidity < damp->humidity))
+                            damp = &z;
+                    if (damp) {
+                        if (!unit_humidity) {
+                            curr_ams->humidity_raw = damp->humidity_raw;
+                            if (damp->humidity >= 1)
+                                curr_ams->humidity = damp->humidity;
+                        }
+                        if (!unit_temp)
+                            curr_ams->current_temperature = damp->temperature;
                     }
                 }
 
@@ -3899,6 +3921,11 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                         } else {
                             curr_tray->remain = -1;
                         }
+                        // H3C keys: grams left, and the slot state (27 loaded, 160 empty).
+                        curr_tray->remain_g = tray_it->contains("remain_g") && (*tray_it)["remain_g"].is_number_integer()
+                                                  ? (*tray_it)["remain_g"].get<int>() : -1;
+                        curr_tray->state = tray_it->contains("state") && (*tray_it)["state"].is_number_integer()
+                                               ? (*tray_it)["state"].get<int>() : -1;
                         int ams_id_int = 0;
                         int tray_id_int = 0;
                         try {
@@ -3906,12 +3933,7 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                                 ams_id_int = atoi(ams_id.c_str());
                                 tray_id_int = atoi(curr_tray->id.c_str());
 
-                                if (type_id < 4) {
-                                    curr_tray->is_exists = hex_bit_set(tray_exist_bits, ams_id_int * 4 + tray_id_int);
-                                }
-                                else {
-                                    curr_tray->is_exists = hex_bit_set(tray_exist_bits, 16 + (ams_id_int - 128));
-                                }
+                                curr_tray->is_exists = hex_bit_set(tray_exist_bits, GUI::AmsTypes::tray_bit(type_id, ams_id_int, tray_id_int));
 
                             }
                         }
@@ -6750,6 +6772,128 @@ bool MachineObject::parse_hex_bits(const json& value, long long& bits)
     return true;
 }
 
+void MachineObject::parse_ams_zones(const json& zone_info, Ams& ams)
+{
+    auto read_int = [](const json& j, const char* key, int& out) {
+        if (!j.contains(key))
+            return;
+        const json& v = j[key];
+        if (v.is_number_integer())
+            out = v.get<int>();
+        else if (v.is_number())
+            out = int(v.get<double>());
+        else if (v.is_string()) {
+            char*       end = nullptr;
+            const std::string s = v.get<std::string>();
+            const long  n   = std::strtol(s.c_str(), &end, 10);
+            if (end != s.c_str())
+                out = int(n);
+        }
+    };
+    for (const json& jz : zone_info) {
+        if (!jz.is_object())
+            continue;
+        Ams::Zone z;
+        read_int(jz, "zone_id", z.id);
+        if (jz.contains("zone_slots") && jz["zone_slots"].is_array())
+            for (const json& s : jz["zone_slots"]) {
+                int slot = -1;
+                if (s.is_number_integer())
+                    slot = s.get<int>();
+                else if (s.is_string())
+                    slot = std::atoi(s.get<std::string>().c_str());
+                if (slot >= 0)
+                    z.slots.push_back(slot);
+            }
+        read_int(jz, "humidity", z.humidity);
+        read_int(jz, "humidity_raw", z.humidity_raw);
+        read_int(jz, "dry_time", z.left_dry_time);
+        if (jz.contains("temp")) {
+            const json& t = jz["temp"];
+            if (t.is_number())
+                z.temperature = t.get<float>();
+            else if (t.is_string() && !t.get<std::string>().empty())
+                z.temperature = string_to_float(t.get<std::string>());
+        }
+        ams.zones.push_back(z);
+    }
+}
+
+bool MachineObject::has_rack_ams() const
+{
+    for (const auto& kv : amsList)
+        if (kv.second && kv.second->is_rack())
+            return true;
+    return false;
+}
+
+bool MachineObject::is_rack_ams_id(const std::string& ams_id) const
+{
+    auto it = amsList.find(ams_id);
+    return it != amsList.end() && it->second && it->second->is_rack();
+}
+
+bool MachineObject::mapping_blocked_ams_id(const std::string& ams_id) const
+{
+    if (is_rack_ams_id(ams_id))
+        return true;
+    // A nozzle rack's external spool holders (one per rack position, 255 down to 247): which
+    // holder feeds which rack nozzle is part of the rack pairing that is not ported yet.
+    if (has_rack_ams() || vir_slots.size() > 2) {
+        char*      end = nullptr;
+        const long id  = std::strtol(ams_id.c_str(), &end, 10);
+        if (end != ams_id.c_str() && *end == '\0' && GUI::AmsTypes::is_rack_virtual_slot(int(id)))
+            return true;
+    }
+    return false;
+}
+
+std::set<std::string> MachineObject::mapping_blocked_ams_ids() const
+{
+    std::set<std::string> out;
+    for (const auto& kv : amsList)
+        if (kv.second && kv.second->is_rack())
+            out.insert(kv.first);
+    if (has_rack_ams() || vir_slots.size() > 2)
+        for (int id = 247; id <= 255; ++id)
+            out.insert(std::to_string(id));
+    return out;
+}
+
+int MachineObject::strip_blocked_mapping(std::vector<FilamentInfo>& result) const
+{
+    int stripped = 0;
+    // A tray number alone (no ams id) is checked too: a rack AMS unit's trays as the old
+    // ams_id * 4 + slot numbering would name them, and the rack spool holders' own ids.
+    auto tray_blocked = [this](int tray_id) {
+        if (tray_id < 0)
+            return false;
+        if (mapping_blocked_ams_id(std::to_string(tray_id)) && GUI::AmsTypes::is_rack_virtual_slot(tray_id))
+            return true;
+        for (const auto& kv : amsList) {
+            if (!kv.second || !kv.second->is_rack())
+                continue;
+            const int first = std::atoi(kv.first.c_str()) * 4;
+            if (tray_id >= first && tray_id < first + std::max<int>(9, int(kv.second->trayList.size())))
+                return true;
+        }
+        return false;
+    };
+    for (FilamentInfo& f : result) {
+        const bool blocked = (!f.ams_id.empty() && mapping_blocked_ams_id(f.ams_id)) || tray_blocked(f.tray_id);
+        if (!blocked)
+            continue;
+        f.tray_id  = -1;
+        f.distance = 99999;
+        f.ams_id.clear();
+        f.slot_id.clear();
+        ++stripped;
+    }
+    if (stripped > 0)
+        BOOST_LOG_TRIVIAL(info) << "ams_mapping: " << stripped << " filament(s) not mapped to a rack AMS / rack spool holder (not supported yet)";
+    return stripped;
+}
+
 void MachineObject::update_filament_list()
 {
     PresetBundle *preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
@@ -6870,6 +7014,8 @@ void MachineObject::check_ams_filament_valid()
     for (auto &ams_pair : amsList) {
         auto ams_id = ams_pair.first;
         auto &ams = ams_pair.second;
+        if (ams && ams->is_rack())
+            continue; // no commands to a rack AMS (H3C AMS 3H) yet
         std::ostringstream stream;
         if (ams->nozzle < 0 || ams->nozzle >= m_extder_data.extders.size()) {
             return;
