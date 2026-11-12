@@ -5914,14 +5914,12 @@ void PrintConfigDef::init_fff_params()
     def = this->add("zaa_max_segment_rate", coFloat);
     def->label    = L("Max contoured segments per second");
     def->category = L("Quality");
-    def->tooltip  = L("Upper limit on how many short contoured moves per second Z contouring may send.
-"
+    def->tooltip  = L("Upper limit on how many short contoured moves per second Z contouring may send.\n"
                       "Contouring samples the surface every 0.1 mm, and a fast top surface can then ask the "
                       "firmware for thousands of moves a second; a printer whose planner cannot keep up stutters "
                       "and leaves blobs. With a limit, contoured paths drop intermediate samples so that no "
                       "segment is shorter than the feature's speed divided by this rate. The path's own corners "
-                      "are always kept; only the added height samples are thinned.
-"
+                      "are always kept; only the added height samples are thinned.\n"
                       "0 = no limit. Klipper and Bambu printers rarely need one; try 300-500 for Marlin.");
     def->sidetext = L("1/s");
     def->min      = 0;
