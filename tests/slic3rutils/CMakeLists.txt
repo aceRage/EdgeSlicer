@@ -89,6 +89,7 @@ add_executable(${_TEST_NAME}_tests
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     plate_cut_membership_tests.cpp
+    plate_duplicate_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp

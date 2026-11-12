@@ -30634,6 +30634,7 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     dlg.sync_spiral_mode(curr_plate->get_spiral_vase_mode(), !curr_plate->has_spiral_mode_config());
 
     dlg.Bind(EVT_SET_BED_TYPE_CONFIRM, [this, plate_index, &dlg](wxCommandEvent& e) {
+        take_snapshot(_u8L("Plate Settings"));
         PartPlate* curr_plate = p->partplate_list.get_curr_plate();
         BedType old_bed_type = curr_plate->get_bed_type(true);
         auto bt_sel = BedType(dlg.get_bed_type_choice());
@@ -30681,6 +30682,8 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         });
     dlg.set_plate_name(from_u8(curr_plate->get_plate_name()));
 
+    // One undo step for the dialog: the settings snapshot taken on OK covers a rename too.
+    Plater::SingleSnapshot single(this);
     dlg.ShowModal();
     rename_plate(p->partplate_list.get_curr_plate_index(), dlg.get_plate_name().ToUTF8().data());
 }
@@ -30908,6 +30911,9 @@ int Plater::duplicate_plate(int plate_index)
     if (plate_index == -1)
         index = p->partplate_list.get_curr_plate_index();
 
+    if (!p->can_add_plate())
+        return -1;
+    take_snapshot(_u8L("Duplicate Current Plate"));
     ret = p->partplate_list.duplicate_plate(index);
 
     //need to call update
