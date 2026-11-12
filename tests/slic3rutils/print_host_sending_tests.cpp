@@ -401,11 +401,34 @@ TEST_CASE("Moonraker retries an upload on port 8080 unless Moonraker refused it 
     }
 }
 
+// Moonraker::upload picks one of these two paths; on Windows it first asks the application's config whether
+// to resolve a host name (an address with a port is never taken for an IP there), which a test has none of,
+// so the paths are called directly.
+struct UploadPaths : Moonraker
+{
+    using Moonraker::Moonraker;
+    bool via_host(PrintHostUpload up, ProgressFn progress, ErrorFn error, InfoFn info) const
+    {
+        return upload_inner_with_host(std::move(up), progress, error, info);
+    }
+#ifdef WIN32
+    bool via_resolved_ip(PrintHostUpload up, ProgressFn progress, ErrorFn error, InfoFn info) const
+    {
+        return upload_inner_with_resolved_ip(std::move(up), progress, error, info, net::ip::make_address("127.0.0.1"));
+    }
+#endif
+};
+
 // The whole upload, against listeners of the test's own: the first on an ephemeral port, the retry's on
 // 127.0.0.1:8080. If 8080 cannot be had here (another program has it), the case says so and stops: a retry
 // must never reach someone else's server.
 TEST_CASE("A Moonraker upload is retried on port 8080 of the same host, but not after a refusal", "[Moonraker][sending][socket]")
 {
+#ifdef WIN32
+    const bool resolved_ip = GENERATE(false, true); // Windows uploads to an address given as an IP through its own path
+#else
+    const bool resolved_ip = false;
+#endif
     static bool  had_8080 = false;
     StatusServer on_8080(200, 8080);
     if (!on_8080.ok()) {
@@ -417,20 +440,27 @@ TEST_CASE("A Moonraker upload is retried on port 8080 of the same host, but not 
     had_8080 = true;
     const fs::path file = write_test_file("moonraker_retry", 4);
 
-    auto upload_to = [&file](const std::string& print_host, std::string& error) {
+    auto upload_to = [&file, resolved_ip](const std::string& print_host, std::string& error) {
         DynamicPrintConfig cfg = host_config("octoprint", print_host);
-        Moonraker          host(&cfg);
+        UploadPaths        host(&cfg);
         PrintHostUpload    up;
         up.source_path = file;
         up.upload_path = "cube.gcode";
         up.post_action = PrintHostPostUploadAction::None;
-        wxString err;
-        const bool ok = host.upload(
-            up, [](Http::Progress, bool& cancel) { cancel = false; }, [&err](wxString e) { err = e; },
-            [](wxString, wxString) {});
+        wxString              err;
+        PrintHost::ProgressFn progress = [](Http::Progress, bool& cancel) { cancel = false; };
+        PrintHost::ErrorFn    on_error = [&err](wxString e) { err = e; };
+        PrintHost::InfoFn     on_info  = [](wxString, wxString) {};
+#ifdef WIN32
+        const bool ok = resolved_ip ? host.via_resolved_ip(up, progress, on_error, on_info) : host.via_host(up, progress, on_error, on_info);
+#else
+        (void) resolved_ip;
+        const bool ok = host.via_host(up, progress, on_error, on_info);
+#endif
         error = err.ToUTF8().data();
         return ok;
     };
+    INFO((resolved_ip ? "the resolved IP upload path" : "the host name upload path"));
 
     SECTION("refused with a reason: one upload, no retry, the printer's own answer shown")
     {
