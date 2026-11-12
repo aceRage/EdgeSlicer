@@ -4852,26 +4852,26 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         m_full_report_seen = true; // DeviceManager::full_report_tick
                     if (jj.contains("ams")) {
                         if (jj["ams"].contains("ams")) {
-                            long int last_ams_exist_bits = ams_exist_bits;
-                            long int last_tray_exist_bits = tray_exist_bits;
-                            long int last_is_bbl_bits = tray_is_bbl_bits;
-                            long int last_read_done_bits = tray_read_done_bits;
+                            long long last_ams_exist_bits = ams_exist_bits;
+                            long long last_tray_exist_bits = tray_exist_bits;
+                            long long last_is_bbl_bits = tray_is_bbl_bits;
+                            long long last_read_done_bits = tray_read_done_bits;
                             long int last_ams_version = ams_version;
                             if (jj["ams"].contains("ams_exist_bits")) {
-                                ams_exist_bits = stol(jj["ams"]["ams_exist_bits"].get<std::string>(), nullptr, 16);
+                                parse_hex_bits(jj["ams"]["ams_exist_bits"], ams_exist_bits);
                             }
                             if (jj["ams"].contains("tray_exist_bits")) {
-                                tray_exist_bits = stol(jj["ams"]["tray_exist_bits"].get<std::string>(), nullptr, 16);
+                                parse_hex_bits(jj["ams"]["tray_exist_bits"], tray_exist_bits);
                             }
                             if (!key_field_only) {
                                 if (jj["ams"].contains("tray_read_done_bits")) {
-                                    tray_read_done_bits = stol(jj["ams"]["tray_read_done_bits"].get<std::string>(), nullptr, 16);
+                                    parse_hex_bits(jj["ams"]["tray_read_done_bits"], tray_read_done_bits);
                                 }
                                 if (jj["ams"].contains("tray_reading_bits")) {
-                                    tray_reading_bits = stol(jj["ams"]["tray_reading_bits"].get<std::string>(), nullptr, 16);
+                                    parse_hex_bits(jj["ams"]["tray_reading_bits"], tray_reading_bits);
                                 }
                                 if (jj["ams"].contains("tray_is_bbl_bits")) {
-                                    tray_is_bbl_bits = stol(jj["ams"]["tray_is_bbl_bits"].get<std::string>(), nullptr, 16);
+                                    parse_hex_bits(jj["ams"]["tray_is_bbl_bits"], tray_is_bbl_bits);
                                 }
                                 if (jj["ams"].contains("version")) {
                                     if (jj["ams"]["version"].is_number())
@@ -4962,9 +4962,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                             int ams_id_int = atoi(ams_id.c_str());
 
                                             if (type_id < 4) {
-                                                curr_ams->is_exists = (ams_exist_bits & (1 << ams_id_int)) != 0 ? true : false;
+                                                curr_ams->is_exists = hex_bit_set(ams_exist_bits, ams_id_int);
                                             } else {
-                                                curr_ams->is_exists = get_flag_bits(ams_exist_bits, 4 + (ams_id_int - 128));
+                                                curr_ams->is_exists = hex_bit_set(ams_exist_bits, 4 + (ams_id_int - 128));
                                             }
                                         }
                                     } catch (...) {
@@ -5167,10 +5167,10 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                                     tray_id_int = atoi(curr_tray->id.c_str());
 
                                                     if (type_id < 4) {
-                                                        curr_tray->is_exists = (tray_exist_bits & (1 << (ams_id_int * 4 + tray_id_int))) != 0 ? true : false;
+                                                        curr_tray->is_exists = hex_bit_set(tray_exist_bits, ams_id_int * 4 + tray_id_int);
                                                     }
                                                     else {
-                                                        curr_tray->is_exists = get_flag_bits(tray_exist_bits, 16 + (ams_id_int - 128));
+                                                        curr_tray->is_exists = hex_bit_set(tray_exist_bits, 16 + (ams_id_int - 128));
                                                     }
 
                                                 }
@@ -6691,6 +6691,32 @@ int MachineObject::get_flag_bits(int num, int start, int count, int base) const
     } catch (...) {
         return 0;
     }
+}
+
+bool MachineObject::parse_hex_bits(const json& value, long long& bits)
+{
+    // The printers send these masks as hex strings ("F0000000"). stol stopped at 32 bits on Windows
+    // and threw out_of_range once the H3C's AMS 3H set tray bit 31, which ended the whole push.
+    if (value.is_number_integer()) {
+        bits = value.get<long long>();
+        return true;
+    }
+    if (!value.is_string())
+        return false;
+    std::string s = value.get<std::string>();
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s.erase(0, 2);
+    if (s.empty() || s.size() > 16)
+        return false;
+    unsigned long long v = 0;
+    for (char c : s) {
+        int d = AmsTray::hex_digit_to_int(c);
+        if (d < 0)
+            return false;
+        v = (v << 4) | (unsigned long long) d;
+    }
+    bits = (long long) v;
+    return true;
 }
 
 void MachineObject::update_filament_list()

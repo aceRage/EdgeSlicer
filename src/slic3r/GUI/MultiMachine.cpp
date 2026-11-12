@@ -59,7 +59,7 @@ void DeviceItem::sync_state()
             state_printable = 4;
         }
 
-        state_enable_ams = obj_->ams_exist_bits;
+        state_enable_ams = static_cast<int>(obj_->ams_exist_bits);
 
 
         //device

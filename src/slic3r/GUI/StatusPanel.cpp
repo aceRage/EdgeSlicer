@@ -3015,7 +3015,7 @@ void StatusPanel::update_ams(MachineObject *obj)
                 std::string tray_id     = tray_it->first;
                 int         tray_id_int = atoi(tray_id.c_str());
                 // new protocol
-                if ((obj->tray_reading_bits & (1 << (ams_id_int * 4 + tray_id_int))) != 0) {
+                if (MachineObject::hex_bit_set(obj->tray_reading_bits, ams_id_int * 4 + tray_id_int)) {
                     m_ams_control->PlayRridLoading(ams_id, tray_id);
                 } else {
                     m_ams_control->StopRridLoading(ams_id, tray_id);
