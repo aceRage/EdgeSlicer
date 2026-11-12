@@ -194,8 +194,11 @@ void   prefer_lan(nlohmann::json& printers);
 // ---- sending ----
 // Multipart upload to /server/files/upload with print=false, so a failed print start still leaves
 // a usable file on the printer. `progress` is called with 0..100.
+// An upload the printer stops taking - nothing sent for `stall_s` seconds - is given up rather than
+// left to hang the send.
+constexpr int UPLOAD_STALL_S = 120;
 bool upload(const Device& d, const std::string& source_path, const std::string& filename,
-            std::function<void(int)> progress, std::string& error);
+            std::function<void(int)> progress, std::string& error, int stall_s = UPLOAD_STALL_S);
 // GET /server/files/metadata?filename= - proof that the file really landed.
 bool metadata(const Device& d, const std::string& filename, long long& size, std::string& error);
 // The file is still on the printer, byte for byte as far as a size can tell: what lets a reprint
@@ -224,6 +227,9 @@ std::vector<int> auto_match(const std::vector<FileFilament>& filaments, const st
 // POST /printer/gcode/script?script= - one or more macros, run at once. The transport every
 // task-config command below travels on.
 bool run_script(const Device& d, const std::string& script, std::string& error);
+// The same at a print host's own origin ("https://host:7125", see PrinterStorage::base_url_of),
+// with its Moonraker API key as X-Api-Key when it has one.
+bool run_script(const std::string& base_url, const std::string& apikey, const std::string& script, std::string& error);
 
 // The macros for one mapping, without the start (what a dry run reports).
 // `unload_at_end` adds END_UNLOAD_FILAMENT=[..] to SET_PRINT_PREFERENCES: a 1 for every toolhead
