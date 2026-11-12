@@ -242,6 +242,16 @@ TEST_CASE("url_without_userinfo drops user:password@ and nothing else", "[Http][
     CHECK(Http::url_without_userinfo("") == "");
 }
 
+TEST_CASE("url_for_log hides userinfo and secret query values", "[Http][secrets]")
+{
+    CHECK(Http::url_for_log("http://host/api?apikey=FAKE123") == "http://host/api?apikey=***");
+    CHECK(Http::url_for_log("http://u:p@host/api?a=1&API_KEY=FAKE&b=2#frag") == "http://host/api?a=1&API_KEY=***&b=2#frag");
+    CHECK(Http::url_for_log("http://host/api?token=T&flag&name=x") == "http://host/api?token=***&flag&name=x");
+    CHECK(Http::url_for_log("http://host/api?op=118&TIME=5") == "http://host/api?op=118&TIME=5");
+    CHECK(Http::url_for_log("http://host/api") == "http://host/api");
+    CHECK(Http::url_for_log("") == "");
+}
+
 TEST_CASE("OctoPrint's connection test does not log the address's password", "[PrintHost][secrets][socket]")
 {
     FixedReplyServer  server(R"({"api":"0.1","server":"1.9.0","text":"OctoPrint 1.9.0"})");
