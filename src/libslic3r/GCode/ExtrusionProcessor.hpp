@@ -129,15 +129,16 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
         // Intersection handling
         if (ADD_INTERSECTIONS &&
             ((points.back().distance > boundary_offset + EPSILON) != (next_point.distance > boundary_offset + EPSILON))) {
-            const ExtendedPoint &prev_point    = points.back();
-            auto                 intersections = unscaled_prev_layer.template intersections_with_line<true>(
-                L{prev_point.position.cast<AABBScalar>(), next_point.position.cast<AABBScalar>()});
+            // A copy: the crossings are pushed onto points below, which can make it grow and move.
+            const Vec2d prev_position = points.back().position;
+            auto        intersections = unscaled_prev_layer.template intersections_with_line<true>(
+                L{prev_position.cast<AABBScalar>(), next_point.position.cast<AABBScalar>()});
             for (const auto &intersection : intersections) {
                 ExtendedPoint p{};
                 p.position = intersection.first.template cast<double>();
                 p.distance = boundary_offset;
                 // ORCA: Filter out points that are introduced at intersections if their distance from the previous or next point is not meaningful
-                if ((p.position - prev_point.position).norm() > min_spacing &&
+                if ((p.position - prev_position).norm() > min_spacing &&
                     (next_point.position - p.position).norm() > min_spacing) {
                     points.push_back(p);
                 }

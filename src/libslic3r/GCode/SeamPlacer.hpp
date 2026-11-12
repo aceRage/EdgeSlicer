@@ -85,7 +85,7 @@ struct SeamCandidate {
   SeamCandidate(const Vec3f &pos, Perimeter &perimeter,
                 float local_ccw_angle,
                 EnforcedBlockedSeamPoint type) :
-                                                 position(pos), perimeter(perimeter), visibility(0.0f), overhang(0.0f), embedded_distance(0.0f), local_ccw_angle(
+                                                 position(pos), perimeter(perimeter), visibility(0.0f), overhang(0.0f), unsupported_dist(0.0f), embedded_distance(0.0f), local_ccw_angle(
                                                                                                                                                      local_ccw_angle), type(type), central_enforcer(false) {
   }
   const Vec3f position;
@@ -93,6 +93,7 @@ struct SeamCandidate {
   Perimeter &perimeter;
   float visibility;
   float overhang;
+  // Edge: set from the layer below; a point with no layer below (the object's first layer) is supported, 0 as overhang.
   float unsupported_dist;
   // distance inside the merged layer regions, for detecting perimeter points which are hidden indside the print (e.g. multimaterial join)
   // Negative sign means inside the print, comes from EdgeGrid structure
