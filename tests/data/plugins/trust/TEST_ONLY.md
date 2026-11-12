@@ -17,5 +17,5 @@ RFC 8032 test 1:
 
 RFC 8032 test 2, used as the "wrong key" in signature-reject cases:
 
-- seed: `4ccd089b28ff96da9c80fc314fe0b7a126c472b8d0c6f5d53cc7dd6da61e0c8d`
+- seed: `4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb`
 - public key: `3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c`

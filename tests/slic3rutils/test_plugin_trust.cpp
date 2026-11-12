@@ -33,7 +33,7 @@ namespace {
 const char* const k_seed1 = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
 const char* const k_pub1  = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 // RFC 8032 test vector 2 — the wrong key for reject cases.
-const char* const k_seed2 = "4ccd089b28ff96da9c80fc314fe0b7a126c472b8d0c6f5d53cc7dd6da61e0c8d";
+const char* const k_seed2 = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
 const char* const k_pub2  = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 
 const char* const k_plugin_source = R"PY(# /// script
