@@ -63,14 +63,14 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
         Vec3i32 neighbors = triangles_neighbors[face_idx];
         int n_a = neighbors[0] != other_face_idx ? neighbors[0] : neighbors[1];
         int n_b = neighbors[2] != other_face_idx ? neighbors[2] : neighbors[1];
-        if (n_a > 0)
+        if (n_a >= 0) // Edge: face 0 is a face like any other; -1 is no neighbour
             for (int &n : triangles_neighbors[n_a]) {
                 if (n == face_idx) {
                     n = n_b;
                     break;
                 }
             }
-        if (n_b > 0)
+        if (n_b >= 0)
             for (int &n : triangles_neighbors[n_b]) {
                 if (n == face_idx) {
                     n = n_a;

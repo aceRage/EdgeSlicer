@@ -21,6 +21,7 @@
 #include "libslic3r/Fill/FillGyroid.hpp"
 #include "libslic3r/Fill/AdaptiveInfillField.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
@@ -3172,4 +3173,74 @@ TEST_CASE("Gap fill of a fill that keeps its order prints after the extrusions i
     INFO(pattern << " on " << Slic3r::Test::mesh_names.at(mesh));
     REQUIRE(gap_fills > 0);
     CHECK(before == 0);
+}
+
+// make_fills() set the link limit of straight solid fill lines from f->spacing before the spacing was given to the
+// filler (it is set per expolygon further down), so it was 3 x 0 = 0, which is no limit at all. A link that follows
+// the outline of the area from one fill line to the next was then laid however long it was. Along a hole whose side
+// runs the way the fill does, that is a whole extra line laid along the hole's side, a quarter of a line spacing
+// from the fill line beside it: here two lines 10 mm long on every solid layer whose lines run across the plate in
+// the hole's direction.
+TEST_CASE("Solid fill is not linked along the side of a hole beyond the link limit", "[Fill][Regression]")
+{
+    // A 30 x 30 x 3 mm plate, solid all through, with a 10 x 10 mm square hole in the middle; the fill runs at 0 and
+    // 90 degrees, along the sides of the hole.
+    indexed_triangle_set plate = its_make_cube(30., 30., 3.);
+    indexed_triangle_set hole  = its_make_cube(10., 10., 3.);
+    for (stl_vertex &v : hole.vertices)
+        v += Vec3f(10.f, 10.f, 0.f);
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "plate_with_square_hole";
+    object->add_volume(TriangleMesh(plate));
+    object->add_volume(TriangleMesh(hole))->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+    object->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"top_shell_layers", "8"},
+        {"bottom_shell_layers", "8"},
+        {"wall_loops", "2"},
+        {"solid_infill_direction", "0"},
+        {"infill_direction", "0"},
+    });
+    Print print;
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode_out = Slic3r::Test::gcode(print);
+
+    // The object is not arranged, so the G-code is in the mesh's coordinates: the hole spans x and y from 10 to 20 mm,
+    // and the solid fill begins about 1 mm from it, inside the walls.
+    double      solid_length = 0., along_hole = 0., longest_along_hole = 0.;
+    std::string type;
+    GCodeReader parser;
+    parser.parse_buffer(gcode_out, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            type = std::string(comment);
+        if (type.find("Internal solid infill") == std::string::npos || !line.extruding(self) || std::abs(self.z() - 0.4) > 0.01)
+            return;
+        const double length = line.dist_XY(self);
+        solid_length += length;
+        const double x0 = std::min(double(self.x()), double(line.new_X(self))), x1 = std::max(double(self.x()), double(line.new_X(self)));
+        const double y0 = std::min(double(self.y()), double(line.new_Y(self))), y1 = std::max(double(self.y()), double(line.new_Y(self)));
+        // A move within 1.5 mm of a side of the hole, running along that side and no further than its ends.
+        const bool along_x_side = x1 - x0 < 0.01 && ((x0 > 8.5 && x0 < 10.) || (x0 > 20. && x0 < 21.5)) && y0 > 9.5 && y1 < 20.5;
+        const bool along_y_side = y1 - y0 < 0.01 && ((y0 > 8.5 && y0 < 10.) || (y0 > 20. && y0 < 21.5)) && x0 > 9.5 && x1 < 20.5;
+        if (along_x_side || along_y_side) {
+            along_hole += length;
+            longest_along_hole = std::max(longest_along_hole, length);
+        }
+    });
+    INFO("internal solid fill of the layer at z = 0.4: " << solid_length << " mm, of it along the sides of the hole " << along_hole
+                                                        << " mm, the longest move there " << longest_along_hole << " mm");
+    REQUIRE(solid_length > 1000.);
+    // The link limit is three line spacings, 1.2 mm here.
+    CHECK(longest_along_hole < 1.5);
 }
