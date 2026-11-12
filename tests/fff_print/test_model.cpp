@@ -220,9 +220,9 @@ TEST_CASE("Splitting one part leaves a flat part of the same object in place", "
     sheet.indices  = { Vec3i32(0, 1, 2), Vec3i32(0, 2, 3) };
     // Two 4 mm cubes 10 mm apart, as one mesh.
     indexed_triangle_set cubes = its_make_cube(4., 4., 4.);
-    indexed_triangle_set far   = its_make_cube(4., 4., 4.);
-    its_translate(far, Vec3f(10.f, 0.f, 0.f));
-    its_merge(cubes, far);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(cubes, other);
 
     Model        model;
     ModelObject *object = model.add_object();
