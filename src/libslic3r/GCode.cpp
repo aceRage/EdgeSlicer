@@ -34,6 +34,8 @@
 #include "Time.hpp"
 #include "GCode/ExtrusionProcessor.hpp"
 #include "GCode/PreCoolingInjector.hpp"
+#include "GCode/HeadCollisionCheck.hpp"
+#include "HeadClearance.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -3024,6 +3026,57 @@ WipeTowerType GCode::wipe_tower_type() const
     return WipeTowerType::Type2;
 }
 
+// EdgeSlicer: print-head clearance check. Z contouring (ZAA) moves the nozzle up and down inside a
+// layer, so a later move - a contoured bead or a travel across contoured material - can reach
+// material that is already there. Replays the processed moves against the printer's head model
+// (resources/head_clearance) and reports contact as a slicing warning. Never changes the G-code.
+// Skipped entirely, before any work, when no object is contoured: planar output and planar slicing
+// time are untouched.
+static void check_head_clearance(Print &print, const GCodeProcessorResult &result)
+{
+    bool contoured = false;
+    for (const PrintObject *object : print.objects())
+        if (object->need_z_contouring()) {
+            contoured = true;
+            break;
+        }
+    if (!contoured)
+        return;
+
+    const std::string &printer_model = print.config().printer_model.value;
+    const auto         head          = head_clearance_for_printer_model(printer_model);
+    if (!head) {
+        BOOST_LOG_TRIVIAL(info) << "Head clearance check: no head model for printer_model \"" << printer_model << "\", skipped";
+        return;
+    }
+
+    const auto                t0     = std::chrono::steady_clock::now();
+    const HeadCollisionReport report = check_head_collisions(result.moves, *head, HeadCollisionParams(),
+                                                             [&print]() { if (print.canceled()) throw CanceledException(); });
+    BOOST_LOG_TRIVIAL(info) << "Head clearance check (" << head->id << "): " << report.moves_checked << " moves, "
+                            << report.hit_moves << " with contact, deepest " << report.max_depth << " mm, "
+                            << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s";
+    if (report.hit_moves == 0)
+        return;
+
+    auto mm = [](double v) { return float_to_string_decimal_point(v, 2); };
+    std::string msg = Slic3r::format(_(L("Z contouring: %1% moves would bring the print head into material that is already printed, "
+                                         "up to %2% mm deep (head model: %3%).")),
+                                     report.hit_moves, mm(report.max_depth), head->name);
+    if (!head->calibrated)
+        msg += " " + _(L("The head model is an estimate, not a measurement."));
+    const size_t shown = std::min<size_t>(report.hits.size(), 3);
+    for (size_t i = 0; i < shown; ++i) {
+        const HeadCollisionHit &h = report.hits[i];
+        msg += "\n" + Slic3r::format(_(L("Layer %1%, X %2% Y %3% Z %4%: %5% during %6%, %7% mm.")), h.layer_id + 1,
+                                     mm(h.position.x()), mm(h.position.y()), mm(h.position.z()),
+                                     h.part == "nozzle" ? _(L("nozzle")) : h.part,
+                                     h.travel ? _(L("travel")) : _(L("extrusion")), mm(h.depth));
+    }
+    msg += "\n" + _(L("Check the preview at these positions, raise Z hop, or lower the Z contouring range."));
+    print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingHeadCollision);
+}
+
 void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     PROFILE_CLEAR();
@@ -3216,6 +3269,8 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     }
 
     m_processor.finalize(true);
+    // EdgeSlicer: check-only head clearance pass. Returns at once unless an object is Z contoured.
+    check_head_clearance(*print, m_processor.result());
     //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
     DoExport::update_print_estimated_stats(m_processor, m_writer.extruders(), print->m_print_statistics, print->config());
     if (result != nullptr) {
@@ -4652,7 +4707,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!thumbnails.empty())
                 GCodeThumbnails::export_thumbnails_to_file(
                     thumbnail_cb, print.get_plate_index(), thumbnails, [&file](const char* sz) { file.write(sz); },
-                    [&print]() { print.throw_if_canceled(); });
+                    [&print]() { if (print.canceled()) throw CanceledException(); });
         }
     }
 

@@ -71,6 +71,7 @@ add_executable(${_TEST_NAME}_tests
 	test_config_range.cpp
 	test_support_interface_settings.cpp
 	test_contour_z.cpp
+	test_head_clearance.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp
 	test_edgegrid.cpp

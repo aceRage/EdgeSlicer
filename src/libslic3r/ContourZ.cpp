@@ -189,6 +189,45 @@ void contour_z_smooth_profile(std::vector<double> &d, int radius)
     d.swap(out);
 }
 
+void contour_z_thin_samples(std::vector<Vec2d> &xy, std::vector<double> &d, std::vector<char> &is_original, double min_len)
+{
+    if (min_len <= 0.0 || xy.size() < 3)
+        return;
+    const double min_len2 = min_len * min_len;
+    size_t       out      = 1;
+    for (size_t k = 1; k < xy.size(); ++k) {
+        const bool keep = is_original[k] || k + 1 == xy.size() || (xy[k] - xy[out - 1]).squaredNorm() >= min_len2;
+        if (!keep)
+            continue;
+        xy[out]          = xy[k];
+        d[out]           = d[k];
+        is_original[out] = is_original[k];
+        ++out;
+    }
+    xy.resize(out);
+    d.resize(out);
+    is_original.resize(out);
+}
+
+// The fastest speed a contoured path of this role can run at: the role's configured speed (the
+// largest over extruders). Dynamic slow-downs only lower it, so a segment-rate cap computed from it
+// holds for the real feed rate too.
+static double contour_z_role_max_speed(const PrintRegionConfig &config, ExtrusionRole role)
+{
+    const ConfigOptionFloats *opt = nullptr;
+    switch (role) {
+    case erTopSolidInfill: opt = &config.top_surface_speed; break;
+    case erIroning: opt = &config.ironing_speed; break;
+    case erExternalPerimeter: opt = &config.outer_wall_speed; break;
+    case erPerimeter: opt = &config.inner_wall_speed; break;
+    default: return 0.0;
+    }
+    double v = 0.0;
+    for (double s : opt->values)
+        v = std::max(v, s);
+    return v;
+}
+
 double contour_z_segment_feedrate(double f_role_mm_min,
                                   double h_nominal,
                                   double h_seg,
@@ -352,6 +391,13 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
         max_abs_d = std::max(max_abs_d, std::abs(v));
     if (max_abs_d < ZAA_MIN_PATH_DELTA_MM)
         return false;
+
+    // Pass 3b: zaa_max_segment_rate. Thin the added height samples so that the firmware is never
+    // asked for more than the configured number of moves per second at the role's top speed.
+    // Default 0: no change, the profile stays as upstream produced it.
+    if (const double rate = region->region().config().zaa_max_segment_rate.value; rate > 0.0)
+        contour_z_thin_samples(sample_xy, sample_d, sample_is_original,
+                               contour_z_min_segment_length(contour_z_role_max_speed(region->region().config(), path.role()), rate));
 
     // Pass 4: collapse collinear samples, as upstream, but on the smoothed profile.
     Pointf3s contoured_points;

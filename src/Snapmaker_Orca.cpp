@@ -6825,7 +6825,7 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
