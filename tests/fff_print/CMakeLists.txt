@@ -63,6 +63,7 @@ add_executable(${_TEST_NAME}_tests
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
+	test_counterbore_bridging.cpp
 	test_extra_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_overhang_outer.cpp
