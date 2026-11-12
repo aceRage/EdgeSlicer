@@ -1,5 +1,6 @@
 #include "EditGCodeDialog.hpp"
 
+#include <algorithm>
 #include <vector>
 #include <string>
 
@@ -8,6 +9,8 @@
 #include <wx/textctrl.h>
 #include <wx/button.h>
 #include <wx/wupdlock.h>
+#include <wx/stc/stc.h>
+#include <wx/cursor.h>
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -75,16 +78,7 @@ EditGCodeDialog::EditGCodeDialog(wxWindow* parent, const std::string& key, const
     m_add_btn = new ScalableButton(this, wxID_ANY, "add_copies");
     m_add_btn->SetToolTip(_L("Add selected placeholder to G-code"));
 
-    // The G-code is UTF-8; an implicit std::string -> wxString conversion uses the locale code page
-    // and mangled the degree sign (and other non-ASCII text) a little more on every open / save.
-    m_gcode_editor = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(value), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE
-#ifdef _WIN32
-    | wxBORDER_SIMPLE
-#endif
-    );
-    m_gcode_editor->SetFont(wxGetApp().code_font());
-    m_gcode_editor->SetInsertionPointEnd();
-    wxGetApp().UpdateDarkUI(m_gcode_editor);
+    create_editor(value);
 
     grid_sizer->Add(param_sizer,  1, wxEXPAND);
     grid_sizer->Add(m_add_btn,      0, wxALIGN_CENTER_VERTICAL);
@@ -93,6 +87,18 @@ EditGCodeDialog::EditGCodeDialog(wxWindow* parent, const std::string& key, const
     grid_sizer->AddGrowableRow(0, 1);
     grid_sizer->AddGrowableCol(0, 1);
     grid_sizer->AddGrowableCol(2, 2);
+
+    // One line under the editor: the template check's result. Clicking it jumps to the first problem.
+    m_lint_status = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+    m_lint_status->SetCursor(wxCursor(wxCURSOR_HAND));
+    m_lint_status->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) {
+        if (m_lint.issues.empty())
+            return;
+        const GCodeLint::Issue& first = m_lint.issues.front();
+        m_gcode_editor->GotoPos(int(first.start));
+        m_gcode_editor->SetSelection(int(first.start), int(first.start + first.length));
+        m_gcode_editor->SetFocus();
+    });
 
     m_param_label = new wxStaticText(this, wxID_ANY, _L("Select placeholder"));
     m_param_label->SetFont(wxGetApp().bold_font());
@@ -105,6 +111,7 @@ EditGCodeDialog::EditGCodeDialog(wxWindow* parent, const std::string& key, const
 
     topSizer->Add(label_top           , 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(grid_sizer          , 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
+    topSizer->Add(m_lint_status       , 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(m_param_label       , 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(m_param_description , 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(dlg_btns            , 0, wxEXPAND);
@@ -122,10 +129,19 @@ EditGCodeDialog::EditGCodeDialog(wxWindow* parent, const std::string& key, const
 
     init_params_list(key);
     bind_list_and_button();
+
+    // Names from the current presets count as known placeholders too (the parser sees the full config).
+    for (const std::string& opt_key : wxGetApp().preset_bundle->full_config().keys())
+        m_preset_keys.insert(opt_key);
+
+    m_lint_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent&) { run_lint(); }, m_lint_timer.GetId());
+    run_lint();
 }
 
 EditGCodeDialog::~EditGCodeDialog()
 {
+    m_lint_timer.Stop();
     // To avoid redundant process of wxEVT_DATAVIEW_SELECTION_CHANGED after dialog distroing (on Linux)
     // unbind this event from params_list
     m_params_list->Unbind(wxEVT_DATAVIEW_SELECTION_CHANGED, &EditGCodeDialog::selection_changed, this);
@@ -133,8 +149,237 @@ EditGCodeDialog::~EditGCodeDialog()
 
 std::string EditGCodeDialog::get_edited_gcode() const
 {
-    wxString text = m_gcode_editor->GetValue();
-    return std::string(text.ToUTF8());
+    return editor_text_utf8();
+}
+
+// The document as UTF-8 bytes: the offsets GCodeLint works with are Scintilla byte positions.
+std::string EditGCodeDialog::editor_text_utf8() const
+{
+    const wxCharBuffer buf = m_gcode_editor->GetTextRaw();
+    return buf.data() ? std::string(buf.data(), buf.length()) : std::string();
+}
+
+// ----------------------------------------------------------------------------
+//                  G-code editor: highlighting and live checks
+// ----------------------------------------------------------------------------
+
+namespace {
+
+// Scintilla indicators and markers used by the editor.
+constexpr int GCE_INDIC_ERROR    = 8; // 0-7 are reserved for lexers
+constexpr int GCE_INDIC_WARNING  = 9;
+constexpr int GCE_MARK_ERROR     = 0;
+constexpr int GCE_MARK_WARNING   = 1;
+constexpr int GCE_MARGIN_NUMBERS = 0;
+constexpr int GCE_MARGIN_MARKERS = 1;
+
+struct GCodeEditorPalette
+{
+    wxColour bg, fg, margin_bg, margin_fg, selection, caret;
+    wxColour command, param, comment, brace, keyword, variable, number, string, op;
+    wxColour error, warning;
+};
+
+GCodeEditorPalette gcode_editor_palette(bool dark)
+{
+    if (dark)
+        return {wxColour("#2B2B2F"), wxColour("#E6E6E8"), wxColour("#242427"), wxColour("#8C8C94"), wxColour("#264F78"), wxColour("#E6E6E8"),
+                wxColour("#6CB4FF"), wxColour("#E5B567"), wxColour("#8B949E"), wxColour("#D88CFF"), wxColour("#D88CFF"),
+                wxColour("#4FD1C5"), wxColour("#B5CEA8"), wxColour("#CE9178"), wxColour("#C8C8C8"),
+                wxColour("#FF6B6B"), wxColour("#FFB74D")};
+    return {wxColour("#FFFFFF"), wxColour("#262E30"), wxColour("#F4F4F6"), wxColour("#8C8C94"), wxColour("#CCE4F7"), wxColour("#262E30"),
+            wxColour("#0050B3"), wxColour("#8A4B00"), wxColour("#6A737D"), wxColour("#A626A4"), wxColour("#A626A4"),
+            wxColour("#00796B"), wxColour("#098658"), wxColour("#A31515"), wxColour("#383A42"),
+            wxColour("#E53935"), wxColour("#C77C00")};
+}
+
+} // namespace
+
+void EditGCodeDialog::create_editor(const std::string& value)
+{
+    m_gcode_editor = new wxStyledTextCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize
+#ifdef _WIN32
+        , wxBORDER_SIMPLE
+#endif
+    );
+    // Templates use "\n"; on Windows Scintilla would otherwise insert "\r\n" on Enter.
+    m_gcode_editor->SetEOLMode(wxSTC_EOL_LF);
+    m_gcode_editor->SetLexer(wxSTC_LEX_CONTAINER);
+    m_gcode_editor->SetWrapMode(wxSTC_WRAP_NONE);
+    m_gcode_editor->SetTabWidth(4);
+    m_gcode_editor->SetUseTabs(false);
+    m_gcode_editor->SetMouseDwellTime(500);
+    m_gcode_editor->SetMarginType(GCE_MARGIN_NUMBERS, wxSTC_MARGIN_NUMBER);
+    m_gcode_editor->SetMarginType(GCE_MARGIN_MARKERS, wxSTC_MARGIN_SYMBOL);
+    m_gcode_editor->SetMarginMask(GCE_MARGIN_NUMBERS, 0);
+    m_gcode_editor->SetMarginMask(GCE_MARGIN_MARKERS, (1 << GCE_MARK_ERROR) | (1 << GCE_MARK_WARNING));
+    m_gcode_editor->IndicatorSetStyle(GCE_INDIC_ERROR, wxSTC_INDIC_SQUIGGLE);
+    m_gcode_editor->IndicatorSetStyle(GCE_INDIC_WARNING, wxSTC_INDIC_SQUIGGLE);
+    m_gcode_editor->MarkerDefine(GCE_MARK_ERROR, wxSTC_MARK_CIRCLE);
+    m_gcode_editor->MarkerDefine(GCE_MARK_WARNING, wxSTC_MARK_CIRCLE);
+
+    apply_editor_theme();
+
+    // The G-code is UTF-8; an implicit std::string -> wxString conversion uses the locale code page
+    // and mangled the degree sign (and other non-ASCII text) a little more on every open / save.
+    m_gcode_editor->SetText(wxString::FromUTF8(value));
+    m_gcode_editor->EmptyUndoBuffer();
+    m_gcode_editor->DocumentEnd();
+
+    m_gcode_editor->Bind(wxEVT_STC_STYLENEEDED, [this](wxStyledTextEvent&) { restyle_editor(); });
+    m_gcode_editor->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent& evt) {
+        m_lint_timer.StartOnce(300);
+        evt.Skip();
+    });
+    m_gcode_editor->Bind(wxEVT_STC_DWELLSTART, [this](wxStyledTextEvent& evt) { show_issue_tip(evt.GetPosition()); });
+    m_gcode_editor->Bind(wxEVT_STC_DWELLEND, [this](wxStyledTextEvent&) {
+        if (m_gcode_editor->CallTipActive())
+            m_gcode_editor->CallTipCancel();
+    });
+}
+
+void EditGCodeDialog::apply_editor_theme()
+{
+    if (!m_gcode_editor)
+        return;
+    const GCodeEditorPalette pal  = gcode_editor_palette(wxGetApp().dark_mode());
+    const wxFont        font = wxGetApp().code_font();
+    wxStyledTextCtrl*   ed   = m_gcode_editor;
+
+    ed->StyleSetFont(wxSTC_STYLE_DEFAULT, font);
+    ed->StyleSetBackground(wxSTC_STYLE_DEFAULT, pal.bg);
+    ed->StyleSetForeground(wxSTC_STYLE_DEFAULT, pal.fg);
+    ed->StyleClearAll(); // every style starts from the default above
+
+    using GCodeLint::Style;
+    auto set = [ed](Style style, const wxColour& fg, bool bold = false, bool italic = false) {
+        ed->StyleSetForeground(int(style), fg);
+        ed->StyleSetBold(int(style), bold);
+        ed->StyleSetItalic(int(style), italic);
+    };
+    set(Style::Command, pal.command, true);
+    set(Style::Param, pal.param);
+    set(Style::Comment, pal.comment, false, true);
+    set(Style::Brace, pal.brace, true);
+    set(Style::Keyword, pal.keyword, true);
+    set(Style::Variable, pal.variable);
+    set(Style::Number, pal.number);
+    set(Style::String, pal.string);
+    set(Style::Operator, pal.op);
+
+    ed->StyleSetBackground(wxSTC_STYLE_LINENUMBER, pal.margin_bg);
+    ed->StyleSetForeground(wxSTC_STYLE_LINENUMBER, pal.margin_fg);
+    ed->SetFoldMarginColour(true, pal.margin_bg);
+    ed->SetFoldMarginHiColour(true, pal.margin_bg);
+    ed->SetCaretForeground(pal.caret);
+    ed->SetSelBackground(true, pal.selection);
+    ed->CallTipSetBackground(pal.margin_bg);
+    ed->CallTipSetForeground(pal.fg);
+
+    ed->IndicatorSetForeground(GCE_INDIC_ERROR, pal.error);
+    ed->IndicatorSetForeground(GCE_INDIC_WARNING, pal.warning);
+    ed->MarkerSetForeground(GCE_MARK_ERROR, pal.error);
+    ed->MarkerSetBackground(GCE_MARK_ERROR, pal.error);
+    ed->MarkerSetForeground(GCE_MARK_WARNING, pal.warning);
+    ed->MarkerSetBackground(GCE_MARK_WARNING, pal.warning);
+
+    // Margins follow the font, which follows the monitor's DPI.
+    ed->SetMarginWidth(GCE_MARGIN_NUMBERS, ed->TextWidth(wxSTC_STYLE_LINENUMBER, "_9999"));
+    ed->SetMarginWidth(GCE_MARGIN_MARKERS, std::max(FromDIP(12), ed->TextHeight(0) * 3 / 4));
+
+    // Re-colour the whole document with the new styles.
+    ed->Colourise(0, -1);
+}
+
+void EditGCodeDialog::restyle_editor()
+{
+    // Templates are small: re-lex the whole document (no name checks here, those are debounced).
+    const std::string       text = editor_text_utf8();
+    const GCodeLint::Result res  = GCodeLint::analyze(text, GCodeLint::KnownFn());
+    wxStyledTextCtrl*       ed   = m_gcode_editor;
+    ed->StartStyling(0);
+    size_t pos = 0;
+    for (const GCodeLint::Span& span : res.spans) {
+        if (span.start > pos)
+            ed->SetStyling(int(span.start - pos), int(GCodeLint::Style::Default));
+        ed->SetStyling(int(span.length), int(span.style));
+        pos = span.start + span.length;
+    }
+    if (text.size() > pos)
+        ed->SetStyling(int(text.size() - pos), int(GCodeLint::Style::Default));
+}
+
+wxString EditGCodeDialog::issue_message(const GCodeLint::Issue& issue) const
+{
+    using GCodeLint::Code;
+    switch (issue.code) {
+    case Code::UnknownPlaceholder: return format_wxstr(_L("Unknown placeholder \"%1%\""), issue.name);
+    case Code::UnclosedBrace:      return _L("'{' has no matching '}'");
+    case Code::StrayClosingBrace:  return _L("'}' has no matching '{'");
+    case Code::MalformedLegacy:    return _L("'[' must enclose a placeholder name, like [bed_temperature]");
+    case Code::UnclosedString:     return _L("Unterminated string or regular expression");
+    case Code::UnbalancedBracket:  return _L("Unbalanced parentheses or brackets");
+    case Code::IfWithoutEndif:     return _L("'if' has no matching 'endif'");
+    case Code::ElseWithoutIf:      return format_wxstr(_L("'%1%' has no matching 'if'"), issue.name);
+    case Code::EndifWithoutIf:     return _L("'endif' has no matching 'if'");
+    }
+    return wxEmptyString;
+}
+
+void EditGCodeDialog::run_lint()
+{
+    if (!m_gcode_editor || !m_lint_status)
+        return;
+    const auto& known = GCodeLint::known_placeholder_names();
+    m_lint = GCodeLint::analyze(editor_text_utf8(), [this, &known](const std::string& name) {
+        return known.count(name) > 0 || m_preset_keys.count(name) > 0;
+    });
+
+    wxStyledTextCtrl* ed  = m_gcode_editor;
+    const int         len = ed->GetLength();
+    for (int indic : {GCE_INDIC_ERROR, GCE_INDIC_WARNING}) {
+        ed->SetIndicatorCurrent(indic);
+        ed->IndicatorClearRange(0, len);
+    }
+    ed->MarkerDeleteAll(GCE_MARK_ERROR);
+    ed->MarkerDeleteAll(GCE_MARK_WARNING);
+    for (const GCodeLint::Issue& is : m_lint.issues) {
+        const bool error = is.severity == GCodeLint::Severity::Error;
+        ed->SetIndicatorCurrent(error ? GCE_INDIC_ERROR : GCE_INDIC_WARNING);
+        ed->IndicatorFillRange(int(is.start), int(is.length));
+        ed->MarkerAdd(is.line - 1, error ? GCE_MARK_ERROR : GCE_MARK_WARNING);
+    }
+
+    const size_t        errors   = m_lint.errors();
+    const size_t        warnings = m_lint.warnings();
+    const GCodeEditorPalette pal      = gcode_editor_palette(wxGetApp().dark_mode());
+    wxString            status;
+    if (errors == 0 && warnings == 0) {
+        status = _L("No problems found");
+        m_lint_status->SetForegroundColour(GetForegroundColour());
+    } else {
+        const GCodeLint::Issue& first = m_lint.issues.front();
+        status = format_wxstr(_L("%1% error(s), %2% warning(s). Line %3%: %4%"), errors, warnings, first.line, issue_message(first));
+        m_lint_status->SetForegroundColour(errors > 0 ? pal.error : pal.warning);
+    }
+    m_lint_status->SetLabel(status);
+    m_lint_status->SetToolTip(errors + warnings > 0 ? _L("Click to go to the first problem. Saving is never blocked.") : wxString());
+    m_lint_status->Refresh();
+}
+
+void EditGCodeDialog::show_issue_tip(int pos)
+{
+    if (pos < 0)
+        return;
+    wxString tip;
+    for (const GCodeLint::Issue& is : m_lint.issues)
+        if (size_t(pos) >= is.start && size_t(pos) < is.start + is.length) {
+            if (!tip.empty())
+                tip += "\n";
+            tip += issue_message(is);
+        }
+    if (!tip.empty())
+        m_gcode_editor->CallTipShow(pos, tip);
 }
 
 void EditGCodeDialog::on_search_update()
@@ -415,6 +660,7 @@ void EditGCodeDialog::bind_list_and_button()
 
 void EditGCodeDialog::on_dpi_changed(const wxRect&suggested_rect)
 {
+    apply_editor_theme();
     const int& em = em_unit();
     const wxSize& size = wxSize(45 * em, 35 * em);
     SetMinSize(size);
@@ -426,6 +672,8 @@ void EditGCodeDialog::on_dpi_changed(const wxRect&suggested_rect)
 void EditGCodeDialog::on_sys_color_changed()
 {
     m_add_btn->msw_rescale();
+    apply_editor_theme();
+    run_lint();
 }
 
 const std::map<ParamType, std::string> ParamsInfo {

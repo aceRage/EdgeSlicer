@@ -400,6 +400,8 @@ set(lisbslic3r_sources
     GCode/PrintExtents.cpp
     GCode/PrintExtents.hpp
     GCodeReader.cpp
+    GCodeTemplateLint.cpp
+    GCodeTemplateLint.hpp
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp

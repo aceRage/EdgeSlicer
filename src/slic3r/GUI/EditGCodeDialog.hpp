@@ -1,19 +1,24 @@
 #ifndef slic3r_EditGCodeDialog_hpp_
 #define slic3r_EditGCodeDialog_hpp_
 
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <wx/gdicmn.h>
+#include <wx/timer.h>
 #include <slic3r/GUI/Widgets/Button.hpp>
 
 #include "GUI_Utils.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCodeTemplateLint.hpp"
 #include <wx/srchctrl.h>
 
 class wxListBox;
-class wxTextCtrl;
+class wxStyledTextCtrl;
+class wxStyledTextEvent;
 class ScalableButton;
 
 namespace Slic3r {
@@ -30,7 +35,8 @@ class EditGCodeDialog : public DPIDialog
 {
     ParamsViewCtrl*   m_params_list   {nullptr};
     ScalableButton*   m_add_btn       {nullptr};
-    wxTextCtrl*       m_gcode_editor  {nullptr};
+    wxStyledTextCtrl* m_gcode_editor  {nullptr};
+    wxStaticText*     m_lint_status   {nullptr};
     wxStaticText*     m_param_label   {nullptr};
     wxStaticText*     m_param_description {nullptr};
     wxSearchCtrl*     m_search_bar   {nullptr};
@@ -44,6 +50,11 @@ class EditGCodeDialog : public DPIDialog
     TemperaturesConfigDef           cgp_temperatures_config_def;
     TimestampsConfigDef             cgp_timestamps_config_def;
     OtherPresetsConfigDef           cgp_other_presets_config_def;
+
+    // Live checking of the template (GCodeTemplateLint): debounced while typing, never blocks OK.
+    wxTimer                          m_lint_timer;
+    GCodeLint::Result                m_lint;
+    std::unordered_set<std::string>  m_preset_keys; // keys of the current full config
 
 public:
     EditGCodeDialog(wxWindow*parent, const std::string&key, const std::string&value);
@@ -65,6 +76,15 @@ protected:
     void on_sys_color_changed() override;
 
     void selection_changed(wxDataViewEvent& evt);
+
+private:
+    void     create_editor(const std::string& value);
+    void     apply_editor_theme();
+    void     restyle_editor();
+    void     run_lint();
+    void     show_issue_tip(int pos);
+    wxString issue_message(const GCodeLint::Issue& issue) const;
+    std::string editor_text_utf8() const;
 };
 
 
