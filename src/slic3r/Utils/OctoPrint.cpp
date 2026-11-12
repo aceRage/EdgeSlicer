@@ -262,7 +262,10 @@ bool OctoPrint::test(wxString& msg) const
                 pt::read_json(ss, ptree);
 
                 if (! ptree.get_optional<std::string>("api")) {
+                    // Something answered, but not with OctoPrint's version reply: say so, rather
+                    // than "Could not connect to OctoPrint: " and nothing after it.
                     res = false;
+                    msg = GUI::format_wxstr(_L("Mismatched type of print host: %s"), name);
                     return;
                 }
 

@@ -829,6 +829,10 @@ namespace Slic3r {
                     client.send(jsonString);
                     // wait 30s
                     auto start_time = std::chrono::steady_clock::now();
+                    // receive() gives up at the end of the 30 s rather than wait for a frame forever:
+                    // a printer that goes quiet used to hang the send for good.
+                    client.set_deadline(start_time + std::chrono::seconds(30));
+                    bool answered = false;
                     do{
                         std::string response = client.receive();
                         // Never the frame as it came: it carries the printer's MainboardID (and its topic).
@@ -851,6 +855,7 @@ namespace Slic3r {
                             continue;
                         }
                         if(*cmd == ElegooLinkCommand::ELEGOO_START_PRINT){
+                            answered = true;
                             auto _ack = data->get_optional<int>("Data.Ack");
                             if(!_ack){
                                 BOOST_LOG_TRIVIAL(error) << "start print failed, ack not found";
@@ -905,10 +910,14 @@ namespace Slic3r {
                             break;
                         }
                     } while (std::chrono::steady_clock::now() - start_time < std::chrono::seconds(30));
-                    if (std::chrono::steady_clock::now() - start_time >= std::chrono::seconds(30)) {
+                    if (wait_timed_out(answered, std::chrono::steady_clock::now() - start_time, std::chrono::seconds(30))) {
                         res = false;
                         error_fn(_L("Start print timeout"));
                     }
+            } catch (const WebSocketClient::Timeout&) {
+                BOOST_LOG_TRIVIAL(error) << "start print: the printer did not answer within 30 s";
+                error_fn(_L("Start print timeout"));
+                res = false;
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << std::endl;
                 BOOST_LOG_TRIVIAL(error) << "start print error: " << e.what();
@@ -950,6 +959,9 @@ namespace Slic3r {
             bool needWrite = true;
             // wait 60s
             auto start_time = std::chrono::steady_clock::now();
+            // As in print(): receive() gives up when the 60 s are over.
+            client.set_deadline(start_time + std::chrono::seconds(60));
+            bool answered = false;
             do {
                 if (needWrite) {
                     client.send(jsonString);
@@ -975,17 +987,23 @@ namespace Slic3r {
                             // sleep 1s
                             std::this_thread::sleep_for(std::chrono::seconds(1));
                         } else {
+                            answered = true;
                             break;
                         }
                     } else {
+                        answered = true;
                         break;
                     }
                 }
             } while (std::chrono::steady_clock::now() - start_time < std::chrono::seconds(60));
-            if (std::chrono::steady_clock::now() - start_time >= std::chrono::seconds(60)) {
+            if (wait_timed_out(answered, std::chrono::steady_clock::now() - start_time, std::chrono::seconds(60))) {
                 res = false;
                 error_fn(_L("Start print timeout"));
             }
+        } catch (const WebSocketClient::Timeout&) {
+            BOOST_LOG_TRIVIAL(error) << "start print: the printer did not report its state within 60 s";
+            error_fn(_L("Start print timeout"));
+            res = false;
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << std::endl;
             BOOST_LOG_TRIVIAL(error) << "start print error: " << e.what();

@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
+    print_host_sending_tests.cpp
     plugin_guard_tests.cpp
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp

@@ -604,6 +604,12 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
                                             status % body;
             wcp_loger.add_log(name + std::string(": failed to upload file to ") + Http::url_without_userinfo(url) + ": " + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
             // fallback to port 8080
+            if (!retry_on_port_8080(status)) {
+                error_fn(format_error(body, error, status));
+                result = false;
+                return;
+            }
+            const wxString first_error = format_error(body, error, status);
             wcp_loger.add_log("Retrying upload on port 8080", false, "", "Moonraker_Mqtt", "info");
             url = substitute_host(make_url_8080("server/files/upload"), GUI::into_u8(test_msg_or_host_ip));
 
@@ -622,7 +628,7 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
                     BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: port 8080 upload failed: %2%, HTTP %3%, response body: `%4%`") % name % error %
                                                     status % body;
                     wcp_loger.add_log(name + std::string(": port 8080 upload failed: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
-                    error_fn(format_error(body, error, status));
+                    error_fn(first_error + "\n(port 8080: " + format_error(body, error, status) + ")");
                     result = false;
                 })
                 .on_progress([&](Http::Progress progress, bool& cancel) {
@@ -718,6 +724,12 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
                                             body;
             wcp_loger.add_log(name + std::string(": failed to upload file: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
             // fallback to port 8080
+            if (!retry_on_port_8080(status)) {
+                error_fn(format_error(body, error, status));
+                res = false;
+                return;
+            }
+            const wxString first_error = format_error(body, error, status);
 
             wcp_loger.add_log("Retrying upload on port 8080", false, "", "Moonraker_Mqtt", "info");
             url = make_url_8080("server/files/upload");            
@@ -735,7 +747,7 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
                     BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: port 8080 upload failed: %2%, HTTP %3%, response body: `%4%`") % name % error %
                                                     status % body;
                     wcp_loger.add_log(name + std::string(": port 8080 upload failed: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
-                    error_fn(format_error(body, error, status));
+                    error_fn(first_error + "\n(port 8080: " + format_error(body, error, status) + ")");
                     res = false;
                 })
                 .on_progress([&](Http::Progress progress, bool& cancel) {
@@ -794,27 +806,47 @@ std::string Moonraker::make_url_8080(const std::string& path) const
 {
     auto& wcp_loger = GUI::WCP_Logger::getInstance();    
     wcp_loger.add_log("Building port 8080 URL, path: " + path, false, "", "Moonraker_Mqtt", "info");
-    size_t pos = m_host.find(":");
-    std::string target_host = m_host;
-    if (pos != std::string::npos && pos != std::string("http:").length() - 1 && std::string("https:").length() - 1) {
-        target_host = target_host.substr(0, pos);        
-        wcp_loger.add_log("Removed port number, target host: " + target_host, false, "", "Moonraker_Mqtt", "info");
+    return url_on_port_8080(m_host, path);
+}
+
+// Not when Moonraker itself has refused the upload and said why: a bad request (400), a refused or
+// missing key (401, 403), a file in use (409). A second upload of the whole file to another port only
+// hides that reason. Everything else is retried as before: no HTTP answer at all, no Moonraker API
+// there (404), and what a front proxy on the first port answers while Moonraker behind it restarts or
+// when its body limit is smaller than the file (405, 413, 5xx) - nobody knows which printers rely on that.
+bool Moonraker::retry_on_port_8080(unsigned status)
+{
+    switch (status) {
+    case 400:
+    case 401:
+    case 403:
+    case 409: return false;
+    default: return true;
     }
-    
-    std::string result;
-    if (target_host.find("http://") == 0 || target_host.find("https://") == 0) {
-        if (target_host.back() == '/') {
-            target_host = target_host.substr(0, target_host.length() - 1);
-            result = (boost::format("%1%:8080/%2%") % target_host % path).str();
-        } else {
-            result = (boost::format("%1%:8080/%2%") % target_host % path).str();
-        }
-    } else {
-        result = (boost::format("http://%1%:8080/%2%") % target_host % path).str();
+}
+
+std::string Moonraker::url_on_port_8080(const std::string& host, const std::string& path)
+{
+    std::string h = host;
+    while (!h.empty() && (h.back() == '/' || std::isspace((unsigned char) h.back())))
+        h.pop_back();
+    while (!h.empty() && std::isspace((unsigned char) h.front()))
+        h.erase(h.begin());
+    std::string scheme = "http://";
+    if (const size_t sep = h.find("://"); sep != std::string::npos) {
+        scheme = h.substr(0, sep + 3);
+        h      = h.substr(sep + 3);
     }
-        
-    wcp_loger.add_log("Port 8080 URL built: " + result, false, "", "Moonraker_Mqtt", "info");
-    return result;
+    // The origin only.
+    h = h.substr(0, h.find_first_of("/?#"));
+    // The port is the colon after the host: after any user:password@, and after an IPv6 literal's ']'.
+    const size_t at         = h.rfind('@');
+    const size_t host_start = at == std::string::npos ? 0 : at + 1;
+    const size_t close      = h.find(']', host_start);
+    const size_t colon      = h.find(':', close == std::string::npos ? host_start : close);
+    if (colon != std::string::npos)
+        h.erase(colon);
+    return scheme + h + ":8080/" + path;
 }
 
 // Construct full URL for API endpoint
