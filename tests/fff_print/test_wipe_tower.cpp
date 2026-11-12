@@ -1516,3 +1516,56 @@ TEST_CASE("The ram changes a pressure advance that the filament start G-code set
     CHECK(std::count(values.begin(), values.end(), "0.0200") > 0);
     CHECK(std::count(values.begin(), values.end(), "0.04") > 0);
 }
+
+// The ram sets ramming_pressure_advance_value and nothing set it back: a filament whose pressure
+// advance lives in the firmware or the machine start G-code kept the ramming value for the rest of
+// the print. The tower now changes it only when the slicer's G-code sets it again, and returns a
+// profile's own value once the filament is unloaded.
+TEST_CASE("The ram's pressure advance is set back to the filament's own value", "[WipeTower][RammingPressureAdvance]")
+{
+    const std::string out = slice_ramming_pressure_advance({{"enable_pressure_advance", "1,1"}});
+    const std::vector<std::string> lines = split_lines(out);
+    int rams = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+            continue;
+        size_t end = i;
+        while (end < lines.size() && lines[end].find("; CP TOOLCHANGE END") == std::string::npos)
+            ++end;
+        // The tool rammed out is the one active before the block.
+        int old_tool = -1;
+        for (size_t j = i; j-- > 0;)
+            if (is_tool_line(lines[j])) {
+                old_tool = std::stoi(lines[j].substr(1));
+                break;
+            }
+        std::vector<std::string> block_values;
+        size_t                   tool_line = end;
+        for (size_t j = i; j < end; ++j) {
+            if (is_tool_line(lines[j])) {
+                tool_line = j;
+                break;
+            }
+            if (lines[j].rfind("M900 K", 0) == 0)
+                block_values.emplace_back(lines[j].substr(6));
+        }
+        if (block_values.empty() || old_tool < 0 || tool_line == end)
+            continue;
+        ++rams;
+        CAPTURE(i, old_tool);
+        // Four decimals, as the G-code writer's own pressure advance.
+        CHECK(block_values.front() == "0.0200");
+        // Before the tool change: back to the rammed filament's own value.
+        CHECK(block_values.back() == (old_tool == 0 ? "0.0500" : "0.0600"));
+    }
+    CHECK(rams > 0);
+}
+
+TEST_CASE("The ram leaves a pressure advance the slicer does not set alone", "[WipeTower][RammingPressureAdvance]")
+{
+    // No profile value and no pressure advance command in the slicer's G-code: the printer's own
+    // value could never be restored, so the ram must not change it.
+    const std::string out = slice_ramming_pressure_advance({{"enable_pressure_advance", "0,0"}});
+    REQUIRE(out.find("; CP TOOLCHANGE UNLOAD") != std::string::npos);
+    CHECK(m900_values(out).empty());
+}
