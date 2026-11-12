@@ -1248,8 +1248,8 @@ TEST_CASE("Z contouring: a contoured wall gets no scarf seam", "[GCode][ContourZ
     for (const auto &[z, scarfed] : with_scarf) {
         INFO("layer at " << z << ": walls " << scarfed.second << " mm with the scarf asked, " << without.at(z).second << " without");
         extra_length += scarfed.second - without.at(z).second;
-        CHECK(scarfed.first == Approx(without.at(z).first).epsilon(1e-4));
-        CHECK(scarfed.second == Approx(without.at(z).second).epsilon(1e-4));
+        CHECK_THAT(scarfed.first, Catch::Matchers::WithinRel(without.at(z).first, 1e-4));
+        CHECK_THAT(scarfed.second, Catch::Matchers::WithinRel(without.at(z).second, 1e-4));
     }
     INFO(with_scarf.size() << " layers with contoured walls, " << extra_length << " mm more wall with the scarf asked");
     CHECK(std::abs(extra_length) < 0.1);
