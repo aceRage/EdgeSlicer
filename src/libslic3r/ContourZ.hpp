@@ -273,6 +273,22 @@ double contour_z_sample_delta(const ContourZSampleInput &in);
 // clamp still satisfies it and a profile that was everywhere <= 0 (a perimeter) stays <= 0.
 void contour_z_smooth_profile(std::vector<double> &d, int radius);
 
+// zaa_max_segment_rate: the shortest contoured segment the cap allows for a path printed at up to
+// speed_mm_s. 0 (no cap) when either input is not positive.
+inline double contour_z_min_segment_length(double speed_mm_s, double max_segments_per_s)
+{
+    if (speed_mm_s <= 0.0 || max_segments_per_s <= 0.0)
+        return 0.0;
+    return speed_mm_s / max_segments_per_s;
+}
+
+// zaa_max_segment_rate: thins a path's sample profile in place so that no segment that starts at
+// an ADDED height sample is shorter than min_len. Samples flagged as points of the original path
+// (is_original != 0), and the last sample, are always kept, so the XY outline never changes; only
+// the in-between height samples go, and the Z between kept samples becomes linear. min_len <= 0
+// leaves the profile untouched. The three vectors stay parallel.
+void contour_z_thin_samples(std::vector<Vec2d> &xy, std::vector<double> &d, std::vector<char> &is_original, double min_len);
+
 // The single height correction the G-code emitter applies to the flow of a contoured segment.
 // The local layer height is (height + z_diff); ironing keeps its configured flow.
 inline double contour_z_extrusion_ratio(bool is_ironing, double height, double z_diff)
