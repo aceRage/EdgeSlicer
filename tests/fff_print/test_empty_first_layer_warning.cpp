@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -59,13 +60,22 @@ void add_object(ObjPrint &p, const char *name, const TriangleMesh &mesh, double 
     object->ensure_on_bed();
 }
 
-void process(ObjPrint &p, const DynamicPrintConfig &config)
+// Returns false when process() stopped on the empty-layer error. With supports off nothing at
+// all prints on the rim's first layer, so GCode::collect_layers_to_print rejects the object
+// ("empty layer between ...") after the object steps - the warning is already raised by then.
+// (On the owner's plate tree support printed on that layer, so there was no error, only no brim.)
+bool process(ObjPrint &p, const DynamicPrintConfig &config)
 {
     for (ModelObject *object : p.model.objects)
         p.print.auto_assign_extruders(object);
     p.print.apply(p.model, config);
     p.print.set_status_silent();
-    p.print.process();
+    try {
+        p.print.process();
+    } catch (const SlicingErrors &) {
+        return false;
+    }
+    return true;
 }
 
 std::string empty_first_layer_warning(const PrintObject &po)
@@ -114,14 +124,14 @@ TEST_CASE("Empty first layer warning: no warning when the first layer prints", "
     {
         ObjPrint p;
         add_object(p, "cube", TriangleMesh(its_make_cube(20., 20., 10.)), 100.);
-        process(p, ring_config());
+        CHECK(process(p, ring_config()));
         CHECK(empty_first_layer_warning(*p.print.objects().front()).empty());
     }
     SECTION("the thin rim with Arachne walls")
     {
         ObjPrint p;
         add_object(p, "ring", thin_rim_ring(), 100.);
-        process(p, ring_config("arachne"));
+        CHECK(process(p, ring_config("arachne")));
         const PrintObject &po = *p.print.objects().front();
         CHECK(po.layers().front()->has_extrusions());
         CHECK(empty_first_layer_warning(po).empty());
@@ -130,7 +140,7 @@ TEST_CASE("Empty first layer warning: no warning when the first layer prints", "
     {
         ObjPrint p;
         add_object(p, "ring", thin_rim_ring(), 100.);
-        process(p, ring_config("classic", "1"));
+        CHECK(process(p, ring_config("classic", "1")));
         const PrintObject &po = *p.print.objects().front();
         CHECK(po.layers().front()->has_extrusions());
         CHECK(empty_first_layer_warning(po).empty());
