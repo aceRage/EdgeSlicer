@@ -10498,7 +10498,7 @@ static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& la
 
 std::string GCode::extrude_loop(
     ExtrusionLoop loop, std::string description, double speed, const ConstExtrusionEntitiesPtr& region_perimeters, const Point* start_point,
-    const WipeInwardSupport* wipe_support)
+    const WipeInwardSupport* wipe_support, const ExtrusionEntity* loop_in_region)
 {
     // get a copy; don't modify the orientation of the original loop object otherwise
     // next copies (if any) would not detect the correct orientation
@@ -10578,10 +10578,9 @@ std::string GCode::extrude_loop(
     // Orca:
     // Port of "wipe inside before extruding an external perimeter" feature from super slicer
     // If region perimeters size not greater than or equal to 2, then skip the wipe inside move as we will extrude in mid air
-    // as no neighbouring perimeter exists. If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
-    // 1 - the currently printed external perimeter and 2 - the neighbouring internal perimeter.
+    // as no neighbouring perimeter exists. If an internal perimeter exists, we should find it touching the de-retraction point.
     if (m_config.wipe_before_external_loop.value && !paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 &&
-        paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {
+        paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1 && loop_in_region != nullptr) {
         const bool   is_full_loop_ccw = loop.polygon().is_counter_clockwise();
         bool         is_hole_loop     = (loop.loop_role() & ExtrusionLoopRole::elrHole) != 0; // loop.make_counter_clockwise();
         const double nozzle_diam      = nozzle_diameter;
@@ -10624,23 +10623,26 @@ std::string GCode::extrude_loop(
         pt = (current_pos + vec_dist * (2 * dist / vec_norm)).cast<coord_t>();
         pt.rotate(angle, current_point);
 
-        // Search region perimeters for lines that are touching the de-retraction point.
-        // If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
-        // 1: the currently printed external perimeter and 2: the neighbouring internal perimeter.
-        int discoveredTouchingLines = 0;
+        // Search region perimeters for a perimeter other than this one that is touching the de-retraction point:
+        // the neighbouring internal perimeter. This loop is not measured. The point is made no further from the
+        // loop's start than the nozzle is wide, and where the part's side of the seam is a corner of 270 degrees
+        // or more (any corner of a square hole) it is exactly that far from the loop, so that a search for the
+        // loop strictly within that radius found it or not by how the point's coordinates were rounded.
+        bool neighbour_touching = false;
         for (const ExtrusionEntity* ee : region_perimeters) {
+            if (ee == loop_in_region)
+                continue;
             auto                                potential_touching_line = ee->as_polyline();
             AABBTreeLines::LinesDistancer<Line> potential_touching_line_distancer{potential_touching_line.lines()};
             auto touching_line = potential_touching_line_distancer.all_lines_in_radius(pt, scale_(nozzle_diam));
             if (touching_line.size()) {
-                discoveredTouchingLines++;
-                if (discoveredTouchingLines > 1)
-                    break; // found 2 touching lines. End the search early.
+                neighbour_touching = true;
+                break;
             }
         }
-        // found 2 perimeters touching the de-retraction point. Its safe to deretract as the point will be
-        // inside the model
-        if (discoveredTouchingLines > 1) {
+        // found a neighbouring perimeter touching the de-retraction point. Its safe to deretract as the point
+        // will be inside the model
+        if (neighbour_touching) {
             // use extrude instead of travel_to_xy to trigger the unretract
             ExtrusionPath fake_path_wipe(Polyline{pt, current_point}, paths.front());
             fake_path_wipe.set_force_no_extrusion(true);
@@ -10866,7 +10868,7 @@ std::string GCode::extrude_entity(const ExtrusionEntity&            entity,
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
         return this->extrude_multi_path(*multipath, description, speed);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
-        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, wipe_support);
+        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, wipe_support, &entity);
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
