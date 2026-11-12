@@ -542,13 +542,17 @@ ExtrusionLoopSloped::ExtrusionLoopSloped(ExtrusionPaths&   original_paths,
 
             // Recursively split the line into half until no longer than `slope_max_segment_length`
             const std::function<void(const Line &)> handle_line = [slope_max_segment_length, &detailed_poly, &handle_line](const Line &line) {
-                if (line.length() <= slope_max_segment_length) {
+                // A line a unit or so long has its midpoint on one of its ends and cannot be halved. With a step
+                // shorter than that (a scarf a few units long, or a step that is not a number) the right half
+                // would be the line itself again, without end.
+                const Point mid = line.midpoint();
+                if (line.length() <= slope_max_segment_length || mid == line.a || mid == line.b) {
                     detailed_poly.append(line.b);
                 } else {
                     // Then process left half
-                    handle_line({line.a, line.midpoint()});
+                    handle_line({line.a, mid});
                     // Then process right half
-                    handle_line({line.midpoint(), line.b});
+                    handle_line({mid, line.b});
                 }
             };
 
@@ -658,7 +662,9 @@ void ExtrusionLoopSloped::clip_front(const double distance)
     std::vector<ExtrusionPathSloped> &start_slope = this->starts;
 
     Polyline front_inward;
-    while (distance > 0 && !start_slope.empty()) {
+    // The length left to clip, not the seam gap that was asked for: an inner wall's slope starts
+    // slope_inner_outer_wall_gap of its length on whatever the seam gap is, 0 too.
+    while (clip_dist > 0 && !start_slope.empty()) {
         ExtrusionPathSloped &first_path = start_slope.front();
         double len = first_path.length();
         if (len <= clip_dist) {
