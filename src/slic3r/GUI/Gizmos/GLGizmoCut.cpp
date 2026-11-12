@@ -6633,7 +6633,9 @@ void GLGizmoCut3D::update_bb()
         m_snap_fine_out_radius    = m_grabber_connection_len * 1.15;
 
         // input params for cut with tongue and groove
-        m_groove.depth = m_groove.depth_init = std::max(1.f , 0.5f * float(get_grabber_mean_size(m_bounding_box)));
+        // From the object, not from get_grabber_mean_size(): with ENABLE_FIXED_GRABBER that is a screen
+        // size (32 px / zoom), and the groove first offered depended on the camera's zoom.
+        m_groove.depth = m_groove.depth_init = cut_groove_default_depth(m_bounding_box);
         m_groove.width = m_groove.width_init = 4.0f * m_groove.depth;
         m_groove.flaps_angle = m_groove.flaps_angle_init = float(PI) / 3.f;
         m_groove.angle = m_groove.angle_init = 0.f;
@@ -9545,20 +9547,8 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
         // plane at the connector, not in the cut plane - see the projection below.
         its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     } else {
-        const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
-        const int   sectorCount = shape == CutConnectorShape::Triangle  ? 3 :
-                                  shape == CutConnectorShape::Square    ? 4 :
-                                  shape == CutConnectorShape::Circle    ? 60: // supposably, 60 points are enough for conflict detection
-                                  shape == CutConnectorShape::Hexagon   ? 6 : 1 ;
-
-        vertices.reserve(sectorCount + 1);
-
-        float fa = 2 * PI / sectorCount;
-        auto vec = Eigen::Vector2f(0, cur_connector.radius);
-        for (float angle = 0; angle < 2.f * PI; angle += fa) {
-            Vec2f p = Eigen::Rotation2Df(angle) * vec;
-            vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
-        }
+        // The outline turned by the connector's Rotation, as it is drawn: see cut_connector_outline().
+        vertices = cut_connector_outline(cur_connector);
         its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     }
 
@@ -9619,7 +9609,8 @@ bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& co
         for (const Vec3f& vertex : tac_joint_cutter_mesh(cur_connector.tac_joint).vertices)
             cur_tbb.merge(matrix * vertex.cast<double>());
     } else {
-        const Transform3d matrix = frame *
+        // Turned by its Rotation, as drawn, or a turned connector's box is tested unturned.
+        const Transform3d matrix = frame * rotation_transform(-cur_connector.z_angle * Vec3d::UnitZ()) *
                                    scale_transform(Vec3f(cur_connector.radius, cur_connector.radius, cur_connector.height).cast<double>());
         cur_tbb = m_shapes[cur_connector.attribs].model.get_bounding_box().transformed(matrix);
     }
@@ -10578,6 +10569,11 @@ void GLGizmoCut3D::begin_reedit()
             first_instance_trafo = Geometry::Transformation(first_instance_trafo.get_matrix() * first->volumes.front()->get_matrix() *
                                                             frame.inverse());
     }
+    // The stand-in takes the cut instance's turn and size: the recipe's plane is in that frame. See
+    // cut_recipe_stand_in_matrix().
+    if (first_has_instance)
+        first_instance_trafo = Geometry::Transformation(
+            cut_recipe_stand_in_matrix(m_reedit_pending_recipe, first_instance_trafo.get_matrix()));
     const bool             first_printable    = first_has_instance ? first->instances.front()->printable : true;
 
     m_reedit_recipe = m_reedit_pending_recipe;
@@ -11770,14 +11766,8 @@ void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& conn
             add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
             continue;
         }
-        TriangleMesh mesh = TriangleMesh(get_connector_mesh(connector.attribs));
-        // Mesh will be centered when loading.
-        ModelVolume* new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
-
-        // Transform the new modifier to be aligned inside the instance
-        new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
-            rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
-            scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+        // Placed as the gizmo draws it: see add_cut_connector_volume().
+        ModelVolume* new_volume = add_cut_connector_volume(*mo, get_connector_mesh(connector.attribs), connector);
 
         new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
         new_volume->name = connector_name + "-" + std::to_string(++connector_id);

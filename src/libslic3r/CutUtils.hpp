@@ -345,6 +345,34 @@ public:
 
 }; // namespace Cut
 
+// ---------------------------------------------------------------------------
+// Decisions of the Cut gizmo, kept here so they can be tested without the GUI.
+// ---------------------------------------------------------------------------
+
+// The negative volume a Plug, Dowel or Snap connector is cut with: `unit_mesh` (the gizmo's unit
+// shape, get_connector_mesh()) added to `mo` and placed at the connector the way the gizmo draws it
+// (position, frame, Rotation, radius x radius x height). The mesh is centred on the middle of its
+// HEIGHT only: the gizmo draws the shape about its axis, and a shape whose box is not centred on
+// the axis (a triangle) must not move sideways.
+ModelVolume* add_cut_connector_volume(ModelObject& mo, indexed_triangle_set unit_mesh, const CutConnector& connector);
+
+// The points a Plug, Dowel or Snap connector's outline is tested against the cut contour with, in
+// the connector's own frame (before its rotation_m and position): its shape at its radius, turned
+// by its Rotation as the gizmo draws it. 60 points for a circle.
+std::vector<Vec3f> cut_connector_outline(const CutConnector& connector);
+
+// The dovetail depth the Cut gizmo first offers for an object with bounding box `bb`, mm: a
+// sixtieth of the box's three sides together, at least 1 mm. From the object only, never from
+// the camera.
+float cut_groove_default_depth(const BoundingBoxf3& bb);
+
+// The objects "Edit cut" replaces when it is opened on objects[selected]: the indices of every
+// object of that cut, `selected` among them, in model order. A cut with a cut_id (connectors, a
+// dovetail) is found by it. A plain cut carries none, so its other half is the one other object
+// with an equal recipe; when there is more than one (the same cut made twice), the two cuts cannot
+// be told apart and only `selected` is returned.
+std::vector<size_t> edit_cut_objects(const ModelObjectPtrs& objects, size_t selected);
+
 } // namespace Slic3r
 
 #endif /* slic3r_CutUtils_hpp_ */
