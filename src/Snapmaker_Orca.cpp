@@ -8237,13 +8237,9 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
         default: assert(false); break;
     };
     // use --outputdir when available
-    file_name = object.name.empty()?object.input_file:object.name;
-    file_name = "obj_"+std::to_string(index)+"_"+file_name;
-    size_t pos = file_name.find_last_of(ext), ext_pos = file_name.size() - 1;
-    if (pos != ext_pos)
-        file_name += ext;
+    file_name = cli_object_file_name(object.name.empty() ? object.input_file : object.name, index, ext);
 
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name<< ", pos = "<<pos<<", ext_pos="<<ext_pos;
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name;
     if (path_dir.empty()) {
         std::string cmdline_param = m_config.opt_string("outputdir");
         if (! cmdline_param.empty()) {

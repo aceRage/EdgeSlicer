@@ -1,10 +1,15 @@
 #include "../libslic3r.h"
 #include "../Model.hpp"
 #include "../TriangleMesh.hpp"
+#include "../Utils.hpp"
 
 #include "STL.hpp"
 
 #include <string>
+
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/log/trivial.hpp>
 
 #ifdef _WIN32
 #define DIR_SEPARATOR '\\'
@@ -41,12 +46,38 @@ bool load_stl(const char *path, Model *model, const char *object_name_in, Import
 
 bool store_stl(const char *path, TriangleMesh *mesh, bool binary)
 {
-    if (binary)
-        mesh->write_binary(path);
-    else
-        mesh->write_ascii(path);
-    //FIXME returning false even if write failed.
+    // Written beside the target and renamed over it once complete, so a failed write (a full disk, a
+    // name the file system refuses) leaves no partial file and keeps a file that was there before.
+    const boost::filesystem::path target(path);
+    boost::filesystem::path       temp = target;
+    temp += ".tmp";
+    const std::string temp_name = temp.string();
+    const bool        written   = binary ? mesh->write_binary(temp_name.c_str()) : mesh->write_ascii(temp_name.c_str());
+    boost::system::error_code ec;
+    if (written)
+        boost::filesystem::rename(temp, target, ec);
+    if (!written || ec) {
+        if (ec)
+            BOOST_LOG_TRIVIAL(error) << "store_stl: Couldn't rename " << temp_name << " to " << path << ": " << ec.message();
+        boost::system::error_code ec_remove;
+        if (boost::filesystem::is_regular_file(temp, ec_remove))
+            boost::filesystem::remove(temp, ec_remove);
+        return false;
+    }
     return true;
+}
+
+std::string stl_export_file_path(const std::string &dir, const std::string &object_name)
+{
+    std::string name = sanitize_filename(object_name);
+    boost::trim(name);
+    if (name.empty())
+        name = "object";
+    std::string path = dir + name + ".stl";
+    int         n    = 1;
+    while (boost::filesystem::exists(path))
+        path = dir + name + "(" + std::to_string(n++) + ").stl";
+    return path;
 }
 
 bool store_stl(const char *path, ModelObject *model_object, bool binary)

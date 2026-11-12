@@ -3717,7 +3717,8 @@ void MainFrame::init_menubar_as_editor()
                 wxKeyEvent e;
                 e.SetEventType(wxEVT_KEY_DOWN);
                 e.SetControlDown(true);
-                e.m_keyCode = 'M';
+                // The key of this entry's shortcut (Cmd+K), as the other entries pass theirs; it was 'M'.
+                e.m_keyCode = 'K';
                 if (handle_key_event(e)) {
                     return;
                 }
@@ -5191,8 +5192,10 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
     }
     else
     {
-        MessageDialog msg(this, _L("The project is no longer available."), _L("Error"), wxOK | wxYES_DEFAULT);
-        if (msg.ShowModal() == wxID_YES)
+        // The box has only OK (wxID_OK); the entry used to go only on wxID_YES, which it never returns,
+        // so the missing project stayed in the list and the box came back on every click.
+        MessageDialog msg(this, _L("The project is no longer available."), _L("Error"), wxOK);
+        msg.ShowModal();
         {
             m_recent_projects.RemoveFileFromHistory(file_id);
             std::vector<std::string> recent_projects;
