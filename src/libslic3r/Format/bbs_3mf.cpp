@@ -6106,7 +6106,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             Transform3d volume_matrix_to_object = Transform3d::Identity();
-            bool        has_transform 		    = false;
+            bool        has_matrix              = false;
             int         shared_mesh_id          = object_id.second;
             if (volume_data)
             {
@@ -6115,7 +6115,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 for (const Metadata& metadata : volume_data->metadata) {
                     if (metadata.key == MATRIX_KEY) {
                         volume_matrix_to_object = Slic3r::Geometry::transform3d_from_string(metadata.value);
-                        has_transform 			= ! volume_matrix_to_object.isApprox(Transform3d::Identity(), 1e-10);
+                        has_matrix              = true;
                         found_count++;
                     }
                     else if (metadata.key == MESH_SHARED_KEY){
@@ -6215,10 +6215,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume = object.add_volume_with_shared_mesh(*shared_volume);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": line %1%, create volume using shared_mesh %2%")%__LINE__%shared_volume;
             }
-            // stores the volume matrix taken from the metadata, if present
-            if (has_transform)
-                volume->source.transform = Slic3r::Geometry::Transformation(volume_matrix_to_object);
-
             volume->calculate_convex_hull();
 
             //set transform from 3mf
@@ -6229,6 +6225,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 Vec3d shift = trangle_mesh.get_init_shift();
                 if (!shift.isApprox(Vec3d::Zero()))
                     volume->translate(shift);
+            }
+
+            // The "matrix" metadata is written as the volume's placement times its source transform (see the
+            // exporter); the mesh of this format is stored in the volume's own frame, so the source transform is
+            // the matrix with the placement just read taken back out. Stored whole, each save and open multiplied
+            // the placement into it once more.
+            if (has_matrix) {
+                const Transform3d source_transform = volume->get_matrix().inverse() * volume_matrix_to_object;
+                if (! source_transform.isApprox(Transform3d::Identity(), 1e-10))
+                    volume->source.transform = Slic3r::Geometry::Transformation(source_transform);
             }
 
             // recreate custom supports, seam and mmu segmentation from previously loaded attribute

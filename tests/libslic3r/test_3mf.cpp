@@ -380,6 +380,80 @@ TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
 }
 
+// A part's "matrix" in model_settings.config is written as the part's placement times its source transform
+// (the placement baked into its mesh when it was imported). It was read back whole into the source transform,
+// so each save and open multiplied the part's placement into it once more. The reader now takes the part's
+// placement back out, and two round trips leave the source transform, and so the matrix written, as it was.
+TEST_CASE("A part's source transform is the same after two project round trips", "[3mf][Regression]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "two parts";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "base";
+    ModelVolume *placed = src_object->add_volume(make_cube(4., 6., 8.));
+    placed->name = "placed";
+    placed->set_rotation(Vec3d(0., PI / 6., PI / 2.));
+    placed->set_scaling_factor(Vec3d(1., 2., 1.));
+    placed->set_offset(Vec3d(12., -5., 3.));
+    // As an import that baked a placement into the part's mesh leaves it.
+    Transform3d baked = Geometry::translation_transform(Vec3d(1., 2., 3.)) * Geometry::rotation_transform(Vec3d(PI / 4., 0., 0.));
+    placed->source.transform = Geometry::Transformation(baked);
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    auto round_trip = [&](Model &src, Model &dst, const std::string &name) {
+        const std::string test_file = (tmp_root / name).string();
+        StoreParams store_params;
+        store_params.path     = test_file.c_str();
+        store_params.model    = &src;
+        store_params.config   = &store_config;
+        store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        const bool stored = store_bbs_3mf(store_params);
+
+        DynamicPrintConfig        dst_config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+        PlateDataPtrs             plate_data;
+        std::vector<Preset*>      project_presets;
+        bool                      is_bbl_3mf = false;
+        Semver                    file_version;
+        const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst, &plate_data, &project_presets,
+                                                   &is_bbl_3mf, &file_version, nullptr,
+                                                   LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                                                       LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+        release_PlateData_list(plate_data);
+        boost::filesystem::remove(test_file);
+        REQUIRE(stored);
+        REQUIRE(loaded);
+        REQUIRE(dst.objects.size() == 1);
+        REQUIRE(dst.objects.front()->volumes.size() == 2);
+    };
+
+    Model once;
+    round_trip(src_model, once, "part_matrix_once.3mf");
+    Model twice;
+    round_trip(once, twice, "part_matrix_twice.3mf");
+
+    for (const Model *model : { &once, &twice }) {
+        const ModelObject *object = model->objects.front();
+        for (size_t i = 0; i < 2; ++i) {
+            const ModelVolume *src = src_object->volumes[i];
+            const ModelVolume *dst = object->volumes[i];
+            CAPTURE(model == &once ? "once" : "twice", dst->name);
+            CHECK(dst->name == src->name);
+            INFO("source transform\n" << dst->source.transform.get_matrix().matrix() << "\nexpected\n"
+                                      << src->source.transform.get_matrix().matrix());
+            CHECK(dst->source.transform.get_matrix().isApprox(src->source.transform.get_matrix(), 1e-5));
+            INFO("placement\n" << dst->get_matrix().matrix() << "\nexpected\n" << src->get_matrix().matrix());
+            CHECK(dst->get_matrix().isApprox(src->get_matrix(), 1e-5));
+        }
+    }
+}
+
 // A project or sliced-plate file whose name holds Chinese and accented characters (the default export
 // name is the project name). The exporter writes "<name>.tmp" and renames it into place; with
 // boost::filesystem narrow paths on Windows converted by the ANSI code page, that step failed and the
