@@ -61,10 +61,10 @@ std::string get_host_from_url(const std::string& url_in)
                 }
             }
             else
-                BOOST_LOG_TRIVIAL(error) << "OctoPrint get_host_from_url: failed to get host form URL " << url;
+                BOOST_LOG_TRIVIAL(error) << "OctoPrint get_host_from_url: failed to get host form URL " << Http::url_without_userinfo(url);
         }
         else
-            BOOST_LOG_TRIVIAL(error) << "OctoPrint get_host_from_url: failed to parse URL " << url;
+            BOOST_LOG_TRIVIAL(error) << "OctoPrint get_host_from_url: failed to parse URL " << Http::url_without_userinfo(url);
         curl_url_cleanup(hurl);
     }
     else
@@ -184,7 +184,7 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
     auto url = substitute_host(make_url("api/version"), GUI::into_u8(msg));
     msg.Clear();
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_without_userinfo(url);
 
     std::string host = get_host_from_url(m_host);
     auto http = Http::get(url);//std::move(url));
@@ -199,7 +199,7 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
     set_auth(http);
     http
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % url % error % status % body;
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % Http::url_without_userinfo(url) % error % status % body;
             res = false;
             msg = format_error(body, error, status);
         })
@@ -243,7 +243,7 @@ bool OctoPrint::test(wxString& msg) const
     bool res = true;
     auto url = make_url("api/version");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_without_userinfo(url);
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -390,7 +390,7 @@ bool OctoPrint::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%")
         % name
         % upload_data.source_path
-        % url
+        % Http::url_without_userinfo(url)
         % upload_filename.string()
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");
@@ -413,7 +413,7 @@ bool OctoPrint::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % url % error % status % body;
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % Http::url_without_userinfo(url) % error % status % body;
             error_fn(format_error(body, error, status));
             result = false;
         })
@@ -469,14 +469,14 @@ bool OctoPrint::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
         // in original address (m_host) replace host for resolved ip 
         info_fn(L"resolve", test_msg_or_host_ip);
         url = substitute_host(make_url("api/files/local"), GUI::into_u8(test_msg_or_host_ip));
-        BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << url;
+        BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << Http::url_without_userinfo(url);
     }
 #endif // _WIN32
 
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%")
         % name
         % upload_data.source_path
-        % url
+        % Http::url_without_userinfo(url)
         % upload_filename.string()
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");
@@ -651,7 +651,7 @@ bool PrusaLink::test(wxString& msg) const
     bool res = true;
     auto url = make_url("api/version");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_without_userinfo(url);
 
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -714,7 +714,7 @@ bool PrusaLink::get_storage(wxArrayString& storage_path, wxArrayString& storage_
     };
     std::vector<StorageInfo> storage;
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get storage at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get storage at: %2%") % name % Http::url_without_userinfo(url);
 
     wxString wlang = GUI::wxGetApp().current_language_code();
     std::string lang = GUI::format(wlang.SubString(0, 1));
@@ -816,7 +816,7 @@ bool PrusaLink::test_with_method_check(wxString& msg, bool& use_put) const
     bool res = true;
     auto url = make_url("api/version");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_without_userinfo(url);
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -889,7 +889,7 @@ bool PrusaLink::test_with_resolved_ip_and_method_check(wxString& msg, bool& use_
     auto url = substitute_host(make_url("api/version"), GUI::into_u8(msg));
     msg.Clear();
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_without_userinfo(url);
 
     std::string host = get_host_from_url(m_host);
     auto http = Http::get(url);//std::move(url));
@@ -904,7 +904,7 @@ bool PrusaLink::test_with_resolved_ip_and_method_check(wxString& msg, bool& use_
     set_auth(http);
     http
         .on_error([&](std::string body, std::string error, unsigned status) {
-        BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % url % error % status % body;
+        BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % Http::url_without_userinfo(url) % error % status % body;
         res = false;
         msg = format_error(body, error, status);
             })
@@ -978,7 +978,7 @@ bool PrusaLink::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%, method: %7%")
         % name
         % upload_data.source_path
-        % url
+        % Http::url_without_userinfo(url)
         % upload_filename.string()
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")
@@ -1029,14 +1029,14 @@ bool PrusaLink::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
         // in original address (m_host) replace host for resolved ip 
         info_fn(L"resolve", test_msg_or_host_ip);
         url = substitute_host(make_url(storage_path), GUI::into_u8(test_msg_or_host_ip));
-        BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << url;
+        BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << Http::url_without_userinfo(url);
     }
 #endif // _WIN32
 
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%, method: %7%")
         % name
         % upload_data.source_path
-        % url
+        % Http::url_without_userinfo(url)
         % upload_filename.string()
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")

@@ -368,7 +368,7 @@ void PrintHostJobQueue::priv::bg_thread_main()
         BOOST_LOG_TRIVIAL(debug) << boost::format("PrintHostJobQueue/bg_thread: Received job: [%1%]: `%2%` -> `%3%`, cancelled: %4%")
             % job_id
             % job.upload_data.upload_path
-            % job.printhost->get_host()
+            % Http::url_without_userinfo(job.printhost->get_host())
             % job.cancelled;
 
         // One throwing job must not kill the worker: later sends would sit in the queue forever,

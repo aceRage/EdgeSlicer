@@ -66,6 +66,12 @@ static void save_store(const json& j)
         const fs::path temp = final.parent_path() / (final.filename().string() + ".tmp");
         {
             boost::nowide::ofstream out(temp.string(), std::ios::binary | std::ios::trunc);
+#ifndef _WIN32
+            // API keys and passwords are in here: readable by this user alone, set before any of
+            // them is written. The rename below keeps the mode. (On Windows the file sits in the
+            // user's own profile folder, whose ACL already keeps other users out.)
+            fs::permissions(temp, fs::owner_read | fs::owner_write, ec);
+#endif
             out << j.dump(1);
         }
         fs::remove(final, ec);
