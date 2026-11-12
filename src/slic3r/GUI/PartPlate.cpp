@@ -5638,7 +5638,7 @@ void PartPlateList::postprocess_bed_index_for_unselected(arrangement::ArrangePol
 }
 
 //postprocess an arrangement::ArrangePolygon, other instances are under locked states
-void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon)
+void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before)
 {
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": bed_idx %1%, locked_plate %2%, translation(x) %3%, (y) %4%") % arrange_polygon.bed_idx % arrange_polygon.locked_plate % unscale<double>(arrange_polygon.translation(X)) % unscale<double>(arrange_polygon.translation(Y));
 
@@ -5649,8 +5649,18 @@ void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::Arrange
 	}
 	else if (arrange_polygon.bed_idx == 0)
 		arrange_polygon.bed_idx += m_current_plate;
-	else
+	else if (plates_before < 0)
 		arrange_polygon.bed_idx = m_plate_list.size();
+	else
+	{
+		// What did not fit the plate comes back on beds 1, 2, ..., each object at its place on its own bed.
+		// One plate per bed, after the existing ones: put on one place, the beds' objects lay on top of each other.
+		const int plate_index = plates_before + arrange_polygon.bed_idx - 1;
+		while ((int)m_plate_list.size() <= plate_index && create_plate(false) >= 0)
+			;
+		// Past the plate limit: beside the last plate, as before.
+		arrange_polygon.bed_idx = std::min(plate_index, (int)m_plate_list.size());
+	}
 
 	return;
 }
@@ -6178,15 +6188,16 @@ int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool ex
 	{
 		for (unsigned int i = (unsigned int)m_plate_list.size() - 1; i > 0; --i)
 		{
-			if (m_plate_list[i]->empty()
+			// A locked plate is left as it is, empty or not.
+			if (m_plate_list[i]->is_locked()) {
+				continue;
+			}
+			else if (m_plate_list[i]->empty()
 				|| !m_plate_list[i]->has_printable_instances())
 			{
 				//delete it
 				BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":delete plate %1% for empty") % i;
 				delete_plate(i);
-			}
-			else if (m_plate_list[i]->is_locked()) {
-				continue;
 			}
 			else
 			{
