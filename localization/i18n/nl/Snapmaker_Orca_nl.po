@@ -8332,8 +8332,8 @@ msgid "Presets inherited by other presets cannot be deleted!"
 msgstr ""
 "Presets die door andere presets worden geërfd, kunnen niet worden verwijderd!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] ""
 msgstr[1] ""
 

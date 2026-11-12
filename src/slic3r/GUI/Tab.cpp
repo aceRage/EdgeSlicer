@@ -10064,8 +10064,9 @@ void Tab::delete_preset(bool confirmed)
         if (count > 0) {
             msg = _L("Presets inherited by other presets cannot be deleted!");
             msg += "\n";
-            msg += _L_PLURAL("The following presets inherit this preset.",
-                            "The following preset inherits this preset.", count);
+            // Singular first, plural second (gettext's order); they were the other way round.
+            msg += _L_PLURAL("The following preset inherits this preset.",
+                            "The following presets inherit this preset.", count);
             wxString title = from_u8((boost::format(_utf8(L("%1% Preset"))) % action).str()); // action + _(L(" Preset"));
             MessageDialog(parent(), msg + presets, title, wxOK | wxICON_ERROR).ShowModal();
             return;
@@ -10116,7 +10117,9 @@ void Tab::delete_preset(bool confirmed)
     if (is_base_preset && (current_preset.type == Preset::Type::TYPE_FILAMENT) && action == _utf8(L("Delete"))) {
         msg += from_u8(_u8L("Are you sure to delete the selected preset? \nIf the preset corresponds to a filament currently in use on your printer, please reset the filament information for that slot."));
     } else {
-        msg += from_u8((boost::format(_u8L("Are you sure to %1% the selected preset?")) % action).str());
+        // The action is always Delete here, and filling "%1%" with the capitalised button word read
+        // "Are you sure to Delete the selected preset?"; the sentence of its own has translations.
+        msg += _L("Are you sure to delete the selected preset?");
     }
 
     //BBS: add project embedded preset logic and refine is_external

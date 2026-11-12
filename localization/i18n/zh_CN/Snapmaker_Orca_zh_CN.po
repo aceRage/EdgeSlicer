@@ -7709,8 +7709,8 @@ msgstr "该打印机下已关联 %d 个材料预设与 %d 个工艺预设。如�
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "不能删除被其他预设继承的预设！"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "以下预设继承此预设。"
 
 #. TRN  Remove/Delete

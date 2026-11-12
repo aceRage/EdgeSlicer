@@ -8522,8 +8522,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "Els perfils heretats per altres perfils no es poden eliminar!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "Els següent perfil hereta aquesta d'aquest altre."
 msgstr[1] "Els següents perfils hereten d'aquest perfil."
 

@@ -8197,8 +8197,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "A más beállítások által örökölt beállítások nem törölhetők!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] ""
 msgstr[1] ""
 

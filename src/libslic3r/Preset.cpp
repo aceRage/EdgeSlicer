@@ -934,10 +934,22 @@ bool is_compatible_with_parent_printer(const PresetWithVendorProfile& preset, co
 {
     auto *compatible_printers     = dynamic_cast<const ConfigOptionStrings*>(preset.preset.config.option("compatible_printers"));
     bool  has_compatible_printers = compatible_printers != nullptr && ! compatible_printers->values.empty();
-    //BBS: FIXME only check the parent now, but should check grand-parent as well.
-    return has_compatible_printers &&
-           std::find(compatible_printers->values.begin(), compatible_printers->values.end(), active_printer.preset.inherits()) !=
-               compatible_printers->values.end();
+    if (! has_compatible_printers)
+        return false;
+    const std::vector<std::string> &names = compatible_printers->values;
+    // The printer's parent, and (where the collection is known) its parent's parent and so on up to the first
+    // system preset: a user printer made from another user printer inherits its system printer's processes and
+    // filaments too. Only the parent was looked at (BBS: "FIXME ... should check grand-parent as well").
+    const Preset *printer = &active_printer.preset;
+    for (int depth = 0; printer != nullptr && ! printer->is_system && depth < 32; ++ depth) {
+        const std::string &parent_name = printer->inherits();
+        if (parent_name.empty())
+            return false;
+        if (std::find(names.begin(), names.end(), parent_name) != names.end())
+            return true;
+        printer = active_printer.collection != nullptr ? active_printer.collection->get_preset_parent(*printer) : nullptr;
+    }
+    return false;
 }
 
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config)
@@ -3251,6 +3263,9 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
         preset.is_default  = false;
         preset.is_system   = false;
         preset.is_external = false;
+        // A new preset is updated now. It kept the time of the preset it was made from (0 for a system
+        // one), and Preset::load_info() only put the time in at the next start.
+        preset.updated_time = (long long) Slic3r::Utils::get_current_time_utc();
         preset.file        = this->path_for_preset(preset);
         // The newly saved preset will be activated -> make it visible.
         preset.is_visible  = true;
@@ -3615,7 +3630,7 @@ PresetWithVendorProfile PresetCollection::get_preset_with_vendor_profile(const P
 		}
 		p = this->get_preset_parent(*p);
 	} while (p != nullptr);
-	return PresetWithVendorProfile(preset, v);
+	return PresetWithVendorProfile(preset, v, this);
 }
 
 const std::string& PresetCollection::get_preset_name_by_alias(const std::string& alias) const

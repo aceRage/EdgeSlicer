@@ -85,6 +85,7 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliNamedPresets.hpp"
 #include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
@@ -725,7 +726,7 @@ struct NamedPresets
     }
 
     // User preset: <datadir>/user/*/<type>/*.json whose "name" matches, flattened onto its parent.
-    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id)
+    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id, std::string* system_parent = nullptr)
     {
         const boost::filesystem::path root = boost::filesystem::path(data_dir()) / "user";
         if (!boost::filesystem::exists(root)) return false;
@@ -757,6 +758,7 @@ struct NamedPresets
                     out = parent->config;
                     out.apply(cfg, true);
                     if (filament_id.empty()) filament_id = parent->filament_id;
+                    if (system_parent) *system_parent = parent->name;
                 } else {
                     out = cfg;
                 }
@@ -771,20 +773,24 @@ struct NamedPresets
     std::string resolve_to_file(const std::string& name, Preset::Type t, const std::string& out_dir, int ordinal)
     {
         DynamicPrintConfig cfg;
-        std::string        filament_id;
+        std::string        filament_id, system_parent;
+        bool               is_user = false;
         if (const Preset* p = find_system(name, t)) {
             cfg         = p->config;
             filament_id = p->filament_id;
-        } else if (!find_user(name, t, cfg, filament_id)) {
+        } else if (find_user(name, t, cfg, filament_id, &system_parent)) {
+            is_user = true;
+        } else {
             return "";
         }
         cfg.erase(BBL_JSON_KEY_INHERITS);
+        const CliNamedPresetOrigin origin = cli_named_preset_origin(t == Preset::TYPE_PRINTER, is_user, system_parent);
         nlohmann::json j;
         j[BBL_JSON_KEY_TYPE]     = type_dir(t);
         j[BBL_JSON_KEY_NAME]     = name;
-        j[BBL_JSON_KEY_FROM]     = "system";
+        j[BBL_JSON_KEY_FROM]     = origin.from;
         j[BBL_JSON_KEY_VERSION]  = SLIC3R_VERSION;
-        j[BBL_JSON_KEY_INHERITS] = "";
+        j[BBL_JSON_KEY_INHERITS] = origin.inherits;
         if (t == Preset::TYPE_FILAMENT && !filament_id.empty()) j[BBL_JSON_KEY_FILAMENT_ID] = filament_id;
         for (const std::string& key : cfg.keys()) {
             const ConfigOption* opt = cfg.option(key);
@@ -2757,14 +2763,8 @@ int CLI::run(int argc, char **argv)
                 flush_and_exit(CLI_CONFIG_FILE_ERROR);
             }
             new_printer_name = config_name;
-            if (config_from == "system") {
-                new_printer_system_name = new_printer_name;
-                new_printer_config_is_system = true;
-            }
-            else {
-                new_printer_system_name = config.option<ConfigOptionString>("inherits", true)->value;
-                new_printer_config_is_system = false;
-            }
+            new_printer_system_name = cli_config_system_name(config_from, new_printer_name, config.option<ConfigOptionString>("inherits", true)->value);
+            new_printer_config_is_system = config_from == "system";
             config.set("printer_settings_id", new_printer_name, true);
 
             //get printer_model_id
