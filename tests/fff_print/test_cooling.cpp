@@ -1308,7 +1308,7 @@ TEST_CASE("The cooling slowdown counts no extruder move on a line without E", "[
         config.set_deserialize_strict({{"slow_down_layer_time", "3.5"}, {"fan_cooling_layer_time", "4.5"}});
         const std::string out = cool_one_layer(config, known_layer, 5);
         INFO(out);
-        REQUIRE(layer_time_from_first_extrusion(out) == Approx(known_layer_time).epsilon(1e-4));
+        REQUIRE_THAT(layer_time_from_first_extrusion(out), Catch::Matchers::WithinRel(known_layer_time, 1e-4));
         int fan = -1;
         std::istringstream in(out);
         std::string        line;
