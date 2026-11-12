@@ -126,9 +126,9 @@ std::string substitute_host(const std::string& orig_addr, std::string sub_addr)
                 } else
                     BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to extract the URL after substitution";
             } else
-                BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to substitute host " << sub_addr << " in URL " << orig_addr;
+                BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to substitute host " << sub_addr << " in URL " << Http::url_without_userinfo(orig_addr);
         } else
-            BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to parse URL " << orig_addr;
+            BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to parse URL " << Http::url_without_userinfo(orig_addr);
         curl_url_cleanup(hurl);
     } else
         BOOST_LOG_TRIVIAL(error) << "OctoPrint substitute_host: failed to allocate curl_url";
@@ -332,7 +332,7 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
     }
     if (resolved_addr.empty()) {
         // no resolved addresses - try system resolving
-        BOOST_LOG_TRIVIAL(error) << "PrusaSlicer failed to resolve hostname " << m_host << " into the IP address. Starting upload with system resolving.";
+        BOOST_LOG_TRIVIAL(error) << "PrusaSlicer failed to resolve hostname " << Http::url_without_userinfo(m_host) << " into the IP address. Starting upload with system resolving.";
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
     } else if (resolved_addr.size() == 1) {
         // one address resolved - upload there
@@ -799,7 +799,7 @@ bool PrusaLink::get_storage(wxArrayString& storage_path, wxArrayString& storage_
         }
         // TRN %1% = host
         std::string message = GUI::format(_L("Upload has failed. There is no suitable storage found at %1%."), m_host) + GUI::into_u8(error_msg);
-        BOOST_LOG_TRIVIAL(error) << message;
+        BOOST_LOG_TRIVIAL(error) << GUI::format(_L("Upload has failed. There is no suitable storage found at %1%."), Http::url_without_userinfo(m_host)) + GUI::into_u8(error_msg);
         throw Slic3r::IOError(message);
     }
 

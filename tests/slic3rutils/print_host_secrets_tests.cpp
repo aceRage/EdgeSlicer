@@ -179,6 +179,56 @@ TEST_CASE("The saved printers file is readable by its owner alone", "[PrintHostD
 }
 #endif
 
+// The list is replaced in one step: the old file is no longer removed before the new one is renamed over it.
+TEST_CASE("Saving the printers file twice keeps the list and leaves no temporary file", "[PrintHostDevices][secrets]")
+{
+    const fs::path path = fs::temp_directory_path() /
+                          ("print_host_devices_twice_" + std::to_string((long long) ::time(nullptr)) + ".json");
+    const fs::path temp = path.parent_path() / (path.filename().string() + ".tmp");
+    boost::system::error_code ec;
+    fs::remove(path, ec);
+    PrintHostDevices::set_store_path(path.string());
+
+    PrintHostDevices::Device a;
+    a.alias     = "Left bay";
+    a.address   = "192.0.2.20";
+    a.host_type = "octoprint";
+    a.auth_type = "key";
+    a.apikey    = "fake-key-1";
+    std::string error;
+    REQUIRE(PrintHostDevices::add("Test Model", a, error));
+    REQUIRE(PrintHostDevices::devices("Test Model").size() == 1);
+    CHECK_FALSE(fs::exists(temp));
+
+    PrintHostDevices::Device b;
+    b.alias     = "Right bay";
+    b.address   = "192.0.2.21";
+    b.host_type = "octoprint";
+    b.auth_type = "key";
+    b.apikey    = "fake-key-2";
+    REQUIRE(PrintHostDevices::add("Test Model", b, error));
+    const std::vector<PrintHostDevices::Device> both = PrintHostDevices::devices("Test Model");
+    REQUIRE(both.size() == 2);
+    CHECK(both[0].address == "192.0.2.20");
+    CHECK(both[1].address == "192.0.2.21");
+    CHECK(both[0].apikey == "fake-key-1");
+    CHECK_FALSE(fs::exists(temp));
+
+    // Still the same JSON object keyed by model as before (format unchanged).
+    std::string text;
+    {
+        boost::nowide::ifstream in(path.string(), std::ios::binary);
+        std::stringstream       ss;
+        ss << in.rdbuf();
+        text = ss.str();
+    }
+    CHECK(text.rfind("{", 0) == 0);
+    CHECK(text.find("Test Model") != std::string::npos);
+
+    PrintHostDevices::set_store_path("");
+    fs::remove(path, ec);
+}
+
 TEST_CASE("url_without_userinfo drops user:password@ and nothing else", "[Http][secrets]")
 {
     CHECK(Http::url_without_userinfo("https://user:secret@host.example:7125/api/version") == "https://host.example:7125/api/version");

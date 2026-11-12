@@ -190,9 +190,9 @@ namespace Slic3r {
                         } else
                             BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to extract the URL after substitution";
                     } else
-                        BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to substitute host " << sub_addr << " in URL " << orig_addr;
+                        BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to substitute host " << sub_addr << " in URL " << Http::url_without_userinfo(orig_addr);
                 } else
-                    BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to parse URL " << orig_addr;
+                    BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to parse URL " << Http::url_without_userinfo(orig_addr);
                 curl_url_cleanup(hurl);
             } else
                 BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to allocate curl_url";
@@ -770,7 +770,7 @@ namespace Slic3r {
         }
         if (resolved_addr.empty()) {
             // no resolved addresses - try system resolving
-            BOOST_LOG_TRIVIAL(error) << "ElegooLink failed to resolve hostname " << m_host << " into the IP address. Starting upload with system resolving.";
+            BOOST_LOG_TRIVIAL(error) << "ElegooLink failed to resolve hostname " << Http::url_without_userinfo(m_host) << " into the IP address. Starting upload with system resolving.";
             return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
         } else if (resolved_addr.size() == 1) {
             // one address resolved - upload there

@@ -164,13 +164,13 @@ std::string substitute_host(const std::string& orig_addr, std::string sub_addr)
                     wcp_loger.add_log("failed to extract URL after host replacement", false, "", "Moonraker_Mqtt", "error");
                 }
             } else {
-                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] host replacement failed: " << sub_addr << ", URL: " << orig_addr;
+                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] host replacement failed: " << sub_addr << ", URL: " << Http::url_without_userinfo(orig_addr);
                 wcp_loger.add_log("host replacement failed: " + sub_addr, false, "", "Moonraker_Mqtt", "error");
             }
                 
         } else {
-            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse original URL: " << orig_addr;
-            wcp_loger.add_log("failed to parse original URL: " + orig_addr, false, "", "Moonraker_Mqtt", "error");
+            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse original URL: " << Http::url_without_userinfo(orig_addr);
+            wcp_loger.add_log("failed to parse original URL: " + Http::url_without_userinfo(orig_addr), false, "", "Moonraker_Mqtt", "error");
         }
             
         curl_url_cleanup(hurl);
@@ -505,7 +505,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
     // Handle different resolution scenarios
     if (resolved_addr.empty()) {
         // no resolved addresses - try system resolving        
-        wcp_loger.add_log("Failed to resolve hostname " + m_host + " to IP, using system resolver for upload", false, "", "Moonraker_Mqtt", "error");
+        wcp_loger.add_log("Failed to resolve hostname " + Http::url_without_userinfo(m_host) + " to IP, using system resolver for upload", false, "", "Moonraker_Mqtt", "error");
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
     } else if (resolved_addr.size() == 1) {
         // one address resolved - upload there        
@@ -1300,13 +1300,13 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
 
     // Log connection parameters (without sensitive content)
     BOOST_LOG_TRIVIAL(debug) << "[Moonraker_Mqtt] MQTTS connection parameters:"
-        << "\n - host: " << m_host
+        << "\n - host: " << Http::url_without_userinfo(m_host)
         << "\n - port: " << m_port
         << "\n - client ID: " << m_client_id
         << "\n - CA cert present: " << (!m_ca.empty() ? "yes" : "no")
         << "\n - client cert present: " << (!m_cert.empty() ? "yes" : "no")
         << "\n - private key present: " << (!m_key.empty() ? "yes" : "no");
-    wcp_loger.add_log("MQTTS connection parameters: " + m_host + ":" + std::to_string(m_port) + ", client ID: " + m_client_id + ", CA cert present: " + (!m_ca.empty() ? "yes" : "no") + ", client cert present: " + (!m_cert.empty() ? "yes" : "no") + ", private key present: " + (!m_key.empty() ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log("MQTTS connection parameters: " + Http::url_without_userinfo(m_host) + ":" + std::to_string(m_port) + ", client ID: " + m_client_id + ", CA cert present: " + (!m_ca.empty() ? "yes" : "no") + ", client cert present: " + (!m_cert.empty() ? "yes" : "no") + ", private key present: " + (!m_key.empty() ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
 
     // Detach the old clients under the lock, then disconnect/destroy them
     // outside it: ~MqttClient waits for the Paho threads to stop, so the lock
