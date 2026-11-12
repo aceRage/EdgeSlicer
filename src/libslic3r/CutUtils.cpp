@@ -873,12 +873,26 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                                           const Transform3d& cut_matrix = Transform3d::Identity(),
                                           bool place_on_cut = false, bool flip = false)
 {
-    // Reset instance transformation except offset and Z-rotation
+    // Reset instance transformation except offset and Z-rotation.
+    // The halves' meshes already carry the cut instance's rotation, scale and mirroring. Any other
+    // instance keeps only what it had on top of the cut one, or its copy would show that one's
+    // rotation twice and lose its own scale.
+    const Transformation src_trafo = src_instance_idx < object->instances.size() ?
+                                         object->instances[src_instance_idx]->get_transformation() : Transformation();
+    const Transform3d    src_linear = src_trafo.get_matrix_no_offset();
+    const Transform3d    src_inv    = std::abs(src_linear.matrix().determinant()) > 1e-12 ? src_linear.inverse() : Transform3d::Identity();
+    const double         src_rot_z  = src_trafo.get_rotation().z();
 
     for (size_t i = 0; i < object->instances.size(); ++i) {
         auto& obj_instance = object->instances[i];
         const double rot_z = obj_instance->get_rotation().z();
-        
+
+        if (!flip && !place_on_cut && i != src_instance_idx) {
+            obj_instance->set_transformation(Transformation(translation_transform(obj_instance->get_offset()) *
+                                                            obj_instance->get_transformation().get_matrix_no_offset() * src_inv));
+            continue;
+        }
+
         Transformation inst_trafo = Transformation(obj_instance->get_transformation().get_matrix_no_scaling_factor());
         // add respect to mirroring
         if (obj_instance->is_left_handed())
@@ -887,11 +901,7 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
         obj_instance->set_transformation(inst_trafo);
 
         Vec3d rotation = Vec3d::Zero();
-        if (!flip && !place_on_cut) {
-            if ( i != src_instance_idx)
-            rotation[Z] = rot_z;
-        }
-        else {
+        if (flip || place_on_cut) {
             Transform3d rotation_matrix = Transform3d::Identity();
             if (flip)
                 rotation_matrix = rotation_transform(PI * Vec3d::UnitX());
@@ -900,13 +910,37 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                 rotation_matrix = rotation_matrix * Transformation(cut_matrix).get_rotation_matrix().inverse();
 
             if (i != src_instance_idx)
-                rotation_matrix = rotation_transform(rot_z * Vec3d::UnitZ()) * rotation_matrix;
+                rotation_matrix = rotation_transform((rot_z - src_rot_z) * Vec3d::UnitZ()) * rotation_matrix;
 
             rotation = Transformation(rotation_matrix).get_rotation();
         }
 
         obj_instance->set_rotation(rotation);
     }
+}
+
+// The upper half of a flat horizontal cut goes onto the bed by its own lowest point, so its height
+// ranges move down by as much as that point is above the old object's bottom; a range wholly below
+// it no longer has anything to apply to. Only this plain case: the half is neither flipped nor laid
+// on its cut, and the source does not sink below the bed.
+static void shift_upper_layer_ranges(ModelObject* upper, size_t instance, const Transform3d& cut_matrix, const BoundingBoxf3& src_bb)
+{
+    if (upper->layer_config_ranges.empty() || upper->volumes.empty() || instance >= upper->instances.size() || !src_bb.defined ||
+        src_bb.min.z() < -EPSILON)
+        return;
+    if ((Transformation(cut_matrix).get_rotation_matrix() * Vec3d::UnitZ() - Vec3d::UnitZ()).norm() > EPSILON)
+        return;
+    const BoundingBoxf3 upper_bb = upper->instance_bounding_box(instance);
+    if (!upper_bb.defined)
+        return;
+    const double shift = upper_bb.min.z() - src_bb.min.z();
+    if (shift <= EPSILON)
+        return;
+    t_layer_config_ranges shifted;
+    for (auto& [range, config] : upper->layer_config_ranges)
+        if (range.second > shift + EPSILON)
+            shifted[{ std::max(0., range.first - shift), range.second - shift }] = std::move(config);
+    upper->layer_config_ranges = std::move(shifted);
 }
 
 
@@ -992,7 +1026,9 @@ void Cut::post_process(ModelObject* object, ModelObjectPtrs& cut_object_ptrs, bo
 {
     if (!object) return;
 
-    if (keep && !object->volumes.empty()) {
+    // A side with no part to print (a plane just above or below the parts, with a modifier
+    // reaching across it) is not a result: delete_extra_modifiers() would leave it empty.
+    if (keep && std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* v) { return v->is_model_part(); })) {
         reset_instance_transformation(object, m_instance, m_cut_matrix, place_on_cut, flip);
         cut_object_ptrs.push_back(object);
     }
@@ -2158,6 +2194,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
 
+        if (upper && !m_attributes.has(ModelObjectCutAttribute::PlaceOnCutUpper) && !m_attributes.has(ModelObjectCutAttribute::FlipUpper) &&
+            size_t(m_instance) < m_src_bboxes.size())
+            shift_upper_layer_ranges(upper, m_instance, m_cut_matrix, m_src_bboxes[m_instance]);
     }
     if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
         add_separate_parts(dowels, cut_object_ptrs);
