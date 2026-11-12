@@ -36,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
+	test_h2c_tower_wait_pos.cpp
 	test_nozzle_process_gcode.cpp
 	test_tool_slots_gcode.cpp
 	test_nozzle_widths_gcode.cpp
