@@ -483,11 +483,17 @@ bool draw_cut_core_plane(const DrawCutStroke& stroke,
 // `point` receives a point on it; `normal` the same normal draw_cut_core_plane()
 // returns, already sign-pinned. Returns false for a stroke that is not a valid
 // closed loop, and for through-all (where there is no core at all).
+//
+// `mesh` is the part the cut is made in - pass the same one the cutter gets. A plug
+// loop whose sample normals cancel has its normal's sign decided by the mesh in the
+// cutter, and only with the mesh does this report that same face; without it the
+// sign comes from the samples and the winding alone.
 bool draw_cut_core_face(const DrawCutStroke& stroke,
                         const DrawCutParams& params,
                         const BoundingBoxf3& bbox,
                         Vec3d&               normal,
-                        Vec3d&               point);
+                        Vec3d&               point,
+                        const indexed_triangle_set* mesh = nullptr);
 
 // The in-plane INWARD direction at path sample `i`: the component of (c - p_i)
 // perpendicular to the core normal, normalised. This is "towards the axis" for a
