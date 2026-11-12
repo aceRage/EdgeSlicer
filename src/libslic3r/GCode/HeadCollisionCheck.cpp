@@ -247,7 +247,7 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
         const bool check_nozzle = !(extrude && m.extrusion_role == erIroning);
 
         Contact      worst;
-        const double len_xy = (cur - a).head<2>().norm();
+        const double len_xy = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();
         const int    n      = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
         for (int k = 1; k <= n; ++k) {
             const double t = double(k) / double(n);
@@ -272,7 +272,7 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
 
         if (extrude) {
             const double w = m.width > 0.f ? double(m.width) : 0.4;
-            map.deposit(a.head<2>(), a.z(), cur.head<2>(), cur.z(), 0.5 * w);
+            map.deposit(Vec2d(a.x(), a.y()), a.z(), Vec2d(cur.x(), cur.y()), cur.z(), 0.5 * w);
         }
     }
     return report;
