@@ -47,6 +47,7 @@ private:
 
     //BBS:remove const
     void update_model_object() override;
+    const FacetsAnnotation *painted_facets(const ModelVolume &mv) const override { return &mv.seam_facets; }
     //BBS: add logic to distinguish the first_time_update and later_update
     void update_from_model_object(bool first_update = false) override;
 

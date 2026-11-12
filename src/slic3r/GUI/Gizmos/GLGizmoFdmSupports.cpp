@@ -1325,17 +1325,18 @@ PainterGizmoType GLGizmoFdmSupports::get_painter_type() const
 
 wxString GLGizmoFdmSupports::handle_snapshot_action_name(bool shift_down, GLGizmoPainterBase::Button button_down) const
 {
-    // BBS remove _L()
+    // Translated, as the seam, fuzzy skin and colour painting tools name theirs. Shift erases the painting under
+    // the brush; it was named "Unselect all", which is not what it does (and not in the catalog).
     wxString action_name;
     if (shift_down)
-        action_name = ("Unselect all");
+        action_name = _L("Remove selection");
     else {
         if (m_paint_stabilizers)
-            action_name = button_down == Button::Left ? ("Paint stabilizer points") : ("Erase painting");
+            action_name = button_down == Button::Left ? _L("Paint stabilizer points") : _L("Erase painting");
         else if (button_down == Button::Left)
-            action_name = ("Enforce supports");
+            action_name = _L("Enforce supports");
         else
-            action_name = ("Block supports");
+            action_name = _L("Block supports");
     }
     return action_name;
 }

@@ -236,6 +236,11 @@ protected:
     //BBS: add logic to distinguish the first_time_update and later_update
     virtual void update_model_object() = 0;
     virtual void update_from_model_object(bool first_update) = 0;
+    // The facets of `mv` this gizmo paints, which update_model_object() writes the selectors to; nullptr where
+    // that is not one FacetsAnnotation per volume, and then every stroke is taken as a change.
+    virtual const FacetsAnnotation *painted_facets(const ModelVolume &mv) const { return nullptr; }
+    // Whether the selectors hold paint the model does not have yet, i.e. whether a stroke changed anything.
+    bool paint_differs_from_model() const;
 
     virtual ColorRGBA get_cursor_sphere_left_button_color() const  { return { 0.0f, 0.0f, 1.0f, 0.25f }; }
     virtual ColorRGBA get_cursor_sphere_right_button_color() const { return { 1.0f, 0.0f, 0.0f, 0.25f }; }
