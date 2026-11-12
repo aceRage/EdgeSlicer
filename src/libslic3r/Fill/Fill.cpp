@@ -1988,8 +1988,10 @@ void Layer::make_fills(const FillAdaptive::Octrees* adaptive_fill_octrees, const
             link_max_length = layerm.region()->config().get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
 //            printf("flow spacing: %f,  is_external: %d, link_max_length: %lf\n", flow.spacing(), int(surface.is_external()), link_max_length);
 #else
+            // Edge: from the spacing the filler is about to be given. f->spacing is set only per expolygon below, so
+            // here it was still 0, and a link_max_length of 0 means no limit.
             if (surface_fill.params.density > 80.) // 80%
-                link_max_length = 3. * f->spacing;
+                link_max_length = 3. * surface_fill.params.spacing;
 #endif
         }
 
@@ -2278,8 +2280,10 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(const FillAdapti
             link_max_length = layerm.region()->config().get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
 //            printf("flow spacing: %f,  is_external: %d, link_max_length: %lf\n", flow.spacing(), int(surface.is_external()), link_max_length);
 #else
+            // Edge: from the spacing the filler is about to be given. f->spacing is set only per expolygon below, so
+            // here it was still 0, and a link_max_length of 0 means no limit.
             if (surface_fill.params.density > 80.) // 80%
-                link_max_length = 3. * f->spacing;
+                link_max_length = 3. * surface_fill.params.spacing;
 #endif
         }
 
