@@ -239,6 +239,8 @@ static void parse_h3c(MachineObject& obj)
     obj.printer_type = "N10";
     obj.parse_ams_report(print, false);
     obj.parse_new_info(print);
+    // The H3C sends vir_slot and no vt_tray, so parse_json turns the old single spool off.
+    obj.ams_support_virtual_tray = false;
     obj.vir_slots.clear();
     for (const json& vs : print["vir_slot"]) {
         AmsTray t(vs["id"].get<std::string>());
