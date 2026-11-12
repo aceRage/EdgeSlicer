@@ -253,8 +253,13 @@ static json ams_json(MachineObject* m)
             j["sub_type"] = t->sub_brands;
             j["color"]    = tray_rgb(t->color);
             j["remain"]   = t->remain;
-            FilamentCommands::write_availability(
-                FilamentCommands::availability(filament_state(m), t->is_exists, slot_loaded(m, a->id, t->id)), j);
+            FilamentCommands::Availability av = FilamentCommands::availability(filament_state(m), t->is_exists, slot_loaded(m, a->id, t->id));
+            if (a->is_rack()) { // the H3C's AMS 3H: shown, but no Load / Unload yet
+                av.can_load   = false;
+                av.can_unload = false;
+                av.why        = "not supported on the AMS 3H yet";
+            }
+            FilamentCommands::write_availability(av, j);
             trays.push_back(j);
         }
         u["trays"] = trays;
@@ -976,6 +981,9 @@ static std::pair<int, std::string> prepare_filament_bambu(const Request& req, st
 
     const std::string ams  = std::to_string(std::atoi(req.ams.c_str()));
     const std::string slot = std::to_string(std::atoi(req.slot.c_str()));
+    // The H3C's AMS 3H and its rack spool holders: Load / Unload there is not supported yet.
+    if (obj->slot_actions_blocked(ams))
+        return { 409, "Load / Unload on the " + obj->dev_name + "'s rack AMS is not supported yet" };
     const bool        ext  = ams == "254" || (ams == "255" && obj->is_multi_extruders());
     const AmsTray*    tray = nullptr;
     if (ext) {

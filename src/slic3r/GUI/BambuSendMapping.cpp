@@ -41,8 +41,11 @@ int auto_map(MachineObject* obj,const std::vector<FilamentInfo>& filaments, cons
 {
     if (!obj)
         return -1;
-    if (filament_map.empty())
-        return obj->ams_filament_mapping(filaments, result);
+    if (filament_map.empty()) {
+        const int rc = obj->ams_filament_mapping(filaments, result);
+        obj->strip_blocked_mapping(result); // never a rack AMS slot (H3C AMS 3H) yet
+        return rc;
+    }
 
     /* Two-extruder job: a filament can only be fed from an AMS connected to the extruder the
      * G-code prints it with, so map each side against its own AMS units, as BambuStudio's
@@ -67,6 +70,7 @@ int auto_map(MachineObject* obj,const std::vector<FilamentInfo>& filaments, cons
         result.insert(result.end(), side_result.begin(), side_result.end());
     }
     std::sort(result.begin(), result.end(), [](const FilamentInfo& a, const FilamentInfo& b) { return a.id < b.id; });
+    obj->strip_blocked_mapping(result); // never a rack AMS slot (H3C AMS 3H) yet
     return rc;
 }
 
@@ -105,11 +109,30 @@ static int task_nozzle_id(int nozzle_id)
     return nozzle_id;
 }
 
+static bool compose_checked(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
+                            std::string& v0, std::string& v1, std::string& info);
+
 bool compose(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
              std::string& v0, std::string& v1, std::string& info)
 {
     if (result.empty())
         return false;
+    // The last gate before the strings reach a printer: an entry naming a blocked unit (a rack AMS,
+    // the H3C's AMS 3H, or a rack spool holder) goes out as "no tray", whatever chose it.
+    std::vector<FilamentInfo> checked = result;
+    for (FilamentInfo& r : checked)
+        if (!r.ams_id.empty() && in.blocked_ams_ids.count(r.ams_id) != 0) {
+            BOOST_LOG_TRIVIAL(warning) << "BambuSendMapping::compose: filament " << r.id << " was mapped to a slot that cannot be sent to yet, left unmapped";
+            r.tray_id = -1;
+            r.ams_id.clear();
+            r.slot_id.clear();
+        }
+    return compose_checked(checked, filaments, in, v0, v1, info);
+}
+
+static bool compose_checked(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
+                            std::string& v0, std::string& v1, std::string& info)
+{
     bool   valid   = true;
     size_t invalid = 0;
     for (const FilamentInfo& r : result)

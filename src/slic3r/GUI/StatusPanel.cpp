@@ -2802,8 +2802,10 @@ void StatusPanel::update_ams(MachineObject *obj)
 
     // Two-extruder printers (H2D, H2D Pro, H2C, X2D) get the per-extruder layout.
     m_ams_control->SetMachine(obj);
-    if (m_ams_control->IsDualMode() != obj->is_multi_extruders()) {
-        m_ams_control->SetDualMode(obj->is_multi_extruders());
+    // A printer with a rack AMS (the H3C's nine-slot AMS 3H) uses the same painted layout with one side.
+    const bool dual_layout = obj->is_multi_extruders() || obj->has_rack_ams();
+    if (m_ams_control->IsDualMode() != dual_layout) {
+        m_ams_control->SetDualMode(dual_layout);
         m_ams_control_box->Layout();
         m_ams_control_box->Fit();
         Layout();
@@ -3015,7 +3017,7 @@ void StatusPanel::update_ams(MachineObject *obj)
                 std::string tray_id     = tray_it->first;
                 int         tray_id_int = atoi(tray_id.c_str());
                 // new protocol
-                if ((obj->tray_reading_bits & (1 << (ams_id_int * 4 + tray_id_int))) != 0) {
+                if (MachineObject::hex_bit_set(obj->tray_reading_bits, ams_id_int * 4 + tray_id_int)) {
                     m_ams_control->PlayRridLoading(ams_id, tray_id);
                 } else {
                     m_ams_control->StopRridLoading(ams_id, tray_id);
@@ -3782,6 +3784,12 @@ void StatusPanel::on_ams_load_curr()
         std::string                            curr_ams_id = m_ams_control->GetCurentAms();
         std::string                            curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
 
+        // The H3C's AMS 3H and its rack spool holders are shown but not loaded from here yet.
+        if (obj->slot_actions_blocked(curr_ams_id)) {
+            BOOST_LOG_TRIVIAL(info) << "on_ams_load: rack AMS slot, load not supported yet";
+            return;
+        }
+
 
         update_filament_step();
         //virtual tray (254; on two-extruder printers also 255, the right-hand spool)
@@ -3876,6 +3884,10 @@ void StatusPanel::on_ams_unload(SimpleEvent &event)
     if (obj) {
         std::string curr_ams_id = m_ams_control->GetCurentAms();
         std::string curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
+        if (obj->slot_actions_blocked(curr_ams_id)) {
+            BOOST_LOG_TRIVIAL(info) << "on_ams_unload: rack AMS slot, unload not supported yet";
+            return;
+        }
 
         if (obj->is_enable_np) {
             try {
@@ -4124,6 +4136,9 @@ void StatusPanel::on_ams_refresh_rfid(wxCommandEvent &event)
         if (curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0) {
             return;
         }
+        // nor, yet, for the H3C's AMS 3H
+        if (obj->slot_actions_blocked(curr_ams_id))
+            return;
         std::string curr_can_id = event.GetString().ToStdString();
 
         std::map<std::string, Ams *>::iterator it = obj->amsList.find(curr_ams_id);

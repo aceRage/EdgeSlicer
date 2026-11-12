@@ -1260,6 +1260,11 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
             if (auto *fm = bundle->project_config.option<ConfigOptionInts>("filament_map"))
                 in.nozzle_filament_map = fm->values;
     }
+    // Never a slot the printer cannot be sent to yet (the H3C's AMS 3H): BambuSendMapping::compose
+    // leaves such an entry unmapped, whatever picked it.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            in.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     return BambuSendMapping::compose(m_ams_mapping_result, m_filaments, in, mapping_array_str, mapping_array_str2, ams_mapping_info);
 }
 
@@ -1586,7 +1591,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
             continue;
         }
         auto ams_it = obj_->amsList.find(std::to_string(it->second.ams_id));
-        if (ams_it == obj_->amsList.end() || !ams_it->second)
+        if (ams_it == obj_->amsList.end() || !ams_it->second || ams_it->second->is_rack()) // never the H3C's AMS 3H yet
             continue;
         // Only a tray that feeds the extruder the G-code prints this filament with.
         if (r.id >= 0 && r.id < (int) fil_map.size() &&

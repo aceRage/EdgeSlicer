@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -176,6 +177,7 @@ struct Printer
     std::vector<int>                 nozzle_hrc;  // per logical extruder: the current nozzle's hardness, 0 unknown
     std::vector<Tray>                trays;
     std::vector<DualNozzleSync::PrinterNozzle> nozzles; // for the nozzle-mapping request
+    std::set<std::string>            blocked_ams_ids; // MachineObject::mapping_blocked_ams_ids (H3C AMS 3H)
 };
 
 // What the checks read from the app: the send dialog's remembered checkboxes and the hardness a

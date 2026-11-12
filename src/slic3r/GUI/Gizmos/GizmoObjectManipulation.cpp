@@ -1007,8 +1007,8 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         ImGuiWrapper::pop_combo_style();
         float temp_tip_caption_max = imgui_wrapper->calc_text_size(_L("Align top-bottom center") + " (-X)").x * 1.3f;
         if (ImGui::IsItemHovered()) {
-            imgui_wrapper->tooltip(_L("Holded down Ctrl key continuously and click by left mouse button can select multiple objects, or holded down Alt key continuously and "
-                                      "click by left mouse button can select multiple parts"),
+            imgui_wrapper->tooltip(_L("Hold down the Ctrl key and click with the left mouse button to select multiple objects, or hold down the Alt key and "
+                                      "click with the left mouse button to select multiple parts"),
                                    temp_tip_caption_max * 1.5);
         }
         // Feed the reference box for Align Plate / Align Object each frame. In BambuStudio this
