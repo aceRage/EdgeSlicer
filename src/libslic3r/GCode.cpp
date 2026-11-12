@@ -11299,23 +11299,29 @@ void GCode::GCodeOutputStream::write_format(const char* format, ...)
     va_end(args);
 }
 
+// Whether the moves of a path are thinned by their length (small_area_infill_flow_compensation): a path of solid
+// infill, of a top or of a bottom surface, where that kind of fill is set to a pattern of straight lines. Each kind
+// goes by its own pattern on every layer: a bottom surface above the first layer (one resting on supports) is
+// compensated like one on the plate, and what is laid on the first layer is not taken for a bottom surface because
+// it is there. What a narrow area is filled with (loops, whatever pattern is set for solid infill) is left alone.
 bool GCode::_needSAFC(const ExtrusionPath& path)
 {
+    if (path.narrow_area_fill)
+        return false;
     if (!m_small_area_infill_flow_compensator || !m_config.small_area_infill_flow_compensation.value)
         return false;
 
-    static const InfillPattern supported_patterns[] = {
-        InfillPattern::ipRectilinear,
-        InfillPattern::ipAlignedRectilinear,
-        InfillPattern::ipMonotonic,
-        InfillPattern::ipMonotonicLine,
-    };
+    InfillPattern pattern;
+    switch (path.role()) {
+    case erSolidInfill: pattern = this->config().internal_solid_infill_pattern.value; break;
+    case erTopSolidInfill: pattern = this->config().top_surface_pattern.value; break;
+    case erBottomSurface:
+    case erBottomSurfaceOverSupport: pattern = this->config().bottom_surface_pattern.value; break;
+    default: return false;
+    }
 
-    return std::any_of(std::begin(supported_patterns), std::end(supported_patterns), [&](const InfillPattern pattern) {
-        return this->on_first_layer() && this->config().bottom_surface_pattern == pattern ||
-               path.role() == erSolidInfill && this->config().internal_solid_infill_pattern == pattern ||
-               path.role() == erTopSolidInfill && this->config().top_surface_pattern == pattern;
-    });
+    return pattern == InfillPattern::ipRectilinear || pattern == InfillPattern::ipAlignedRectilinear ||
+           pattern == InfillPattern::ipMonotonic || pattern == InfillPattern::ipMonotonicLine;
 }
 
 // ORCA: Overlap at or below which the overhang fan switches on; negative when it does not depend on overlap
@@ -12473,16 +12479,19 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 }
             } // ORCA: End of adaptive PA code segment
 
-            // Ignore small speed variations - emit speed change if the delta between current and new is greater than 60mm/min / 1mm/sec
-            // Reset speed to F if delta to F is less than 1mm/sec
-            if ((std::abs(last_set_speed - new_speed) > 60)) {
+            // Reset speed to F if delta to F is less than 1mm/sec. Otherwise ignore small speed variations - emit speed change
+            // if the delta between current and new is greater than 60mm/min / 1mm/sec.
+            // Edge: F first. new_speed is rounded to whole mm/s by the overhang speed table, so the first move back
+            // at the wall's own speed after an overhang was written at the rounded speed (it differs from the
+            // slowed speed by more than 1mm/sec) and only the move after it at F.
+            if ((std::abs(F - new_speed) <= 60)) {
+                m_writer.set_speed(gcode, F, "", comment);
+                last_set_speed = F;
+                zaa_speed_h_ref = 0.;
+            } else if ((std::abs(last_set_speed - new_speed) > 60)) {
                 m_writer.set_speed(gcode, new_speed, "", comment);
                 last_set_speed = new_speed;
                 // ZAA: the base feed rate just changed, so any scaled F in force is stale.
-                zaa_speed_h_ref = 0.;
-            } else if ((std::abs(F - new_speed) <= 60)) {
-                m_writer.set_speed(gcode, F, "", comment);
-                last_set_speed = F;
                 zaa_speed_h_ref = 0.;
             }
             auto dE = e_per_mm * line_length;
