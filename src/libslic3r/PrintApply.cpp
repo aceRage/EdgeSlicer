@@ -206,11 +206,14 @@ static bool layer_height_ranges_equal(const t_layer_config_ranges &lr1, const t_
     auto it2 = lr2.begin();
     for (const auto &kvp1 : lr1) {
         const auto &kvp2 = *it2 ++;
-        if (!kvp2.second.has("layer_height") || !kvp1.second.has("layer_height"))
+        // A range without a layer height prints at the object's (layer_height_profile_from_ranges()): two such ranges are equal.
+        const ConfigOption *lh1 = kvp1.second.option("layer_height");
+        const ConfigOption *lh2 = kvp2.second.option("layer_height");
+        if ((lh1 == nullptr) != (lh2 == nullptr))
             return false;
         if (std::abs(kvp1.first.first  - kvp2.first.first ) > EPSILON ||
             std::abs(kvp1.first.second - kvp2.first.second) > EPSILON ||
-            (check_layer_height && std::abs(kvp1.second.option("layer_height")->getFloat() - kvp2.second.option("layer_height")->getFloat()) > EPSILON))
+            (check_layer_height && lh1 != nullptr && std::abs(lh1->getFloat() - lh2->getFloat()) > EPSILON))
             return false;
     }
     return true;

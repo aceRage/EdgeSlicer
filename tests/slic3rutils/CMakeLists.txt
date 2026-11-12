@@ -99,6 +99,7 @@ add_executable(${_TEST_NAME}_tests
     test_flow_variant_edit.cpp
     change_opt_value_tests.cpp
     option_group_line_tests.cpp
+    layer_range_edit_tests.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
     bambu_connect_tests.cpp

@@ -22,6 +22,32 @@ namespace Slic3r
 namespace GUI
 {
 
+LayerRangeEditCheck check_layer_range_edit(const t_layer_config_ranges &ranges, const t_layer_height_range &range,
+                                           const t_layer_height_range &new_range)
+{
+    if (new_range.first < 0.)
+        return LayerRangeEditCheck::Negative;
+    // layer_height_profile_from_ranges() drops a range unless lo + EPSILON < hi.
+    if (!(new_range.first + EPSILON < new_range.second))
+        return LayerRangeEditCheck::Empty;
+    for (const auto &r : ranges)
+        if (r.first != range && std::abs(r.first.first - new_range.first) < EPSILON && std::abs(r.first.second - new_range.second) < EPSILON)
+            return LayerRangeEditCheck::Taken;
+    return LayerRangeEditCheck::Ok;
+}
+
+// Shows why an edit of a range's heights is refused; false if it is not.
+static bool refuse_layer_range_edit(wxWindow *parent, LayerRangeEditCheck check)
+{
+    switch (check) {
+    case LayerRangeEditCheck::Ok: return false;
+    case LayerRangeEditCheck::Negative: show_error(parent, _L("Invalid numeric.")); break;
+    case LayerRangeEditCheck::Empty: show_error(parent, _L("A height range must end above where it starts.")); break;
+    case LayerRangeEditCheck::Taken: show_error(parent, _L("Another height range already has these heights.")); break;
+    }
+    return true;
+}
+
 ObjectLayers::ObjectLayers(wxWindow* parent) :
     OG_Settings(parent, true)
 {
@@ -103,6 +129,10 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range, PlusMinus
         // data for next focusing
         coordf_t max_z = min_z < range.second ? range.second : min_z + 0.5;
         const t_layer_height_range new_range = { min_z, max_z };
+        if (refuse_layer_range_edit(m_parent, check_layer_range_edit(m_object->layer_config_ranges, range, new_range))) {
+            m_selection_type = etUndef;
+            return false;
+        }
         if (delete_button)
             delete_button->range = new_range;
         if (add_button)
@@ -133,6 +163,10 @@ wxSizer* ObjectLayers::create_layer(const t_layer_height_range& range, PlusMinus
 
         // data for next focusing
         const t_layer_height_range& new_range = { range.first, max_z };
+        if (refuse_layer_range_edit(m_parent, check_layer_range_edit(m_object->layer_config_ranges, range, new_range))) {
+            m_selection_type = etUndef;
+            return false;
+        }
         if (delete_button)
             delete_button->range = new_range;
         if (add_button)
@@ -459,7 +493,10 @@ coordf_t LayerRangeEditor::get_value()
     else {
         if (!str.ToDouble(&layer_height) || layer_height < 0.0f) {
             show_error(m_parent, _L("Invalid numeric."));
-            SetValue(double_to_string(layer_height));
+            // Not applied: the field goes back to its last valid value, which the edit then finds unchanged.
+            SetValue(m_valid_value);
+            if (!m_valid_value.ToDouble(&layer_height))
+                layer_height = 0.0;
         }
     }
 
