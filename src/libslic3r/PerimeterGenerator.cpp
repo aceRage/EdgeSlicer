@@ -690,19 +690,39 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                 }
             }
 
+            // Edge: Arachne lays the overhang part of a wall at the wall's own width: thick_polyline_to_multi_path keeps the
+            // overhang flow as it is only when it is a round, thick bridge. With thick bridges off the overhang flow is a
+            // wall's flow with the bridge flow ratio applied (LayerRegion::bridging_flow), and the ratio was lost with the
+            // width. Apply it to what Arachne laid, as the classic walls have it.
+            auto append_overhang = [&perimeter_generator](ExtrusionPaths &dst, const ClipperLib_Z::Paths &overhangs) {
+                const size_t first = dst.size();
+                extrusion_paths_append(dst, overhangs, erOverhangPerimeter, perimeter_generator.overhang_flow);
+                const Flow  &overhang_flow = perimeter_generator.overhang_flow;
+                const double ratio         = perimeter_generator.config->bridge_flow.value;
+                if (overhang_flow.bridge() || ratio <= 0. || ratio == 1.)
+                    return;
+                for (size_t i = first; i < dst.size(); ++i) {
+                    ExtrusionPath &path = dst[i];
+                    if (path.width <= path.height)
+                        continue; // Flow::with_flow_ratio() takes a flat extrusion
+                    const Flow flow = Flow(path.width, path.height, overhang_flow.nozzle_diameter()).with_flow_ratio(ratio);
+                    path.mm3_per_mm = flow.mm3_per_mm();
+                    path.width      = flow.width();
+                    path.height     = flow.height();
+                }
+            };
+
             // get overhang paths by checking what parts of this loop fall
             // outside the grown lower slices (thus where the distance between
             // the loop centerline and original lower slices is >= half nozzle diameter
             if (over_support_clip_paths.empty()) {
-                extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
-                    perimeter_generator.overhang_flow);
+                append_overhang(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference));
             } else {
                 // Ultra (over-support walls): the loop's OWN flow, not the bridging flow.
                 extrusion_paths_append(paths, clip_extrusion(extrusion_path, over_support_clip_paths, ClipperLib_Z::ctIntersection),
                     erOverSupportPerimeter,
                     is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
-                extrusion_paths_append(paths, clip_extrusion(extrusion_path, non_overhang_clip_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
-                    perimeter_generator.overhang_flow);
+                append_overhang(paths, clip_extrusion(extrusion_path, non_overhang_clip_paths, ClipperLib_Z::ctDifference));
             }
 
             // Reapply the nearest point search for starting point.
