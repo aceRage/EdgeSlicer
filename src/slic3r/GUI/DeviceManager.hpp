@@ -1352,6 +1352,9 @@ public:
     /*for parse new info*/
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
+    // print.ams of a push_status report (jj = the "print" object). May throw; parse_json catches it
+    // on its own so the rest of the report is still read.
+    void parse_ams_report(const json& jj, bool key_field_only);
     bool is_nozzle_data_invalid();
     // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
     // the printer has not reported it (Orca #12814).
