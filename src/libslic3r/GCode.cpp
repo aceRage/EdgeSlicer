@@ -12519,6 +12519,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     bool could_be_wipe_disabled = false;
     // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
     const bool  used_external_mp_once = m_avoid_crossing_perimeters.used_external_mp_once();
+    // And of disable_once: a move that is to go straight is not to be planned after the retract either.
+    const bool  disabled_once = m_avoid_crossing_perimeters.disabled_once();
     std::string gcode;
 
     // Orca: we don't need to optimize the Klipper as only set once
@@ -12609,7 +12611,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         // When "Wipe while retracting" is enabled, then extruder moves to another position, and travel from this position can cross perimeters.
         // Because of it, it is necessary to call avoid crossing perimeters again with new starting point after calling retraction()
         // FIXME Lukas H.: Try to predict if this second calling of avoid crossing perimeters will be needed or not. It could save computations.
-        if (last_post_before_retract != this->last_pos() && m_config.reduce_crossing_wall) {
+        if (last_post_before_retract != this->last_pos() && m_config.reduce_crossing_wall && !disabled_once) {
             // If in the previous call of m_avoid_crossing_perimeters.travel_to was use_external_mp_once set to true restore this value for
             // next call.
             if (used_external_mp_once)

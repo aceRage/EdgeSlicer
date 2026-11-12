@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_avoid_crossing_perimeters.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
 	test_temp_retract_grid.cpp
