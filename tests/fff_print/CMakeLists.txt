@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_avoid_crossing_perimeters.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
 	test_temp_retract_grid.cpp
@@ -63,11 +64,13 @@ add_executable(${_TEST_NAME}_tests
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
+	test_counterbore_bridging.cpp
 	test_extra_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
+	test_scarf_seam.cpp
 	test_slice_bake.cpp
 	test_status_callback_race.cpp
 	test_modifier_effect.cpp
