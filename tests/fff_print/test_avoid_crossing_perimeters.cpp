@@ -455,8 +455,12 @@ TEST_CASE("Moves in a part go round its top surfaces on a layer with supports", 
     });
     const double floor_top = 3.0;
 
-    // The moves on the floor's last layer from one extrusion of the part to the next that neither start nor end at
-    // the top surface and whose straight line would cross it: how many there are, and how many of them cross it.
+    // The moves on the floor's last layer from one extrusion of the part to the next whose straight line would cross
+    // the top surface and that neither start nor end across it: how many there are, and how many of them cross it.
+    // A move that starts or ends at the edge of the top surface counts: which moves the layer has depends on the
+    // order the part is printed in, which is not the same on every compiler (MSVC prints the infill of the two
+    // blocks one after the other along the neck's edge, so no move between the blocks meets the slot there, and
+    // the move that is routed is the one from the floor's outer wall to its top surface).
     auto moves_over_the_floor = [&part, floor_top](bool supports) {
         DynamicPrintConfig config = routed_config();
         config.set_deserialize_strict({
@@ -497,13 +501,16 @@ TEST_CASE("Moves in a part go round its top surfaces on a layer with supports", 
         // A routed move may run along the edge of a top surface, a quarter of a millimetre inside it. Half a
         // millimetre inside it is across it.
         const ExPolygons across = offset_ex(top, -float(scaled<double>(0.5)));
-        const ExPolygons around = offset_ex(top, float(scaled<double>(1.5)));
         std::pair<size_t, size_t> counts{0, 0};
         for (const Hop &hop : hops_of(moves_of(gcode))) {
-            if (std::abs(hop.z - floor_top) > 1e-4 || hop.from_type.rfind("Support", 0) == 0 || hop.to_type.rfind("Support", 0) == 0)
+            if (std::abs(hop.z - floor_top) > 1e-4 || hop.points.empty() || hop.from_type.rfind("Support", 0) == 0 ||
+                hop.to_type.rfind("Support", 0) == 0)
+                continue;
+            // From one line of the top surface to the next is a move inside the top surface, not round it.
+            if (hop.from_type == "Top surface" && hop.to_type == "Top surface")
                 continue;
             const Polyline way = in_object(hop, shift);
-            if (holds(around, way.points.front()) || holds(around, way.points.back()) || !crosses(in_object(hop, shift, true), across))
+            if (holds(across, way.points.front()) || holds(across, way.points.back()) || !crosses(in_object(hop, shift, true), across))
                 continue;
             ++counts.first;
             if (crosses(way, across))
