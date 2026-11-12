@@ -16,7 +16,9 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -482,4 +484,95 @@ TEST_CASE("Write rib tower plates for a Bambu Studio comparison", "[.BblRibLive]
             WARN(path << ": " << report.summary());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The plain (non-rib) wall of a Bambu Lab tower is laid at the wall speed.
+//
+// tool_change() drew the rectangle wall with no feedrate, so it went at whatever was left in force
+// after the change filament G-code and the travel back to the tower: on an A1, the 30 mm/s of the
+// Z move that ends that travel. The rib wall, the wall of a layer without a tool change and the
+// brim all use wall_feedrate(): min(wipe_tower_max_purge_speed, max volumetric speed / cross-section).
+// ---------------------------------------------------------------------------
+namespace {
+
+const Machine A1{ "Bambu Lab A1 0.4 nozzle", "0.20mm Standard @BBL A1", "Bambu PLA Basic @BBL A1", { 128., 128. }, { 30., 200. } };
+
+// For each tool change above the first layer, the feedrates in force on its wall: the extrusions
+// with X/Y between "; CP TOOLCHANGE START" and "; CP TOOLCHANGE WIPE" (a Bambu Lab tool change
+// extrudes nothing else on the tower before its wipe).
+struct WallFeedrates
+{
+    std::vector<double> f;      // one per wall extrusion line
+    size_t              walls = 0;
+    std::string         sample; // the first wall line, with the feedrate in force
+};
+
+WallFeedrates toolchange_wall_feedrates(const std::string &gcode, double first_layer_z)
+{
+    WallFeedrates      out;
+    std::istringstream in(gcode);
+    std::string        line;
+    double             f = 0., z = 0.;
+    bool               in_change = false;
+    size_t             lines_here = 0;
+    auto value = [](const std::string &l, const char *key) {
+        const size_t p = l.find(key);
+        return p == std::string::npos ? -1. : std::atof(l.c_str() + p + std::strlen(key));
+    };
+    while (std::getline(in, line)) {
+        const bool is_move = line.rfind("G0", 0) == 0 || line.rfind("G1", 0) == 0 || line.rfind("G2", 0) == 0 || line.rfind("G3", 0) == 0;
+        if (is_move) {
+            if (const double v = value(line, " F"); v > 0.)
+                f = v;
+            if (const double v = value(line, " Z"); v > 0.)
+                z = v;
+        }
+        if (line.find("CP TOOLCHANGE START") != std::string::npos) {
+            in_change  = true;
+            lines_here = 0;
+            continue;
+        }
+        if (line.find("CP TOOLCHANGE WIPE") != std::string::npos || line.find("CP TOOLCHANGE END") != std::string::npos) {
+            if (in_change && lines_here > 0)
+                ++out.walls;
+            in_change = false;
+            continue;
+        }
+        if (in_change && is_move && z > first_layer_z + 1e-3 && value(line, " E") > 0. &&
+            (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos)) {
+            out.f.push_back(f);
+            if (lines_here++ == 0 && out.sample.empty())
+                out.sample = line + "   (F in force: " + std::to_string(int(f)) + ")";
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Bambu Lab tower: the plain wall of a tool change runs at the wall speed", "[WipeTower][BBL][Regression]")
+{
+    DynamicPrintConfig cfg = machine_config(A1, { { "wipe_tower_wall_type", "rectangle" } });
+    Print       print;
+    Model       model;
+    std::string gcode = slice(print, model, cfg, A1.bed_center, true);
+    REQUIRE(print.wipe_tower_type() == WipeTowerType::Type1);
+
+    // wall_feedrate() above the first layer: min(max purge speed, max volumetric speed / (line width x layer height)).
+    const double layer_h  = cfg.opt_float("layer_height");
+    const double max_vol  = cfg.option<ConfigOptionFloats>("filament_max_volumetric_speed")->get_at(0);
+    const double max_purge = cfg.opt_float("wipe_tower_max_purge_speed");
+    const double wall_f   = 60. * max_purge;
+    // The cap is what decides on this printer (max volumetric speed / a 0.5 x 0.2 line is far above it).
+    REQUIRE(max_vol / (0.5 * layer_h) > max_purge);
+
+    const WallFeedrates walls = toolchange_wall_feedrates(gcode, cfg.opt_float("initial_layer_print_height"));
+    INFO("first wall line: " << walls.sample);
+    REQUIRE(walls.walls > 50);
+    size_t at_wall_speed = 0;
+    for (double f : walls.f)
+        if (std::abs(f - wall_f) < 1.)
+            ++at_wall_speed;
+    CHECK(at_wall_speed == walls.f.size());
 }
