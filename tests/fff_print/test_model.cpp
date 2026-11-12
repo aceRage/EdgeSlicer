@@ -240,9 +240,9 @@ TEST_CASE("Splitting a turned and scaled part leaves its pieces where they were"
 {
     // Two 4 mm cubes 10 mm apart along X, as one mesh.
     indexed_triangle_set its = its_make_cube(4., 4., 4.);
-    indexed_triangle_set far = its_make_cube(4., 4., 4.);
-    its_translate(far, Vec3f(10.f, 0.f, 0.f));
-    its_merge(its, far);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(its, other);
 
     Model        model;
     ModelObject *object = model.add_object();
