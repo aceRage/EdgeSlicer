@@ -682,11 +682,11 @@ public:
     BBLSubTask *   last_subtask{nullptr};
     std::string    last_profile_id;
     std::string    last_task_id;
-    long           last_tray_exist_bits { -1 };
-    long           last_ams_exist_bits { -1 };
-    long           last_tray_is_bbl_bits{ -1 };
-    long           last_read_done_bits{ -1 };
-    long           last_reading_bits { -1 };
+    long long      last_tray_exist_bits { -1 };
+    long long      last_ams_exist_bits { -1 };
+    long long      last_tray_is_bbl_bits{ -1 };
+    long long      last_read_done_bits{ -1 };
+    long long      last_reading_bits { -1 };
     long           last_ams_version { -1 };
     int            last_cali_version{-1};
 

@@ -646,11 +646,13 @@ public:
 
     /* ams properties */
     std::map<std::string, Ams*> amsList;    // key: ams[id], start with 0
-    long  ams_exist_bits = 0;
-    long  tray_exist_bits = 0;
-    long  tray_is_bbl_bits = 0;
-    long  tray_read_done_bits = 0;
-    long  tray_reading_bits = 0;
+    // 64-bit like BambuStudio's (DeviceManager.hpp, "[N10] support N10"): the H3C's AMS 3H reports its
+    // nine slots as tray bits 28..36, past a 32-bit long (MSVC), and stol threw on them.
+    long long ams_exist_bits = 0;
+    long long tray_exist_bits = 0;
+    long long tray_is_bbl_bits = 0;
+    long long tray_read_done_bits = 0;
+    long long tray_reading_bits = 0;
     int   ams_rfid_status = 0;
     bool  ams_insert_flag { false };
     bool  ams_power_on_flag { false };
@@ -1350,6 +1352,9 @@ public:
     /*for parse new info*/
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
+    // print.ams of a push_status report (jj = the "print" object). May throw; parse_json catches it
+    // on its own so the rest of the report is still read.
+    void parse_ams_report(const json& jj, bool key_field_only);
     bool is_nozzle_data_invalid();
     // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
     // the printer has not reported it (Orca #12814).
@@ -1374,6 +1379,11 @@ public:
     std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
     std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
+    // A hex bitmask from the status report ("ams_exist_bits", "tray_exist_bits", ...) into 64 bits.
+    // Never throws: a value that is not hex, or does not fit, leaves `bits` as it was and returns false.
+    static bool parse_hex_bits(const json& value, long long& bits);
+    // Bit `index` of a 64-bit report mask; an index outside 0..63 is not set.
+    static bool hex_bit_set(long long bits, int index) { return index >= 0 && index < 64 && ((bits >> index) & 1LL) != 0; }
 
     /* Device Filament Check */
     struct FilamentData
