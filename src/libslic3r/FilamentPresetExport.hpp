@@ -20,6 +20,10 @@ namespace Slic3r {
 // " @printer" tail ("Generic PLA @U1" -> "Generic PLA"; a name without '@' is kept whole).
 std::string filament_group_name(const std::string &base_preset_name);
 
+// The vendor folder a filament preset goes into in an .orca_filament bundle: the first word of the printer
+// after its base preset's '@' ("Generic PLA @Snapmaker U1" -> "Snapmaker"), "Custom" when there is none.
+std::string filament_bundle_vendor(const std::string &base_preset_name);
+
 // For each visible printer preset: select it on `bundle` (a scratch copy) and keep the user
 // filament presets compatible with it (not system, not the default, not embedded in a project).
 UserPresetsByPrinter collect_user_filament_presets(PresetBundle &bundle);

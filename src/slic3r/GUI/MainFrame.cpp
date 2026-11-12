@@ -4579,13 +4579,14 @@ void MainFrame::load_config_file()
         m_last_config = file;
     }
     bool update = false;
+    PresetBundle::PresetImportReport report;
     wxGetApp().preset_bundle->import_presets(cfiles, [this](std::string const & name) {
             ConfigsOverwriteConfirmDialog dlg(this, from_u8(name), false);
             int           res = dlg.ShowModal();
             int           ids[]{wxID_NO, wxID_YES, wxID_NOTOALL, wxID_YESTOALL};
             return std::find(ids, ids + 4, res) - ids;
         },
-        ForwardCompatibilitySubstitutionRule::Enable);
+        ForwardCompatibilitySubstitutionRule::Enable, &report);
     if (!cfiles.empty()) {
         wxGetApp().app_config->update_config_dir(get_dir_name(cfiles.back()));
         wxGetApp().load_current_presets();
@@ -4599,6 +4600,15 @@ void MainFrame::load_config_file()
     update_side_preset_ui();
     auto msg = wxString::Format(_L_PLURAL("There is %d config imported. (Only non-system and compatible configs)",
         "There are %d configs imported. (Only non-system and compatible configs)", cfiles.size()), cfiles.size());
+    // Presets left out that the user did not choose to leave out: say how many, the log has their names.
+    if (!report.bad_version.empty())
+        msg += "\n" + wxString::Format(_L_PLURAL("%d config was not imported: its version cannot be read.",
+                                                 "%d configs were not imported: their version cannot be read.", report.bad_version.size()),
+                                       int(report.bad_version.size()));
+    if (!report.missing_parent.empty())
+        msg += "\n" + wxString::Format(_L_PLURAL("%d config was not imported: the preset it inherits was not found.",
+                                                 "%d configs were not imported: the presets they inherit were not found.", report.missing_parent.size()),
+                                       int(report.missing_parent.size()));
     if(cfiles.empty())
         msg += _L("\nHint: Make sure you have added the corresponding printer before importing the configs.");
     MessageDialog dlg2(this,msg ,

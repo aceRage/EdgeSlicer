@@ -1783,7 +1783,13 @@ void PresetCollection::load_presets(
 
                     std::string version_str = key_values[BBL_JSON_KEY_VERSION];
                     boost::optional<Semver> version = Semver::parse(version_str);
-                    if (!version) continue;
+                    if (!version) {
+                        // Left out of the lists as before, but said where the user can find it.
+                        BOOST_LOG_TRIVIAL(error) << boost::format("user preset %1% (%2%) not loaded: its version \"%3%\" cannot be read")
+                                                        % preset.name % preset.file % version_str;
+                        ++m_errors;
+                        continue;
+                    }
                     preset.version = *version;
 
                     if (key_values.find(BBL_JSON_KEY_FILAMENT_ID) != key_values.end())

@@ -177,6 +177,7 @@ add_executable(${_TEST_NAME}_tests
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
 	test_process_preset_export.cpp
+	test_preset_import_order.cpp
 	test_preset_manager_model.cpp
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
