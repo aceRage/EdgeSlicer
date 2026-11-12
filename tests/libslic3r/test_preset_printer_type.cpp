@@ -92,3 +92,84 @@ TEST_CASE("get_current_printer_type reads the preset it is called on", "[Preset]
     CHECK(u1->get_current_printer_type(nullptr).empty());
     CHECK(u1->get_printer_type(nullptr).empty());
 }
+
+// select_preset_by_name falls back to another preset when the one asked for is hidden or gone. The presets are
+// in name order, so "the first visible" of a printer model is its smallest nozzle; the fallback takes the model's
+// default variant (0.4) when that is visible, as PresetBundle::default_printer_variant and
+// get_similar_printer_preset do.
+namespace {
+
+Preset &add_variant(PresetBundle &bundle, const std::string &name, const std::string &printer_model, const std::string &variant)
+{
+    Preset &printer = add_printer(bundle, name, printer_model);
+    printer.config.option<ConfigOptionString>("printer_variant", true)->value = variant;
+    return printer;
+}
+
+PresetBundle make_variant_bundle()
+{
+    PresetBundle bundle;
+    for (const char *variant : { "0.2", "0.4", "0.6", "0.8" })
+        add_variant(bundle, std::string("Snapmaker U1 (") + variant + " nozzle)", "Snapmaker U1", variant);
+    for (const char *variant : { "0.25", "0.6" })
+        add_variant(bundle, std::string("Odd Printer ") + variant + " nozzle", "Odd Printer", variant);
+    return bundle;
+}
+
+void set_visible(PresetBundle &bundle, const std::string &name, bool visible)
+{
+    // real: the preset of the collection itself, not the edited copy of the selected one.
+    Preset *preset = bundle.printers.find_preset(name, false, true);
+    REQUIRE(preset != nullptr);
+    preset->is_visible = visible;
+}
+
+} // namespace
+
+TEST_CASE("select_preset_by_name falls back to the model's default nozzle variant", "[Preset][SelectFallback]")
+{
+    PresetBundle bundle = make_variant_bundle();
+    REQUIRE(bundle.printers.select_preset_by_name("Snapmaker U1 (0.6 nozzle)", true));
+    REQUIRE(bundle.printers.get_selected_preset_name() == "Snapmaker U1 (0.6 nozzle)");
+
+    SECTION("a visible preset is selected by its name, whatever its nozzle") {
+        bundle.printers.select_preset_by_name("Snapmaker U1 (0.2 nozzle)", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Snapmaker U1 (0.2 nozzle)");
+        bundle.printers.select_preset_by_name("Odd Printer 0.6 nozzle", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Odd Printer 0.6 nozzle");
+    }
+    SECTION("a hidden preset gives way to its model's 0.4, not to the model's first") {
+        set_visible(bundle, "Snapmaker U1 (0.6 nozzle)", false);
+        bundle.printers.select_preset_by_name("Snapmaker U1 (0.6 nozzle)", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Snapmaker U1 (0.4 nozzle)");
+    }
+    SECTION("with the 0.4 hidden as well it is the model's first visible") {
+        set_visible(bundle, "Snapmaker U1 (0.6 nozzle)", false);
+        set_visible(bundle, "Snapmaker U1 (0.4 nozzle)", false);
+        bundle.printers.select_preset_by_name("Snapmaker U1 (0.6 nozzle)", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Snapmaker U1 (0.2 nozzle)");
+    }
+    SECTION("a model without a 0.4 keeps its first visible") {
+        set_visible(bundle, "Odd Printer 0.6 nozzle", false);
+        bundle.printers.select_preset_by_name("Odd Printer 0.6 nozzle", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Odd Printer 0.25 nozzle");
+    }
+    SECTION("a name that is not there gives the first visible model, at its 0.4") {
+        // "Odd Printer ..." sorts before "Snapmaker ...": hide it, and the first visible preset is the U1's 0.2.
+        set_visible(bundle, "Odd Printer 0.25 nozzle", false);
+        set_visible(bundle, "Odd Printer 0.6 nozzle", false);
+        bundle.printers.select_preset_by_name("No such printer", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Snapmaker U1 (0.4 nozzle)");
+    }
+    SECTION("and the first visible model's first preset when it has no 0.4") {
+        bundle.printers.select_preset_by_name("No such printer", true);
+        CHECK(bundle.printers.get_selected_preset_name() == "Odd Printer 0.25 nozzle");
+    }
+    SECTION("the other preset types keep the first visible") {
+        DynamicPrintConfig cfg = bundle.prints.default_preset().config;
+        for (const char *name : { "0.08 Fine", "0.20 Standard" })
+            bundle.prints.load_preset(std::string(), name, cfg, false).is_visible = true;
+        bundle.prints.select_preset_by_name("No such process", true);
+        CHECK(bundle.prints.get_selected_preset_name() == "0.08 Fine");
+    }
+}

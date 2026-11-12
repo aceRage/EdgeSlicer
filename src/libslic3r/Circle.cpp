@@ -75,12 +75,10 @@ bool Circle::try_create_circle(const Points& points, const double max_radius, co
     double least_deviation;
     bool found_circle = false;
     double current_deviation;
+    // Every point between the ends is tried, the path's own middle point with them: what was tried above for
+    // more than three points is a point made between its neighbours, not the middle point itself.
     for (int index = 1; index < count - 1; index++)
     {
-        if (index == middle_index)
-            // BBS: We already checked this one, and it failed. don't need to do again
-            continue;
-
         if (Circle::try_create_circle(points[0], points[index], points[count - 1], max_radius, test_circle) && test_circle.get_deviation_sum_squared(points, tolerance, current_deviation))
         {
             if (!found_circle || current_deviation < least_deviation)
@@ -141,6 +139,10 @@ bool Circle::get_closest_perpendicular_point(const Point& p1, const Point& p2, c
     //BBS: [(Cx - Ax)(Bx - Ax) + (Cy - Ay)(By - Ay)] / [(Bx - Ax) ^ 2 + (By - Ay) ^ 2]
     double num = (c[0] - x1) * x_dif + (c[1] - y1) * y_dif;
     double denom = (x_dif * x_dif) + (y_dif * y_dif);
+    // Two points in the same place: there is no segment for the perpendicular to meet, and 0 / 0 below would
+    // be NaN, which fails both comparisons and is then turned into a coordinate.
+    if (denom == 0.)
+        return false;
     double t = num / denom;
 
     //BBS: Considering this a failure if t == 0 or t==1 within tolerance.  In that case we hit the endpoint, which is OK.
@@ -318,7 +320,7 @@ bool ArcSegment::try_create_arc(
         }
     } else if (polar_start_theta > polar_end_theta) {
         if ((polar_start_theta < polar_mid_theta && polar_mid_theta < (2.0 * PI)) ||
-            (0.0 < polar_mid_theta && polar_mid_theta < polar_end_theta)) {
+            (0.0 <= polar_mid_theta && polar_mid_theta < polar_end_theta)) {
             direction = ArcDirection::Arc_Dir_CCW;
             angle_radians = polar_end_theta + ((2.0 * PI) - polar_start_theta);
         } else if (polar_end_theta < polar_mid_theta && polar_mid_theta < polar_start_theta) {
@@ -352,8 +354,11 @@ bool ArcSegment::try_create_arc(
         difference = (test_arc_length - approximate_length) / approximate_length;
         if (std::fabs(difference) >= path_tolerance_percent)
             return false;
-        //BBS: Set the new length and flip the direction (but not the angle)!
+        //BBS: Set the new length and flip the direction.
+        // The angle is flipped with them: it is what is_point_inside() and the wipe tower read, and it has to be
+        // the angle of the arc that is kept, not of the one given up.
         arc_length = test_arc_length;
+        angle_radians = test_radians;
         direction = direction == ArcDirection::Arc_Dir_CCW ? ArcDirection::Arc_Dir_CW : ArcDirection::Arc_Dir_CCW;
     }
 

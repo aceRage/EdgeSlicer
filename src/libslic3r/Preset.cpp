@@ -1190,6 +1190,27 @@ BedType Preset::get_default_bed_type(PresetBundle* preset_bundle)
         }
     }
 
+    // Bambu Studio keeps a machine's default plate in its machine model file ("default_bed_type" beside
+    // "bed_model", BambuStudio 5c4945d7e8) and uses it for Bambu presets (Sidebar::use_default_bed_type).
+    // The Bambu profiles here carry that key and nothing read it, so every Bambu machine but the three
+    // below started on the High Temp Plate, where Bambu Studio starts them on the Textured PEI Plate.
+    // For Bambu machines only, as in Bambu Studio: other vendors' model files that carry the key come
+    // from OrcaSlicer, which never read it there, and are not read here either.
+    if (preset_bundle != nullptr) {
+        if (auto bbl = preset_bundle->vendors.find("BBL"); bbl != preset_bundle->vendors.end()) {
+            const auto *printer_model = config.option<ConfigOptionString>("printer_model");
+            for (const VendorProfile::PrinterModel &vendor_model : bbl->second.models)
+                if (printer_model != nullptr && vendor_model.name == printer_model->value) {
+                    BedType bed_type;
+                    if (!vendor_model.default_bed_type.empty() &&
+                        ConfigOptionEnum<BedType>::from_string(vendor_model.default_bed_type, bed_type) &&
+                        bed_type > btDefault && bed_type < btCount)
+                        return bed_type;
+                    break;
+                }
+        }
+    }
+
     std::string model_id = this->get_printer_type(preset_bundle);
     if (model_id == "BL-P001" || model_id == "BL-P002" || model_id == "C13") {
         return BedType::btPC;
@@ -4125,18 +4146,33 @@ bool PresetCollection::select_preset_by_name(const std::string &name_w_suffix, b
         idx = it - m_presets.begin();
     else {
         bool found = false;
+        // The first visible preset of a printer model, from the model's default nozzle variant ("0.4") when
+        // one is visible: the presets are in name order, so the first of a model is its smallest nozzle
+        // ("0.2"), which is not the machine anybody has by default. As PresetBundle::default_printer_variant
+        // and get_similar_printer_preset do.
+        auto first_visible_of_model = [this](const std::string &printer_model, size_t &idx_out) {
+            bool any = false;
+            for (size_t i = m_default_suppressed ? m_num_default_presets : 0; i < m_presets.size(); ++i) {
+                const Preset &preset = m_presets[i];
+                if (!preset.is_visible || preset.config.opt_string("printer_model") != printer_model)
+                    continue;
+                const auto *variant = preset.config.option<ConfigOptionString>("printer_variant");
+                if (variant != nullptr && variant->value == PresetBundle::SM_DEFAULT_PRINTER_VARIANT) {
+                    idx_out = i;
+                    return true;
+                }
+                if (!any) {
+                    idx_out = i;
+                    any     = true;
+                }
+            }
+            return any;
+        };
         //Only U1 cancel current preset and select the other avalibale preset to show and not switch the other machine 
         if (m_type == Preset::Type::TYPE_PRINTER && it != m_presets.end() && it->name == name && !it->is_visible) {
             std::string printer_model = it->config.opt_string("printer_model");
-            if (!printer_model.empty()) {
-                for (size_t i = m_default_suppressed ? m_num_default_presets : 0; i < m_presets.size(); ++i) {
-                    if (m_presets[i].is_visible && m_presets[i].config.opt_string("printer_model") == printer_model) {
-                        idx = i;
-                        found = true;
-                        break;
-                    }
-                }
-            }
+            if (!printer_model.empty())
+                found = first_visible_of_model(printer_model, idx);
         }
         if (!found) {
             // Find the first visible preset.
@@ -4145,6 +4181,12 @@ bool PresetCollection::select_preset_by_name(const std::string &name_w_suffix, b
                     idx = i;
                     break;
                 }
+            // For a printer, that is the first model's smallest nozzle: stay with the model, at its default variant.
+            if (m_type == Preset::Type::TYPE_PRINTER && idx < m_presets.size() && m_presets[idx].is_visible) {
+                const std::string printer_model = m_presets[idx].config.opt_string("printer_model");
+                if (!printer_model.empty())
+                    first_visible_of_model(printer_model, idx);
+            }
         }
     }
 
