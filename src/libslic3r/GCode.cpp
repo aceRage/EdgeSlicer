@@ -1166,6 +1166,37 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         check_add_eol(restore_layer_z_str);
     }
 
+    // Farthest-point timelapse, case B (Bambu Studio GCode.cpp append_tcr): when the layer's farthest point
+    // belongs to the other nozzle, the photo is taken right after switching from the photo head to it, from
+    // the safe spot near the farthest point. Bambu Studio emits it straight after the change (template + tool
+    // command), BEFORE the travel to the tower's start point and the unretract there; Edge emitted it after
+    // both, so the head went to the tower, primed the nozzle, left for the photo spot and came back oozing.
+    // The photo is taken for the incoming filament (the active one in Bambu Studio by then). Once per change.
+    const int timelapse_old_extruder = gcodegen.writer().extruder() != nullptr ?
+                                           gcodegen.timelapse_extruder_of_filament(int(gcodegen.writer().extruder()->id())) : -1;
+    bool case_b_timelapse_done = false;
+    auto case_b_timelapse = [&]() -> std::string {
+        if (case_b_timelapse_done)
+            return {};
+        case_b_timelapse_done = true;
+        if (!gcodegen.m_farthest_point_timelapse.enabled || gcodegen.m_farthest_point_timelapse.farthest_is_photo_head ||
+            gcodegen.m_farthest_point_timelapse.inserted_this_layer || timelapse_old_extruder < 0 || new_extruder_id < 0 ||
+            gcodegen.m_config.nozzle_diameter.values.size() <= 1 || gcodegen.m_curr_print == nullptr)
+            return {};
+        const int photo_extruder          = gcodegen.m_farthest_point_timelapse.most_used_extruder;
+        const int old_physical_extruder   = gcodegen.timelapse_physical_extruder(timelapse_old_extruder);
+        const int new_physical_extruder   = gcodegen.timelapse_physical_extruder(gcodegen.timelapse_extruder_of_filament(new_extruder_id));
+        const int photo_physical_extruder = gcodegen.timelapse_physical_extruder(photo_extruder);
+        if (old_physical_extruder != photo_physical_extruder || new_physical_extruder == photo_physical_extruder)
+            return {};
+        GCode::TimelapseGCodeResult timelapse_result =
+            gcodegen.generate_timelapse_gcode(*gcodegen.m_curr_print, tcr.print_z, photo_extruder, false, new_extruder_id);
+        if (timelapse_result.gcode.empty())
+            return {};
+        gcodegen.m_farthest_point_timelapse.inserted_this_layer = true;
+        return timelapse_result.gcode;
+    };
+
     // Process the custom change_filament_gcode. If it is empty, provide a simple Tn command to change the filament.
     // Otherwise, leave control to the user completely.
     std::string        toolchange_gcode_str;
@@ -1333,6 +1364,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             }
         }
 
+        // Farthest-point timelapse, case B: here, before the travel to the tower and the unretract (see above).
+        toolchange_gcode_str += case_b_timelapse();
+
         // move to start_pos for wiping after toolchange
         std::string start_pos_str;
         start_pos_str = gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
@@ -1382,9 +1416,6 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     }
 
     std::string toolchange_command;
-    // Farthest-point timelapse, case B (BambuStudio GCode.cpp append_tcr): the extruder before this change.
-    const int old_timelapse_extruder = gcodegen.writer().extruder() != nullptr ?
-                                           gcodegen.timelapse_extruder_of_filament(int(gcodegen.writer().extruder()->id())) : -1;
     if (tcr.priming || (new_extruder_id >= 0 && gcodegen.writer().need_toolchange(new_extruder_id)))
         toolchange_command = gcodegen.writer().toolchange(new_extruder_id);
     if (new_extruder_id >= 0)
@@ -1395,24 +1426,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     else {
         // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
     }
-    // BambuStudio: when the layer's farthest point belongs to the other nozzle, the photo is taken
-    // right after switching from the photo head to it, from the safe spot near the farthest point.
-    if (gcodegen.m_farthest_point_timelapse.enabled && !gcodegen.m_farthest_point_timelapse.farthest_is_photo_head &&
-        !gcodegen.m_farthest_point_timelapse.inserted_this_layer && old_timelapse_extruder >= 0 && new_extruder_id >= 0 &&
-        gcodegen.m_config.nozzle_diameter.values.size() > 1 && gcodegen.m_curr_print != nullptr) {
-        const int photo_extruder          = gcodegen.m_farthest_point_timelapse.most_used_extruder;
-        const int old_physical_extruder   = gcodegen.timelapse_physical_extruder(old_timelapse_extruder);
-        const int new_physical_extruder   = gcodegen.timelapse_physical_extruder(gcodegen.timelapse_extruder_of_filament(new_extruder_id));
-        const int photo_physical_extruder = gcodegen.timelapse_physical_extruder(photo_extruder);
-        if (old_physical_extruder == photo_physical_extruder && new_physical_extruder != photo_physical_extruder) {
-            GCode::TimelapseGCodeResult timelapse_result =
-                gcodegen.generate_timelapse_gcode(*gcodegen.m_curr_print, tcr.print_z, photo_extruder);
-            if (!timelapse_result.gcode.empty()) {
-                toolchange_gcode_str += timelapse_result.gcode;
-                gcodegen.m_farthest_point_timelapse.inserted_this_layer = true;
-            }
-        }
-    }
+    // Without a change_filament_gcode the photo follows the tool command, as in Bambu Studio.
+    toolchange_gcode_str += case_b_timelapse();
 
     gcodegen.placeholder_parser().set("current_extruder",
                                       new_extruder_id < 0 ? new_extruder_id : int(gcodegen.writer().output_tool(unsigned(new_extruder_id))));
@@ -5118,10 +5133,10 @@ int GCode::timelapse_physical_extruder(int extruder_id) const
 // names its results (m_timelapse_uses_pos / m_timelapse_uses_clear_to_x0), so a template that does
 // not use them costs nothing and writes the same G-code. Requires an active filament.
 DynamicConfig GCode::timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
-                                            bool always_pick, Point *safe_pos)
+                                            bool always_pick, Point *safe_pos, int curr_filament)
 {
     assert(m_writer.extruder() != nullptr);
-    const int curr_extruder  = timelapse_extruder_of_filament(int(m_writer.extruder()->id()));
+    const int curr_extruder  = timelapse_extruder_of_filament(curr_filament >= 0 ? curr_filament : int(m_writer.extruder()->id()));
     Point     timelapse_pos  = DefaultTimelapsePos;
     bool      is_clear_to_x0 = true;
     if (m_layer != nullptr) {
@@ -5167,20 +5182,22 @@ DynamicConfig GCode::timelapse_gcode_config(const Print &print, coordf_t print_z
 // With a safe spot the H2D/H2C/H2S templates hand it to the firmware (M9711 ... U<x> V<y>) for
 // whichever nozzle is active; without one they lift and park only when the active nozzle is not the
 // photo nozzle, which is what made the left and the right nozzle of an H2D look different.
-GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick)
+GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
+                                                            int curr_filament)
 {
     TimelapseGCodeResult result;
     const Extruder      *current_filament = m_writer.extruder();
     if (current_filament == nullptr || print.config().time_lapse_gcode.value.empty())
         return result;
 
-    const int           curr_extruder = timelapse_extruder_of_filament(int(current_filament->id()));
+    const unsigned int  filament_id   = curr_filament >= 0 ? unsigned(curr_filament) : current_filament->id();
+    const int           curr_extruder = timelapse_extruder_of_filament(int(filament_id));
     Point               timelapse_pos = DefaultTimelapsePos;
-    const DynamicConfig config        = timelapse_gcode_config(print, print_z, photo_extruder, skip_pos_pick, true, &timelapse_pos);
+    const DynamicConfig config = timelapse_gcode_config(print, print_z, photo_extruder, skip_pos_pick, true, &timelapse_pos, int(filament_id));
     result.safe_pos = timelapse_pos;
 
     std::string timelapse_gcode = this->placeholder_parser_process("time_lapse_gcode", print.config().time_lapse_gcode.value,
-                                                                   current_filament->id(), &config) +
+                                                                   filament_id, &config) +
                                   "\n";
 
     if (m_config.gcode_comments) {
