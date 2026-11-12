@@ -163,6 +163,13 @@ public:
     // Orca #15035: the WipeTower2 tower's first-layer envelope (brim included) in tower-local
     // coordinates, which the skip-point entry routing goes around.
     void set_wipe_tower_bbx(const BoundingBoxf &bbx) { m_wipe_tower_bbx = bbx; }
+    // BBS (H2C wipe_tower_center_pos_*): the tower's first-layer box on the plate and the bed every
+    // nozzle reaches, for the per-toolchange "point for nozzle heating" (M620.14 X Y).
+    void set_heating_stop_area(const BoundingBoxf &tower_bbx, const BoundingBoxf &printer_bbx)
+    {
+        m_heating_tower_bbx   = tower_bbx;
+        m_heating_printer_bbx = printer_bbx;
+    }
 
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
@@ -218,6 +225,9 @@ private:
     // where the tower's height is not the one process_layer already declared.
     const bool                                                   m_sparse_layers_combined;
     BoundingBoxf                                                 m_wipe_tower_bbx;
+    // See set_heating_stop_area(). Undefined: no heating stop point is published per toolchange.
+    BoundingBoxf                                                 m_heating_tower_bbx;
+    BoundingBoxf                                                 m_heating_printer_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
 };
@@ -514,10 +524,11 @@ private:
                                    const ConstExtrusionEntitiesPtr& region_perimeters = {},
                                    const WipeInwardSupport* wipe_support = nullptr);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
-    // should be executed
+    // should be executed, and which of them the loop is (loop_in_region), so that it is not taken for its own neighbour
     std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.,
                                  const ConstExtrusionEntitiesPtr& region_perimeters = {},
-                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr);
+                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr,
+                                 const ExtrusionEntity* loop_in_region = nullptr);
     std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
     std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
     
@@ -840,6 +851,12 @@ private:
     // BBS
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
+    // BBS (new_extruder_retracted_length): the retraction each extruder was left with when the head last
+    // switched away from it, by logical extruder (filament_map - 1), as Bambu Studio's per-extruder retraction
+    // state on its (single-extruder-multi-material) H2C / H2D profiles. Tracked here for the change_filament
+    // template only; the writer's own retract / unretract bookkeeping is unchanged.
+    std::vector<double> m_parked_retracted;
+    double incoming_extruder_retracted_length(int previous_filament, unsigned int new_filament);
     // Ultra (H2C 3MF schema): the order filaments were entered, and the logical nozzle each
     // entry ran on. BambuStudio records these on GCode and copies them to GCodeProcessorResult
     // for Metadata/filament_sequence.json; the H2C reads the nozzle order from there.

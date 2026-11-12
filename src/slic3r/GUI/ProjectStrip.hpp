@@ -128,6 +128,10 @@ private:
     // stash_active + show_slot + select, timed and logged.
     bool        switch_to(int id, const char *mode);
     void        after_switch(int id, std::chrono::steady_clock::time_point started, long long presets_ms, const char *mode);
+    // The tab the user is on, noted before a switch / close / new project changes anything (restore_tab() puts it back).
+    void        remember_tab();
+    // The shown project lands on the remembered tab (Prepare when that page does not exist now) and shows that tab's view.
+    void        restore_tab();
     // At the limit (D3): asks which project to close to make room. False when none was closed.
     bool        make_room();
     void        restore_session();
@@ -187,6 +191,9 @@ private:
     std::map<int, SlotExtra> m_extra;
     std::string              m_root;
     bool                     m_switching{ false };
+    // remember_tab(): the selected notebook index and its page window (-1 / null: none noted).
+    int                      m_tab_before{ -1 };
+    wxWindow                *m_tab_page_before{ nullptr };
     bool                     m_collapsed{ false };
     bool                     m_text_mode{ false };
     int                      m_width_dip{ StripLayout::default_width }; // the dragged width
