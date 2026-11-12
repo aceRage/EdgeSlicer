@@ -3409,6 +3409,8 @@ void MenuFactory::append_menu_item_locked(wxMenu* menu)
 
     auto item = append_menu_item(menu, wxID_ANY, lock_text, "",
         [plate](wxCommandEvent&) {
+            // As the plate's lock icon does: one undo step, which also marks the project modified.
+            plater()->take_snapshot("lock partplate");
             bool lock = plate->is_locked();
             plate->lock(!lock);
         }, "", nullptr, []() { return true; }, m_parent);
