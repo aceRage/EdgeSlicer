@@ -492,17 +492,10 @@ struct LineNode
     State                  state;
 
     // Return true if some initial line is touching some long line and this information was propagated into the current line.
-    bool is_initial_line_touching_long_lines() const {
-        if (prev_section_overlapping_lines.empty())
-            return false;
-
-        for (LineNode *line_node : prev_section_overlapping_lines) {
-            if (line_node->state.initial_touches_long_lines)
-                return true;
-        }
-
-        return false;
-    }
+    // This is what the line itself was last told: by the run that reached it, or of itself where a run began with it.
+    // It used to be read off the lines of the previous section instead, so the line a run begins with was never asked:
+    // a lone short line beside a long one was removed, and of short lines running out into a corner two stayed.
+    bool is_initial_line_touching_long_lines() const { return state.initial_touches_long_lines; }
 
     // Return true if the current line overlaps with some long line in the previous section.
     bool is_touching_long_lines_in_previous_layer() const {
@@ -575,7 +568,8 @@ void propagate_line_node_remove(const LineNode &line_node) {
 }
 
 // Filter out short extrusions that could create vibrations.
-static std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_sections) {
+// Not static: declared in Fill.hpp for the unit tests.
+std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_sections) {
     // Initialize all line nodes.
     std::vector<LineNodes> line_nodes_sections(lines_sections.size());
     for (const Lines &lines_section : lines_sections) {
@@ -657,8 +651,8 @@ static std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &
                     if (neighbour_line->state.initialized) {
                         // When the state of the node was previously filled, then we need to update data in such a way
                         // that will maximize the possibility of removing this node.
-                        neighbour_line->state.min_skips_taken = std::max(neighbour_line->state.min_skips_taken, neighbour_total_short_lines);
-                        neighbour_line->state.min_skips_taken = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
+                        neighbour_line->state.total_short_lines = std::max(neighbour_line->state.total_short_lines, neighbour_total_short_lines);
+                        neighbour_line->state.min_skips_taken   = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
 
                         // We will keep updating neighbor initial_touches_long_lines until it is equal to false.
                         if (neighbour_line->state.initial_touches_long_lines) {
@@ -694,6 +688,103 @@ static std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &
     }
 
     return lines_sections_out;
+}
+
+// Reconstruct polygons from the lines the filter left: lines of neighbouring sections that lie side by side are
+// joined into one polygon, which is closed where it meets no line or only lines taken already. Each line is used
+// once, so the polygons do not lie over one another.
+// Not static: declared in Fill.hpp for the unit tests.
+Polygons trace_solid_infill_sections(const std::vector<Lines> &polygon_sections, coord_t scaled_spacing)
+{
+    constexpr double connect_extrusions = true;
+
+    const double distance_limit_reconnection         = 2.0 * double(scaled_spacing);
+    const double squared_distance_limit_reconnection = distance_limit_reconnection * distance_limit_reconnection;
+
+    Polygons reconstructed_area{};
+    struct TracedPoly
+    {
+        Points lows;
+        Points highs;
+    };
+
+    std::vector<std::vector<Line>> polygon_sections_w_width = polygon_sections;
+    for (auto &slice : polygon_sections_w_width) {
+        for (Line &l : slice) {
+            l.a -= Point{0.0, 0.5 * scaled_spacing};
+            l.b += Point{0.0, 0.5 * scaled_spacing};
+        }
+    }
+
+    std::vector<TracedPoly> current_traced_polys;
+    for (const auto &polygon_slice : polygon_sections_w_width) {
+        std::unordered_set<const Line *> used_segments;
+        for (TracedPoly &traced_poly : current_traced_polys) {
+            auto candidates_begin = std::upper_bound(polygon_slice.begin(), polygon_slice.end(), traced_poly.lows.back(),
+                                                     [](const Point &low, const Line &seg) { return seg.b.y() > low.y(); });
+            auto candidates_end   = std::upper_bound(polygon_slice.begin(), polygon_slice.end(), traced_poly.highs.back(),
+                                                     [](const Point &high, const Line &seg) { return seg.a.y() > high.y(); });
+
+            bool segment_added = false;
+            for (auto candidate = candidates_begin; candidate != candidates_end && !segment_added; candidate++) {
+                if (used_segments.find(&(*candidate)) != used_segments.end()) {
+                    continue;
+                }
+                if (connect_extrusions && (traced_poly.lows.back() - candidate->a).cast<double>().squaredNorm() <
+                                              squared_distance_limit_reconnection) {
+                    traced_poly.lows.push_back(candidate->a);
+                } else {
+                    traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, coord_t(0)});
+                    traced_poly.lows.push_back(candidate->a - Point{scaled_spacing / 2, 0});
+                    traced_poly.lows.push_back(candidate->a);
+                }
+
+                if (connect_extrusions && (traced_poly.highs.back() - candidate->b).cast<double>().squaredNorm() <
+                                              squared_distance_limit_reconnection) {
+                    traced_poly.highs.push_back(candidate->b);
+                } else {
+                    traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
+                    traced_poly.highs.push_back(candidate->b - Point{scaled_spacing / 2, 0});
+                    traced_poly.highs.push_back(candidate->b);
+                }
+                segment_added = true;
+                used_segments.insert(&(*candidate));
+            }
+
+            if (!segment_added) {
+                // Zero or multiple overlapping segments. Resolving this is nontrivial,
+                // so we just close this polygon and maybe open several new. This will hopefully happen much less often
+                traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, 0});
+                traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
+                Polygon &new_poly = reconstructed_area.emplace_back(std::move(traced_poly.lows));
+                new_poly.points.insert(new_poly.points.end(), traced_poly.highs.rbegin(), traced_poly.highs.rend());
+                traced_poly.lows.clear();
+                traced_poly.highs.clear();
+            }
+        }
+
+        current_traced_polys.erase(std::remove_if(current_traced_polys.begin(), current_traced_polys.end(),
+                                                  [](const TracedPoly &tp) { return tp.lows.empty(); }),
+                                   current_traced_polys.end());
+
+        for (const auto &segment : polygon_slice) {
+            if (used_segments.find(&segment) == used_segments.end()) {
+                TracedPoly &new_tp = current_traced_polys.emplace_back();
+                new_tp.lows.push_back(segment.a - Point{scaled_spacing / 2, 0});
+                new_tp.lows.push_back(segment.a);
+                new_tp.highs.push_back(segment.b - Point{scaled_spacing / 2, 0});
+                new_tp.highs.push_back(segment.b);
+            }
+        }
+    }
+
+    // add not closed polys
+    for (TracedPoly &traced_poly : current_traced_polys) {
+        Polygon &new_poly = reconstructed_area.emplace_back(std::move(traced_poly.lows));
+        new_poly.points.insert(new_poly.points.end(), traced_poly.highs.rbegin(), traced_poly.highs.rend());
+    }
+
+    return reconstructed_area;
 }
 
 void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &normal_infill, ExPolygons &narrow_infill)
@@ -733,11 +824,7 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
 
     Polygons normal_fill_areas;  // Areas that filled with normal infill
 
-    constexpr double connect_extrusions = true;
-
     const coord_t scaled_spacing                      = scaled<coord_t>(fill.params.spacing);
-    double        distance_limit_reconnection         = 2.0 * double(scaled_spacing);
-    double        squared_distance_limit_reconnection = distance_limit_reconnection * distance_limit_reconnection;
     // Calculate infill direction, see Fill::_infill_direction
     double        base_angle                          = fill.params.angle + float(M_PI / 2.);
     // For pattern other than ipAlignedRectilinear, the angle are alternated
@@ -768,12 +855,6 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
             vertical_lines[i].b = Point{x, y_max};
         }
 
-        if (!vertical_lines.empty()) {
-            vertical_lines.push_back(vertical_lines.back());
-            vertical_lines.back().a = Point{coord_t(bb.min.x() + n_vlines * double(scaled_spacing) + scaled_spacing * 0.5), y_min};
-            vertical_lines.back().b = Point{vertical_lines.back().a.x(), y_max};
-        }
-
         std::vector<Lines> polygon_sections(n_vlines);
 
         for (size_t i = 0; i < n_vlines; i++) {
@@ -792,91 +873,8 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
 
         polygon_sections = filter_vibrating_extrusions(polygon_sections);
 
-        Polygons reconstructed_area{};
         // reconstruct polygon from polygon sections
-        {
-            struct TracedPoly
-            {
-                Points lows;
-                Points highs;
-            };
-
-            std::vector<std::vector<Line>> polygon_sections_w_width = polygon_sections;
-            for (auto &slice : polygon_sections_w_width) {
-                for (Line &l : slice) {
-                    l.a -= Point{0.0, 0.5 * scaled_spacing};
-                    l.b += Point{0.0, 0.5 * scaled_spacing};
-                }
-            }
-
-            std::vector<TracedPoly> current_traced_polys;
-            for (const auto &polygon_slice : polygon_sections_w_width) {
-                std::unordered_set<const Line *> used_segments;
-                for (TracedPoly &traced_poly : current_traced_polys) {
-                    auto candidates_begin = std::upper_bound(polygon_slice.begin(), polygon_slice.end(), traced_poly.lows.back(),
-                                                             [](const Point &low, const Line &seg) { return seg.b.y() > low.y(); });
-                    auto candidates_end   = std::upper_bound(polygon_slice.begin(), polygon_slice.end(), traced_poly.highs.back(),
-                                                             [](const Point &high, const Line &seg) { return seg.a.y() > high.y(); });
-
-                    bool segment_added = false;
-                    for (auto candidate = candidates_begin; candidate != candidates_end && !segment_added; candidate++) {
-                        if (used_segments.find(&(*candidate)) != used_segments.end()) {
-                            continue;
-                        }
-                        if (connect_extrusions && (traced_poly.lows.back() - candidates_begin->a).cast<double>().squaredNorm() <
-                                                      squared_distance_limit_reconnection) {
-                            traced_poly.lows.push_back(candidates_begin->a);
-                        } else {
-                            traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, coord_t(0)});
-                            traced_poly.lows.push_back(candidates_begin->a - Point{scaled_spacing / 2, 0});
-                            traced_poly.lows.push_back(candidates_begin->a);
-                        }
-
-                        if (connect_extrusions && (traced_poly.highs.back() - candidates_begin->b).cast<double>().squaredNorm() <
-                                                      squared_distance_limit_reconnection) {
-                            traced_poly.highs.push_back(candidates_begin->b);
-                        } else {
-                            traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b - Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b);
-                        }
-                        segment_added = true;
-                        used_segments.insert(&(*candidates_begin));
-                    }
-
-                    if (!segment_added) {
-                        // Zero or multiple overlapping segments. Resolving this is nontrivial,
-                        // so we just close this polygon and maybe open several new. This will hopefully happen much less often
-                        traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, 0});
-                        traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
-                        Polygon &new_poly = reconstructed_area.emplace_back(std::move(traced_poly.lows));
-                        new_poly.points.insert(new_poly.points.end(), traced_poly.highs.rbegin(), traced_poly.highs.rend());
-                        traced_poly.lows.clear();
-                        traced_poly.highs.clear();
-                    }
-                }
-
-                current_traced_polys.erase(std::remove_if(current_traced_polys.begin(), current_traced_polys.end(),
-                                                          [](const TracedPoly &tp) { return tp.lows.empty(); }),
-                                           current_traced_polys.end());
-
-                for (const auto &segment : polygon_slice) {
-                    if (used_segments.find(&segment) == used_segments.end()) {
-                        TracedPoly &new_tp = current_traced_polys.emplace_back();
-                        new_tp.lows.push_back(segment.a - Point{scaled_spacing / 2, 0});
-                        new_tp.lows.push_back(segment.a);
-                        new_tp.highs.push_back(segment.b - Point{scaled_spacing / 2, 0});
-                        new_tp.highs.push_back(segment.b);
-                    }
-                }
-            }
-
-            // add not closed polys
-            for (TracedPoly &traced_poly : current_traced_polys) {
-                Polygon &new_poly = reconstructed_area.emplace_back(std::move(traced_poly.lows));
-                new_poly.points.insert(new_poly.points.end(), traced_poly.highs.rbegin(), traced_poly.highs.rend());
-            }
-        }
+        Polygons reconstructed_area = trace_solid_infill_sections(polygon_sections, scaled_spacing);
 
         polygons_append(normal_fill_areas, reconstructed_area);
     }
