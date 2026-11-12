@@ -51,6 +51,23 @@ TEST_CASE("Deleting a filament removes its own flushing volumes", "[FilamentDele
         CHECK(project.option<ConfigOptionFloats>("flush_volumes_matrix")->values == matrix(kept));
         CHECK(project.option<ConfigOptionFloats>("flush_volumes_vector")->values == vector_of(kept));
     }
+
+    // Deleted one after another: four filaments, the first, then the new first (the old second).
+    {
+        PresetBundle bundle;
+        bundle.set_num_filaments(4, std::string("#FF0000"));
+        DynamicPrintConfig &project = bundle.project_config;
+        REQUIRE(project.option<ConfigOptionFloats>("flush_volumes_matrix")->values.size() == 16);
+        project.option<ConfigOptionFloats>("flush_volumes_matrix")->values = matrix({ 1, 2, 3, 4 });
+        project.option<ConfigOptionFloats>("flush_volumes_vector")->values = vector_of({ 1, 2, 3, 4 });
+
+        bundle.update_num_filaments(0);
+        CHECK(project.option<ConfigOptionFloats>("flush_volumes_matrix")->values == matrix({ 2, 3, 4 }));
+        bundle.update_num_filaments(0);
+        CHECK(bundle.filament_presets.size() == 2);
+        CHECK(project.option<ConfigOptionFloats>("flush_volumes_matrix")->values == matrix({ 3, 4 }));
+        CHECK(project.option<ConfigOptionFloats>("flush_volumes_vector")->values == vector_of({ 3, 4 }));
+    }
 }
 
 // Plater::on_filaments_delete() -> CustomGCode::update_tool_changes_when_delete_filament(). When a
