@@ -276,12 +276,16 @@ TEST_CASE("Unported host APIs raise a clear Edge-unavailable error", "[PluginScr
     getattr_unavailable(orca.attr("printer_connection"), "PrinterAgentBase");
     getattr_unavailable(orca.attr("resource_texture"), "ResourceTextureBase");
 
+    // Phase 6 binds the live print graph on orca.host (Print, PrintObject, Layer, ...).
+    // Those types are references into a Print the host owns; Python cannot construct one.
+    REQUIRE(py::hasattr(host, "Print"));
+    REQUIRE(py::hasattr(host, "PrintObject"));
+    REQUIRE(py::hasattr(host, "Layer"));
     try {
-        host.attr("slicing").attr("Print")();
-        FAIL("orca.host.slicing.Print unexpectedly succeeded");
+        host.attr("Print")();
+        FAIL("orca.host.Print() unexpectedly constructed a host-owned Print");
     } catch (const py::error_already_set& error) {
-        CHECK(error.matches(PyExc_RuntimeError));
-        CHECK(std::string(error.what()).find("not available in this Edge build") != std::string::npos);
+        CHECK(error.matches(PyExc_TypeError));
     }
 
     try {
