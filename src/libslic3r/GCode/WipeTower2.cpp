@@ -36,6 +36,13 @@ static constexpr int    arc_fit_size                   = 20;
 static constexpr size_t LEGACY_NO_TOOL                 = static_cast<size_t>(std::numeric_limits<unsigned int>::max());
 #define SCALED_WIPE_TOWER_RESOLUTION (WIPE_TOWER_RESOLUTION / SCALING_FACTOR_INTERNAL)
 enum class LimitFlow { None, LimitPrintFlow, LimitRammingFlow };
+// Whether custom G-code sets pressure advance: Marlin M900, RepRapFirmware M572, Repetier M233, Klipper.
+static bool gcode_sets_pressure_advance(const std::string& gcode)
+{
+    return boost::icontains(gcode, "M900") || boost::icontains(gcode, "M572") || boost::icontains(gcode, "M233") ||
+           boost::icontains(gcode, "SET_PRESSURE_ADVANCE");
+}
+
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
 
 inline bool is_no_tool_sentinel(size_t tool)
@@ -830,13 +837,13 @@ public:
     WipeTowerWriter2& disable_linear_advance_value(float value = 0.0)
     {
         if (m_gcode_flavor == gcfRepRapSprinter || m_gcode_flavor == gcfRepRapFirmware)
-            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + std::to_string(value) + "\n");
+            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + Slic3r::float_to_string_decimal_point(value, 4) + "\n");
         else if (m_gcode_flavor == gcfKlipper) {
             m_gcode += "SET_PRESSURE_ADVANCE ADVANCE=" + Slic3r::float_to_string_decimal_point(value, 4) + "\n"; // Snapmaker U1
         }
 
         else
-            m_gcode += "M900 K" + std::to_string(value) + "\n";
+            m_gcode += "M900 K" + Slic3r::float_to_string_decimal_point(value, 4) + "\n";
         return *this;
     }
 
@@ -1753,6 +1760,12 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].filament_minimal_purge_on_wipe_tower =
         get_value_at(config, config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, filament_id);
     m_filpar[idx].flat_iron_area                       = config.filament_tower_ironing_area.get_at(idx);
+    m_filpar[idx].pressure_advance_enabled =
+        get_value_at(config, config.enable_pressure_advance, ConfigFlowDomain::Filament, filament_id);
+    m_filpar[idx].pressure_advance = float(get_value_at(config, config.pressure_advance, ConfigFlowDomain::Filament, filament_id));
+    m_filpar[idx].pressure_advance_reset = m_filpar[idx].pressure_advance_enabled ||
+                                           gcode_sets_pressure_advance(config.filament_start_gcode.get_at(idx)) ||
+                                           gcode_sets_pressure_advance(config.change_filament_gcode.value);
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -2229,11 +2242,14 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     // Orca: Do ramming when SEMM and ramming is enabled or when multi tool head when ramming is enabled on the multi tool.
     const bool do_ramming   = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
     const bool cold_ramming = m_is_mk4mmu3;
+    // The ram's pressure advance is set back only by the slicer's own G-code. A filament whose pressure
+    // advance lives in the firmware or the start G-code keeps it: nothing could restore that value.
+    const bool change_pressure = m_change_pressure && m_filpar[m_current_tool].pressure_advance_reset;
 
     if (do_ramming) {
         writer.travel(ramming_start_pos); // move to starting position
         if (!m_is_mk4mmu3) {
-            if (m_change_pressure) {
+            if (change_pressure) {
                 writer.disable_linear_advance_value(m_change_pressure_value);
             }
         }
@@ -2353,7 +2369,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         float speed_inc = (final_speed - initial_speed) / (2.f * number_of_cooling_moves - 1.f);
 
         if (m_is_mk4mmu3) {
-            if (m_change_pressure) {
+            if (change_pressure) {
                 writer.disable_linear_advance_value(m_change_pressure_value);
             }
         }
@@ -2406,6 +2422,11 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         if (_e != 0.f)
             writer.retract(_e, 2000);
     }
+
+    // Back to the filament's own pressure advance once it is unloaded (a toolchanger's old tool keeps it).
+    if (change_pressure && m_filpar[m_current_tool].pressure_advance_enabled &&
+        ((do_ramming && !m_is_mk4mmu3) || (cooling_will_happen && m_is_mk4mmu3)))
+        writer.disable_linear_advance_value(m_filpar[m_current_tool].pressure_advance);
 
     if (m_enable_filament_ramming)
         writer.append("; Ramming end\n");
