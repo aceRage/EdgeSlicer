@@ -10498,7 +10498,7 @@ static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& la
 
 std::string GCode::extrude_loop(
     ExtrusionLoop loop, std::string description, double speed, const ConstExtrusionEntitiesPtr& region_perimeters, const Point* start_point,
-    const WipeInwardSupport* wipe_support)
+    const WipeInwardSupport* wipe_support, const ExtrusionEntity* loop_in_region)
 {
     // get a copy; don't modify the orientation of the original loop object otherwise
     // next copies (if any) would not detect the correct orientation
@@ -10534,9 +10534,12 @@ std::string GCode::extrude_loop(
     }
 
     if (enable_seam_slope && m_config.seam_slope_conditional.value && m_config.scarf_overhang_threshold.value > 0.0f) {
-        const auto _line_width = loop.role() == erExternalPerimeter ? m_config.outer_wall_line_width.get_abs_value(nozzle_diameter) :
-                                                                      m_config.inner_wall_line_width.get_abs_value(nozzle_diameter);
-        enable_seam_slope      = seam_overhang < m_config.scarf_overhang_threshold.value * 0.01f * _line_width;
+        // The threshold is a share of the wall's own width, not of the width as configured: outer_wall_line_width
+        // and inner_wall_line_width are 0 when the width is left automatic, and the threshold was then 0 mm
+        // whatever the percentage. The loop was just split at its seam and its role is its first path's, so the
+        // first path is this wall at the seam.
+        const double _line_width = loop.paths.front().width;
+        enable_seam_slope        = seam_overhang < m_config.scarf_overhang_threshold.value * 0.01f * _line_width;
     }
 
     // Bambu Studio 2.9.1 (GCode.cpp:6709-6712): the walls of a circle under the auto circle compensation
@@ -10547,6 +10550,12 @@ std::string GCode::extrude_loop(
         std::none_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &p) { return p.role() == erOverhangPerimeter; });
     if (circle_compensation && m_config.apply_scarf_seam_on_circles.value && !m_config.spiral_mode && layer_id() > 0)
         enable_seam_slope = true;
+
+    // A scarf of no length has no slope to lay: seam_slope_min_length at 0 "effectively disables the scarf".
+    // The loop is then a plain one and keeps its seam gap; decided here, before the clip, since a loop that
+    // is to get a scarf is not clipped.
+    if (enable_seam_slope && !m_config.seam_slope_entire_loop.value && !(m_config.seam_slope_min_length.value > 0.))
+        enable_seam_slope = false;
 
     // clip the path to avoid the extruder to get exactly on the first point of the loop;
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
@@ -10578,10 +10587,9 @@ std::string GCode::extrude_loop(
     // Orca:
     // Port of "wipe inside before extruding an external perimeter" feature from super slicer
     // If region perimeters size not greater than or equal to 2, then skip the wipe inside move as we will extrude in mid air
-    // as no neighbouring perimeter exists. If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
-    // 1 - the currently printed external perimeter and 2 - the neighbouring internal perimeter.
+    // as no neighbouring perimeter exists. If an internal perimeter exists, we should find it touching the de-retraction point.
     if (m_config.wipe_before_external_loop.value && !paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 &&
-        paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {
+        paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1 && loop_in_region != nullptr) {
         const bool   is_full_loop_ccw = loop.polygon().is_counter_clockwise();
         bool         is_hole_loop     = (loop.loop_role() & ExtrusionLoopRole::elrHole) != 0; // loop.make_counter_clockwise();
         const double nozzle_diam      = nozzle_diameter;
@@ -10624,23 +10632,26 @@ std::string GCode::extrude_loop(
         pt = (current_pos + vec_dist * (2 * dist / vec_norm)).cast<coord_t>();
         pt.rotate(angle, current_point);
 
-        // Search region perimeters for lines that are touching the de-retraction point.
-        // If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
-        // 1: the currently printed external perimeter and 2: the neighbouring internal perimeter.
-        int discoveredTouchingLines = 0;
+        // Search region perimeters for a perimeter other than this one that is touching the de-retraction point:
+        // the neighbouring internal perimeter. This loop is not measured. The point is made no further from the
+        // loop's start than the nozzle is wide, and where the part's side of the seam is a corner of 270 degrees
+        // or more (any corner of a square hole) it is exactly that far from the loop, so that a search for the
+        // loop strictly within that radius found it or not by how the point's coordinates were rounded.
+        bool neighbour_touching = false;
         for (const ExtrusionEntity* ee : region_perimeters) {
+            if (ee == loop_in_region)
+                continue;
             auto                                potential_touching_line = ee->as_polyline();
             AABBTreeLines::LinesDistancer<Line> potential_touching_line_distancer{potential_touching_line.lines()};
             auto touching_line = potential_touching_line_distancer.all_lines_in_radius(pt, scale_(nozzle_diam));
             if (touching_line.size()) {
-                discoveredTouchingLines++;
-                if (discoveredTouchingLines > 1)
-                    break; // found 2 touching lines. End the search early.
+                neighbour_touching = true;
+                break;
             }
         }
-        // found 2 perimeters touching the de-retraction point. Its safe to deretract as the point will be
-        // inside the model
-        if (discoveredTouchingLines > 1) {
+        // found a neighbouring perimeter touching the de-retraction point. Its safe to deretract as the point
+        // will be inside the model
+        if (neighbour_touching) {
             // use extrude instead of travel_to_xy to trigger the unretract
             ExtrusionPath fake_path_wipe(Polyline{pt, current_point}, paths.front());
             fake_path_wipe.set_force_no_extrusion(true);
@@ -10709,7 +10720,9 @@ std::string GCode::extrude_loop(
 
         const bool   slope_entire_loop = m_config.seam_slope_entire_loop;
         const double slope_min_length  = slope_entire_loop ? loop_length : std::min(m_config.seam_slope_min_length.value, loop_length);
-        const int    slope_steps       = m_config.seam_slope_steps;
+        // At least one step: a count below one (a project file can hold it) made the step longer than any
+        // line or shorter than none, and the slope is halved until its lines are no longer than a step.
+        const int    slope_steps       = std::max(1, m_config.seam_slope_steps.value);
         const double slope_max_segment_length = scale_(slope_min_length / slope_steps);
 
         // Calculate the sloped loop
@@ -10866,7 +10879,7 @@ std::string GCode::extrude_entity(const ExtrusionEntity&            entity,
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
         return this->extrude_multi_path(*multipath, description, speed);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
-        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, wipe_support);
+        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, wipe_support, &entity);
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
@@ -11423,37 +11436,38 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         speed         = m_circle_compensation_speed;
         speed_setting = "circle_compensation_speed";
     }
+    // The joint of a scarf seam is laid no faster than scarf_joint_speed, a percentage being of the wall's own
+    // speed. A speed of 0 (or less) is no speed of its own and leaves the joint at the wall's: taken as it
+    // stands it would be an unset speed, which is replaced by the filament's volumetric maximum below.
+    const auto cap_scarf_joint_speed = [this, &speed, &speed_setting](double wall_speed) {
+        const double scarf = m_config.scarf_joint_speed.get_abs_value(wall_speed);
+        if (scarf > 0. && scarf < speed) {
+            speed         = scarf;
+            speed_setting = "scarf_joint_speed";
+        }
+    };
+    // A small loop comes with its small perimeter speed from extrude_loop, so the role speeds below are not
+    // looked up for it; its joint is held to scarf_joint_speed all the same.
+    if (sloped && speed > EPSILON && (path.role() == erPerimeter || path.role() == erExternalPerimeter)) {
+        const auto &wall_speed = path.role() == erPerimeter ? m_config.inner_wall_speed : m_config.outer_wall_speed;
+        cap_scarf_joint_speed(circle_wall ? m_circle_compensation_speed : this->process_flow_value(wall_speed));
+    }
     if (speed == -1) {
         if (circle_wall) {
             speed_setting = "circle_compensation_speed";
             speed         = m_circle_compensation_speed;
-            if (sloped) {
-                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
-                if (scarf < speed) {
-                    speed         = scarf;
-                    speed_setting = "scarf_joint_speed";
-                }
-            }
+            if (sloped)
+                cap_scarf_joint_speed(speed);
         } else if (path.role() == erPerimeter) {
             speed_setting = "inner_wall_speed";
             speed = this->process_flow_value(m_config.inner_wall_speed);
-            if (sloped) {
-                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
-                if (scarf < speed) {
-                    speed         = scarf;
-                    speed_setting = "scarf_joint_speed";
-                }
-            }
+            if (sloped)
+                cap_scarf_joint_speed(speed);
         } else if (path.role() == erExternalPerimeter) {
             speed_setting = "outer_wall_speed";
             speed = this->process_flow_value(m_config.outer_wall_speed);
-            if (sloped) {
-                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
-                if (scarf < speed) {
-                    speed         = scarf;
-                    speed_setting = "scarf_joint_speed";
-                }
-            }
+            if (sloped)
+                cap_scarf_joint_speed(speed);
         } else if (path.role() == erInternalBridgeInfill) {
             // internal_bridge_speed is a FloatOrPercent vector whose ratio_over target is
             // bridge_speed; resolve the percentage against the variant-matched bridge_speed.
@@ -11686,7 +11700,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             ref_speed = std::min(ref_speed, filament_max_volumetric_speed / _mm3_per_mm);
         }
         if (sloped) {
-            ref_speed = std::min(ref_speed, m_config.scarf_joint_speed.get_abs_value(ref_speed));
+            // As above: a scarf_joint_speed of 0 is the wall's own speed, not a reference speed of 0.
+            const double scarf = m_config.scarf_joint_speed.get_abs_value(ref_speed);
+            if (scarf > 0.)
+                ref_speed = std::min(ref_speed, scarf);
         }
 
         ConfigOptionPercents overhang_overlap_levels({90, 75, 50, 25, 13, 0});
@@ -12502,6 +12519,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     bool could_be_wipe_disabled = false;
     // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
     const bool  used_external_mp_once = m_avoid_crossing_perimeters.used_external_mp_once();
+    // And of disable_once: a move that is to go straight is not to be planned after the retract either.
+    const bool  disabled_once = m_avoid_crossing_perimeters.disabled_once();
     std::string gcode;
 
     // Orca: we don't need to optimize the Klipper as only set once
@@ -12592,7 +12611,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         // When "Wipe while retracting" is enabled, then extruder moves to another position, and travel from this position can cross perimeters.
         // Because of it, it is necessary to call avoid crossing perimeters again with new starting point after calling retraction()
         // FIXME Lukas H.: Try to predict if this second calling of avoid crossing perimeters will be needed or not. It could save computations.
-        if (last_post_before_retract != this->last_pos() && m_config.reduce_crossing_wall) {
+        if (last_post_before_retract != this->last_pos() && m_config.reduce_crossing_wall && !disabled_once) {
             // If in the previous call of m_avoid_crossing_perimeters.travel_to was use_external_mp_once set to true restore this value for
             // next call.
             if (used_external_mp_once)
