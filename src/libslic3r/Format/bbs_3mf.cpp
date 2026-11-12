@@ -7342,6 +7342,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     // backup mesh-only
+    // An object's name made fit for the name of its file in the package (and in the backup folder): the name is
+    // the user's, and a '/' or '\\' in it made a folder of it, ".." among them one level up. The name itself is
+    // kept as it is in the metadata.
+    static std::string object_file_name(const std::string &name)
+    {
+        return sanitize_filename(name);
+    }
+
     bool _BBS_3MF_Exporter::save_object_mesh(const std::string& temp_path, ModelObject const & object, int obj_id)
     {
         m_production_ext = true;
@@ -7351,7 +7359,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
 
-        auto filename = boost::format("3D/Objects/%s_%d.model") % object.name % obj_id;
+        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(object.name) % obj_id;
         std::string filepath = temp_path + "/" + filename.str();
         std::string filepath_tmp = filepath + ".tmp";
         boost::system::error_code ec;
@@ -8006,20 +8014,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             a += (int)thumbnail_data.pixels[4 * ((i + m) * thumbnail_data.width + j + n) + 3];
                         }
                     }
-                    r = std::clamp(0, r / sw / sh, 255);
-                    g = std::clamp(0, g / sw / sh, 255);
-                    b = std::clamp(0, b / sw / sh, 255);
-                    a = std::clamp(0, a / sw / sh, 255);
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 0] = (unsigned char)r;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 1] = (unsigned char)g;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 2] = (unsigned char)b;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 3] = (unsigned char)a;
+                    r = std::clamp(r / sw / sh, 0, 255);
+                    g = std::clamp(g / sw / sh, 0, 255);
+                    b = std::clamp(b / sw / sh, 0, 255);
+                    a = std::clamp(a / sw / sh, 0, 255);
+                    // Row i / sh (i steps by the step height), column j / sw.
+                    const size_t small_idx = 4 * (size_t(i / sh) * PLATE_THUMBNAIL_SMALL_WIDTH + size_t(j / sw));
+                    small_pixels[small_idx + 0] = (unsigned char)r;
+                    small_pixels[small_idx + 1] = (unsigned char)g;
+                    small_pixels[small_idx + 2] = (unsigned char)b;
+                    small_pixels[small_idx + 3] = (unsigned char)a;
                     //memcpy((void*)&small_pixels[4*(i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh)], thumbnail_data.pixels.data() + 4*(i * thumbnail_data.width + j), 4);
                 }
             }
             size_t small_png_size = 0;
             void* small_png_data = tdefl_write_image_to_png_file_in_memory_ex((const void*)small_pixels.data(), PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT, 4, &small_png_size, MZ_DEFAULT_COMPRESSION, 1);
-            if (png_data != nullptr) {
+            res = false;
+            if (small_png_data != nullptr) {
                 std::string thumbnail_name = (boost::format("%1%_%2%_small.png") % local_path % (index + 1)).str();
                 res = mz_zip_writer_add_mem(&archive, thumbnail_name.c_str(), (const void*)small_png_data, small_png_size, MZ_NO_COMPRESSION);
                 mz_free(small_png_data);
@@ -8104,7 +8115,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 if (data._3mf_printer_thumbnail_small.empty()) {
                     if (plate_small_thumbnail_written)
-                        stream << "<Relationship Target=\"/Metadata/plate_1_small.png"
+                        stream << " <Relationship Target=\"/Metadata/plate_1_small.png"
                                << "\" Id=\"rel-5\" Type=\"http://schemas.bambulab.com/package/2021/cover-thumbnail-small\"/>\n";
                 } else {
                     stream << " <Relationship Target=\"/" << xml_escape(data._3mf_printer_thumbnail_small)
@@ -8367,7 +8378,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     auto & object_data = object_it->second;
 
                     if (m_split_model) {
-                        auto filename = boost::format("3D/Objects/%s_%d.model") % obj->name % backup_id;
+                        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(obj->name) % backup_id;
                         object_data.sub_path = "/" + filename.str();
                         object_paths.push_back(filename.str());
                     }
@@ -9339,9 +9350,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add project embedded preset files
     bool _BBS_3MF_Exporter::_add_project_embedded_presets_to_archive(mz_zip_archive& archive, Model& model, std::vector<Preset*> project_presets)
     {
-        char buffer[1024];
-        snprintf(buffer, 1024, "; %s\n\n", header_slic3r_generated().c_str());
-        std::string out = buffer;
         int print_count = 0, filament_count = 0, printer_count = 0;
         const std::string& temp_path = model.get_backup_path();
 

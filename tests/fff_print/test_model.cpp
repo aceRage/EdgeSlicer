@@ -232,3 +232,51 @@ TEST_CASE("An object's raw mesh keeps the triangles of each part on its own vert
     CHECK_THAT(min_x.front(), Catch::Matchers::WithinAbs(0., 1e-4));
     CHECK_THAT(min_x.back(), Catch::Matchers::WithinAbs(30., 1e-4));
 }
+
+// Splitting a part into its pieces left each piece where the part's own rotation and scale would not have put it:
+// center_geometry_after_creation() moved the piece's mesh to its middle in the part's frame and the part by the same
+// shift in the object's, unturned and unscaled. Each piece now stays where it was in the part.
+TEST_CASE("Splitting a turned and scaled part leaves its pieces where they were", "[Model][Regression]")
+{
+    // Two 4 mm cubes 10 mm apart along X, as one mesh.
+    indexed_triangle_set its = its_make_cube(4., 4., 4.);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(its, other);
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part   = object->add_volume(TriangleMesh(its));
+    object->add_instance();
+    // The part's own transformation: turned 90 degrees about Z and 30 about X, scaled 2 x 1 x 1.5, moved.
+    part->set_rotation(Vec3d(PI / 6., 0., PI / 2.));
+    part->set_scaling_factor(Vec3d(2., 1., 1.5));
+    part->set_offset(Vec3d(5., -3., 7.));
+
+    // Where the two cubes are in the object, before the split.
+    auto world_box = [](const ModelVolume &volume) { return volume.mesh().transformed_bounding_box(volume.get_matrix()); };
+    const BoundingBoxf3 before = world_box(*part);
+    REQUIRE(part->mesh().its.vertices.size() == 16);
+    std::vector<BoundingBoxf3> cubes_before;
+    for (const TriangleMesh &cube : part->mesh().split())
+        cubes_before.push_back(cube.transformed_bounding_box(part->get_matrix()));
+    REQUIRE(cubes_before.size() == 2);
+
+    REQUIRE(part->split(1) == 2);
+    REQUIRE(object->volumes.size() == 2);
+    BoundingBoxf3 after;
+    for (const ModelVolume *piece : object->volumes) {
+        const BoundingBoxf3 box = world_box(*piece);
+        after.merge(box);
+        // Each piece is one of the two cubes, where it was.
+        const bool matches = std::any_of(cubes_before.begin(), cubes_before.end(), [&box](const BoundingBoxf3 &cube) {
+            return (cube.min - box.min).norm() < 1e-4 && (cube.max - box.max).norm() < 1e-4;
+        });
+        INFO(piece->name << ": " << box.min.transpose() << " to " << box.max.transpose());
+        CHECK(matches);
+    }
+    INFO("before " << before.min.transpose() << " to " << before.max.transpose() << ", after " << after.min.transpose()
+                   << " to " << after.max.transpose());
+    CHECK((after.min - before.min).norm() < 1e-4);
+    CHECK((after.max - before.max).norm() < 1e-4);
+}
