@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
 	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
+	test_scarf_seam.cpp
 	test_slice_bake.cpp
 	test_status_callback_race.cpp
 	test_modifier_effect.cpp
