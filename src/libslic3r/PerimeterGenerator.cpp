@@ -2368,6 +2368,48 @@ void PerimeterGenerator::add_infill_contour_for_arachne( ExPolygons        infil
     append(*this->fill_no_overlap, offset2_ex(union_ex(inner_pp), float(-min_perimeter_infill_spacing / 2.), float(+min_perimeter_infill_spacing / 2.)));
 }
 
+bool counterbore_outline_is_convex(const Polygon &outline)
+{
+    const Points &points = outline.points;
+    const size_t  count  = points.size();
+    if (count < 3)
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        const Vec2d a = points[(i + count - 1) % count].cast<double>();
+        const Vec2d b = points[i].cast<double>();
+        const Vec2d c = points[(i + 1) % count].cast<double>();
+        // Twice the area of the corner's triangle: over the length of its far side, how far the corner stands off
+        // that side.
+        if (cross2(Vec2d(b - a), Vec2d(c - b)) < -double(SCALED_EPSILON) * (c - a).norm())
+            return false;
+    }
+    return true;
+}
+
+// Counterbore hole bridging: of the areas of a region that have nothing under them, those with one of the region's
+// holes on their edge. A counterbore printed wide end down is a hole that narrows from the layer below: on the first
+// layer of its narrow part what has nothing under it lies round the narrow hole. An area with no hole on its edge is
+// an overhang or a bridge of another kind (a deck across two posts, a table top), whatever holes the region has
+// elsewhere, and is not for process_no_bridge.
+static ExPolygons unsupported_with_a_hole_on_the_edge(ExPolygons unsupported, const Polygons &holes)
+{
+    if (unsupported.empty() || holes.empty())
+        return {};
+    // A hole within this of an area is on its edge.
+    const float touching = float(scale_(0.01));
+    Polygons    plugs;
+    plugs.reserve(holes.size());
+    for (Polygon hole : holes) {
+        hole.make_counter_clockwise();
+        plugs.emplace_back(std::move(hole));
+    }
+    const Polygons beside = offset(plugs, touching);
+    unsupported.erase(std::remove_if(unsupported.begin(), unsupported.end(),
+                                     [&beside](const ExPolygon &area) { return intersection_ex(ExPolygons{area}, beside).empty(); }),
+                      unsupported.end());
+    return unsupported;
+}
+
 // Orca: sacrificial bridge layer algorithm ported from SuperSlicer
 void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perimeter_spacing, coord_t ext_perimeter_width)
 {
@@ -2387,6 +2429,9 @@ void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perim
             if (!unsupported.empty()) {
                 //remove small overhangs
                 ExPolygons unsupported_filtered = opening_ex(unsupported, perimeter_spacing);
+                // Keep only what a hole of this region borders: asking whether the region has a hole anywhere
+                // (below) took any bridge or overhang of a region with a hole in it for a counterbore.
+                unsupported_filtered = unsupported_with_a_hole_on_the_edge(std::move(unsupported_filtered), surface->expolygon.holes);
 
                 if (!unsupported_filtered.empty()) {
                     //to_draw.insert(to_draw.end(), last.begin(), last.end());
@@ -2430,7 +2475,7 @@ void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perim
                                     if (contour_bigger.size() == 1) poly_unsupp_bigger.contour = contour_bigger[0];
 
                                     //check convex, has some bridge, not overhang
-                                    if (contour_simplified.size() == 1 && contour_bigger.size() == 1 && contour_simplified[0].concave_points().size() == 0
+                                    if (contour_simplified.size() == 1 && contour_bigger.size() == 1 && counterbore_outline_is_convex(contour_simplified[0])
                                         && intersection_ex(bridgeable, ExPolygons{ poly_unsupp }).size() > 0
                                         && diff_ex(ExPolygons{ poly_unsupp_bigger }, union_ex(last, offset_ex(bridgeable, bridged_infill_margin + perimeter_spacing / 2)), ApplySafetyOffset::Yes).size() == 0
                                     ) {
