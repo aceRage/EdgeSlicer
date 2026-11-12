@@ -512,6 +512,7 @@ bool parse_pep723_toml(const std::string& toml_content,
                        std::string& out_author,
                        std::string& out_version,
                        std::string& out_orca_api,
+                       std::string& out_type,
                        std::string& error)
 {
     out_deps.clear();
@@ -521,6 +522,7 @@ bool parse_pep723_toml(const std::string& toml_content,
     out_author.clear();
     out_version.clear();
     out_orca_api.clear();
+    out_type.clear();
 
     TomlSection section = TomlSection::Root;
 
@@ -599,6 +601,8 @@ bool parse_pep723_toml(const std::string& toml_content,
                 if (out_orca_api.empty())
                     out_orca_api = unquote_toml_string(val);
             }
+            else if (key == "type")
+                out_type = unquote_toml_string(val);
         }
     }
 
@@ -1184,7 +1188,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
     if (!pep723_content.empty()) {
         std::string pep723_error;
         std::string requires_python;
-        std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api;
+        std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api, pep_type;
         if (!parse_pep723_toml(pep723_content,
                                descriptor.dependencies,
                                requires_python,
@@ -1193,6 +1197,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
                                pep_author,
                                pep_version,
                                pep_orca_api,
+                               pep_type,
                                pep723_error)) {
             error = "Failed to parse PEP 723 metadata: " + pep723_error;
             return false;
@@ -1208,6 +1213,8 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
         if (!pep_author.empty())          descriptor.author     = pep_author;
         if (!pep_version.empty())         descriptor.version    = pep_version;
         if (!pep_orca_api.empty())        descriptor.required_orca_api = pep_orca_api;
+        if (!pep_type.empty() && descriptor.display_types.empty())
+            descriptor.display_types.push_back(pep_type);
     }
 
     // Validate that required identity fields are present (either from PEP 723 or

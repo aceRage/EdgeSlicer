@@ -40,7 +40,7 @@ json plugin_card(const PluginView& view)
     card["loading"]             = view.loading;
     card["error"]               = view.error;
     card["update_available"]    = view.update_available;
-    card["trust"]               = view.trust; // Phase 5 placeholder
+    card["trust"]               = view.trust; // Phase 5: host fills Signed / Approved locally / Untrusted
     card["in_process_pipeline"] = view.in_process_pipeline;
     card["can_run"]             = false;
     card["run_state"]           = (view.run_state == "running" || view.run_state == "success" ||

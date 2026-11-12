@@ -14,6 +14,7 @@
 #include "PluginFsUtils.hpp"
 #include "PluginHooks.hpp"
 #include "PluginAuditManager.hpp"
+#include "PluginTrust.hpp"
 #include "host/PluginHostUi.hpp"
 #include "PyPluginTrampoline.hpp"
 #include "PythonInterpreter.hpp"
@@ -863,6 +864,7 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
     bool shutting_down     = false;
     std::string invalid_error;
     std::vector<std::string> loaded_capability_names;
+    PluginDescriptor         snapshot;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -871,6 +873,7 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
         if (plugin != nullptr) {
             exists         = true;
             plugin_id      = plugin->descriptor.plugin_key;
+            snapshot       = plugin->descriptor;
             invalid        = plugin->descriptor.is_invalid_package();
             already_loaded = plugin->is_loaded();
             invalid_error  = plugin->descriptor.normalized_error();
@@ -888,11 +891,6 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
 
         load_in_progress = m_load_in_progress.count(plugin_id) > 0;
         shutting_down   = m_shutting_down.load(std::memory_order_acquire);
-        if (exists && !invalid && !already_loaded && !load_in_progress && !shutting_down) {
-            m_load_in_progress.insert(plugin_id);
-            m_load_errors.erase(plugin_id);
-            load_slot_claimed = true;
-        }
     }
 
     if (already_loaded) {
@@ -937,6 +935,41 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
         if (invalid)
             set_plugin_error(plugin_id, message);
 
+        run_on_load_callbacks(plugin_id);
+        return;
+    }
+
+    {
+        const plugin_trust::TrustState trust = plugin_trust::evaluate(snapshot);
+        if (!trust.allowed()) {
+            const std::string message = trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_load_errors[plugin_id] = message;
+            }
+            BOOST_LOG_TRIVIAL(error) << "[load_plugin] untrusted plugin=" << plugin_id << " error=" << message;
+            set_plugin_error(plugin_id, message);
+            run_on_load_callbacks(plugin_id);
+            return;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        load_in_progress = m_load_in_progress.count(plugin_id) > 0;
+        shutting_down    = m_shutting_down.load(std::memory_order_acquire);
+        if (!load_in_progress && !shutting_down && find_plugin_locked(plugin_id) != nullptr) {
+            m_load_in_progress.insert(plugin_id);
+            m_load_errors.erase(plugin_id);
+            load_slot_claimed = true;
+        }
+    }
+
+    if (load_in_progress)
+        return;
+
+    if (shutting_down) {
+        BOOST_LOG_TRIVIAL(info) << "Plugin load rejected — shutting down: " << plugin_id;
         run_on_load_callbacks(plugin_id);
         return;
     }
@@ -989,6 +1022,14 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
     if (!try_get_plugin_descriptor(plugin_key, descriptor)) {
         fail(GUI::format(_u8L("Plugin manifest not found: %1%"), plugin_key));
         return;
+    }
+
+    {
+        const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
+        if (!trust.allowed()) {
+            fail(trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error);
+            return;
+        }
     }
 
     // Reject a duplicate package or a capability-name collision BEFORE on_load() runs, so a
@@ -2660,6 +2701,15 @@ PluginManager::ScriptLaunchResult PluginManager::launch_script_capability(const 
 
     if (!std::dynamic_pointer_cast<ScriptPluginCapability>(cap))
         return launch;
+
+    {
+        PluginDescriptor descriptor;
+        if (!try_get_plugin_descriptor(plugin_key, descriptor) || !plugin_trust::evaluate(descriptor).allowed()) {
+            launch.outcome.error = plugin_trust::refuse_untrusted_message();
+            BOOST_LOG_TRIVIAL(error) << "Script plugin refused; untrusted. plugin_key=" << plugin_key;
+            return launch;
+        }
+    }
 
     // Every Script body runs off the caller's thread now: the invocation — including detection and
     // a synchronous `def execute` — is handed to the runtime, which runs it on its own worker and

@@ -502,6 +502,7 @@ TEST_CASE("a plugin load sets an unparsable install-state sidecar aside and keep
     write_raw_sidecar_text(plugin_dir, malformed);
 
     std::string error;
+    REQUIRE(approve_plugin_for_test("Failing_Plugin", error));
     manager.load_plugin("Failing_Plugin", /*skip_deps=*/true);
     CHECK_FALSE(manager.wait_for_plugin_load("Failing_Plugin", std::chrono::seconds(120), error));
     CHECK_FALSE(error.empty());
@@ -538,6 +539,7 @@ TEST_CASE("a plugin that declares permissions loads over an unparsable install-s
         return true;
     });
     std::string error;
+    REQUIRE(approve_plugin_for_test("Declaring_Plugin", error));
     manager.load_plugin("Declaring_Plugin", /*skip_deps=*/true);
     const bool loaded = manager.wait_for_plugin_load("Declaring_Plugin", std::chrono::seconds(120), error);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
@@ -567,6 +569,7 @@ TEST_CASE("a plugin load leaves a sidecar path that is not a file in place", "[P
     fs::create_directories(plugin_dir / ".install_state.json");
 
     std::string error;
+    REQUIRE(approve_plugin_for_test("Failing_Plugin", error));
     manager.load_plugin("Failing_Plugin", /*skip_deps=*/true);
     CHECK_FALSE(manager.wait_for_plugin_load("Failing_Plugin", std::chrono::seconds(120), error));
 
@@ -600,6 +603,7 @@ TEST_CASE("a failed plugin registration disables a readable install-state sideca
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
 
     std::string error;
+    REQUIRE(approve_plugin_for_test("Failing_Plugin", error));
     manager.load_plugin("Failing_Plugin", /*skip_deps=*/true);
     CHECK_FALSE(manager.wait_for_plugin_load("Failing_Plugin", std::chrono::seconds(120), error));
 

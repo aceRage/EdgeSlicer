@@ -141,6 +141,8 @@ void allow_current_data_dir_writes()
 
 bool load_and_wait(PluginManager& manager, const std::string& plugin_key, std::string& error)
 {
+    if (!approve_plugin_for_test(plugin_key, error))
+        return false;
     manager.load_plugin(plugin_key, /*skip_deps=*/true);
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }

@@ -8,6 +8,7 @@
 #include "OrcaApiVersion.hpp"
 #include "PluginConfig.hpp"
 #include "PluginFsUtils.hpp"
+#include "PluginTrust.hpp"
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
 #include "libslic3r/Utils.hpp"
@@ -1312,6 +1313,24 @@ bool install_plugin(const boost::filesystem::path& filepath,
         }
         // TRN %1% is a file path, %2% the system error message.
         return fail(GUI::format(_u8L("Failed to copy plugin file to %1%: %2%"), dest_file.string(), ec.message()));
+    }
+
+    const fs::path source_sig = plugin_trust::signature_path(source_path);
+    ec.clear();
+    if (fs::exists(source_sig, ec) && !ec && fs::is_regular_file(source_sig, ec) && !ec) {
+        const fs::path dest_sig = plugin_trust::signature_path(dest_file);
+        fs::copy_file(source_sig, dest_sig, ec);
+        if (ec) {
+            if (backup_created) {
+                boost::system::error_code restore_ec;
+                fs::remove_all(final_dir, restore_ec);
+                fs::rename(backup_dir, final_dir, restore_ec);
+            } else {
+                boost::system::error_code remove_ec;
+                fs::remove_all(final_dir, remove_ec);
+            }
+            return fail(GUI::format(_u8L("Failed to copy plugin signature to %1%: %2%"), dest_sig.string(), ec.message()));
+        }
     }
 
     // Update entry_path to the installed location.

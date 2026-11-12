@@ -12,6 +12,7 @@
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include "slic3r/plugin/PluginFsUtils.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
+#include "slic3r/plugin/PluginTrust.hpp"
 #include "slic3r/plugin/PythonPluginInterface.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -56,7 +57,7 @@ static HomeTab::PluginView view_of(PluginManager& mgr, const PluginDescriptor& d
     if (v.error.empty())
         v.error = mgr.get_plugin_load_error(d.plugin_key);
     v.update_available = false; // catalog updates are Phase 11
-    v.trust.clear();            // Phase 5
+    v.trust            = plugin_trust::evaluate(d).label;
     v.types            = d.display_types;
 
     if (v.loaded) {
@@ -209,10 +210,51 @@ void HomePlugins::install()
         notice(_u8L("Only a .py or .whl file can be installed as a plugin."), true);
         return;
     }
-    PluginManager& mgr = PluginManager::instance();
-    std::string    error;
-    if (!mgr.install_plugin(path, error)) {
+    PluginManager&   mgr = PluginManager::instance();
+    PluginDescriptor descriptor;
+    bool             existing = false;
+    std::string      error;
+    if (!mgr.inspect_local_plugin_package(path, descriptor, existing, error)) {
         notice(error.empty() ? _u8L("The plugin could not be installed.") : error, true);
+        return;
+    }
+
+    std::string       hash_error;
+    const std::string hash = plugin_trust::sha256_file(path, hash_error);
+    if (hash.empty()) {
+        notice(hash_error.empty() ? _u8L("The plugin file could not be hashed.") : hash_error, true);
+        return;
+    }
+
+    if (plugin_trust::local_install_needs_prompt(descriptor.plugin_key, hash)) {
+        const wxString name = wxString::FromUTF8(
+            (descriptor.name.empty() ? descriptor.plugin_key : descriptor.name).c_str());
+        const bool replacing = plugin_trust::plugin_key_has_different_pin(plugin_trust::load_trust_store(),
+                                                                          descriptor.plugin_key, hash);
+        const wxString body  = replacing ?
+            wxString::Format(_L("\"%s\" is already installed with a different file. Approve the new package?\n\n"
+                                "Yes pins this file's SHA-256 so it can run. No is the default."),
+                             name) :
+            wxString::Format(_L("Install \"%s\"?\n\n"
+                                "This plugin is a local file, not a catalog package. Yes pins this file's SHA-256 "
+                                "so it can run on this computer. Only approve a package you trust. Plugins "
+                                "installed before signing must be re-approved."),
+                             name);
+        MessageDialog trust_dlg(m_parent, body, _L("Trust this plugin?"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+        trust_dlg.SetButtonLabel(wxID_NO, _L("No"), /*set_focus=*/true);
+        if (trust_dlg.ShowModal() != wxID_YES)
+            return;
+    }
+
+    if (!mgr.install_plugin(path, descriptor, error)) {
+        notice(error.empty() ? _u8L("The plugin could not be installed.") : error, true);
+        return;
+    }
+    std::string pin_error;
+    if (!plugin_trust::pin_hash(descriptor.plugin_key, hash, pin_error)) {
+        notice(pin_error.empty() ? _u8L("The plugin was copied but could not be pinned as trusted.") : pin_error, true);
+        mgr.rescan_plugins();
+        send_state();
         return;
     }
     mgr.rescan_plugins();
