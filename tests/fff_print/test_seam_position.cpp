@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -998,4 +999,100 @@ TEST_CASE("A through-body Precise Seam helper surfaces a warning from SeamPlacer
     const std::string warning = placer.precise_seam_warning_message();
     REQUIRE_FALSE(warning.empty());
     REQUIRE(warning.find("Precise Seam") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Errors the Rust port of the seam placer turned up.
+
+namespace {
+
+// A cylinder 20 mm across and 5 mm high with an 8 x 8 x 4 mm block standing on its middle. The seams of the
+// cylinder are lined up in one string, which cannot go on into the block: its search upward stops below the top of
+// the part, and it then searches downward from its first seam.
+indexed_triangle_set cylinder_under_block()
+{
+    indexed_triangle_set part  = its_make_cylinder(10., 5., 2 * PI / 120);
+    indexed_triangle_set block = its_make_cube(8., 8., 4.);
+    for (stl_vertex &v : block.vertices)
+        v += Vec3f(-4.f, -4.f, 5.f);
+    its_merge(part, block);
+    return part;
+}
+
+} // namespace
+
+// find_seam_string() searched upward from the first seam of a string and, where that search stopped below the top
+// of the part, turned round: reverse_lookup_direction() set the layer below the first seam to look at next, and
+// the step at the end of the loop then moved on past it. That layer was left out of the string, and its seam stayed
+// where it had been picked for that layer alone. Here the first seam is on the cylinder's last layer (z = 5), and on
+// main the layer under it, z = 4.8, had its seam 19 mm away on the other side of the cylinder.
+TEST_CASE("The layer under the first seam of a string is aligned with it", "[Seam][Regression]")
+{
+    Slic3r::Model model;
+    ModelObject  *object = model.add_object();
+    object->name         = "cylinder_under_block";
+    object->add_volume(TriangleMesh(cylinder_under_block()));
+    object->add_instance();
+
+    Slic3r::Print print;
+    object->ensure_on_bed();
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, seam_test_config("aligned"));
+    print.set_status_silent();
+    print.process();
+
+    SeamPlacer placer;
+    placer.init(print, []() {});
+
+    // Every outer wall loop of the part is in a string that was aligned.
+    size_t loops = 0, not_aligned = 0;
+    for (const auto &[po, data] : placer.m_seam_per_object)
+        for (const PrintObjectSeamData::LayerSeams &layer : data.layers)
+            for (size_t i = 0; i < layer.points.size(); i = layer.points[i].perimeter.end_index) {
+                ++loops;
+                if (!layer.points[i].perimeter.finalized)
+                    ++not_aligned;
+            }
+    INFO(loops << " loops, " << not_aligned << " not in an aligned string");
+    REQUIRE(loops == 45);
+    CHECK(not_aligned == 0);
+
+    // The cylinder's seams, layer by layer, are no further apart than the string's tolerance.
+    std::vector<std::pair<double, Vec2d>> cylinder_seams;
+    for (const PrintObject *po : print.objects())
+        for (const Layer *layer : po->layers()) {
+            if (layer->print_z > 5. + EPSILON)
+                continue;
+            for (const LayerRegion *region : layer->regions()) {
+                std::vector<const ExtrusionLoop *> loops_of_layer;
+                collect_outer_loops(&region->perimeters, loops_of_layer);
+                for (const ExtrusionLoop *source : loops_of_layer) {
+                    ExtrusionLoop loop     = *source;
+                    float         overhang = 0.f;
+                    placer.place_seam(layer, loop, Point(0, 0), overhang);
+                    cylinder_seams.emplace_back(layer->print_z, unscale(loop.first_point()));
+                }
+            }
+        }
+    REQUIRE(cylinder_seams.size() == 25);
+    for (size_t i = 1; i < cylinder_seams.size(); ++i) {
+        INFO("z = " << cylinder_seams[i].first << ": seam at " << cylinder_seams[i].second.transpose() << ", the layer below at "
+                    << cylinder_seams[i - 1].second.transpose());
+        CHECK((cylinder_seams[i].second - cylinder_seams[i - 1].second).norm() < 1.);
+    }
+}
+
+// SeamCandidate::unsupported_dist was never initialised, and calculate_overhangs_and_layer_embedding() sets it only
+// where there is a layer below. place_seam() hands it back as the seam's overhang, which decides the scarf seam with
+// "Conditional scarf joint" and an overhang threshold: on the first layer of an object over a raft (layer id > 0, so
+// the scarf is considered) it was whatever the memory held.
+TEST_CASE("A seam candidate with no layer below reads as supported", "[Seam][Regression]")
+{
+    SeamPlacerImpl::Perimeter perimeter;
+    alignas(SeamPlacerImpl::SeamCandidate) unsigned char storage[sizeof(SeamPlacerImpl::SeamCandidate)];
+    std::fill(std::begin(storage), std::end(storage), static_cast<unsigned char>(0xff));
+    auto *candidate = new (storage) SeamPlacerImpl::SeamCandidate(Vec3f::Zero(), perimeter, 0.f, SeamPlacerImpl::EnforcedBlockedSeamPoint::Neutral);
+    CHECK(candidate->unsupported_dist == 0.f);
+    CHECK(candidate->overhang == 0.f);
+    candidate->~SeamCandidate();
 }
