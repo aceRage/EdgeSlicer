@@ -14,6 +14,8 @@
 
 namespace Slic3r {
 
+class AABBMesh;
+
 // ---------------------------------------------------------------------------
 // Draw cut, phase 3 (2026-09-13, owner feedback): the cut surface of a CLOSED
 // loop is a BAND plus a FLAT CORE, not a ruled strip.
@@ -1299,6 +1301,32 @@ std::vector<float> draw_cut_inside_field(const indexed_triangle_set& cutter,
                                          int                         nz,
                                          BoundingBoxf3*              field_bbox = nullptr);
 
+// ---------------------------------------------------------------------------
+// THE EXTENSION CLAMP'S RAY TEST.
+//
+// The gizmo clamps an open line's extension per rail so the extended surface stops
+// short of another wall of the part. This is the distance from `from` along `dir` that
+// the extension may run: up to the first face the ray goes INTO from outside (the face
+// normal points against the ray), minus a 0.1 mm margin; +max() when there is none.
+//
+// Only an entering face counts. A line drawn on a flat face lies in that face's plane,
+// so the ray off its end runs along the face and meets the face's own edge, where the
+// side wall is met from INSIDE the material (the ray is leaving the part). Stopping
+// there kept the extension from ever reaching past the silhouette, which is the whole
+// point of the extension, and the cut ended on the part's side face.
+//
+// The ray starts 0.05 mm along `dir` (given back in the result) so the facet the
+// stroke was drawn on is not met at t = 0. A zero `dir` casts along -Z.
+double draw_cut_extension_clearance(const AABBMesh& mesh, const Vec3d& from, const Vec3d& dir);
+
+// ---------------------------------------------------------------------------
+// THE CHAIN AFTER A POINT EDIT.
+//
+// Moving, inserting or deleting a handle rewrites the chain from the edited points as
+// ONE stroke. The chain keeps what it was: a loop stays a loop and a line the user
+// finished open ("Cut along the line") stays open. Marking every edited chain closed
+// turned an open line into a loop the moment one of its points was touched.
+void draw_cut_chain_set_edited(DrawCutChain& chain, const std::vector<DrawCutSample>& points);
 
 } // namespace Slic3r
 
