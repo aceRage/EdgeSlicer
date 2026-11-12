@@ -1337,6 +1337,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/PluginHooks.cpp
     plugin/PluginManager.cpp
     plugin/PluginAuditManager.cpp
+    plugin/PluginTrust.cpp
     GUI/PluginPermissionValidation.cpp
     GUI/PluginsInspectorLogic.cpp
     GUI/PluginsInspectorDialog.cpp

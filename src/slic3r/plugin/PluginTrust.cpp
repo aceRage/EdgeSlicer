@@ -1,6 +1,7 @@
 #include "PluginTrust.hpp"
 
 #include "PluginAuditManager.hpp"
+#include "PluginFsUtils.hpp"
 
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -35,11 +36,12 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <io.h>
 #include <windows.h>
-#endif
-
-#ifndef _WIN32
+#else
 #include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace Slic3r { namespace plugin_trust {
@@ -129,6 +131,164 @@ std::string join_types(const std::vector<std::string>& types)
     return out;
 }
 
+std::vector<std::string> normalized_deps(std::vector<std::string> deps)
+{
+    deps.erase(std::remove_if(deps.begin(), deps.end(), [](const std::string& d) { return d.empty(); }), deps.end());
+    std::sort(deps.begin(), deps.end());
+    deps.erase(std::unique(deps.begin(), deps.end()), deps.end());
+    return deps;
+}
+
+bool name_ends_with(const std::string& name, const char* suffix)
+{
+    const size_t n = std::char_traits<char>::length(suffix);
+    return name.size() >= n && name.compare(name.size() - n, n, suffix) == 0;
+}
+
+bool exclude_tree_name(const std::string& name)
+{
+    if (name == "__pycache__" || name == "__whl_extracted__")
+        return true;
+    if (name == INSTALL_STATE_FILE || name.find(INSTALL_STATE_FILE) == 0)
+        return true;
+    if (name_ends_with(name, k_sig_suffix))
+        return true;
+    return false;
+}
+
+bool path_stays_under_root(const boost::filesystem::path& root, const boost::filesystem::path& candidate)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+    const fs::path            root_c = fs::weakly_canonical(root, ec);
+    if (ec || root_c.empty())
+        return false;
+    ec.clear();
+    const fs::path cand_c = fs::weakly_canonical(candidate, ec);
+    if (ec || cand_c.empty())
+        return false;
+    auto rel = cand_c.lexically_relative(root_c);
+    if (rel.empty())
+        return false;
+    for (const auto& part : rel) {
+        if (part == "..")
+            return false;
+    }
+    return true;
+}
+
+struct TreeEntry
+{
+    std::string rel;
+    char        kind{'f'}; // 'f' file, 'l' symlink
+    std::string payload;
+};
+
+bool collect_tree_entries(const boost::filesystem::path& root, std::vector<TreeEntry>& entries, std::string& error)
+{
+    namespace fs = boost::filesystem;
+    std::vector<fs::path> dirs{root};
+    while (!dirs.empty()) {
+        const fs::path dir = dirs.back();
+        dirs.pop_back();
+        boost::system::error_code ec;
+        fs::directory_iterator    it(dir, ec);
+        if (ec) {
+            error = "cannot list " + dir.string() + ": " + ec.message();
+            return false;
+        }
+        const fs::directory_iterator end;
+        for (; it != end; it.increment(ec)) {
+            if (ec) {
+                error = "cannot iterate " + dir.string() + ": " + ec.message();
+                return false;
+            }
+            const fs::path    path = it->path();
+            const std::string name = path.filename().string();
+            if (name == "." || name == "..")
+                continue;
+            if (exclude_tree_name(name))
+                continue;
+
+            ec.clear();
+            const fs::file_status st = fs::symlink_status(path, ec);
+            if (ec) {
+                error = "cannot stat " + path.string() + ": " + ec.message();
+                return false;
+            }
+
+            const fs::path rel_path = path.lexically_relative(root);
+            std::string    rel      = rel_path.generic_string();
+            if (rel.empty() || rel == ".")
+                continue;
+
+            if (fs::is_symlink(st)) {
+                ec.clear();
+                const fs::path target = fs::read_symlink(path, ec);
+                if (ec) {
+                    error = "cannot read symlink " + path.string() + ": " + ec.message();
+                    return false;
+                }
+                const fs::path resolved = path.parent_path() / target;
+                if (!path_stays_under_root(root, resolved)) {
+                    error = "symlink escapes plugin root: " + path.string();
+                    return false;
+                }
+                entries.push_back(TreeEntry{std::move(rel), 'l', target.generic_string()});
+                continue;
+            }
+            if (fs::is_directory(st)) {
+                dirs.push_back(path);
+                continue;
+            }
+            if (!fs::is_regular_file(st))
+                continue;
+            std::string       file_error;
+            const std::string hash = sha256_file(path, file_error);
+            if (hash.empty()) {
+                error = file_error.empty() ? ("cannot hash " + path.string()) : file_error;
+                return false;
+            }
+            entries.push_back(TreeEntry{std::move(rel), 'f', hash});
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const TreeEntry& a, const TreeEntry& b) { return a.rel < b.rel; });
+    return true;
+}
+
+std::string permissions_digest_of(const PluginPermissions& permissions)
+{
+    auto dump_list = [](std::ostringstream& out, const char* key, std::vector<std::string> values) {
+        std::sort(values.begin(), values.end());
+        out << key << '=';
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i != 0)
+                out << ',';
+            out << values[i];
+        }
+        out << '\n';
+    };
+    std::ostringstream out;
+    dump_list(out, "fs_read", permissions.fs_read);
+    dump_list(out, "fs_readwrite", permissions.fs_readwrite);
+    dump_list(out, "network_http", permissions.network_http);
+    dump_list(out, "network_socket", permissions.network_socket);
+    dump_list(out, "process", permissions.process);
+    dump_list(out, "events", permissions.events);
+    out << "threading=" << (permissions.threading ? '1' : '0') << '\n';
+    out << "full_access=" << (permissions.full_access ? '1' : '0') << '\n';
+    const std::string text = out.str();
+    return sha256_hex(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+}
+
+bool user_sidecar_version_ok(const nlohmann::json& user)
+{
+    const auto it = user.find("version");
+    if (it == user.end() || !it->is_number_integer())
+        return false;
+    return it->get<int>() == 1;
+}
+
 bool read_file_bytes(const boost::filesystem::path& path, std::string& out, std::string& error)
 {
     boost::nowide::ifstream in(path.string(), std::ios::in | std::ios::binary);
@@ -174,6 +334,31 @@ bool atomic_replace_file(const boost::filesystem::path& target, const std::strin
     out.close();
     if (!out)
         return fail("close failed");
+
+#ifdef _WIN32
+    {
+        const std::wstring wide_tmp = tmp_path.wstring();
+        HANDLE handle = ::CreateFileW(wide_tmp.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+            return fail("CreateFileW for fsync failed");
+        const BOOL flushed = ::FlushFileBuffers(handle);
+        ::CloseHandle(handle);
+        if (!flushed)
+            return fail("FlushFileBuffers failed");
+    }
+#else
+    {
+        const int fd = ::open(tmp_path.string().c_str(), O_RDONLY);
+        if (fd < 0)
+            return fail("open for fsync failed");
+        const int synced = ::fsync(fd);
+        const int saved  = errno;
+        ::close(fd);
+        if (synced != 0)
+            return fail(std::error_code(saved, std::generic_category()).message());
+    }
+#endif
 
 #ifdef _WIN32
     const std::wstring wide_tmp     = tmp_path.wstring();
@@ -237,6 +422,8 @@ std::vector<Pin> pins_from_json(const nlohmann::json& root)
         Pin pin;
         pin.sha256     = ascii_lower(entry.value("sha256", std::string()));
         pin.plugin_key = entry.value("plugin_key", std::string());
+        if (pin.plugin_key.empty())
+            continue;
         if (pin.sha256.size() == 64 && is_hex_chars(pin.sha256))
             out.push_back(std::move(pin));
     }
@@ -331,26 +518,77 @@ std::string sha256_file(const boost::filesystem::path& path, std::string& error)
     return sha256_hex(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size());
 }
 
+std::string sha256_plugin_tree(const boost::filesystem::path& root, std::string& error)
+{
+    namespace fs = boost::filesystem;
+    error.clear();
+    if (root.empty()) {
+        error = "plugin root is empty";
+        return {};
+    }
+    boost::system::error_code ec;
+    const fs::file_status     st = fs::symlink_status(root, ec);
+    if (ec) {
+        error = "cannot stat plugin root: " + ec.message();
+        return {};
+    }
+    if (fs::is_symlink(st)) {
+        error = "plugin root must not be a symlink";
+        return {};
+    }
+
+    std::vector<TreeEntry> entries;
+    if (fs::is_regular_file(st)) {
+        const std::string hash = sha256_file(root, error);
+        if (hash.empty())
+            return {};
+        entries.push_back(TreeEntry{root.filename().generic_string(), 'f', hash});
+    } else if (fs::is_directory(st)) {
+        if (!collect_tree_entries(root, entries, error))
+            return {};
+    } else {
+        error = "plugin root is not a file or directory";
+        return {};
+    }
+
+    std::ostringstream out;
+    out << "edge-plugin-tree-v1\n";
+    for (const TreeEntry& entry : entries)
+        out << entry.kind << '\t' << entry.rel << '\t' << entry.payload << '\n';
+    const std::string manifest = out.str();
+    return sha256_hex(reinterpret_cast<const unsigned char*>(manifest.data()), manifest.size());
+}
+
 std::string canonical_payload(const std::string& sha256, const SignedMetadata& metadata)
 {
-    const std::vector<std::string> types = normalized_types(metadata.types);
+    const std::vector<std::string> types       = normalized_types(metadata.types);
+    const std::vector<std::string> deps        = normalized_deps(metadata.dependencies);
+    const std::string              deps_text   = join_types(deps);
+    const std::string              deps_digest = sha256_hex(reinterpret_cast<const unsigned char*>(deps_text.data()), deps_text.size());
     std::ostringstream             out;
     out << k_payload_version << '\n'
         << "sha256=" << ascii_lower(sha256) << '\n'
         << "name=" << metadata.name << '\n'
         << "version=" << metadata.version << '\n'
         << "types=" << join_types(types) << '\n'
-        << "min_orca_version=" << metadata.min_orca_version << '\n';
+        << "min_orca_version=" << metadata.min_orca_version << '\n'
+        << "plugin_key=" << metadata.plugin_key << '\n'
+        << "deps=" << deps_text << '\n'
+        << "deps_digest=" << deps_digest << '\n'
+        << "permissions_digest=" << ascii_lower(metadata.permissions_digest) << '\n';
     return out.str();
 }
 
 SignedMetadata metadata_from_descriptor(const PluginDescriptor& descriptor)
 {
     SignedMetadata meta;
-    meta.name             = descriptor.name;
-    meta.version          = descriptor.installed_version.empty() ? descriptor.version : descriptor.installed_version;
-    meta.types            = normalized_types(descriptor.display_types);
-    meta.min_orca_version = descriptor.required_orca_api;
+    meta.name               = descriptor.name;
+    meta.version            = descriptor.installed_version.empty() ? descriptor.version : descriptor.installed_version;
+    meta.types              = normalized_types(descriptor.display_types);
+    meta.min_orca_version   = descriptor.required_orca_api;
+    meta.plugin_key         = descriptor.plugin_key;
+    meta.dependencies       = normalized_deps(descriptor.dependencies);
+    meta.permissions_digest = permissions_digest_of(PluginPermissions{});
     return meta;
 }
 
@@ -358,7 +596,9 @@ bool metadata_matches(const SignedMetadata& signed_meta, const PluginDescriptor&
 {
     const SignedMetadata live = metadata_from_descriptor(descriptor);
     return signed_meta.name == live.name && signed_meta.version == live.version && normalized_types(signed_meta.types) == live.types &&
-           signed_meta.min_orca_version == live.min_orca_version;
+           signed_meta.min_orca_version == live.min_orca_version && signed_meta.plugin_key == live.plugin_key &&
+           normalized_deps(signed_meta.dependencies) == live.dependencies &&
+           ascii_lower(signed_meta.permissions_digest) == live.permissions_digest;
 }
 
 bool public_key_from_seed(const std::string& seed_hex, std::string& public_hex, std::string& error)
@@ -449,6 +689,9 @@ bool write_signature_file(const boost::filesystem::path& package, const Signatur
         {"version", sig.metadata.version},
         {"types", normalized_types(sig.metadata.types)},
         {"min_orca_version", sig.metadata.min_orca_version},
+        {"plugin_key", sig.metadata.plugin_key},
+        {"dependencies", normalized_deps(sig.metadata.dependencies)},
+        {"permissions_digest", ascii_lower(sig.metadata.permissions_digest)},
     };
     nlohmann::json root = {
         {"version", 1},
@@ -486,16 +729,25 @@ bool read_signature_file(const boost::filesystem::path& package, Signature& sig,
         sig.publisher      = root.value("publisher", std::string());
         const auto meta_it = root.find("metadata");
         if (meta_it != root.end() && meta_it->is_object()) {
-            sig.metadata.name             = meta_it->value("name", std::string());
-            sig.metadata.version          = meta_it->value("version", std::string());
-            sig.metadata.min_orca_version = meta_it->value("min_orca_version", std::string());
-            const auto types_it           = meta_it->find("types");
+            sig.metadata.name               = meta_it->value("name", std::string());
+            sig.metadata.version            = meta_it->value("version", std::string());
+            sig.metadata.min_orca_version   = meta_it->value("min_orca_version", std::string());
+            sig.metadata.plugin_key         = meta_it->value("plugin_key", std::string());
+            sig.metadata.permissions_digest = ascii_lower(meta_it->value("permissions_digest", std::string()));
+            const auto types_it             = meta_it->find("types");
             if (types_it != meta_it->end() && types_it->is_array()) {
                 for (const nlohmann::json& t : *types_it)
                     if (t.is_string())
                         sig.metadata.types.push_back(t.get<std::string>());
             }
             sig.metadata.types = normalized_types(sig.metadata.types);
+            const auto deps_it = meta_it->find("dependencies");
+            if (deps_it != meta_it->end() && deps_it->is_array()) {
+                for (const nlohmann::json& d : *deps_it)
+                    if (d.is_string())
+                        sig.metadata.dependencies.push_back(d.get<std::string>());
+            }
+            sig.metadata.dependencies = normalized_deps(sig.metadata.dependencies);
         }
         if (root.value("algorithm", std::string()) != "ed25519") {
             error = "unsupported signature algorithm";
@@ -519,10 +771,15 @@ TrustStore load_trust_store()
     for (Publisher& pub : store.shipped_publishers)
         pub.source = "shipped";
 
-    bool                 user_corrupt = false;
-    const nlohmann::json user         = load_json_object_file(trust_sidecar_path(), user_corrupt);
-    store.user_file_corrupt           = user_corrupt;
-    if (user_corrupt) {
+    bool                          user_corrupt = false;
+    const boost::filesystem::path sidecar      = trust_sidecar_path();
+    boost::system::error_code     exists_ec;
+    const bool                    sidecar_exists = boost::filesystem::exists(sidecar, exists_ec) && !exists_ec;
+    const nlohmann::json          user           = load_json_object_file(sidecar, user_corrupt);
+    store.user_file_corrupt                      = user_corrupt;
+    if (!user_corrupt && sidecar_exists && !user_sidecar_version_ok(user))
+        store.user_file_corrupt = true;
+    if (store.user_file_corrupt) {
         // Fail closed: a corrupt sidecar contributes no pins and no user-added keys.
         store.user_publishers.clear();
         store.pins.clear();
@@ -538,6 +795,10 @@ TrustStore load_trust_store()
 bool save_trust_store(const TrustStore& store, std::string& error)
 {
     error.clear();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
     const boost::filesystem::path path = trust_sidecar_path();
     if (sidecar_resolves_into_ultranet(path)) {
         error = "refusing to write plugin trust.json under UltraNet {data_dir}/plugins";
@@ -568,11 +829,9 @@ bool save_trust_store(const TrustStore& store, std::string& error)
     }
     nlohmann::json pins = nlohmann::json::array();
     for (const Pin& pin : store.pins) {
-        if (pin.sha256.size() != 64 || !is_hex_chars(pin.sha256))
+        if (pin.plugin_key.empty() || pin.sha256.size() != 64 || !is_hex_chars(pin.sha256))
             continue;
-        nlohmann::json entry = {{"sha256", ascii_lower(pin.sha256)}};
-        if (!pin.plugin_key.empty())
-            entry["plugin_key"] = pin.plugin_key;
+        nlohmann::json entry = {{"sha256", ascii_lower(pin.sha256)}, {"plugin_key", pin.plugin_key}};
         pins.push_back(std::move(entry));
     }
     const nlohmann::json root = {
@@ -596,6 +855,10 @@ bool add_user_publisher(const Publisher& publisher, std::string& error)
     }
     std::lock_guard<std::mutex> lock(trust_mutex());
     TrustStore                  store = load_trust_store();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
     for (Publisher& pub : store.user_publishers) {
         if (pub.public_key == key) {
             pub.name = publisher.name;
@@ -612,20 +875,26 @@ bool add_user_publisher(const Publisher& publisher, std::string& error)
 bool pin_hash(const std::string& plugin_key, const std::string& sha256, std::string& error)
 {
     error.clear();
+    if (plugin_key.empty()) {
+        error = "content pin requires a plugin_key";
+        return false;
+    }
     const std::string hash = ascii_lower(sha256);
     if (hash.size() != 64 || !is_hex_chars(hash)) {
         error = "content pin must be a SHA-256 hex digest";
         return false;
     }
     std::lock_guard<std::mutex> lock(trust_mutex());
-    TrustStore                  store    = load_trust_store();
-    bool                        replaced = false;
-    if (!plugin_key.empty()) {
-        for (Pin& pin : store.pins) {
-            if (pin.plugin_key == plugin_key) {
-                pin.sha256 = hash;
-                replaced   = true;
-            }
+    TrustStore                  store = load_trust_store();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
+    bool replaced = false;
+    for (Pin& pin : store.pins) {
+        if (pin.plugin_key == plugin_key) {
+            pin.sha256 = hash;
+            replaced   = true;
         }
     }
     if (!replaced)
@@ -638,6 +907,10 @@ bool unpin_plugin(const std::string& plugin_key, std::string& error)
     error.clear();
     std::lock_guard<std::mutex> lock(trust_mutex());
     TrustStore                  store = load_trust_store();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
     store.pins.erase(std::remove_if(store.pins.begin(), store.pins.end(),
                                     [&plugin_key](const Pin& pin) { return pin.plugin_key == plugin_key; }),
                      store.pins.end());
@@ -650,7 +923,7 @@ bool is_hash_pinned(const TrustStore& store, const std::string& plugin_key, cons
     for (const Pin& pin : store.pins) {
         if (pin.sha256 != hash)
             continue;
-        if (pin.plugin_key.empty() || pin.plugin_key == plugin_key)
+        if (!pin.plugin_key.empty() && pin.plugin_key == plugin_key)
             return true;
     }
     return false;
@@ -672,6 +945,15 @@ bool local_install_needs_prompt(const std::string& plugin_key, const std::string
 {
     const TrustStore store = load_trust_store();
     return !is_hash_pinned(store, plugin_key, sha256);
+}
+
+bool reset_corrupt_trust_store(std::string& error)
+{
+    error.clear();
+    std::lock_guard<std::mutex> lock(trust_mutex());
+    TrustStore                  empty;
+    empty.user_file_corrupt = false;
+    return save_trust_store(empty, error);
 }
 
 std::string refuse_untrusted_message()
@@ -700,8 +982,9 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
         return state;
     }
 
-    std::string hash_error;
-    state.sha256 = sha256_file(package, hash_error);
+    std::string                   hash_error;
+    const boost::filesystem::path content_root = descriptor.plugin_root.empty() ? package : boost::filesystem::path(descriptor.plugin_root);
+    state.sha256                               = sha256_plugin_tree(content_root, hash_error);
     if (state.sha256.empty()) {
         state.error = hash_error.empty() ? refuse_untrusted_message() : hash_error;
         state.label = trust_label(state);
@@ -717,7 +1000,7 @@ TrustState evaluate_package(const boost::filesystem::path& package, const Plugin
         if (verify(sig.public_key, payload, sig.signature)) {
             if (const Publisher* pub = find_publisher(store, sig.public_key)) {
                 state.kind      = TrustKind::Signed;
-                state.publisher = pub->name.empty() ? sig.publisher : pub->name;
+                state.publisher = pub->name;
                 state.label     = trust_label(state);
                 return state;
             }

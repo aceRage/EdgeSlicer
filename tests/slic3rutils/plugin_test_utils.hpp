@@ -179,7 +179,9 @@ inline bool approve_plugin_for_test(const std::string& plugin_key, std::string& 
         error = "plugin not discovered: " + plugin_key;
         return false;
     }
-    const std::string hash = plugin_trust::sha256_file(descriptor.entry_path, error);
+    const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                                         boost::filesystem::path(descriptor.plugin_root);
+    const std::string hash = plugin_trust::sha256_plugin_tree(root, error);
     if (hash.empty())
         return false;
     return plugin_trust::pin_hash(descriptor.plugin_key, hash, error);

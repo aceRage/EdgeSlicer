@@ -28,8 +28,8 @@ struct Publisher
 
 struct Pin
 {
-    std::string sha256;     // SHA-256 of the .py / .whl, 64 lowercase hex chars
-    std::string plugin_key; // optional; set for a local sideload of a named package
+    std::string sha256;     // SHA-256 of the plugin tree (sorted relative paths + content)
+    std::string plugin_key; // required; local sideload of a named package
 };
 
 struct TrustStore
@@ -46,6 +46,9 @@ struct SignedMetadata
     std::string              version;
     std::vector<std::string> types;
     std::string              min_orca_version;
+    std::string              plugin_key;
+    std::vector<std::string> dependencies;
+    std::string              permissions_digest; // SHA-256 of the canonical requested-permissions form
 };
 
 struct Signature
@@ -80,6 +83,11 @@ bool path_is_ultranet(const boost::filesystem::path& path);
 
 std::string sha256_hex(const unsigned char* data, size_t len);
 std::string sha256_file(const boost::filesystem::path& path, std::string& error);
+// Canonical tree hash of a plugin file or plugin root: sorted relative paths plus content.
+// Skips .sig files, __pycache__, __whl_extracted__, and .install_state.json. Does not follow
+// symlinks out of the root (an escaping symlink fails the hash). uv-installed deps are not
+// part of this tree.
+std::string sha256_plugin_tree(const boost::filesystem::path& root, std::string& error);
 
 std::string    canonical_payload(const std::string& sha256, const SignedMetadata& metadata);
 SignedMetadata metadata_from_descriptor(const PluginDescriptor& descriptor);
@@ -94,11 +102,15 @@ bool verify(const std::string& public_hex, const std::string& message, const std
 bool write_signature_file(const boost::filesystem::path& package, const Signature& sig, std::string& error);
 bool read_signature_file(const boost::filesystem::path& package, Signature& sig, std::string& error);
 
-// Never throws. A missing sidecar is empty-trust. A corrupt or unparseable file is empty-trust
-// (no user pins, no user publishers) and never crashes; shipped keys still apply.
+// Never throws. A missing sidecar is empty-trust. A corrupt or unparseable file, a missing
+// version, or any version other than 1 is empty-trust (no user pins, no user publishers) and
+// never crashes; shipped keys still apply.
 TrustStore load_trust_store();
-// Atomic replace. Refuses to write if the sidecar path resolves into UltraNet {data_dir}/plugins.
+// Atomic replace. Refuses to write if the sidecar path resolves into UltraNet {data_dir}/plugins
+// or if store.user_file_corrupt is set (would wipe existing pins). Call reset_corrupt_trust_store
+// for an explicit empty rewrite.
 bool save_trust_store(const TrustStore& store, std::string& error);
+bool reset_corrupt_trust_store(std::string& error);
 
 bool add_user_publisher(const Publisher& publisher, std::string& error);
 bool pin_hash(const std::string& plugin_key, const std::string& sha256, std::string& error);

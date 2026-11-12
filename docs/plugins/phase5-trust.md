@@ -33,9 +33,13 @@ by a trusted publisher).
 
 A package may carry a sibling `{file}.py.sig` / `{file}.whl.sig` JSON sidecar:
 
-- SHA-256 of the `.py` or `.whl` bytes
-- Ed25519 signature over a canonical payload: `edge-plugin-sig-v1` plus hash, name, version,
-  capability types, and min orca version
+- SHA-256 of the plugin tree (sorted relative paths plus content), not only the entry `.py` / `.whl`.
+  The walk skips `.sig` files, `__pycache__`, `__whl_extracted__`, and `.install_state.json`. Symlinks
+  that escape the plugin root fail the hash. **uv-installed dependencies are unpinned** — they live
+  outside the plugin root and are not part of this digest.
+- Ed25519 signature over a canonical payload: `edge-plugin-sig-v1` plus the tree hash, name, version,
+  capability types, min orca version, `plugin_key`, declared deps (and their digest), and a digest of
+  requested permissions
 - The signer's 32-byte public key (64 hex chars)
 
 Verification uses the in-tree OpenSSL EVP Ed25519 API (`EVP_PKEY_ED25519`,
@@ -51,11 +55,13 @@ app trusts ship in `resources/python_plugins/trust_keys.json` (empty until catal
 `{data_dir}/orca_plugins/trust.json` records:
 
 - user-added publisher keys
-- pinned content hashes (optional `plugin_key`)
+- pinned content hashes keyed by `plugin_key` (an empty `plugin_key` is refused)
 
-It is written with the same atomic replace as `.install_state.json` (unique temp, then POSIX
-`rename` / `MoveFileExW` REPLACE). A missing file is empty-trust. A corrupt or unparseable file
-is empty-trust (no user pins, no user keys), never a crash; shipped keys still apply.
+It is written with the same atomic replace as `.install_state.json` (unique temp, fsync, then POSIX
+`rename` / `MoveFileExW` REPLACE). A missing file is empty-trust. A corrupt or unparseable file, a
+missing `version`, or any version other than `1` is empty-trust (no user pins, no user keys), never
+a crash; shipped keys still apply. Mutators refuse to overwrite a corrupt sidecar until
+`reset_corrupt_trust_store` rewrites an empty valid file.
 
 This path is **never** `{data_dir}/plugins` (UltraNet). Writes that resolve there are refused.
 The case-insensitive / NFC/NFD / dangling-symlink / `equivalent()` checks are the same
@@ -65,4 +71,17 @@ The case-insensitive / NFC/NFD / dangling-symlink / `equivalent()` checks are th
 
 Cards show the trust string from `plugin_trust::evaluate`. Installing a local file always goes
 through a Yes/No dialog (`wxYES_NO | wxNO_DEFAULT`, No focused). Yes copies the package (and a
-sibling `.sig` when present) into `{data_dir}/orca_plugins` and pins the SHA-256.
+sibling `.sig` when present) into `{data_dir}/orca_plugins` and pins the tree SHA-256. The
+`Signed by …` name comes from the shipped or user-added key file, never from the unsigned `.sig`
+sidecar.
+
+Enable / load re-hashes the plugin root immediately before the trust check.
+
+## Known limitations
+
+- Cross-process last-writer-wins on `trust.json` (no file lock across processes).
+- No in-place approve of an already-installed Untrusted package; reinstall from a local file and
+  click Yes, or install a package signed by a trusted publisher.
+- No trust check on permission mutation. Changing grants in `.install_state.json` does not
+  re-prompt and does not change the tree hash (that sidecar is excluded).
+- uv-installed Python dependencies are unpinned.

@@ -220,7 +220,7 @@ void HomePlugins::install()
     }
 
     std::string       hash_error;
-    const std::string hash = plugin_trust::sha256_file(path, hash_error);
+    const std::string hash = plugin_trust::sha256_plugin_tree(path, hash_error);
     if (hash.empty()) {
         notice(hash_error.empty() ? _u8L("The plugin file could not be hashed.") : hash_error, true);
         return;
@@ -251,8 +251,12 @@ void HomePlugins::install()
         return;
     }
     std::string pin_error;
-    if (!plugin_trust::pin_hash(descriptor.plugin_key, hash, pin_error)) {
-        notice(pin_error.empty() ? _u8L("The plugin was copied but could not be pinned as trusted.") : pin_error, true);
+    const fs::path    pin_root       = descriptor.plugin_root.empty() ? path : fs::path(descriptor.plugin_root);
+    const std::string installed_hash = plugin_trust::sha256_plugin_tree(pin_root, hash_error);
+    if (installed_hash.empty() || !plugin_trust::pin_hash(descriptor.plugin_key, installed_hash, pin_error)) {
+        notice(pin_error.empty() ? (hash_error.empty() ? _u8L("The plugin was copied but could not be pinned as trusted.") : hash_error) :
+                                   pin_error,
+               true);
         mgr.rescan_plugins();
         send_state();
         return;

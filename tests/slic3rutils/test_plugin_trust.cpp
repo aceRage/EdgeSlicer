@@ -94,11 +94,19 @@ PluginDescriptor descriptor_for(const fs::path& package, const std::string& plug
     return d;
 }
 
+std::string tree_hash_of(const fs::path& root)
+{
+    std::string       error;
+    const std::string hash = pt::sha256_plugin_tree(root, error);
+    REQUIRE_FALSE(hash.empty());
+    CHECK(error.empty());
+    return hash;
+}
+
 pt::Signature sign_package(const fs::path& package, const PluginDescriptor& d, const std::string& seed, const std::string& publisher)
 {
-    std::string   hash_error;
     pt::Signature sig;
-    sig.hash = pt::sha256_file(package, hash_error);
+    sig.hash = tree_hash_of(d.plugin_root.empty() ? package : fs::path(d.plugin_root));
     REQUIRE_FALSE(sig.hash.empty());
     sig.metadata = pt::metadata_from_descriptor(d);
     std::string pub_error;
@@ -176,10 +184,8 @@ TEST_CASE("hash pin accept", "[PluginTrust]")
     write_file(package, k_plugin_source);
     const PluginDescriptor d = descriptor_for(package, "echo");
 
-    std::string       hash_error;
-    const std::string hash = pt::sha256_file(package, hash_error);
+    const std::string hash = tree_hash_of(package);
     REQUIRE(hash.size() == 64);
-    CHECK(hash_error.empty());
 
     REQUIRE(pt::local_install_needs_prompt("echo", hash));
 
@@ -295,8 +301,7 @@ TEST_CASE("different hash of same plugin_key prompts again", "[PluginTrust]")
     ScopedDataDir  data("plugin-trust-reprompt");
     const fs::path package = data.dir / "echo.py";
     write_file(package, k_plugin_source);
-    std::string       hash_error;
-    const std::string hash1 = pt::sha256_file(package, hash_error);
+    const std::string hash1 = tree_hash_of(package);
     REQUIRE(hash1.size() == 64);
 
     std::string pin_error;
@@ -304,7 +309,7 @@ TEST_CASE("different hash of same plugin_key prompts again", "[PluginTrust]")
     CHECK_FALSE(pt::local_install_needs_prompt("echo", hash1));
 
     write_file(package, std::string(k_plugin_source) + "\n# v2\n");
-    const std::string hash2 = pt::sha256_file(package, hash_error);
+    const std::string hash2 = tree_hash_of(package);
     REQUIRE(hash2.size() == 64);
     REQUIRE(hash1 != hash2);
 
@@ -324,11 +329,8 @@ TEST_CASE("corrupt trust.json fails closed", "[PluginTrust]")
     write_file(package, k_plugin_source);
     const PluginDescriptor d = descriptor_for(package, "echo");
 
-    std::string       hash_error;
-    const std::string hash = pt::sha256_file(package, hash_error);
-    std::string       pin_error;
-    // A pin written after a corrupt read must not crash; evaluate of the corrupt file itself
-    // reports empty-trust before any rewrite.
+    const std::string    hash = tree_hash_of(package);
+    std::string          pin_error;
     const pt::TrustStore store = pt::load_trust_store();
     CHECK(store.user_file_corrupt);
     CHECK(store.pins.empty());
@@ -341,6 +343,9 @@ TEST_CASE("corrupt trust.json fails closed", "[PluginTrust]")
     CHECK(state.label == "Untrusted");
 
     REQUIRE_NOTHROW(pt::load_trust_store());
+    CHECK_FALSE(pt::pin_hash("echo", hash, pin_error));
+    CHECK_FALSE(pin_error.empty());
+    CHECK(read_text(data.plugins_dir() / "trust.json").find("this is not json") != std::string::npos);
 }
 
 TEST_CASE("path handling never resolves into UltraNet plugins", "[PluginTrust]")
@@ -408,8 +413,7 @@ TEST_CASE("enable and run succeed when pinned; removing the pin refuses run", "[
 
     PluginDescriptor d;
     REQUIRE(manager.try_get_plugin_descriptor("Trust_Echo", d));
-    std::string       hash_error;
-    const std::string hash = pt::sha256_file(d.entry_path, hash_error);
+    const std::string hash = tree_hash_of(d.plugin_root.empty() ? fs::path(d.entry_path) : fs::path(d.plugin_root));
     std::string       pin_error;
     REQUIRE(pt::pin_hash("Trust_Echo", hash, pin_error));
 
@@ -450,4 +454,193 @@ TEST_CASE("home plugins cards pass through trust labels", "[HomePlugins][PluginT
     untrusted.plugin_key = "echo";
     untrusted.trust      = "Untrusted";
     CHECK(HomeTab::plugin_card(untrusted)["trust"] == "Untrusted");
+}
+
+TEST_CASE("pin then sibling wheel is not Approved and load refuses", "[PluginTrust][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir  data("plugin-trust-sibling-whl");
+    const fs::path plugin_dir = data.plugins_dir() / "Trust_Echo";
+    write_file(plugin_dir / "Trust_Echo.py", k_plugin_source);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    PluginDescriptor d;
+    REQUIRE(manager.try_get_plugin_descriptor("Trust_Echo", d));
+    const fs::path    root = d.plugin_root.empty() ? fs::path(d.entry_path) : fs::path(d.plugin_root);
+    const std::string hash = tree_hash_of(root);
+    std::string       pin_error;
+    REQUIRE(pt::pin_hash("Trust_Echo", hash, pin_error));
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::ApprovedLocally);
+
+    write_file(root / "extra.whl", "PK\x03\x04 sibling-not-in-pin");
+
+    const pt::TrustState after = pt::evaluate(d);
+    CHECK(after.kind != pt::TrustKind::ApprovedLocally);
+    CHECK(after.kind == pt::TrustKind::Untrusted);
+    CHECK_FALSE(after.allowed());
+
+    std::string error;
+    CHECK_FALSE(load_and_wait(manager, "Trust_Echo", error));
+    CHECK(error.find("untrusted") != std::string::npos);
+}
+
+TEST_CASE("valid signature under a different plugin_key is not Signed", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-key-mismatch");
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const PluginDescriptor signed_for = descriptor_for(package, "echo");
+    sign_package(package, signed_for, k_seed1, "Attacker");
+
+    std::string add_error;
+    REQUIRE(pt::add_user_publisher({"Edge Test", k_pub1, "user"}, add_error));
+
+    PluginDescriptor other     = signed_for;
+    other.plugin_key           = "other";
+    const pt::TrustState state = pt::evaluate(other);
+    CHECK(state.kind != pt::TrustKind::Signed);
+    CHECK(state.kind == pt::TrustKind::Untrusted);
+    CHECK_FALSE(state.allowed());
+}
+
+TEST_CASE("trust.json v99 with a valid pin is Untrusted", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-v99");
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const PluginDescriptor d    = descriptor_for(package, "echo");
+    const std::string      hash = tree_hash_of(package);
+
+    fs::create_directories(data.plugins_dir());
+    write_file(data.plugins_dir() / "trust.json",
+               std::string("{\"version\":99,\"publishers\":[],\"pins\":[{\"sha256\":\"") + hash + "\",\"plugin_key\":\"echo\"}]}\n");
+
+    const pt::TrustStore store = pt::load_trust_store();
+    CHECK(store.user_file_corrupt);
+    CHECK(store.pins.empty());
+    CHECK_FALSE(pt::is_hash_pinned(store, "echo", hash));
+
+    const pt::TrustState state = pt::evaluate(d);
+    CHECK(state.kind == pt::TrustKind::Untrusted);
+    CHECK_FALSE(state.allowed());
+}
+
+TEST_CASE("empty trust.json fails closed", "[PluginTrust]")
+{
+    ScopedDataDir data("plugin-trust-empty");
+    fs::create_directories(data.plugins_dir());
+    write_file(data.plugins_dir() / "trust.json", "");
+
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const PluginDescriptor d = descriptor_for(package, "echo");
+
+    const pt::TrustStore store = pt::load_trust_store();
+    CHECK(store.user_file_corrupt);
+    CHECK(store.pins.empty());
+    CHECK(store.user_publishers.empty());
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::Untrusted);
+}
+
+TEST_CASE("unknown version without pins is corrupt", "[PluginTrust]")
+{
+    ScopedDataDir data("plugin-trust-unknown-ver");
+    fs::create_directories(data.plugins_dir());
+    write_file(data.plugins_dir() / "trust.json", "{\"version\":2,\"publishers\":[],\"pins\":[]}\n");
+
+    const pt::TrustStore store = pt::load_trust_store();
+    CHECK(store.user_file_corrupt);
+    CHECK(store.pins.empty());
+}
+
+TEST_CASE("symlink replace of a pinned file is not Approved", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-symlink");
+    const fs::path plugin_dir = data.dir / "plug";
+    const fs::path entry      = plugin_dir / "echo.py";
+    write_file(entry, k_plugin_source);
+    write_file(plugin_dir / "other.py", std::string(k_plugin_source) + "\n# other\n");
+
+    PluginDescriptor d = descriptor_for(entry, "echo");
+    d.plugin_root      = plugin_dir.string();
+
+    const std::string hash = tree_hash_of(plugin_dir);
+    std::string       pin_error;
+    REQUIRE(pt::pin_hash("echo", hash, pin_error));
+    CHECK(pt::evaluate(d).kind == pt::TrustKind::ApprovedLocally);
+
+    fs::remove(entry);
+    fs::create_symlink(plugin_dir / "other.py", entry);
+
+    const pt::TrustState state = pt::evaluate(d);
+    CHECK(state.kind != pt::TrustKind::ApprovedLocally);
+    CHECK(state.kind == pt::TrustKind::Untrusted);
+    CHECK_FALSE(state.allowed());
+}
+
+TEST_CASE("pin_hash and add_user_publisher refuse to save while trust.json is corrupt", "[PluginTrust]")
+{
+    ScopedDataDir data("plugin-trust-no-wipe");
+    fs::create_directories(data.plugins_dir());
+    const fs::path sidecar = data.plugins_dir() / "trust.json";
+    write_file(sidecar, "{ this is not json ]]");
+
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const std::string hash = tree_hash_of(package);
+
+    std::string pin_error;
+    CHECK_FALSE(pt::pin_hash("echo", hash, pin_error));
+    CHECK(pin_error.find("corrupt") != std::string::npos);
+
+    std::string add_error;
+    CHECK_FALSE(pt::add_user_publisher({"Edge Test", k_pub1, "user"}, add_error));
+    CHECK(add_error.find("corrupt") != std::string::npos);
+
+    CHECK(read_text(sidecar).find("this is not json") != std::string::npos);
+    CHECK(pt::load_trust_store().user_file_corrupt);
+
+    std::string reset_error;
+    REQUIRE(pt::reset_corrupt_trust_store(reset_error));
+    CHECK(reset_error.empty());
+    CHECK_FALSE(pt::load_trust_store().user_file_corrupt);
+
+    REQUIRE(pt::pin_hash("echo", hash, pin_error));
+    CHECK(pt::is_hash_pinned(pt::load_trust_store(), "echo", hash));
+}
+
+TEST_CASE("empty plugin_key pin is rejected", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-empty-key");
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const std::string hash = tree_hash_of(package);
+
+    std::string pin_error;
+    CHECK_FALSE(pt::pin_hash("", hash, pin_error));
+    CHECK(pin_error.find("plugin_key") != std::string::npos);
+    CHECK(pt::load_trust_store().pins.empty());
+}
+
+TEST_CASE("signed label uses the pinned key name not the sidecar publisher", "[PluginTrust]")
+{
+    ScopedDataDir  data("plugin-trust-label-keyfile");
+    const fs::path package = data.dir / "echo.py";
+    write_file(package, k_plugin_source);
+    const PluginDescriptor d = descriptor_for(package, "echo");
+    sign_package(package, d, k_seed1, "Attacker");
+
+    std::string add_error;
+    REQUIRE(pt::add_user_publisher({"", k_pub1, "user"}, add_error));
+
+    const pt::TrustState state = pt::evaluate(d);
+    CHECK(state.kind == pt::TrustKind::Signed);
+    CHECK(state.publisher != "Attacker");
+    CHECK(state.publisher.empty());
+    CHECK(state.label == "Signed by unknown publisher");
 }
