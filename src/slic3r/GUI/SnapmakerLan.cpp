@@ -1186,10 +1186,15 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
     // No time limit for the whole upload - a big file on slow Wi-Fi takes as long as it takes - but
     // one that stops moving is given up: curl's progress callback runs about once a second even
     // when nothing goes out, and a printer that stopped reading would otherwise hang the send for good.
-    using Clock             = std::chrono::steady_clock;
-    size_t            sent    = 0;
-    Clock::time_point moved   = Clock::now();
-    bool              stalled = false;
+    // Once the last byte is out the printer still writes the file away (and, on some firmware, scans it)
+    // before it answers, with nothing moving: that wait gets a limit of its own, UPLOAD_ANSWER_FACTOR
+    // times longer (10 min for the default 120 s), so a big file on slow storage is not cut off while a
+    // printer that never answers still does not hang the send for good.
+    using Clock               = std::chrono::steady_clock;
+    size_t            sent      = 0;
+    Clock::time_point moved     = Clock::now();
+    bool              stalled   = false;
+    bool              answering = false;
     // print=false always: a print that will not start must still leave a file the person can use
     // from the printer's own screen.
     Http::post(base_url(d) + "/server/files/upload").tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
@@ -1202,10 +1207,12 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
             if (stalled)
                 return;
             const Clock::time_point now = Clock::now();
+            answering                   = prog.ultotal > 0 && prog.ulnow >= prog.ultotal;
+            const int limit_s           = answering ? stall_s * UPLOAD_ANSWER_FACTOR : stall_s;
             if (prog.ulnow != sent) {
                 sent  = prog.ulnow;
                 moved = now;
-            } else if (stall_s > 0 && now - moved >= std::chrono::seconds(stall_s)) {
+            } else if (stall_s > 0 && now - moved >= std::chrono::seconds(limit_s)) {
                 stalled = true;
                 cancel  = true;
                 return;
@@ -1227,7 +1234,8 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
         })
         .perform_sync();
     if (stalled) {
-        error = "the printer stopped taking the file: nothing was sent for " + std::to_string(stall_s) + " s";
+        error = answering ? "the printer took the whole file but did not answer for " + std::to_string(stall_s * UPLOAD_ANSWER_FACTOR) + " s" :
+                            "the printer stopped taking the file: nothing was sent for " + std::to_string(stall_s) + " s";
         ok    = false;
     }
     return ok;

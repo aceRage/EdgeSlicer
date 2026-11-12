@@ -9,6 +9,7 @@
 #include "slic3r/Utils/ElegooLink.hpp"
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "slic3r/Utils/PrinterStorage.hpp"
 #include "slic3r/Utils/WebSocketClient.hpp"
 #include "slic3r/GUI/SnapmakerLan.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -193,6 +194,106 @@ private:
     std::vector<std::string> m_keys;
 };
 
+// Reads each whole request, waits `delay`, then answers with `status`; keeps each request's target and Host.
+// Bound to 127.0.0.1 on `port` (0: an ephemeral one); ok() is false when that port could not be had, and
+// then it never listens.
+class StatusServer
+{
+public:
+    StatusServer(unsigned status, unsigned short port = 0, std::chrono::milliseconds delay = std::chrono::milliseconds(0))
+        : m_status(status), m_delay(delay)
+    {
+        beast::error_code ec;
+        m_acceptor.open(tcp::v4(), ec);
+#ifndef _WIN32
+        // Let a fixed port be bound again while the last run's connections sit in TIME_WAIT. (Not on Windows,
+        // where SO_REUSEADDR would let the bind take a port another program is listening on.)
+        if (!ec)
+            m_acceptor.set_option(net::socket_base::reuse_address(true), ec);
+#endif
+        if (!ec)
+            m_acceptor.bind({net::ip::make_address("127.0.0.1"), port}, ec);
+        if (!ec)
+            m_acceptor.listen(net::socket_base::max_listen_connections, ec);
+        m_ok = !ec;
+        if (!m_ok)
+            return;
+        m_thread = std::thread([this] {
+            for (;;) {
+                tcp::socket       socket{m_ioc};
+                beast::error_code ec;
+                m_acceptor.accept(socket, ec);
+                if (ec || m_stopping)
+                    return;
+                beast::flat_buffer                      buffer;
+                http::request_parser<http::string_body> parser;
+                parser.body_limit(boost::none);
+                http::read(socket, buffer, parser, ec);
+                if (ec)
+                    continue;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_targets.emplace_back(parser.get().target());
+                    m_hosts.emplace_back(parser.get()[http::field::host]);
+                    m_keys.emplace_back(parser.get()["X-Api-Key"]);
+                    m_auths.emplace_back(parser.get()[http::field::authorization]);
+                }
+                if (m_delay.count() > 0)
+                    std::this_thread::sleep_for(m_delay);
+                http::response<http::string_body> response{http::status(m_status), parser.get().version()};
+                response.set(http::field::content_type, "application/json");
+                response.body() = m_status < 300 ? R"({"result":{"item":{"path":"cube.gcode"}}})" :
+                                                   R"({"error":{"code":)" + std::to_string(m_status) + R"(,"message":"mock refusal"}})";
+                response.prepare_payload();
+                http::write(socket, response, ec);
+                socket.shutdown(tcp::socket::shutdown_both, ec);
+            }
+        });
+    }
+    ~StatusServer()
+    {
+        if (!m_ok)
+            return;
+        m_stopping = true;
+        net::io_context   wake_ioc;
+        tcp::socket       wake{wake_ioc};
+        beast::error_code ec;
+        wake.connect(m_acceptor.local_endpoint(), ec);
+        if (m_thread.joinable())
+            m_thread.join();
+    }
+    bool                     ok() const { return m_ok; }
+    unsigned short           port() const { return m_acceptor.local_endpoint().port(); }
+    std::vector<std::string> targets() const { std::lock_guard<std::mutex> lock(m_mutex); return m_targets; }
+    std::vector<std::string> hosts() const { std::lock_guard<std::mutex> lock(m_mutex); return m_hosts; }
+    std::vector<std::string> keys() const { std::lock_guard<std::mutex> lock(m_mutex); return m_keys; }
+    std::vector<std::string> auths() const { std::lock_guard<std::mutex> lock(m_mutex); return m_auths; }
+
+private:
+    const unsigned                  m_status;
+    const std::chrono::milliseconds m_delay;
+    net::io_context                 m_ioc;
+    tcp::acceptor                   m_acceptor{m_ioc};
+    bool                            m_ok = false;
+    std::atomic<bool>               m_stopping{false};
+    std::thread                     m_thread;
+    mutable std::mutex              m_mutex;
+    std::vector<std::string>        m_targets;
+    std::vector<std::string>        m_hosts;
+    std::vector<std::string>        m_keys;
+    std::vector<std::string>        m_auths;
+};
+
+fs::path write_test_file(const std::string& stem, size_t kib)
+{
+    const fs::path file = fs::temp_directory_path() / (stem + "_" + std::to_string((long long) ::time(nullptr)) + ".gcode");
+    boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+    const std::string       line(1023, ';');
+    for (size_t i = 0; i < kib; ++i)
+        out << line << '\n';
+    return file;
+}
+
 DynamicPrintConfig host_config(const std::string& host_type, const std::string& url)
 {
     DynamicPrintConfig cfg;
@@ -265,16 +366,114 @@ TEST_CASE("The Moonraker port 8080 address replaces the port, with or without a 
     CHECK(Moonraker::url_on_port_8080("http://[fe80::1]:7125", p) == "http://[fe80::1]:8080/server/files/upload");
 }
 
-TEST_CASE("Moonraker retries an upload on port 8080 only when nothing answered as Moonraker", "[Moonraker][sending]")
+TEST_CASE("Moonraker retries an upload on port 8080 unless Moonraker refused it and said why", "[Moonraker][sending]")
 {
-    CHECK(Moonraker::retry_on_port_8080(0));   // no HTTP answer at all: refused, timed out, unreachable
-    CHECK(Moonraker::retry_on_port_8080(404)); // something answered, but has no Moonraker API there
-    CHECK_FALSE(Moonraker::retry_on_port_8080(400));
-    CHECK_FALSE(Moonraker::retry_on_port_8080(401));
-    CHECK_FALSE(Moonraker::retry_on_port_8080(403));
-    CHECK_FALSE(Moonraker::retry_on_port_8080(409));
-    CHECK_FALSE(Moonraker::retry_on_port_8080(413));
-    CHECK_FALSE(Moonraker::retry_on_port_8080(500));
+    SECTION("no HTTP answer at all: refused, timed out, unreachable")
+    {
+        CHECK(Moonraker::retry_on_port_8080(0));
+    }
+    SECTION("the request refused: bad request, key refused or missing, file in use")
+    {
+        CHECK_FALSE(Moonraker::retry_on_port_8080(400));
+        CHECK_FALSE(Moonraker::retry_on_port_8080(401));
+        CHECK_FALSE(Moonraker::retry_on_port_8080(403));
+        CHECK_FALSE(Moonraker::retry_on_port_8080(409));
+    }
+    SECTION("other 4xx: no API here, wrong method, a front proxy's body limit")
+    {
+        CHECK(Moonraker::retry_on_port_8080(404));
+        CHECK(Moonraker::retry_on_port_8080(405));
+        CHECK(Moonraker::retry_on_port_8080(408));
+        CHECK(Moonraker::retry_on_port_8080(413));
+    }
+    SECTION("5xx: a front proxy while Moonraker behind it restarts")
+    {
+        CHECK(Moonraker::retry_on_port_8080(500));
+        CHECK(Moonraker::retry_on_port_8080(502));
+        CHECK(Moonraker::retry_on_port_8080(503));
+        CHECK(Moonraker::retry_on_port_8080(504));
+    }
+    SECTION("1xx, 2xx, 3xx reaching the error handler")
+    {
+        CHECK(Moonraker::retry_on_port_8080(101));
+        CHECK(Moonraker::retry_on_port_8080(204));
+        CHECK(Moonraker::retry_on_port_8080(302));
+    }
+}
+
+// The whole upload, against listeners of the test's own: the first on an ephemeral port, the retry's on
+// 127.0.0.1:8080. If 8080 cannot be had here (another program has it), the case says so and stops: a retry
+// must never reach someone else's server.
+TEST_CASE("A Moonraker upload is retried on port 8080 of the same host, but not after a refusal", "[Moonraker][sending][socket]")
+{
+    static bool  had_8080 = false;
+    StatusServer on_8080(200, 8080);
+    if (!on_8080.ok()) {
+        // Free on an earlier run of this case but not now: this case's own leftovers, a test failure.
+        REQUIRE_FALSE(had_8080);
+        WARN("127.0.0.1:8080 is taken on this machine; the upload retry is not exercised");
+        return;
+    }
+    had_8080 = true;
+    const fs::path file = write_test_file("moonraker_retry", 4);
+
+    auto upload_to = [&file](const std::string& print_host, std::string& error) {
+        DynamicPrintConfig cfg = host_config("octoprint", print_host);
+        Moonraker          host(&cfg);
+        PrintHostUpload    up;
+        up.source_path = file;
+        up.upload_path = "cube.gcode";
+        up.post_action = PrintHostPostUploadAction::None;
+        wxString err;
+        const bool ok = host.upload(
+            up, [](Http::Progress, bool& cancel) { cancel = false; }, [&err](wxString e) { err = e; },
+            [](wxString, wxString) {});
+        error = err.ToUTF8().data();
+        return ok;
+    };
+
+    SECTION("refused with a reason: one upload, no retry, the printer's own answer shown")
+    {
+        const unsigned status = GENERATE(400u, 401u, 403u, 409u);
+        StatusServer   first(status);
+        REQUIRE(first.ok());
+        std::string error;
+        CHECK_FALSE(upload_to("http://127.0.0.1:" + std::to_string(first.port()), error));
+        INFO("status " << status << ", error: " << error);
+        CHECK(first.targets().size() == 1);
+        CHECK(on_8080.targets().empty());
+        CHECK(error.find("HTTP " + std::to_string(status)) != std::string::npos);
+    }
+    SECTION("other answers: retried once on port 8080 of the same host")
+    {
+        const unsigned status = GENERATE(404u, 405u, 413u, 500u, 502u);
+        StatusServer   first(status);
+        REQUIRE(first.ok());
+        std::string error;
+        CHECK(upload_to("http://127.0.0.1:" + std::to_string(first.port()), error));
+        INFO("status " << status << ", error: " << error);
+        CHECK(first.targets().size() == 1);
+        REQUIRE(on_8080.targets().size() == 1);
+        CHECK(on_8080.targets().front() == "/server/files/upload");
+        CHECK(on_8080.hosts().front().rfind("127.0.0.1", 0) == 0);
+    }
+    SECTION("nothing listening: retried on port 8080 of the same host")
+    {
+        unsigned short closed_port = 0;
+        {
+            StatusServer gone(200);
+            REQUIRE(gone.ok());
+            closed_port = gone.port();
+        }
+        std::string error;
+        CHECK(upload_to("http://127.0.0.1:" + std::to_string(closed_port), error));
+        INFO("error: " << error);
+        REQUIRE(on_8080.targets().size() == 1);
+        CHECK(on_8080.targets().front() == "/server/files/upload");
+        CHECK(on_8080.hosts().front().rfind("127.0.0.1", 0) == 0);
+    }
+    boost::system::error_code ec;
+    fs::remove(file, ec);
 }
 
 // ---- 9: OctoPrint's test with an answer that is not OctoPrint's ----
@@ -320,6 +519,30 @@ TEST_CASE("A Klipper script goes to the print host's own scheme and port with it
     }
 }
 
+// perform_job sends its scripts to PrinterStorage::base_url_of(the job's print_host) with the Moonraker
+// key: the same listener the upload goes to, without the address's user:password@.
+TEST_CASE("A print job's script goes to the job's own host, without its userinfo", "[SnapmakerLan][sending][socket]")
+{
+    StatusServer printer(200);
+    REQUIRE(printer.ok());
+    const std::string print_host = "http://fakeuser:fake-pass@127.0.0.1:" + std::to_string(printer.port());
+    const std::string base       = PrinterStorage::base_url_of(print_host);
+    CHECK(base == "http://127.0.0.1:" + std::to_string(printer.port()));
+    std::string error;
+    REQUIRE(GUI::SnapmakerLan::run_script(base, "fake-key", "G28", error));
+    REQUIRE(printer.targets().size() == 1);
+    CHECK(printer.targets().front() == "/printer/gcode/script?script=G28");
+    CHECK(printer.keys().front() == "fake-key");
+    CHECK(printer.auths().front().empty()); // no Basic auth made from a user:password@
+    CHECK(printer.hosts().front().rfind("127.0.0.1", 0) == 0);
+
+    SECTION("an address the API does not answer on sends nothing")
+    {
+        CHECK(PrinterStorage::base_url_of("ws://127.0.0.1:" + std::to_string(printer.port())).empty());
+        CHECK(PrinterStorage::base_url_of("mqtt://127.0.0.1:1884").empty());
+    }
+}
+
 // ---- 12: a U1 upload the printer stops taking ----
 
 TEST_CASE("A U1 upload the printer stops taking gives up instead of hanging", "[SnapmakerLan][sending][socket]")
@@ -344,6 +567,50 @@ TEST_CASE("A U1 upload the printer stops taking gives up instead of hanging", "[
     CHECK_FALSE(ok);
     INFO("error: " << error);
     CHECK(error.find("stopped") != std::string::npos);
+    boost::system::error_code ec;
+    fs::remove(file, ec);
+}
+
+// Once the whole file is out the printer writes it away before it answers, and nothing moves meanwhile:
+// that wait has a limit of its own, UPLOAD_ANSWER_FACTOR times the stall limit.
+TEST_CASE("A U1 upload waits for the printer's answer after the last byte", "[SnapmakerLan][sending][socket]")
+{
+    const fs::path            file = write_test_file("u1_answer", 64);
+    StatusServer              printer(200, 0, std::chrono::milliseconds(3000)); // reads it all, answers 3 s later
+    REQUIRE(printer.ok());
+    GUI::SnapmakerLan::Device d;
+    d.ip   = "127.0.0.1";
+    d.port = printer.port();
+    std::string error;
+    const auto  start = std::chrono::steady_clock::now();
+    const bool  ok    = GUI::SnapmakerLan::upload(d, file.string(), "answer.gcode", nullptr, error, 1);
+    const auto  took  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    INFO("error: " << error << ", took " << took.count() << " ms");
+    CHECK(ok);
+    CHECK(took.count() >= 2900);
+    REQUIRE(printer.targets().size() == 1);
+    CHECK(printer.targets().front() == "/server/files/upload");
+    boost::system::error_code ec;
+    fs::remove(file, ec);
+}
+
+TEST_CASE("A U1 upload whose answer never comes gives up after its own limit", "[SnapmakerLan][sending][socket][slow]")
+{
+    const fs::path            file = write_test_file("u1_noanswer", 64);
+    StatusServer              printer(200, 0, std::chrono::milliseconds(8000)); // reads it all, answers after the 5 s limit
+    REQUIRE(printer.ok());
+    GUI::SnapmakerLan::Device d;
+    d.ip   = "127.0.0.1";
+    d.port = printer.port();
+    std::string error;
+    const auto  start = std::chrono::steady_clock::now();
+    const bool  ok    = GUI::SnapmakerLan::upload(d, file.string(), "noanswer.gcode", nullptr, error, 1);
+    const auto  took  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    INFO("error: " << error << ", took " << took.count() << " ms");
+    CHECK_FALSE(ok);
+    CHECK(error.find("did not answer") != std::string::npos);
+    CHECK(took.count() >= 1000 * GUI::SnapmakerLan::UPLOAD_ANSWER_FACTOR - 100);
+    CHECK(took.count() < 1000 * GUI::SnapmakerLan::UPLOAD_ANSWER_FACTOR + 5000);
     boost::system::error_code ec;
     fs::remove(file, ec);
 }

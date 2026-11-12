@@ -809,12 +809,20 @@ std::string Moonraker::make_url_8080(const std::string& path) const
     return url_on_port_8080(m_host, path);
 }
 
-// Only when nothing answered as Moonraker at the address as given: no HTTP answer at all, or a
-// server there without the API. A printer that did answer - a refused key, a file in use, a full
-// disk - has said why, and a second upload of the whole file to another port only hides it.
+// Not when Moonraker itself has refused the upload and said why: a bad request (400), a refused or
+// missing key (401, 403), a file in use (409). A second upload of the whole file to another port only
+// hides that reason. Everything else is retried as before: no HTTP answer at all, no Moonraker API
+// there (404), and what a front proxy on the first port answers while Moonraker behind it restarts or
+// when its body limit is smaller than the file (405, 413, 5xx) - nobody knows which printers rely on that.
 bool Moonraker::retry_on_port_8080(unsigned status)
 {
-    return status == 0 || status == 404;
+    switch (status) {
+    case 400:
+    case 401:
+    case 403:
+    case 409: return false;
+    default: return true;
+    }
 }
 
 std::string Moonraker::url_on_port_8080(const std::string& host, const std::string& path)

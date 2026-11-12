@@ -195,8 +195,10 @@ void   prefer_lan(nlohmann::json& printers);
 // Multipart upload to /server/files/upload with print=false, so a failed print start still leaves
 // a usable file on the printer. `progress` is called with 0..100.
 // An upload the printer stops taking - nothing sent for `stall_s` seconds - is given up rather than
-// left to hang the send.
-constexpr int UPLOAD_STALL_S = 120;
+// left to hang the send. Once the whole file is sent, the wait for the printer's answer (it writes the
+// file away first) may last UPLOAD_ANSWER_FACTOR times as long.
+constexpr int UPLOAD_STALL_S       = 120;
+constexpr int UPLOAD_ANSWER_FACTOR = 5;
 bool upload(const Device& d, const std::string& source_path, const std::string& filename,
             std::function<void(int)> progress, std::string& error, int stall_s = UPLOAD_STALL_S);
 // GET /server/files/metadata?filename= - proof that the file really landed.
