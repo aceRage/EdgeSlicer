@@ -1113,8 +1113,20 @@ std::string CoolingBuffer::apply_layer_cooldown(
             assert(fpos != nullptr);
             new_feedrate = line->slowdown ? int(floor(60. * line->feedrate + 0.5)) : atoi(fpos);
             if (new_feedrate == current_feedrate) {
+                // A line with an axis word is never dropped, even when it seems not to move the head: the position
+                // this pass tracks runs straight through firmware branches (the H2D tool change repeats its moves to
+                // the tower's avoid position in a power-loss-resume branch), where a move that repeats the one before
+                // it is the only one the printer runs. Only its F word is removed.
+                auto has_axis_word = [line_start, end]() {
+                    for (const char *c = line_start + 2; c < end; ++ c)
+                        if ((c[-1] == ' ' || c[-1] == '\t') &&
+                            (*c == 'X' || *c == 'Y' || *c == 'Z' || *c == 'E' || *c == 'I' || *c == 'J'))
+                            return true;
+                    return false;
+                };
                 // No need to change the F value.
-                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) || line->length == 0.)
+                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) ||
+                    (line->length == 0. && ! has_axis_word()))
                     // Feedrate does not change and this line does not move the print head. Skip the complete G-code line including the G-code comment.
                     end = line_end;
                 else

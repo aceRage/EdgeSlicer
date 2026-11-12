@@ -1370,3 +1370,44 @@ TEST_CASE("Layers slowed for cooling take the time asked", "[Cooling][CoolingBuf
                                             << total / double(layers.size() - 1) << " s; asked 20 s");
     CHECK(shortest >= 20. * 0.999);
 }
+
+// A move that repeats the one before it is kept, only its F word goes. The H2D tool change repeats the moves to the
+// tower's avoid position in its power-loss-resume branch (M622 J1 .. M623): the printer runs either the first or the
+// repeated moves, so the repeated "G1 X.. F30000" (already at that X as far as the cooling pass can tell) must stay.
+// Main kept it only because the line inherited an extruder move; with that fixed, the cooling pass dropped it.
+TEST_CASE("The cooling pass keeps a move that repeats the position, without its F", "[Cooling][CoolingBuffer][Regression]")
+{
+    DynamicPrintConfig config = known_layer_config();
+    config.set_deserialize_strict({{"slow_down_layer_time", "1"}, {"fan_cooling_layer_time", "2"}});
+    const std::string layer =
+        "G1 X10 Y10 F12000\n"
+        "G1 E1.5 F2100\n"
+        "G1 F1800;_EXTRUDE_SET_SPEED\n"
+        "G1 X40 Y10 E1.2\n"
+        ";_EXTRUDE_END\n"
+        "G1 Y320 F30000\n"
+        "G1 X110 F30000\n"
+        "G1 Y265 F18000\n"
+        "M622 J1\n"
+        "G1 Y320 F30000\n"
+        "G1 X110 F30000\n"
+        "G1 Y265 F18000\n"
+        "M623\n"
+        "G1 F2400\n"
+        "G1 F2400\n";
+    const std::string out = cool_one_layer(config, layer, 5);
+    INFO(out);
+    int x110 = 0, f_only = 0;
+    std::istringstream in(out);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.rfind("G1 X110", 0) == 0)
+            ++x110;
+        if (line.rfind("G1 F", 0) == 0 && line.find_first_of("XYZE") == std::string::npos)
+            ++f_only;
+    }
+    CHECK(x110 == 2);
+    // A line with nothing but an F word that sets the F in force is still dropped.
+    // Here "G1 F1800" that opens the path and the first "G1 F2400"; the second "G1 F2400" changes nothing.
+    CHECK(f_only == 2);
+}
