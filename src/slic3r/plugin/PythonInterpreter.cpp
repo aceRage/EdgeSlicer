@@ -602,8 +602,10 @@ bool PythonInterpreter::initialize()
         PyConfig_InitPythonConfig(&config);
         // Do not let the host process's PYTHONPATH or user site-packages override the bundled
         // runtime used by plugins.
-        config.use_environment    = 0;
+        config.use_environment     = 0;
         config.user_site_directory = 0;
+        // Plugin loads must import the hashed source, not a planted or stale .pyc.
+        config.write_bytecode      = 0;
 
         BOOST_LOG_TRIVIAL(debug) << "Calling PyConfig_SetBytesString with home=" << python_home;
         PyStatus status = PyConfig_SetBytesString(&config, &config.home, python_home.c_str());
@@ -684,6 +686,8 @@ bool PythonInterpreter::initialize()
             }
             Py_DECREF(sys);
         }
+
+        PySys_SetObject("dont_write_bytecode", Py_True);
 
         BOOST_LOG_TRIVIAL(info) << "Python " << Py_GetVersion() << " initialized successfully";
 
@@ -1164,6 +1168,86 @@ void PythonInterpreter::unload_module(PyObject*                      module,
     Py_XDECREF(module);
 }
 
+void PythonInterpreter::invalidate_plugin_bytecode_caches(const std::string& plugin_root)
+{
+    if (plugin_root.empty() || !m_initialized.load(std::memory_order_acquire))
+        return;
+
+    namespace fs = boost::filesystem;
+    std::vector<fs::path> py_files;
+    std::vector<fs::path> dirs{fs::path(plugin_root)};
+    boost::system::error_code ec;
+    while (!dirs.empty()) {
+        const fs::path dir = dirs.back();
+        dirs.pop_back();
+        fs::directory_iterator it(dir, ec);
+        if (ec)
+            continue;
+        const fs::directory_iterator end;
+        for (; it != end; it.increment(ec)) {
+            if (ec)
+                break;
+            const fs::path    path = it->path();
+            const std::string name = path.filename().string();
+            if (name == "__pycache__")
+                continue;
+            ec.clear();
+            const fs::file_status st = fs::symlink_status(path, ec);
+            if (ec)
+                continue;
+            if (fs::is_directory(st) && !fs::is_symlink(st)) {
+                dirs.push_back(path);
+                continue;
+            }
+            if (fs::is_regular_file(st) && path.extension() == ".py")
+                py_files.push_back(path);
+        }
+    }
+
+    PythonGILState gil;
+    if (!gil)
+        return;
+
+    PyObject* util = PyImport_ImportModule("importlib.util");
+    if (!util) {
+        PyErr_Clear();
+        return;
+    }
+
+    for (const fs::path& py : py_files) {
+        PyObject* source = PyUnicode_DecodeFSDefault(py.string().c_str());
+        if (!source) {
+            PyErr_Clear();
+            continue;
+        }
+        PyObject* cached = PyObject_CallMethod(util, "cache_from_source", "O", source);
+        Py_DECREF(source);
+        if (!cached) {
+            PyErr_Clear();
+            continue;
+        }
+        if (const char* cached_path = PyUnicode_AsUTF8(cached)) {
+            boost::system::error_code remove_ec;
+            fs::remove(fs::path(cached_path), remove_ec);
+        } else {
+            PyErr_Clear();
+        }
+        Py_DECREF(cached);
+    }
+    Py_DECREF(util);
+
+    if (PyObject* importlib = PyImport_ImportModule("importlib")) {
+        PyObject* ignored = PyObject_CallMethod(importlib, "invalidate_caches", nullptr);
+        if (ignored)
+            Py_DECREF(ignored);
+        else
+            PyErr_Clear();
+        Py_DECREF(importlib);
+    } else {
+        PyErr_Clear();
+    }
+}
+
 PyObject* PythonInterpreter::load_module_from_file(const std::string&       file_path,
                                                    std::string&              error,
                                                    std::vector<std::string>* plugin_paths,
@@ -1287,10 +1371,11 @@ PyObject* PythonInterpreter::load_module_from_whl(const std::string& file_path,
 
     fs::path extract_dir = whl_path.parent_path() / "__whl_extracted__" / pkg_name;
 
-    if (!fs::exists(extract_dir)) {
-        if (!extract_zip_to_directory(whl_path, extract_dir, error))
-            return nullptr;
-    }
+    boost::system::error_code ec;
+    fs::remove_all(extract_dir, ec);
+    if (!extract_zip_to_directory(whl_path, extract_dir, error))
+        return nullptr;
+    invalidate_plugin_bytecode_caches(extract_dir.string());
 
     return load_module_from_directory(extract_dir.string(), pkg_name, error, plugin_paths, plugin_modules);
 }

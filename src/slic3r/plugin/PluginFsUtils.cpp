@@ -512,6 +512,7 @@ bool parse_pep723_toml(const std::string& toml_content,
                        std::string& out_author,
                        std::string& out_version,
                        std::string& out_orca_api,
+                       std::string& out_type,
                        std::string& error)
 {
     out_deps.clear();
@@ -521,6 +522,7 @@ bool parse_pep723_toml(const std::string& toml_content,
     out_author.clear();
     out_version.clear();
     out_orca_api.clear();
+    out_type.clear();
 
     TomlSection section = TomlSection::Root;
 
@@ -599,6 +601,8 @@ bool parse_pep723_toml(const std::string& toml_content,
                 if (out_orca_api.empty())
                     out_orca_api = unquote_toml_string(val);
             }
+            else if (key == "type")
+                out_type = unquote_toml_string(val);
         }
     }
 
@@ -805,6 +809,54 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
     }
 
     return true;
+}
+
+void discard_stale_plugin_import_artifacts(const boost::filesystem::path& plugin_root)
+{
+    namespace fs = boost::filesystem;
+    if (plugin_root.empty())
+        return;
+
+    boost::system::error_code ec;
+    fs::remove_all(plugin_root / "__whl_extracted__", ec);
+
+    std::vector<fs::path> dirs{plugin_root};
+    std::vector<fs::path> kill;
+    while (!dirs.empty()) {
+        const fs::path dir = dirs.back();
+        dirs.pop_back();
+        fs::directory_iterator it(dir, ec);
+        if (ec)
+            continue;
+        const fs::directory_iterator end;
+        for (; it != end; it.increment(ec)) {
+            if (ec)
+                break;
+            const fs::path    path = it->path();
+            const std::string name = path.filename().string();
+            ec.clear();
+            const fs::file_status st = fs::symlink_status(path, ec);
+            if (ec)
+                continue;
+            if (name == "__pycache__") {
+                kill.push_back(path);
+                continue;
+            }
+            if (fs::is_directory(st) && !fs::is_symlink(st)) {
+                dirs.push_back(path);
+                continue;
+            }
+            if (!fs::is_regular_file(st) || name.size() < 4)
+                continue;
+            const std::string ext = name.substr(name.size() - 4);
+            if (ext == ".pyc" || ext == ".pyo")
+                kill.push_back(path);
+        }
+    }
+    for (const fs::path& path : kill) {
+        ec.clear();
+        fs::remove_all(path, ec);
+    }
 }
 
 bool read_install_state(const boost::filesystem::path& plugin_dir, PluginDescriptor& entry)
@@ -1184,7 +1236,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
     if (!pep723_content.empty()) {
         std::string pep723_error;
         std::string requires_python;
-        std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api;
+        std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api, pep_type;
         if (!parse_pep723_toml(pep723_content,
                                descriptor.dependencies,
                                requires_python,
@@ -1193,6 +1245,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
                                pep_author,
                                pep_version,
                                pep_orca_api,
+                               pep_type,
                                pep723_error)) {
             error = "Failed to parse PEP 723 metadata: " + pep723_error;
             return false;
@@ -1208,6 +1261,8 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
         if (!pep_author.empty())          descriptor.author     = pep_author;
         if (!pep_version.empty())         descriptor.version    = pep_version;
         if (!pep_orca_api.empty())        descriptor.required_orca_api = pep_orca_api;
+        if (!pep_type.empty() && descriptor.display_types.empty())
+            descriptor.display_types.push_back(pep_type);
     }
 
     // Validate that required identity fields are present (either from PEP 723 or

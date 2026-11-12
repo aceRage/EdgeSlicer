@@ -202,6 +202,8 @@ bool load_and_wait(PluginManager&           manager,
                    std::string&             error,
                    std::vector<std::string> capabilities_to_enable = {})
 {
+    if (!approve_plugin_for_test(plugin_key, error))
+        return false;
     manager.load_plugin(plugin_key, /*skip_deps=*/true, std::move(capabilities_to_enable));
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }
@@ -1003,6 +1005,9 @@ class SlowPackage(orca.base):
 
     PluginManager& manager = PluginManager::instance();
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    std::string pin_error;
+    REQUIRE(approve_plugin_for_test("Slow_Load_Plugin", pin_error));
 
     manager.load_plugin("Slow_Load_Plugin", /*skip_deps=*/true);
 

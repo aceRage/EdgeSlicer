@@ -23,6 +23,7 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_scripts.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_audit.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_permission_validation.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_trust.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp

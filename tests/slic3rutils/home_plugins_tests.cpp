@@ -26,6 +26,21 @@ static PluginView sample_view()
     return v;
 }
 
+TEST_CASE("home plugins: trust labels pass through to the card", "[HomePlugins]")
+{
+    PluginView signed_view = sample_view();
+    signed_view.trust      = "Signed by Edge Test";
+    CHECK(plugin_card(signed_view)["trust"] == "Signed by Edge Test");
+
+    PluginView local = sample_view();
+    local.trust      = "Approved locally";
+    CHECK(plugin_card(local)["trust"] == "Approved locally");
+
+    PluginView untrusted = sample_view();
+    untrusted.trust      = "Untrusted";
+    CHECK(plugin_card(untrusted)["trust"] == "Untrusted");
+}
+
 TEST_CASE("home plugins: a card carries display fields only", "[HomePlugins]")
 {
     const json card = plugin_card(sample_view());

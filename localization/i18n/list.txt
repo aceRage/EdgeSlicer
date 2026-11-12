@@ -220,3 +220,6 @@ src/slic3r/GUI/PluginPermissionValidation.cpp
 src/slic3r/GUI/PluginsInspectorLogic.cpp
 src/slic3r/GUI/PluginsInspectorDialog.cpp
 src/slic3r/plugin/PluginAuditManager.cpp
+src/slic3r/plugin/PluginTrust.cpp
+src/slic3r/plugin/PluginLoader.cpp
+src/slic3r/GUI/HomePlugins.cpp

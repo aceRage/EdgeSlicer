@@ -11,7 +11,8 @@
 // every build, including EDGE_PYTHON_PLUGINS=OFF:
 //   * a card carries name / version / author / types / status, never a package path,
 //   * the page may only name plugin_keys the host itself listed,
-//   * trust (Phase 5) and catalog (Phase 11) have reserved keys, left empty / false here.
+//   * trust (Phase 5) is a display string the host fills: "Signed by …" / "Approved locally" /
+//     "Untrusted". Catalog (Phase 11) stays false here.
 namespace Slic3r {
 namespace HomeTab {
 
@@ -37,7 +38,8 @@ struct PluginView
     bool                               loading { false };
     std::string                        error;
     bool                               update_available { false };
-    // Phase 5 slot: "Signed by …" / "Approved locally" / "Untrusted". Empty until then.
+    // Phase 5: "Signed by …" / "Approved locally" / "Untrusted". Empty only when the host
+    // has not evaluated the package yet (the page still has a reserved key).
     std::string                        trust;
     // Phase 6/8 label: early slicing-pipeline steps stay in-process.
     bool                               in_process_pipeline { false };

@@ -12,6 +12,12 @@
 
 #include "test_utils.hpp"
 
+#ifdef EDGE_PYTHON_PLUGINS
+#include <slic3r/plugin/PluginDescriptor.hpp>
+#include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/PluginTrust.hpp>
+#endif
+
 // Catch2 v2 has no SKIP(); keep the Orca tests' SKIP("...") calls compiling.
 #ifndef SKIP
 #define SKIP(msg) do { WARN(msg); return; } while (0)
@@ -162,5 +168,24 @@ struct ScopedResourcesDir
     ScopedResourcesDir(const ScopedResourcesDir&)            = delete;
     ScopedResourcesDir& operator=(const ScopedResourcesDir&) = delete;
 };
+
+#ifdef EDGE_PYTHON_PLUGINS
+// Phase 5: enable/run refuse an unpinned local package. Existing Catch2 loads pin the discovered
+// entry so they still exercise Python, not the trust prompt.
+inline bool approve_plugin_for_test(const std::string& plugin_key, std::string& error)
+{
+    PluginDescriptor descriptor;
+    if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        error = "plugin not discovered: " + plugin_key;
+        return false;
+    }
+    const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                                         boost::filesystem::path(descriptor.plugin_root);
+    const std::string hash = plugin_trust::sha256_plugin_tree(root, error);
+    if (hash.empty())
+        return false;
+    return plugin_trust::pin_hash(descriptor.plugin_key, hash, error);
+}
+#endif
 
 } // namespace Slic3r

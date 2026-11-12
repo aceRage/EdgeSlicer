@@ -8,6 +8,7 @@
 #include "OrcaApiVersion.hpp"
 #include "PluginConfig.hpp"
 #include "PluginFsUtils.hpp"
+#include "PluginTrust.hpp"
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
 #include "libslic3r/Utils.hpp"
@@ -186,13 +187,13 @@ bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
             continue;
 
         const fs::path dep_dir = plugin_dir / "__whl_extracted__" / it->path().stem().string();
-        if (!fs::exists(dep_dir)) {
-            std::string extract_error;
-            if (!extract_zip_to_directory(it->path(), dep_dir, extract_error)) {
-                // TRN %1% is the dependency file, %2% the error detail.
-                error = GUI::format(_u8L("Failed to extract plugin .whl dependency %1%: %2%"), it->path().string(), extract_error);
-                return false;
-            }
+        boost::system::error_code ec;
+        fs::remove_all(dep_dir, ec);
+        std::string extract_error;
+        if (!extract_zip_to_directory(it->path(), dep_dir, extract_error)) {
+            // TRN %1% is the dependency file, %2% the error detail.
+            error = GUI::format(_u8L("Failed to extract plugin .whl dependency %1%: %2%"), it->path().string(), extract_error);
+            return false;
         }
 
         std::string syspath_error;
@@ -834,6 +835,11 @@ bool load(const PluginDescriptor&                          descriptor,
     plugin.descriptor  = descriptor;
     plugin.module_name = plugin_module_name(descriptor);
 
+    const boost::filesystem::path import_root = !descriptor.plugin_root.empty() ?
+        boost::filesystem::path(descriptor.plugin_root) :
+        boost::filesystem::path(descriptor.entry_path).parent_path();
+    discard_stale_plugin_import_artifacts(import_root);
+
     if (!skip_deps) {
         std::string pkg_install_error;
         if (!install_packages(descriptor.dependencies, pkg_install_error)) {
@@ -851,6 +857,8 @@ bool load(const PluginDescriptor&                          descriptor,
         error = std::move(wheel_error);
         return false;
     }
+
+    interpreter.invalidate_plugin_bytecode_caches(import_root.string());
 
     std::string load_error;
     PyObject*   module = import_plugin_module(descriptor, plugin.plugin_sys_paths, plugin.plugin_modules, load_error);
@@ -1312,6 +1320,24 @@ bool install_plugin(const boost::filesystem::path& filepath,
         }
         // TRN %1% is a file path, %2% the system error message.
         return fail(GUI::format(_u8L("Failed to copy plugin file to %1%: %2%"), dest_file.string(), ec.message()));
+    }
+
+    const fs::path source_sig = plugin_trust::signature_path(source_path);
+    ec.clear();
+    if (fs::exists(source_sig, ec) && !ec && fs::is_regular_file(source_sig, ec) && !ec) {
+        const fs::path dest_sig = plugin_trust::signature_path(dest_file);
+        fs::copy_file(source_sig, dest_sig, ec);
+        if (ec) {
+            if (backup_created) {
+                boost::system::error_code restore_ec;
+                fs::remove_all(final_dir, restore_ec);
+                fs::rename(backup_dir, final_dir, restore_ec);
+            } else {
+                boost::system::error_code remove_ec;
+                fs::remove_all(final_dir, remove_ec);
+            }
+            return fail(GUI::format(_u8L("Failed to copy plugin signature to %1%: %2%"), dest_sig.string(), ec.message()));
+        }
     }
 
     // Update entry_path to the installed location.

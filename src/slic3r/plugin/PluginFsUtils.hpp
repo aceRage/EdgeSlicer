@@ -95,6 +95,10 @@ bool is_safe_relative_path(const boost::filesystem::path& path);
 bool is_valid_plugin_id(const std::string& id);
 bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boost::filesystem::path& destination, std::string& error);
 
+// Drop host-written import artifacts so the next load imports the hashed .py / .whl bytes:
+// removes `__whl_extracted__`, `__pycache__`, and loose `.pyc`/`.pyo` under `plugin_root`.
+void discard_stale_plugin_import_artifacts(const boost::filesystem::path& plugin_root);
+
 // Read PEP 723 inline script metadata from a .py plugin file.
 // Populates metadata.dependencies and local identity fallbacks.
 // Returns true on success (including when no PEP 723 block is found — deps will be empty).
