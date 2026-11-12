@@ -41,7 +41,7 @@ bool AstroBox::test(wxString &msg) const
     bool res = true;
     auto url = make_url("api/version");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_for_log(url);
 
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -113,7 +113,7 @@ bool AstroBox::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3%, filename: %4%, path: %5%, print: %6%")
         % name
         % upload_data.source_path
-        % url
+        % Http::url_for_log(url)
         % upload_filename.string()
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");

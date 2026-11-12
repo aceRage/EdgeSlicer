@@ -70,7 +70,7 @@ bool MKS::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn er
 		% upload_data.source_path
 		% upload_data.upload_path
 		% (upload_data.post_action == PrintHostPostUploadAction::StartPrint)
-		% upload_cmd;
+		% Http::url_for_log(upload_cmd);
 
 	auto http = Http::post(std::move(upload_cmd));
 	apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
