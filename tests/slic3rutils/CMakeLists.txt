@@ -202,7 +202,7 @@ endif ()
 # lives in <prefix>/include/msvc rather than <prefix>/include, and only wxWidgets_USE_FILE adds it.
 # find_package(wxWidgets) runs in src/, whose variables do not reach this sibling directory, so it
 # is repeated here - it is cached, so this costs nothing.
-find_package(wxWidgets 3.1 QUIET COMPONENTS html adv gl core base webview aui net media)
+find_package(wxWidgets 3.1 QUIET COMPONENTS stc html adv gl core base webview aui net media)
 if (wxWidgets_FOUND)
     # Set on the target, not through wxWidgets_USE_FILE: that one calls include_directories(),
     # which only affects targets created after it, and this target already exists above.
