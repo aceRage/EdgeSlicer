@@ -79,6 +79,7 @@ add_executable(${_TEST_NAME}_tests
 	test_modifier_effect.cpp
 	test_tree_support_determinism.cpp
 	test_tree_support.cpp
+	test_organic_foot_gap.cpp
 	test_support_interface.cpp
 	test_support_patterns.cpp
 	test_stabilizers.cpp
