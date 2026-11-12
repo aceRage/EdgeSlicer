@@ -3669,6 +3669,16 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                     continue;
                 }
 
+                /* A rack AMS (Bambu Studio DevAmsType ZMULTI_A = 6, the H3C's AMS 3H; ZMULTI_B = 7) is not
+                 * supported yet. Its slots use another numbering (tray bits 28 + slot, mapping index 28 + slot,
+                 * nine slots, drying zones), so listing it would give the mapping and the filament sync wrong
+                 * slot numbers for the printer. Leave it out until that numbering is ported. */
+                if (type_id == 6 || type_id == 7) {
+                    if (log_first_time("rack_ams_skipped|" + dev_id + "|" + std::to_string(type_id)))
+                        BOOST_LOG_TRIVIAL(info) << "parse_json: rack AMS (type " << type_id << ") not supported yet, not listed";
+                    continue;
+                }
+
                 ams_id_set.erase(ams_id);
                 Ams* curr_ams = nullptr;
                 auto ams_it = amsList.find(ams_id);

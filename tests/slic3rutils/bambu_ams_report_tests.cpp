@@ -59,47 +59,133 @@ json unit(const std::string& id, const std::string& info, int trays, int loaded)
     return u;
 }
 
-// The new-protocol flag strings and device block. aux bits 12..13 = 1: an SD card, normal.
-// device.nozzle: the toolhead nozzle (id 0) and nine rack nozzles (ids 0x10 + n), as an H3C sends.
+// An H3C (N10) with the AMS 3H attached: print.ams, print.vir_slot and part of print.device from a
+// real push_status, with every serial, tag, uuid and name replaced by a fake value. The AMS 3H is
+// unit "32", info "240002006" (type 6 in bits 0..3, extruder 0 in bits 8..11), nine trays with
+// slots 1-4 loaded: ams_exist_bits bit 13 and tray_exist_bits bits 28..31, past a 32-bit long. Its
+// humidity and temperature are only in zone_info, not on the unit. One extruder (snow 0x2001 = AMS
+// 0x20 slot 1) and nine rack nozzles (ids 0x10..0x18).
+const char* const H3C_REPORT = R"JSON(
+{"ams":{"ams":[{"dry_info":"1","id":"32","info":"240002006","tray":[{"bed_temp":"0","bed_temp_type":"0",
+"cali_idx":-1,"cols":["000000FF"],"ctype":2,"drying_temp":"0","drying_time":"0","id":"0","ins_cyc":3,
+"nozzle_temp_max":"240","nozzle_temp_min":"190","print_status":0,"remain":-1,"remain_g":-1,"state":27,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"000000FF","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"GFA00","tray_sub_brands":"","tray_type":"PLA",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["DE4343FF"],"ctype":2,"drying_temp":"0","drying_time":"0","id":"1","ins_cyc":4,
+"nozzle_temp_max":"240","nozzle_temp_min":"190","print_status":0,"remain":-1,"remain_g":-1,"state":27,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"DE4343FF","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"GFA00","tray_sub_brands":"","tray_type":"PLA",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"2","ins_cyc":1,"nozzle_temp_max":"0",
+"nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":27,"tag_uid":"0000000000000000",
+"total_len":330000,"tray_color":"00000000","tray_diameter":"1.75","tray_id_name":"FAKE-00","tray_info_idx":"",
+"tray_sub_brands":"","tray_type":"","tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"3","ins_cyc":3,"nozzle_temp_max":"0",
+"nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":27,"tag_uid":"0000000000000000",
+"total_len":330000,"tray_color":"00000000","tray_diameter":"1.75","tray_id_name":"FAKE-00","tray_info_idx":"",
+"tray_sub_brands":"","tray_type":"","tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"id":"4","print_status":0,"state":160},{"id":"5",
+"print_status":0,"state":160},{"id":"6","print_status":0,"state":160},{"id":"7","print_status":0,"state":160},
+{"id":"8","print_status":0,"state":160}],"zone_info":[{"dry_setting":{"dry_duration":-1,"dry_filament":"",
+"dry_temperature":-1},"dry_sf_reason":[],"dry_time":0,"humidity":"1","humidity_raw":"50","info":"240002006",
+"temp":"25.7","zone_dry_info":"1","zone_id":0,"zone_slots":[5,7]},{"dry_setting":{"dry_duration":-1,
+"dry_filament":"","dry_temperature":-1},"dry_sf_reason":[],"dry_time":0,"humidity":"1","humidity_raw":"47",
+"info":"240002006","temp":"25.2","zone_dry_info":"0","zone_id":1,"zone_slots":[0,1,2,3,4,6,8]}]}],
+"ams_exist_bits":"2000","ams_exist_bits_raw":"2000","cali_id":255,"cali_stat":0,"cfs":[2,10,5,7,16],
+"cfs_m":[[2,10,5,7],[2,10,5,7,16]],"csl":[8192,8193],"insert_flag":true,"power_on_flag":false,"stat":0,
+"tray_exist_bits":"f0000000","tray_hall_out_bits":"f0000000","tray_is_bbl_bits":"f0000000","tray_now":"255",
+"tray_pre":"255","tray_read_done_bits":"f0000000","tray_reading_bits":"0","tray_tar":"1","unbind_ams_stat":0,
+"version":9340},"device":{"bed":{"info":{"temp":26},"state":0},"bed_temp":26,"ctc":{"info":{"temp":24},
+"state":0},"extruder":{"info":[{"hnow":0,"hpre":0,"htar":0,"id":0,"info":1547,"snow":8193,"spre":8193,
+"star":8193,"stat":393984,"temp":27,"z_bias":0.0}],"state":1},"holder":{"info":1,"info2":16355,"job":0,
+"pos":2,"stat":0,"step":[0]},"nozzle":{"exist":33488896,"hc":511,"info":[{"addr_id":0,"base_type":0,
+"bind_ams":[],"c_t":1,"color_m":"000000FF","diameter":0.4,"fila_id":"GFA00","id":16,"p_t":0,"rfid":6,
+"sn":"FAKESN00000000","snow":8192,"stat":161,"temp":27,"tm":350,"type":"HS01","wear":0.0},{"addr_id":1,
+"base_type":0,"c_t":1,"color_m":"DE4343FF","diameter":0.4,"fila_id":"GFA00","id":17,"p_t":0,"rfid":6,
+"sn":"FAKESN00000000","snow":8193,"stat":161,"temp":27,"tm":350,"type":"HS01","wear":0.0},{"addr_id":2,
+"base_type":0,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":18,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":65023,"stat":1,"temp":26,"tm":350,"type":"HS01","wear":0.0},{"addr_id":3,
+"base_type":0,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":19,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":64767,"stat":1,"temp":26,"tm":350,"type":"HS01","wear":0.0},{"addr_id":4,
+"base_type":0,"c_t":1,"color_m":"00000000","diameter":0.4,"fila_id":"","id":20,"p_t":2016,"rfid":0,
+"sn":"FAKESN00000000","snow":64511,"stat":1,"temp":27,"tm":350,"type":"HS01","wear":0.0},{"addr_id":5,
+"base_type":0,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":21,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":64255,"stat":1,"temp":26,"tm":350,"type":"HS01","wear":0.0},{"addr_id":6,
+"base_type":0,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":22,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":63999,"stat":1,"temp":26,"tm":350,"type":"HS01","wear":0.0},{"addr_id":7,
+"base_type":1,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":23,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":63488,"stat":1,"temp":26,"tm":350,"type":"HT01","wear":0.0},{"addr_id":8,
+"base_type":0,"c_t":0,"color_m":"00000000","diameter":0.4,"fila_id":"","id":24,"p_t":0,"rfid":0,
+"sn":"FAKESN00000000","snow":63487,"stat":1,"temp":26,"tm":350,"type":"HS01","wear":0.0}],"refresh_list":[],
+"src_id":255,"state":4096,"tar_id":255},"storage":[{"name":"sdcard","total":"120112000","used":"64"}],
+"type":1},"vir_slot":[{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,"cols":["00000000"],"ctype":0,
+"drying_temp":"0","drying_time":"0","id":"247","ins_cyc":1,"nozzle_temp_max":"0","nozzle_temp_min":"0",
+"print_status":0,"remain":-1,"remain_g":-1,"state":1,"tag_uid":"0000000000000000","total_len":330000,
+"tray_color":"00000000","tray_diameter":"1.75","tray_id_name":"FAKE-00","tray_info_idx":"",
+"tray_sub_brands":"","tray_type":"","tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"248","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"249","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"250","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"251","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"252","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"253","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"254","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"},{"bed_temp":"0","bed_temp_type":"0","cali_idx":-1,
+"cols":["00000000"],"ctype":0,"drying_temp":"0","drying_time":"0","id":"255","ins_cyc":1,
+"nozzle_temp_max":"0","nozzle_temp_min":"0","print_status":0,"remain":-1,"remain_g":-1,"state":1,
+"tag_uid":"0000000000000000","total_len":330000,"tray_color":"00000000","tray_diameter":"1.75",
+"tray_id_name":"FAKE-00","tray_info_idx":"","tray_sub_brands":"","tray_type":"",
+"tray_uuid":"00000000000000000000000000000000","tray_weight":"-1",
+"xcam_info":"00000000000000000000000000000000"}]}
+)JSON";
+
+// The new-protocol flag strings are made up: empty, apart from aux bits 12..13 = 1 (an SD card, normal).
 json n10_print()
 {
-    json p;
+    json p    = json::parse(H3C_REPORT);
     p["cfg"]  = "";
     p["fun"]  = "";
     p["aux"]  = "1000";
     p["stat"] = "";
-
-    json nozzles = json::array();
-    nozzles.push_back({ { "id", 0 }, { "type", "HS01" }, { "diameter", 0.4 } });
-    for (int n = 0; n < 9; ++n)
-        nozzles.push_back({ { "id", 0x10 + n }, { "type", "HS01" }, { "diameter", 0.4 } });
-
-    json extruder_info = json::array();
-    extruder_info.push_back({ { "id", 0 }, { "info", 8 }, { "temp", 29 }, { "spre", 0xFFFF }, { "snow", 0xFFFF }, { "star", 0xFFFF },
-                              { "hnow", 0 }, { "htar", 0 }, { "stat", 0 } });
-
-    p["device"] = {
-        { "nozzle", { { "exist", 1 }, { "state", 0 }, { "info", nozzles } } },
-        { "extruder", { { "state", 1 }, { "info", extruder_info } } },
-        { "ctc", { { "state", 0 }, { "info", { { "temp", 35 } } } } },
-    };
-
-    // The AMS 3H: type 6 in info bits 0..3, extruder 0xE in bits 8..11 (Bambu Studio DevAmsType
-    // ZMULTI_A; ams_exist_bits bit 13, tray bits 28 + slot). Nine slots, slots 1-4 loaded, so
-    // tray_exist_bits has bit 31 set: past a 32-bit long.
-    p["ams"] = {
-        { "ams", json::array({ unit("0", "E06", 9, 4) }) },
-        { "ams_exist_bits", "2000" },
-        { "tray_exist_bits", "F0000000" },
-        { "tray_is_bbl_bits", "F0000000" },
-        { "tray_read_done_bits", "F0000000" },
-        { "tray_reading_bits", "0" },
-        { "tray_now", "255" },
-        { "tray_tar", "255" },
-        { "version", 4 },
-        { "insert_flag", true },
-        { "power_on_flag", false },
-    };
     return p;
 }
 
@@ -150,19 +236,37 @@ TEST_CASE("An H3C report with the AMS 3H loaded is read to the end", "[BambuAmsR
     CHECK(obj.tray_exist_bits == 0xF0000000LL);
     CHECK(obj.tray_is_bbl_bits == 0xF0000000LL);
     CHECK(obj.tray_read_done_bits == 0xF0000000LL);
-    CHECK(obj.ams_version == 4);
-    // Phase 0 keeps the AMS 3H hidden (extruder 0xE is still skipped): its slots must not reach
-    // the mapping or the filament sync until the tray numbering for it is ported.
+    CHECK(obj.tray_reading_bits == 0);
+    CHECK(obj.ams_version == 9340);
+    CHECK(obj.m_tray_tar == "1");
+    // Phase 0 keeps the AMS 3H out of the AMS list: its slots must not reach the mapping or the
+    // filament sync until its slot numbering is ported.
     CHECK(obj.amsList.empty());
 
+    // What parse_json reads after the AMS block, which the overflow used to skip.
     REQUIRE_NOTHROW(obj.parse_new_info(print));
     CHECK(obj.is_enable_np);
     CHECK(obj.m_extder_data.total_extder_count == 1);
-    CHECK(obj.m_extder_data.extders.size() == 1);
-    CHECK(obj.m_nozzle_data.nozzles.size() == 10);
+    REQUIRE(obj.m_extder_data.extders.size() == 1);
+    CHECK(obj.m_extder_data.extders[0].snow.ams_id == "32");
+    CHECK(obj.m_extder_data.extders[0].snow.slot_id == "1");
+    CHECK(obj.m_nozzle_data.nozzles.size() == 9);
     CHECK(obj.has_nozzle_rack());
-    CHECK(obj.chamber_temp == Approx(35.0f));
+    CHECK(obj.chamber_temp == Approx(24.0f));
     CHECK(obj.sdcard_state == MachineObject::SdcardState::HAS_SDCARD_NORMAL);
+
+    // A second push changes nothing and still keeps the AMS 3H out.
+    REQUIRE_NOTHROW(obj.parse_ams_report(print, false));
+    CHECK_FALSE(obj.is_ams_need_update);
+    CHECK(obj.amsList.empty());
+}
+
+TEST_CASE("A rack AMS that was listed earlier is dropped from the AMS list", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000002", "127.0.0.1" };
+    obj.amsList["32"] = new Ams("32", 0, 6);
+    REQUIRE_NOTHROW(obj.parse_ams_report(n10_print(), false));
+    CHECK(obj.amsList.empty());
 }
 
 TEST_CASE("An H2D-style AMS report parses as before", "[BambuAmsReport]")
