@@ -514,10 +514,11 @@ private:
                                    const ConstExtrusionEntitiesPtr& region_perimeters = {},
                                    const WipeInwardSupport* wipe_support = nullptr);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
-    // should be executed
+    // should be executed, and which of them the loop is (loop_in_region), so that it is not taken for its own neighbour
     std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.,
                                  const ConstExtrusionEntitiesPtr& region_perimeters = {},
-                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr);
+                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr,
+                                 const ExtrusionEntity* loop_in_region = nullptr);
     std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
     std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
     
