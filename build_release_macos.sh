@@ -118,6 +118,21 @@ DEPS="$DEPS_BUILD_DIR/OrcaSlicer_deps"
 # For Multi-config generators like Ninja and Xcode
 export BUILD_DIR_CONFIG_SUBDIR="/$BUILD_CONFIG"
 
+# Pin the unversioned SDK path. Left to itself CMake records a versioned folder (MacOSX27.0.sdk) in
+# CMakeCache and in the deps' installed curl-config, .pc and .cmake files, and an Xcode update that
+# drops that folder breaks every later build against them. MacOSX.sdk stays across Xcode updates.
+MAC_SDK_PATH="$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+SLICER_SYSROOT_ARGS=()
+DEPS_SYSROOT_ARGS=()
+if [ -d "$MAC_SDK_PATH" ]; then
+    SLICER_SYSROOT_ARGS=(-DCMAKE_OSX_SYSROOT="$MAC_SDK_PATH")
+    # Without -t the deps infer their deployment target from a versioned SDK name, so only then
+    # is the versioned default kept.
+    if [ -n "$OSX_DEPLOYMENT_TARGET" ]; then
+        DEPS_SYSROOT_ARGS=(-DCMAKE_OSX_SYSROOT="$MAC_SDK_PATH")
+    fi
+fi
+
 function build_deps() {
     # iterate over two architectures: x86_64 and arm64
     for _ARCH in x86_64 arm64; do
@@ -140,7 +155,8 @@ function build_deps() {
                         -DOPENSSL_ARCH="darwin64-${_ARCH}-cc" \
                         -DCMAKE_BUILD_TYPE="$BUILD_CONFIG" \
                         -DCMAKE_OSX_ARCHITECTURES:STRING="${_ARCH}" \
-                        -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}"
+                        -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}" \
+                        "${DEPS_SYSROOT_ARGS[@]}"
                 fi
                 cmake --build . --config "$BUILD_CONFIG" --target deps
             )
@@ -185,7 +201,8 @@ function build_slicer() {
                     -DCMAKE_INSTALL_RPATH="${DEPS}/usr/local" \
                     -DCMAKE_MACOSX_BUNDLE=ON \
                     -DCMAKE_OSX_ARCHITECTURES="${_ARCH}" \
-                    -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}"
+                    -DCMAKE_OSX_DEPLOYMENT_TARGET="${OSX_DEPLOYMENT_TARGET}" \
+                    "${SLICER_SYSROOT_ARGS[@]}"
             fi
             cmake --build . --config "$BUILD_CONFIG" --target "$SLICER_BUILD_TARGET"
             # Explicitly build profile_validator if ORCA_TOOLS is enabled
