@@ -157,6 +157,7 @@ add_executable(${_TEST_NAME}_tests
 	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
+	test_gcode_template_lint.cpp
 	test_polygon.cpp
 	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp

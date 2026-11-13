@@ -51,7 +51,7 @@ Snapmaker_Orca_add_cmake_project(
         -DwxUSE_LIBXPM=builtin
         -DwxUSE_LIBSDL=OFF
         -DwxUSE_XTEST=OFF
-        -DwxUSE_STC=OFF
+        -DwxUSE_STC=ON
         -DwxUSE_AUI=ON
         -DwxUSE_LIBPNG=sys
         -DwxUSE_ZLIB=sys
