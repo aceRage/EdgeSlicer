@@ -2893,7 +2893,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
         std::vector<Preset const *> selected_filament_presets;
         for (std::pair<::CheckBox *, Preset const *> filament_preset : m_filament_preset) {
             if (filament_preset.first->GetValue()) { selected_filament_presets.push_back(filament_preset.second); }
-            if (!filament_preset_is_exist && preset_bundle->filaments.find_preset(filament_preset.second->alias + " @ " + printer_preset_name) != nullptr) {
+            if (!filament_preset_is_exist && preset_bundle->filaments.find_preset(PresetCollection::name_for_printer_clone(filament_preset.second->name, printer_preset_name)) != nullptr) {
                 filament_preset_is_exist = true;
             }
         }
@@ -2908,7 +2908,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
         std::vector<Preset const *> selected_process_presets;
         for (std::pair<::CheckBox *, Preset const *> process_preset : m_process_preset) {
             if (process_preset.first->GetValue()) { selected_process_presets.push_back(process_preset.second); }
-            if (!process_preset_is_exist && preset_bundle->prints.find_preset(process_preset.second->alias + " @" + printer_preset_name) != nullptr) {
+            if (!process_preset_is_exist && preset_bundle->prints.find_preset(PresetCollection::name_for_printer_clone(process_preset.second->name, printer_preset_name)) != nullptr) {
                 process_preset_is_exist = true;
             }
         }
@@ -2930,7 +2930,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string &failure : failures) { message += "\t" + failure + "\n"; }
                     MessageDialog dlg(this, _L("Create filament presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxOK | wxCENTRE);
+                                      wxYES_NO | wxYES_DEFAULT | wxCENTRE);
                     int res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->filaments.clone_presets_for_printer(selected_filament_presets, failures, printer_preset_name,
@@ -2942,7 +2942,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                 }
                 // save created successfully preset name
                 for (Preset const *sucessful_preset : selected_filament_presets)
-                    successful_preset_names.push_back(sucessful_preset->name.substr(0, sucessful_preset->name.find(" @")) + " @" + printer_preset_name);
+                    successful_preset_names.push_back(PresetCollection::name_for_printer_clone(sucessful_preset->name, printer_preset_name));
             }
 
             /******************************   clone process preset    ********************************/
@@ -2956,7 +2956,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string &failure : failures) { message += "\t" + failure + "\n"; }
                     MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxOK | wxCENTRE);
+                                      wxYES_NO | wxYES_DEFAULT | wxCENTRE);
                     int res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->prints.clone_presets_for_printer(selected_process_presets, failures, printer_preset_name, get_filament_id, true);
@@ -2979,7 +2979,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     }
                     MessageDialog dlg(this, _L("Create filament presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"),
                                       wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                                      wxOK | wxCENTRE);
+                                      wxYES_NO | wxYES_DEFAULT | wxCENTRE);
                     int           res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->filaments.clone_presets_for_printer(selected_filament_presets, failures, printer_preset_name, get_filament_id, true);
@@ -2999,7 +2999,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                     for (const std::string& failure : failures) {
                         message += "\t" + failure + "\n";
                     }
-                    MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxOK | wxCENTRE);
+                    MessageDialog dlg(this, _L("Create process presets failed. As follows:\n") + from_u8(message) + _L("\nDo you want to rewrite it?"), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES_NO | wxYES_DEFAULT | wxCENTRE);
                     int           res = dlg.ShowModal();
                     if (wxID_YES == res) {
                         create_preset_result = preset_bundle->prints.clone_presets_for_printer(selected_process_presets, failures, printer_preset_name, get_filament_id, true);
@@ -3010,7 +3010,7 @@ wxWindow *CreatePrinterPresetDialog::create_page2_dialog_buttons(wxWindow *paren
                 }
                 // save created successfully preset name
                 for (Preset const *sucessful_preset : selected_filament_presets)
-                    successful_preset_names.push_back(sucessful_preset->name.substr(0, sucessful_preset->name.find(" @")) + " @" + printer_preset_name);
+                    successful_preset_names.push_back(PresetCollection::name_for_printer_clone(sucessful_preset->name, printer_preset_name));
             }
         }
          
@@ -3300,7 +3300,7 @@ bool CreatePrinterPresetDialog::save_printable_area_config(Preset *preset)
         Utils::slash_to_back_slash(m_custom_model);
         config.set("bed_custom_model", m_custom_model);
         config.set("bed_custom_texture", m_custom_texture);
-    } else if(m_create_type.create_nozzle){
+    } else if (curr_selected_printer_type == m_create_type.create_nozzle) {
         std::string selected_printer_preset_name = into_u8(m_select_printer->GetStringSelection());
         std::unordered_map<std::string, std::shared_ptr<Preset>>::iterator itor = m_printer_name_to_preset.find(selected_printer_preset_name);
         assert(m_printer_name_to_preset.end() != itor);

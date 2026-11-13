@@ -603,6 +603,9 @@ public:
     // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
     const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
+    // The name clone_presets_for_printer() gives the copy of a preset named template_name for printer:
+    // the name up to the first " @" ("/" written "-"), then " @" and the printer's name.
+    static std::string name_for_printer_clone(const std::string &template_name, const std::string &printer);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
     bool clone_presets_for_filament(Preset const *const &     preset,
