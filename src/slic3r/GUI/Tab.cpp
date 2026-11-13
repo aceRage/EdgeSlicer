@@ -85,6 +85,8 @@
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
 #include "CostsDialog.hpp"
+#include "StartupSoundDialog.hpp"
+#include "libslic3r/GCode/StartupSound.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
 #include <wx/textdlg.h>
@@ -7196,6 +7198,7 @@ void TabPrinter::build_fff()
         optgroup = page->new_optgroup(L("Machine start G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+            update_startup_sound_widget();
         };
         optgroup->edit_custom_gcode = edit_custom_gcode_fn;
         option = optgroup->get_option("machine_start_gcode");
@@ -7203,6 +7206,13 @@ void TabPrinter::build_fff()
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
+        {
+            // Startup sound (tests/design_startup_sounds.md): a MIDI file -> the M1006 tune above.
+            Line startup_sound_line = Line{ "", "" };
+            startup_sound_line.full_width = 1;
+            startup_sound_line.widget = [this](wxWindow* parent) { return startup_sound_create_widget(parent); };
+            optgroup->append_line(startup_sound_line);
+        }
 
         optgroup = page->new_optgroup(L("Machine end G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
@@ -8102,6 +8112,60 @@ void TabPrinter::clear_pages()
     Tab::clear_pages();
     m_reset_to_filament_color = nullptr;
     m_rate_note = nullptr;
+    m_startup_sound_btn = nullptr;
+    m_startup_sound_note = nullptr;
+}
+
+wxSizer* TabPrinter::startup_sound_create_widget(wxWindow* parent)
+{
+    const int em = em_unit(parent);
+    auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* btn = new Button(parent, _L("Startup sound") + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(_L("Make the tune this printer plays at the start of a print from a MIDI file"));
+    btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { edit_startup_sound(); });
+    hsizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxTOP, em / 2);
+    m_startup_sound_btn = btn;
+    m_startup_sound_note = new wxStaticText(parent, wxID_ANY,
+        _L("Replaces the M1006 tune (from \"M1006 S1\" to \"M1006 W\") in the G-code above."));
+    m_startup_sound_note->SetFont(wxGetApp().normal_font());
+    hsizer->Add(m_startup_sound_note, 1, wxALIGN_CENTER_VERTICAL | wxTOP, em / 2);
+    update_startup_sound_widget();
+    return hsizer;
+}
+
+// Only printers whose start G-code already plays an M1006 tune get the button: their firmware
+// understands M1006 (the stock X1, A1, A2L, P2S, H2 and H3 profiles do), and the tune has a
+// known place to go.
+void TabPrinter::update_startup_sound_widget()
+{
+    if (m_startup_sound_btn == nullptr || m_config == nullptr || !m_config->has("machine_start_gcode"))
+        return;
+    const bool show = StartupSound::has_tune_block(m_config->opt_string("machine_start_gcode"));
+    if (m_startup_sound_btn->IsShown() == show)
+        return;
+    m_startup_sound_btn->Show(show);
+    if (m_startup_sound_note != nullptr)
+        m_startup_sound_note->Show(show);
+    if (wxWindow* parent = m_startup_sound_btn->GetParent())
+        parent->Layout();
+}
+
+void TabPrinter::edit_startup_sound()
+{
+    if (m_config == nullptr)
+        return;
+    StartupSoundDialog dlg(this);
+    if (dlg.ShowModal() != wxID_OK || dlg.tune_block().empty())
+        return;
+    std::string gcode = m_config->opt_string("machine_start_gcode");
+    if (!StartupSound::replace_tune_block(gcode, dlg.tune_block())) {
+        MessageDialog(this, _L("Machine start G-code has no M1006 tune to replace."), _L("Startup sound"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    set_custom_gcode("machine_start_gcode", gcode);
+    update_dirty();
+    update();
 }
 
 wxSizer* TabPrinter::rate_note_create_widget(wxWindow* parent)
@@ -8413,6 +8477,7 @@ void TabPrinter::toggle_options()
         update_rack_controls(e);
     // Per-nozzle process P7: so do the project nozzle size pickers.
     update_project_nozzle_sizes();
+    update_startup_sound_widget();
 
     //BBS: whether the preset is Bambu Lab printer
     bool is_BBL_printer = false;

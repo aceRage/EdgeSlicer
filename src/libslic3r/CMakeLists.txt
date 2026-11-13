@@ -423,6 +423,8 @@ set(lisbslic3r_sources
     GCode/WipePathHelpers.hpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
+    GCode/StartupSound.cpp
+    GCode/StartupSound.hpp
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/ToolOrdering.cpp

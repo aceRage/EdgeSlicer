@@ -194,6 +194,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stl.cpp
 	test_support_set.cpp
 	test_support_interlock.cpp
+	test_startup_sound.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
