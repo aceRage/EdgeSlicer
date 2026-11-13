@@ -238,6 +238,8 @@ set(lisbslic3r_sources
     ExtrusionEntityCollection.hpp
     ContourZ.cpp
     ContourZ.hpp
+    CurvedTops.cpp
+    CurvedTops.hpp
     ExtrusionEntity.cpp
     ExtrusionEntity.hpp
     ExtrusionSimulator.cpp

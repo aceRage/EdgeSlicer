@@ -1654,6 +1654,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                seam_prefer_part_joints))
     ((ConfigOptionFloat,               slice_closing_radius))
     ((ConfigOptionEnum<SlicingMode>,   slicing_mode))
+    // EdgeSlicer SPIKE: curved (non-planar) top surfaces, see src/libslic3r/CurvedTops.cpp.
+    ((ConfigOptionBool,                curved_tops_enabled))
+    ((ConfigOptionInt,                 curved_tops_layers))
+    ((ConfigOptionFloat,               curved_tops_max_angle))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))

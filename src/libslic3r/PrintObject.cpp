@@ -21,6 +21,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
 #include "ContourZ.hpp"
+#include "CurvedTops.hpp"
 #include "SLA/IndexedMesh.hpp"
 #include "Support/Stabilizers.hpp"
 #include "ExtruderAreas.hpp"
@@ -845,12 +846,16 @@ void PrintObject::contour_z()
     if (!this->set_started(posContouring))
         return;
 
-    if (!this->need_z_contouring()) {
+    // EdgeSlicer SPIKE: curved tops share this step and its mesh (CurvedTops.cpp). With
+    // curved_tops_enabled off (the default) this is exactly the ZAA-only step it was.
+    const bool zaa         = this->need_z_contouring();
+    const bool curved_tops = m_config.curved_tops_enabled.value && !m_instances.empty();
+    if (!zaa && !curved_tops) {
         this->set_done(posContouring);
         return;
     }
 
-    m_print->set_status(40, L("Z contouring"));
+    m_print->set_status(40, zaa ? L("Z contouring") : L("Curved tops"));
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
 
     TriangleMesh mesh = this->m_model_object->raw_mesh();
@@ -867,16 +872,21 @@ void PrintObject::contour_z()
     sla::IndexedMesh imesh(mesh);
     imesh.ground_level_offset(-z);
 
-    tbb::parallel_for(
-        // Contouring starts with the second layer to avoid a build plate collision.
-        tbb::blocked_range<size_t>(1, m_layers.size()),
-        [this, &imesh](const tbb::blocked_range<size_t>& range) {
-            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
-                m_print->throw_if_canceled();
-                m_layers[layer_idx]->make_contour_z(imesh);
+    if (zaa)
+        tbb::parallel_for(
+            // Contouring starts with the second layer to avoid a build plate collision.
+            tbb::blocked_range<size_t>(1, m_layers.size()),
+            [this, &imesh](const tbb::blocked_range<size_t>& range) {
+                for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+                    m_print->throw_if_canceled();
+                    m_layers[layer_idx]->make_contour_z(imesh);
+                }
             }
-        }
-    );
+        );
+    m_print->throw_if_canceled();
+
+    if (curved_tops)
+        apply_curved_tops(*this, mesh, imesh);
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
 

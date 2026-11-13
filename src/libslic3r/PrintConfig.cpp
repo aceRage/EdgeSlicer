@@ -5911,6 +5911,37 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;   // alongside the other zaa_* keys
     def->set_default_value(new ConfigOptionBool(true));
 
+    // EdgeSlicer SPIKE: curved (non-planar) top surfaces. See src/libslic3r/CurvedTops.cpp.
+    def = this->add("curved_tops_enabled", coBool);
+    def->label    = L("Curved tops (experimental)");
+    def->category = L("Quality");
+    def->tooltip  = L("EXPERIMENTAL. Print the last top layers of gently curved top surfaces as non-planar layers "
+                      "that follow the surface, instead of a staircase of flat layers.\n"
+                      "Only surfaces flatter than the maximum angle, and no taller than the print head's "
+                      "nozzle clearance, are bent. One object, one nozzle only. Watch the first print.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("curved_tops_layers", coInt);
+    def->label    = L("Curved top layers");
+    def->category = L("Quality");
+    def->tooltip  = L("How many layers under a curved top surface are printed following the surface.");
+    def->min      = 1;
+    def->max      = 6;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(3));
+
+    def = this->add("curved_tops_max_angle", coFloat);
+    def->label    = L("Curved tops max angle");
+    def->category = L("Quality");
+    def->tooltip  = L("Steepest surface slope that is printed curved. It is further limited by the print "
+                      "head's clearance for this printer.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min      = 1;
+    def->max      = 40;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15));
+
     def = this->add("layer_change_gcode", coString);
     def->label = L("Layer change G-code");
     def->tooltip = L("This G-code is inserted at every layer change after the Z lift.");
