@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/iostream.hpp>
 
 #include <algorithm>
 #include <boost/log/trivial.hpp>
@@ -482,8 +483,15 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
 
     const bool has_any = std::any_of(capabilities.values.begin(), capabilities.values.end(),
                                      [](const std::string& s) { return !s.empty(); });
+    // Headless --slice has no notification UI. Mirror skip/timeout warnings to stderr so a
+    // missing plugin or a 10s load timeout is not silent. Do not fail the slice: GUI
+    // skip-with-warning is the documented missing-plugin semantics.
+    auto warn_skip = [](const std::string& msg) {
+        BOOST_LOG_TRIVIAL(warning) << msg;
+        boost::nowide::cerr << msg << std::endl;
+    };
     if (has_any && !plugin_mgr.wait_for_all_plugin_loads(std::chrono::seconds(10))) {
-        BOOST_LOG_TRIVIAL(warning) << tag << ": timed out waiting for plugin loads; unresolved capabilities will be skipped";
+        warn_skip(tag + ": timed out waiting for plugin loads; unresolved capabilities will be skipped");
     }
 
     for (const std::string& capability : capabilities.values) {
@@ -511,7 +519,7 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
         }
 
         if (!ref) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": no plugin reference found for capability '" << capability << "'; skipping";
+            warn_skip(tag + ": no plugin reference found for capability '" + capability + "'; skipping");
             continue;
         }
 
@@ -532,13 +540,12 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
         // and each keeps its own diagnostic.
         auto cap = plugin_mgr.get_plugin_capability({type, cap_name, plugin_key}, /*only_enabled=*/false);
         if (!cap) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": no loaded capability '" << cap_name << "' for plugin '" << plugin_key << "'; skipping";
+            warn_skip(tag + ": no loaded capability '" + cap_name + "' for plugin '" + plugin_key + "'; skipping");
             continue;
         }
 
         if (!cap->is_enabled()) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": capability '" << cap_name << "' for plugin '" << plugin_key
-                                       << "' is disabled; skipping";
+            warn_skip(tag + ": capability '" + cap_name + "' for plugin '" + plugin_key + "' is disabled; skipping");
             continue;
         }
 

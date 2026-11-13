@@ -20,6 +20,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <exception>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -48,7 +49,8 @@ void install_lifecycle_event_hook()
 void run_post_process_plugins(const std::string& gcode_path,
                               const std::string& host,
                               const std::string& output_name,
-                              const DynamicPrintConfig& config)
+                              const DynamicPrintConfig& config,
+                              const std::function<bool()>& canceled)
 {
     const auto* caps  = config.opt<ConfigOptionStrings>("slicing_pipeline_plugin");
     const auto* plugs = config.opt<ConfigOptionStrings>("plugins");
@@ -71,7 +73,11 @@ void run_post_process_plugins(const std::string& gcode_path,
             PythonGILState gil;
             if (!gil)
                 throw std::runtime_error("Python interpreter is shutting down");
+            if (canceled && canceled())
+                throw CanceledException();
             exec_result = cap->execute(ctx);
+        } catch (const CanceledException&) {
+            throw;
         } catch (const std::exception& ex) {
             const std::string msg =
                 Slic3r::format(_u8L("Post-processing plugin %1% raised an exception.\nError: %2%"), ref.capability_name, ex.what());
@@ -134,7 +140,7 @@ void install_slicing_pipeline_hook()
                         throw SlicingError(Slic3r::format(_u8L("Slicing pipeline plugin '%1%' error: %2%"),
                                                           ref.capability_name, ex.what()));
                     }
-                    if (r.status == PluginResult::FatalError)
+                    if (r.status == PluginResult::RecoverableError || r.status == PluginResult::FatalError)
                         throw SlicingError(Slic3r::format(_u8L("Slicing pipeline plugin '%1%' error: %2%"),
                                                           ref.capability_name, r.message));
                     if (!r.message.empty()) {

@@ -137,6 +137,34 @@ class WriteProbePackage(orca.base):
         orca.register_capability(WriteProbe)
 )PY";
 
+const char* const RECOVERABLE_SOURCE = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "Recoverable"
+# description = "Returns RecoverableError at posSlice"
+# author = "tests"
+# version = "1.0.0"
+# type = "slicing-pipeline"
+# ///
+import orca
+
+class Recoverable(orca.slicing.SlicingPipelineCapabilityBase):
+    def get_name(self):
+        return "Recoverable"
+
+    def execute(self, ctx):
+        if ctx.step == orca.slicing.Step.posSlice:
+            return orca.ExecutionResult.failure(orca.PluginResult.RecoverableError, "recoverable")
+        return orca.ExecutionResult.success()
+
+@orca.plugin
+class RecoverablePackage(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Recoverable)
+)PY";
+
 const char* const BOOM_SOURCE = R"PY(# /// script
 # requires-python = ">=3.12"
 # requires-orca-api = "1.0.0"
@@ -342,6 +370,57 @@ TEST_CASE("An untrusted pipeline plugin fails the slice instead of running", "[s
         CHECK(std::string(err.what()).find("untrusted") != std::string::npos);
     }
     CHECK(read_file(gcode) == original);
+}
+
+TEST_CASE("An untrusted pipeline plugin fails print.process on the early-step path",
+          "[slicing_pipeline][Python][trust]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("pipeline-untrusted-process");
+    write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    PluginDescriptor descriptor;
+    REQUIRE(manager.try_get_plugin_descriptor("PipelineStamp", descriptor));
+    CHECK_FALSE(plugin_trust::evaluate(descriptor).allowed());
+
+    Print print;
+    Model model;
+    init_print_cube(print, model, pipeline_config("Stamp", "PipelineStamp"));
+    try {
+        print.process();
+        FAIL("expected SlicingError");
+    } catch (const SlicingError& err) {
+        CHECK(std::string(err.what()).find("untrusted") != std::string::npos);
+    }
+}
+
+TEST_CASE("An early-step RecoverableError fails the slice", "[slicing_pipeline][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir  data_dir_guard("pipeline-recoverable");
+    PluginManager& manager = PluginManager::instance();
+    discover_and_load(manager, data_dir_guard, "Recoverable", RECOVERABLE_SOURCE, {"Recoverable"});
+
+    Print print;
+    Model model;
+    init_print_cube(print, model, pipeline_config("Recoverable", "Recoverable"));
+    try {
+        print.process();
+        FAIL("expected SlicingError");
+    } catch (const SlicingError& err) {
+        CHECK(std::string(err.what()).find("recoverable") != std::string::npos);
+    }
+
+    manager.unload_plugin("Recoverable");
 }
 
 TEST_CASE("psGCodePostProcess write root is the G-code folder and not UltraNet plugins",
