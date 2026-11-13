@@ -4644,7 +4644,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             }
             file.writeln(out.str());
 
-            file.write_format("; support_material_on_wipe_tower: %d\n", int(print.support_material_on_wipe_tower()));
+            // Always 0, as BambuStudio does since 24f90c04e ("force setting the DA flag", 2026-10-09):
+            // an H3C refuses a job that says 1 ("Printer incompatible with sliced file", HMS
+            // 0502-4010), e.g. a PLA part with PETG support on another filament.
+            file.write_format("; support_material_on_wipe_tower: %d\n", 0);
         }
 
         file.write_format("; HEADER_BLOCK_END\n\n");
