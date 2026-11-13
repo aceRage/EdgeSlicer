@@ -5,9 +5,13 @@ Plan: plugins plan section 8 (slicing pipeline). Catalog publishing is Phase 11.
 plugins (upstream #16941) and printer-agent hooks stay unwired.
 
 All of this is compiled only when `EDGE_PYTHON_PLUGINS` is ON (default OFF). With it OFF, or
-ON with no pipeline plugin selected, G-code is byte-identical to today. Startup never loads a
-pipeline plugin in golden or CI runs: a missing `.install_state.json` sidecar means
-`enabled=false`.
+ON with no pipeline plugin selected, the G-code **config block omits** the five plugin keys
+(`plugins`, `slicing_pipeline_plugin`, `print_plugin_config_overrides`,
+`printer_plugin_config_overrides`, `filament_plugin_config_overrides`) when they are empty, so
+the dump matches main. Empty is not nil, which is why `append_full_config` skips them
+explicitly. Option definitions stay in `PrintConfig.cpp` so OFF still round-trips ON 3MFs and
+presets. Startup never loads a pipeline plugin in golden or CI runs: a missing
+`.install_state.json` sidecar means `enabled=false`.
 
 ## What was built
 
@@ -32,7 +36,7 @@ Chosen semantics (documented because the plan allowed either):
 
 | Situation | Slice / export |
 |---|---|
-| Plugin missing, inactive, or disabled | **Skip with a warning** (`BOOST_LOG_TRIVIAL(warning)`), matching upstream `execute_capabilities_from_refs`. The GUI also warns on preset save / 3MF open (upstream #16929). |
+| Plugin missing, inactive, or disabled | **Skip with a warning** (`BOOST_LOG_TRIVIAL(warning)` plus **stderr** on CLI), matching upstream `execute_capabilities_from_refs`. Headless `--slice` does **not** fail: that is the same skip-with-warning as the GUI. The GUI also warns on preset save / 3MF open (upstream #16929). |
 | Plugin present but **untrusted** | **Fail** with a clear `SlicingError` / `ExportError`. Edge does not silently skip an untrusted package. |
 
 Pipeline plugins cannot pop permission dialogs off the UI thread. Phase 4's worker-thread
@@ -57,8 +61,11 @@ without wiping the plate.
 - Early slicing steps run **in-process and unsandboxed**. A trusted plugin can still corrupt
   the slice graph.
 - A trusted plugin at `psGCodePostProcess` can rewrite the G-code inside the export folder.
+- Phase 5 **evaluate-then-run TOCTOU** residual: the tree hash is re-checked in
+  `execute_capabilities_from_refs` immediately before dispatch, but the files can still change
+  between that `evaluate()` and the Python import / `execute()`.
 - U1 test prints are required before any pipeline plugin is claimed to work.
-- Smoke tests owed at merge: Mac GUI, Windows, Linux pkg, Flatpak.
+- Smoke tests owed at merge: Mac GUI, Windows, Linux pkg, Flatpak. The Mac re-gate result is owed from Russ.
 
 ## Ported upstream PRs
 
