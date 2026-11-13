@@ -3100,6 +3100,19 @@ const Preset* PresetCollection::create_inherited_user_preset(const Preset &paren
     return find_preset(inserted_name, false);
 }
 
+// The part of a preset's name kept in its copy for another printer.
+static std::string printer_clone_prefix(const std::string &template_name)
+{
+    std::string prefix = template_name.substr(0, template_name.find(" @"));
+    std::replace(prefix.begin(), prefix.end(), '/', '-');
+    return prefix;
+}
+
+std::string PresetCollection::name_for_printer_clone(const std::string &template_name, const std::string &printer)
+{
+    return printer_clone_prefix(template_name) + " @" + printer;
+}
+
 bool PresetCollection::clone_presets_for_printer(std::vector<Preset const *> const &     templates,
                                                  std::vector<std::string> &              failures,
                                                  std::string const &                     printer,
@@ -3107,9 +3120,8 @@ bool PresetCollection::clone_presets_for_printer(std::vector<Preset const *> con
                                                  bool                                    force_rewritten)
 {
     return clone_presets(templates, failures, [printer, create_filament_id](Preset &preset, Preset::Type &type) {
-            std::string prefix          = preset.name.substr(0, preset.name.find(" @"));
-            std::replace(prefix.begin(), prefix.end(), '/', '-');
-            preset.name                 = prefix + " @" + printer;
+            const std::string prefix    = printer_clone_prefix(preset.name);
+            preset.name                 = name_for_printer_clone(preset.name, printer);
             auto *compatible_printers   = dynamic_cast<ConfigOptionStrings *>(preset.config.option("compatible_printers"));
             compatible_printers->values = std::vector<std::string>{printer};
             preset.is_visible           = true;
