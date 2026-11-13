@@ -110,6 +110,13 @@ std::vector<double> filament_rack_pin_choices(const ConfigBase &config, unsigned
 // filament_rack_nozzle_diameter with 0-based `filament` pinned to `diameter` (0 = its extruder's nozzle), sized for
 // `filaments`; { 0 } (the unused value) when nothing is pinned.
 std::vector<double> set_filament_rack_pin(std::vector<double> pins, size_t filament, size_t filaments, double diameter);
+// Mixed (virtual) filaments have no nozzle of their own: their passes print with their component filaments. The
+// filament whose nozzle a 1-based `filament_id` resolves to: itself for a physical filament, and for a mixed filament
+// (an id past the physical ones, mixed_filament_definitions) the component that prints through the finest nozzle
+// (its pin / rack slot / filament_map decide which; components of one diameter all give the same answer). Every
+// per-filament nozzle lookup below (diameter, extruder, rack pin and slot, the per-nozzle process tool) goes through
+// it, so a mixed filament reads its components' nozzle, not extruder 1's. Ids it cannot resolve are returned as given.
+unsigned int nozzle_filament_of(const ConfigBase &config, unsigned int filament_id);
 // The rack nozzle size filament `filament_id` (1-based) is pinned to, 0 when none.
 double filament_rack_pin(const ConfigBase &config, unsigned int filament_id);
 // The nozzle diameter 1-based `filament_id` prints with, on any config: its physical extruder's

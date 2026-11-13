@@ -3,6 +3,7 @@
 #include "ToolSlots.hpp"
 
 #include "LocalesUtils.hpp"
+#include "MixedFilament.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "NozzleOverride.hpp"
 #include "Preset.hpp"
@@ -133,9 +134,68 @@ NozzleVolumeType extruder_volume_type(const ConfigBase &config, size_t extruder)
     return nvtStandard;
 }
 
+unsigned int nozzle_filament_of_impl(const ConfigBase &config, unsigned int filament_id)
+{
+    const size_t physical = filament_count_of(config);
+    if (filament_id <= physical || physical == 0)
+        return filament_id;
+    const auto *defs = opt_of<ConfigOptionString>(config, "mixed_filament_definitions");
+    if (defs == nullptr || defs->value.empty())
+        return filament_id;
+    // The mixed rows of these definitions, by virtual id: their component filaments. Rebuilt only when the definitions,
+    // the physical count or the auto-generated pairs switch change (the same rows Print::apply builds).
+    struct Cache
+    {
+        std::string                            defs;
+        size_t                                 physical { 0 };
+        bool                                   auto_generate { false };
+        std::vector<std::vector<unsigned int>> components; // index: virtual id - physical - 1
+    };
+    thread_local Cache cache;
+    const bool auto_generate = MixedFilamentManager::auto_generate_enabled();
+    if (cache.defs != defs->value || cache.physical != physical || cache.auto_generate != auto_generate) {
+        cache.defs          = defs->value;
+        cache.physical      = physical;
+        cache.auto_generate = auto_generate;
+        cache.components.clear();
+        const std::vector<std::string> colours(physical, std::string("#808080"));
+        MixedFilamentManager           mgr;
+        mgr.auto_generate(colours);
+        mgr.load_custom_entries(defs->value, colours);
+        for (size_t idx = 0; idx < mgr.mixed_filaments().size(); ++idx) {
+            const unsigned int vid = mgr.filament_id_from_mixed_index(idx, physical);
+            if (vid <= physical)
+                continue;
+            const MixedFilament      &row = mgr.mixed_filaments()[idx];
+            std::vector<unsigned int> ids = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, physical);
+            if (ids.size() < 3)
+                ids = { row.component_a, row.component_b };
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [physical](unsigned int id) { return id == 0 || id > physical; }), ids.end());
+            const size_t slot = vid - physical - 1;
+            if (cache.components.size() <= slot)
+                cache.components.resize(slot + 1);
+            cache.components[slot] = std::move(ids);
+        }
+    }
+    const size_t slot = filament_id - physical - 1;
+    if (slot >= cache.components.size() || cache.components[slot].empty())
+        return filament_id;
+    // The component on the finest nozzle: what every width and height of the mixed filament has to fit.
+    const std::vector<unsigned int> components = cache.components[slot];
+    unsigned int best   = components.front();
+    double       best_d = nozzle_diameter_for_filament(config, best);
+    for (unsigned int id : components)
+        if (const double d = nozzle_diameter_for_filament(config, id); d > 0. && (best_d <= 0. || d < best_d - 1e-6)) {
+            best   = id;
+            best_d = d;
+        }
+    return best;
+}
+
 // The physical extruder (0-based) of 1-based `filament_id`, from any config.
 size_t physical_extruder_of(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     const std::vector<double> nozzles = floats_of(config, "nozzle_diameter");
     return physical_extruder_for_filament(nozzles.size(), filament_count_of(config), ints_of(config, "filament_map"), filament_id,
                                           ints_of(config, "filament_nozzle_assignment"));
@@ -169,6 +229,12 @@ bool any_rack_text(const ConfigBase &config)
 }
 
 } // namespace
+
+// ToolSlots.hpp: a mixed filament resolves to its components' nozzle (nozzle_filament_of_impl above).
+unsigned int nozzle_filament_of(const ConfigBase &config, unsigned int filament_id)
+{
+    return nozzle_filament_of_impl(config, filament_id);
+}
 
 std::string default_rack_nozzle_text(const ConfigBase &config, size_t e)
 {
@@ -430,6 +496,7 @@ bool has_mixed_rack_diameters(const ConfigBase &config)
 
 double filament_rack_pin(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     // Per-nozzle process P9: a filament pinned to a rack slot prints with that slot's size.
     if (const int slot = filament_rack_slot_pin(config, filament_id); slot > 0) {
         const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
@@ -445,6 +512,7 @@ double filament_rack_pin(const ConfigBase &config, unsigned int filament_id)
 
 double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     // Per-nozzle process P7: the size the extruder carries in the project (a full config before Print::apply, as the
     // preset bundle builds it, still has the preset's nozzle_diameter beside nozzle_diameter_override).
     const std::vector<double> nozzles = effective_nozzle_diameters(config);
@@ -467,6 +535,7 @@ double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filam
 
 double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     const double own = config.nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id));
     if (config.extruder_rack_nozzle_diameter.values.empty() && config.extruder_rack_nozzle_override.values.empty())
         return own;
@@ -487,6 +556,7 @@ double min_physical_nozzle_diameter(const PrintConfig &config)
 double nozzle_diameter_for_filament_on_layer(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult *group,
                                              unsigned int filament_id, int layer_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     if (group != nullptr && filament_id > 0)
         if (const auto nozzle = group->get_nozzle_for_filament(int(filament_id - 1), layer_id); nozzle && !nozzle->diameter.empty()) {
             double d = 0.;
@@ -777,6 +847,7 @@ std::string rack_slot_name(const ConfigBase &config, size_t extruder, int slot)
 
 int filament_rack_slot_pin(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     const std::vector<int> pins = ints_of(config, "filament_rack_nozzle_slot");
     if (filament_id == 0 || filament_id > pins.size())
         return 0;
@@ -828,6 +899,7 @@ std::vector<int> manual_filament_map_from_pins(const std::vector<int> &pins, con
 
 int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of_impl(config, filament_id);
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
     const size_t                               e     = physical_extruder_of(config, filament_id);
     if (e >= racks.size() || rack_slot_count(config, e) == 0)

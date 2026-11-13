@@ -143,6 +143,19 @@ No value is invented: a key that cannot be represented is left out and Bambu use
 (colour, supports, seams, fuzzy skin), modifiers, height ranges, cut data and everything else in
 the archive are written exactly as for a normal save.
 
+Mixed filaments (mixed color sublayer P3, `tests/design_mixed_color_sublayer.md` D12): every enabled
+EdgeSlicer mixed row up to the highest filament id the project uses becomes a Bambu Studio 2.9.1
+mixed filament slot, appended after the physical filaments in virtual id order, so slot k is the
+row's EdgeSlicer id and paint and filament settings need no remap. The slot copies its first
+component's entry in every per-filament array (preset, temperatures, flush row and column) and takes
+the row's blended colour; `filament_is_mixed`, `filament_mixed_components`,
+`filament_mixed_sublayer_ratios`, `filament_mixed_gradient` and `filament_mixed_gradient_range` are
+written for all slots, and `enable_mixed_color_sublayer` is on when a written row prints as Ratio
+(Bambu Studio has one switch for every mixed slot). Subdivide, pattern, pointillism and image rows
+are written with their components and mix and reported. Reading the export back converts the slots
+to the same rows (`[MixedSublayer][BambuExport]` round-trip tests). The plates' `filament_maps`
+keep one entry per physical filament.
+
 ### Report
 
 Every export logs one line per scope ("N setting(s) left out: ...") plus one line per rename or

@@ -84,6 +84,12 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 // Returns whether an entry changed. Called by Print::apply() with the final config. Without sources the fill also empties the
 // per-filament arrays (a project file carries those of the fill it was saved with).
 bool realign_nozzle_filament_values(DynamicPrintConfig &config);
+// Mixed color sublayer (owner hand test on #937): the per-filament per-nozzle arrays (line widths, first-layer and fallback
+// widths, region values, layer heights, process slots) have one entry per physical filament. A mixed (virtual) filament
+// prints through its components' nozzle (nozzle_filament_of), so append one entry per mixed filament, copied from that
+// component's entry: a region painted or assigned with a mixed filament then takes its components' nozzle process.
+// No-op without per-nozzle processes or mixed filaments; arrays already longer than the physical count are left alone.
+bool extend_nozzle_filament_values_to_mixed(DynamicPrintConfig &config);
 
 // ---- Per-nozzle process P2: line widths per nozzle (design D8) ----
 //

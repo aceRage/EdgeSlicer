@@ -90,6 +90,32 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
                                                    bool                                     ascending_order,
                                                    MixedRatioRowState                      &state);
 
+// P3: a Ratio row sharing its layer with another split row (Subdivide) starts with the filament that row's first
+// pass uses, when it is one of its components, so the Local-Z pass scheduler serves both rows in one phase. The
+// rotation keeps the cyclic order and every pass height (LocalZOrderOptimizer::order_bucket_extruders); the row's
+// state then records the new last component, so the next layer alternates from it. Returns true when it changed.
+bool reorder_mixed_ratio_passes_to_start(std::vector<MixedRatioPass> &passes, unsigned int first_extruder, MixedRatioRowState &state);
+
+// P3, D9: the Ratio passes of one AdaptiveLayerMerge band. A band of height `band_height` is printed on its top
+// layer and swallows the layers below it, so the passes start at the band bottom, below the layer the G-code is
+// on. `swallowed_height` (band height - the top layer's own height) is how far below that layer's bottom they
+// reach: the first pass is chosen so its top is not under it (the nozzle never drops below the material the
+// previous layer printed next to the mixed region). Plans as plan_mixed_ratio_layer() over the band height, then
+// starts with the first component in that order whose pass is tall enough. When none is (three or more even
+// components on a deep band), the band prints whole with the component owed the most (cadence): `split` is false.
+struct MixedRatioBandPlan
+{
+    std::vector<MixedRatioPass> passes;
+    bool                        split { false };
+    // The planned order had to start with another component so the first pass reaches above the swallowed layers.
+    bool                        rotated { false };
+};
+MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,
+                                         double                                   band_height,
+                                         double                                   swallowed_height,
+                                         bool                                     ascending_order,
+                                         MixedRatioRowState                      &state);
+
 // D8: the components of a Ratio row must print through one nozzle diameter, on every printer. `nozzle_for` gives
 // the nozzle diameter of a 1-based physical filament id. Returns the 1-based ids of two components that differ
 // (first pair found), or {0, 0} when they all match.
@@ -161,6 +187,33 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
 
 // Apply a BambuMixedImportResult::id_remap to a 1-based id (0 and out-of-range ids map to 0).
 unsigned int bambu_mixed_remap_id(const BambuMixedImportResult &result, int old_id);
+
+// ---- Bambu Studio 3MF export (P3, D12) -------------------------------------------------------------------
+//
+// The reverse of convert_bambu_mixed_slots(): every enabled Edge mixed row becomes a Bambu Studio mixed filament
+// slot appended after the physical ones, in virtual id order, so slot k is exactly the row's Edge virtual id and
+// the model's painted states and filament settings need no remap. The slot copies its first component's entry in
+// every per-filament array (its preset, temperatures, flush row and column; Bambu Studio syncs the nozzle from the
+// components itself) and takes the row's blended colour. The Bambu keys come back in `slots`, aligned with all
+// physical + mixed slots, ready for project_settings.config; Edge never stores them (D3).
+//   * A two-component row writes "a,b" and its mix as "0.7,0.3"; three or more write the gradient ids and weights.
+//   * A Z gradient row writes filament_mixed_gradient and its linear range "start,end" (A's share, bottom to top).
+//   * Bambu Studio has one switch for all mixed slots: `sublayer` is true when an exported row prints as Ratio.
+//     Rows that print otherwise (Subdivide, cadence while another row is Ratio, pattern / pointillism / image rows)
+//     are exported with their components and mix and reported in `notes` (D12: Subdivide exports as cadence).
+// Rows above `max_used_id` (the highest filament id the project uses) are left out, so unused rows (auto-generated
+// pairs) never become Bambu slots; the ids of the rows written stay aligned. Does nothing (any = false) without an
+// enabled mixed row at or below it.
+struct BambuMixedExport
+{
+    bool                     any { false };
+    size_t                   physical_count { 0 };
+    size_t                   mixed_count { 0 };
+    bool                     sublayer { false };
+    BambuMixedSlots          slots;
+    std::vector<std::string> notes;
+};
+BambuMixedExport expand_bambu_mixed_slots(DynamicPrintConfig &config, unsigned int max_used_id = 0xFFFFFFFFu);
 
 } // namespace Slic3r
 

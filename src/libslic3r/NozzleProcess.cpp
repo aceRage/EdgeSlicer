@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -244,6 +245,8 @@ bool zero_width_is_line_width(const std::string &width_key)
 
 size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
+    // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
+    filament_id = nozzle_filament_of(config, filament_id);
     const auto *nozzles   = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
     const auto *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
     const auto *fmap      = dynamic_cast<const ConfigOptionInts *>(config.option("filament_map"));
@@ -626,6 +629,40 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("nozzle_filament_tool", new ConfigOptionStrings(std::move(tools)));
     }
     return true;
+}
+
+bool extend_nozzle_filament_values_to_mixed(DynamicPrintConfig &config)
+{
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    if (count == 0)
+        return false;
+    // The physical filament each mixed filament reads its entries from, in virtual id order.
+    std::vector<unsigned int> sources;
+    for (unsigned int v = unsigned(count) + 1;; ++v) {
+        const unsigned int f = nozzle_filament_of(config, v);
+        if (f == v || f == 0 || f > count)
+            break;
+        sources.push_back(f);
+    }
+    if (sources.empty())
+        return false;
+    bool changed = false;
+    auto extend  = [&](const std::string &key) {
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(config.optptr(key));
+        if (opt == nullptr || opt->size() != count)
+            return;
+        std::unique_ptr<ConfigOption> src(opt->clone());
+        for (size_t k = 0; k < sources.size(); ++k)
+            opt->set_at(src.get(), count + k, sources[k] - 1);
+        changed = true;
+    };
+    for (const auto &entry : nozzle_line_width_keys())
+        extend(entry.first);
+    for (const char *key : { "nozzle_initial_layer_line_width", "nozzle_line_width", "nozzle_region_values", "nozzle_layer_height",
+                             "nozzle_filament_process_slot" })
+        extend(key);
+    return changed;
 }
 
 bool realign_nozzle_filament_values(DynamicPrintConfig &config)
@@ -1702,6 +1739,7 @@ bool fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<con
 
 double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of(config, filament_id);
     const auto *heights = dynamic_cast<const ConfigOptionFloatsOrPercents *>(config.option("nozzle_layer_height"));
     if (heights == nullptr || filament_id < 1 || filament_id > heights->values.size())
         return 0.;

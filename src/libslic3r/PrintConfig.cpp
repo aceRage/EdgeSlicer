@@ -594,6 +594,8 @@ bool has_nozzle_rack(const PrintConfig &config)
 // Mixed nozzle sizes (Phase 1), ported from OrcaSlicer PR #13782 (LixNix) - see PrintConfig.hpp.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
+    // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
+    filament_id = nozzle_filament_of(config, filament_id);
     return physical_extruder_for_filament(config.nozzle_diameter.values.size(), config.filament_diameter.values.size(),
                                           config.filament_map.values, filament_id, config.filament_nozzle_assignment.values);
 }

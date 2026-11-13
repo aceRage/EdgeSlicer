@@ -2622,14 +2622,23 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     // every later pass. A layer with no toolchange prints with the filament the layer below left loaded.
     if (m_sparse_layers_combined) {
         size_t start_tool = m_current_tool;
-        for (const WipeTowerInfo &layer : m_plan)
+        for (const WipeTowerInfo &layer : m_plan) {
+            if (layer.local_z_start_tool >= 0) {
+                start_tool = size_t(layer.local_z_prev_tool);
+                break;
+            }
             if (! layer.tool_changes.empty()) {
                 start_tool = layer.tool_changes.front().old_tool;
                 break;
             }
+        }
         combine_sparse_wipe_tower_plan(
             m_plan, m_filpar, m_first_layer_idx, start_tool, [](const WipeTowerInfo &layer) { return layer.tool_changes.empty(); },
-            [](const WipeTowerInfo &layer, size_t tool) { return layer.tool_changes.empty() ? tool : layer.tool_changes.back().new_tool; });
+            [](const WipeTowerInfo &layer, size_t tool) {
+                if (! layer.tool_changes.empty())
+                    return layer.tool_changes.back().new_tool;
+                return layer.local_z_start_tool >= 0 ? size_t(layer.local_z_start_tool) : tool;
+            });
     }
 
 	plan_tower();
@@ -2649,6 +2658,11 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 
     // we don't know which extruder to start with - we'll set it according to the first toolchange
     for (const auto& layer : m_plan) {
+        // A layer whose Local-Z passes changed filament first started with the one loaded before them.
+        if (layer.local_z_start_tool >= 0) {
+            m_current_tool = size_t(layer.local_z_prev_tool);
+            break;
+        }
         if (!layer.tool_changes.empty()) {
             m_current_tool = layer.tool_changes.front().old_tool;
             break;
@@ -2664,6 +2678,10 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 	for (auto layer : m_plan)
 	{
         m_cur_layer_id = index++;
+        // The layer's Local-Z passes left another filament loaded than the tower's last change: its
+        // first change starts from that one (initial_tool, unload and material of the old filament).
+        if (layer.local_z_start_tool >= 0)
+            m_current_tool = size_t(layer.local_z_start_tool);
         set_layer(layer.z, layer.height, 0, false/*layer.z == m_plan.front().z*/, layer.z == m_plan.back().z);
         // BBS
         //m_internal_rotation += 180.f;
