@@ -3400,6 +3400,38 @@ std::vector<std::string> PresetCollection::user_presets_inheriting(const std::st
     return out;
 }
 
+std::vector<Preset const *> PresetCollection::get_user_presets_for_printer(const std::string &printer_name) const
+{
+    std::vector<Preset const *> presets;
+    if (printer_name.empty())
+        return presets;
+    for (const Preset &preset : m_presets) {
+        if (!preset.is_user())
+            continue;
+        const auto *compatible_printers = preset.config.option<ConfigOptionStrings>("compatible_printers");
+        if (compatible_printers != nullptr && !compatible_printers->values.empty() &&
+            std::all_of(compatible_printers->values.begin(), compatible_printers->values.end(),
+                        [&printer_name](const std::string &name) { return name == printer_name; }))
+            presets.push_back(&preset);
+    }
+    // A preset that a kept preset inherits from is kept too. Each one kept can in turn keep its own
+    // parent, so this repeats until nothing changes.
+    for (bool kept_one = true; kept_one;) {
+        kept_one = false;
+        for (const Preset &preset : m_presets) {
+            if (preset.inherits().empty() || std::find(presets.begin(), presets.end(), &preset) != presets.end())
+                continue;
+            auto parent = std::find_if(presets.begin(), presets.end(),
+                                       [&preset](const Preset *candidate) { return candidate->name == preset.inherits(); });
+            if (parent != presets.end()) {
+                presets.erase(parent);
+                kept_one = true;
+            }
+        }
+    }
+    return presets;
+}
+
 // The "<type>_settings_id" option of a preset config: the preset's own name.
 static void set_preset_settings_id(Preset::Type type, DynamicPrintConfig &config, const std::string &name)
 {

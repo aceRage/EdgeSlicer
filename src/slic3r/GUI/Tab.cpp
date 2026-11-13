@@ -9133,24 +9133,19 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
             // Obtain compatible filament and process presets for printers
             if (m_preset_bundle && m_presets->get_preset_base(current_preset) == &current_preset && printer_tab && !current_preset.is_system) {
                 delete_third_printer = true;
-                for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            filament_presets.push_front(preset);
+                // Only the user presets made for this printer alone go with it: not the vendor's presets, nor
+                // the person's presets shared with other printers or made for every printer.
+                auto collect = [&current_preset](PresetCollection &presets, std::deque<Preset> &collected) {
+                    for (const Preset *preset : presets.get_user_presets_for_printer(current_preset.name)) {
+                        if (preset->inherits() != "")
+                            collected.push_front(*preset);
                         else
-                            filament_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
+                            collected.push_back(*preset);
+                        if (!preset->setting_id.empty()) { presets.set_sync_info_and_save(preset->name, preset->setting_id, "delete", 0); }
                     }
-                }
-                for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            process_presets.push_front(preset);
-                        else
-                            process_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
-                    }
-                }
+                };
+                collect(m_preset_bundle->filaments, filament_presets);
+                collect(m_preset_bundle->prints, process_presets);
             }
             if (!current_preset.setting_id.empty()) {
                 m_presets->set_sync_info_and_save(current_preset.name, current_preset.setting_id, "delete", 0);
@@ -10040,22 +10035,20 @@ void Tab::delete_preset(bool confirmed)
         is_base_preset = true;
         if (current_preset.type == Preset::Type::TYPE_PRINTER && !current_preset.is_system) { //Customize third-party printers
             Preset &current_preset = m_presets->get_selected_preset();
-            int filament_preset_num    = 0;
-            int process_preset_num     = 0;
-            for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { filament_preset_num++; }
-            }
-            for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { process_preset_num++; }
-            }
+            // The same presets select_preset() deletes along with the printer.
+            const int filament_preset_num = int(m_preset_bundle->filaments.get_user_presets_for_printer(current_preset.name).size());
+            const int process_preset_num  = int(m_preset_bundle->prints.get_user_presets_for_printer(current_preset.name).size());
 
-            DeleteConfirmDialog
-                dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
-                    wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
-                                     filament_preset_num, process_preset_num));
-            int res = dlg.ShowModal();
-            if (res != wxID_OK) return;
-            confirm_delete_third_party_printer = true;
+            // With nothing attached, the plain delete confirmation below is asked instead.
+            if (filament_preset_num + process_preset_num > 0) {
+                DeleteConfirmDialog
+                    dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
+                        wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
+                                         filament_preset_num, process_preset_num));
+                int res = dlg.ShowModal();
+                if (res != wxID_OK) return;
+                confirm_delete_third_party_printer = true;
+            }
         }
         int count = 0;
         wxString presets;
