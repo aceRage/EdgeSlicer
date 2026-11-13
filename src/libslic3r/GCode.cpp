@@ -1765,7 +1765,13 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // gcode (and the head position it ends at) is known.
     }
 
-    if (will_go_down) {
+    // A tool change made where the nozzle is (not over the tower) must not go down to the tower's
+    // height there: with no sparse layers the tower can be far below the part under the nozzle.
+    // The change runs at the layer's height, its tower entry travels over to the tower, and the
+    // "Force restore layer Z" below takes the nozzle down once it is there.
+    const bool changes_in_place = !travel_to_tower_now && !tcr.priming && new_extruder_id >= 0 && needs_toolchange &&
+                                  gcodegen.config().enable_prime_tower;
+    if (will_go_down && !changes_in_place) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
         gcode += gcodegen.writer().unretract();
@@ -1783,7 +1789,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // docking a tool, etc.), so restore Z to the real layer height before running it,
         // otherwise that travel can collide with already-printed parts taller than the tower.
         // deretraction_str (below) brings Z back down to resume printing the wipe tower.
-        if (will_go_down && gcodegen.config().enable_prime_tower) {
+        if (will_go_down && !changes_in_place && gcodegen.config().enable_prime_tower) {
             restore_layer_z_str += gcodegen.writer().retract();
             restore_layer_z_str += gcodegen.writer().travel_to_z(current_z,
                 "Restore layer Z before toolchange to avoid collision with printed parts");

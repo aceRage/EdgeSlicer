@@ -647,6 +647,85 @@ TEST_CASE("Non-SEMM without multitool ramming skips the final purge", "[WipeTowe
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
 }
 
+// A multi-tool printer that changes tool where the nozzle is (no ramming, "Tool change on wipe tower"
+// off) with no sparse layers: append_tcr2() took the nozzle down to the tower's height right there,
+// over the part, before the tool change, and only went back up for change_filament_gcode.
+TEST_CASE("No-sparse in-place tool change does not take the nozzle down over the part", "[WipeTower][GCode][NoSparseLayers]")
+{
+    DynamicPrintConfig config = final_purge_config(false, true);
+    config.set_deserialize_strict({ { "tool_change_on_wipe_tower", "0" }, { "filament_multitool_ramming", "0,0" } });
+    Print print;
+    Model model;
+    // The post is half filament 2 from 3 to 4 mm and from 9 to 10 mm, so those layers change
+    // filament in the middle of the layer, with the nozzle over the post.
+    ModelObject *post = model.add_object();
+    post->name        = "halves.stl";
+    double bottom = 0.;
+    for (const auto &[height, split] : std::vector<std::pair<double, bool>>{ { 3., false }, { 1., true }, { 5., false }, { 1., true }, { 2., false } }) {
+        // add_volume() centres the mesh on its own origin, so each box is placed by its centre.
+        for (int half = 0; half < (split ? 2 : 1); ++half) {
+            ModelVolume *v = post->add_volume(make_cube(split ? 10. : 20., 20., height));
+            v->set_offset(Vec3d(split ? 5. + 10. * half : 10., 10., bottom + 0.5 * height));
+            v->config.set("extruder", half + 1);
+        }
+        bottom += height;
+    }
+    post->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    post->ensure_on_bed();
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    const std::string gcode = Slic3r::Test::gcode(print);
+    // The tower really is lower than the part when a tool change comes.
+    REQUIRE(gcode.find("Force restore layer Z") != std::string::npos);
+
+    // Every position the nozzle takes over the post (40..60 in x and y), against the highest the
+    // post has been printed so far.
+    std::istringstream in(gcode);
+    std::string        line;
+    double             x = 0, y = 0, z = 0, e = 0, top = 0;
+    bool               in_tower = false, relative_e = false;
+    int                below = 0;
+    double             worst = 0;
+    const std::regex   word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
+        if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, de = 0;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': z = v; break;
+            case 'E': de = relative_e ? v : v - e; if (!relative_e) e = v; break;
+            }
+        }
+        x = nx;
+        y = ny;
+        const bool over_post = x > 40. + 0.5 && x < 60. - 0.5 && y > 40. + 0.5 && y < 60. - 0.5;
+        if (!in_tower && de > 1e-6 && over_post)
+            top = std::max(top, z);
+        if (over_post && z < top - 0.05) {
+            ++below;
+            if (top - z > worst) {
+                worst = top - z;
+                INFO("nozzle at x " << x << " y " << y << " z " << z << " over the post printed to " << top << ": " << line);
+                CHECK(below == 0);
+            }
+        }
+    }
+    INFO(below << " moves below the printed post, deepest " << worst << " mm");
+    CHECK(below == 0);
+}
+
 TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCode][FinalPurge]")
 {
     const std::string saved_data_dir = data_dir();
