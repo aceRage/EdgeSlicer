@@ -45,6 +45,18 @@ struct ContourZSamples
     // see the clamp in ContourZ.cpp and the emitter in GCode.cpp).
     std::vector<float> z;
 
+    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp). False for every ZAA path, which keeps the
+    // emitter's ZAA behaviour byte-identical. When true:
+    //  - z holds a PLACEMENT delta (the path's absolute Z minus its layer's print_z, several mm
+    //    below on the deferred conformal layers), not a change of bead height, so the emitter
+    //    takes the flow from `flow` instead of contour_z_extrusion_ratio();
+    //  - before travelling to this path the emitter first lifts to base + safe_z_delta, which
+    //    clears every surface of the object, and only then moves in XY and descends vertically.
+    bool               curved_top   = false;
+    float              safe_z_delta = 0.f;
+    // Per-sample flow multiplier (same order as points); empty means 1.
+    std::vector<float> flow;
+
     // Build the coordinate index. Must be called once, after points/z are filled.
     void build_index();
 
@@ -52,6 +64,8 @@ struct ContourZSamples
     // the nearest sample segment (this only happens for the single point a seam split or a
     // clip_end introduces).
     float z_at(const Point &p) const;
+    // Curved tops: flow multiplier for p, 1 when there is none or p is not an original sample.
+    float flow_at(const Point &p) const;
 
     bool   empty() const { return this->points.empty(); }
     size_t size() const { return this->points.size(); }
@@ -67,9 +81,14 @@ private:
         }
     };
     std::unordered_map<std::pair<int64_t, int64_t>, float, KeyHash> m_index;
+    // Curved tops only; stays empty for ZAA paths.
+    std::unordered_map<std::pair<int64_t, int64_t>, float, KeyHash> m_flow_index;
 };
 
 using ContourZSamplesPtr = std::shared_ptr<const ContourZSamples>;
+
+// EdgeSlicer SPIKE, curved tops: speed cap for conformal paths, mm/s (see GCode.cpp).
+static constexpr double CURVED_TOPS_MAX_SPEED_MM_S = 40.0;
 
 // ---------------------------------------------------------------------------------------------
 // The tuning constants of the pass. All of them exist because of a measured artifact on a real

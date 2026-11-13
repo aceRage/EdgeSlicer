@@ -260,6 +260,10 @@ public:
                     height = patch.merged_height;
         return height;
     }
+    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): set on the object's top layer when it carries the
+    // conformal layers. The planar layers under it were emptied on purpose (their material is in the
+    // curved block), so the empty Z span below is not a printability gap.
+    bool                    curved_tops_block { false };
     // Mixed-layer-height band merge: true when this layer takes part in a merge and carries no extrusions of its
     // own. What it would have printed moved up into the group top, so the empty Z span is not a printability gap
     // and the layer above must not be reported as unsupported. A merged band that had nothing printable to begin

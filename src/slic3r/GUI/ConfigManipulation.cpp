@@ -1147,6 +1147,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "zaa_speed_scaling"})
         toggle_line(el, has_zaa);
 
+    // EdgeSlicer SPIKE: curved tops detail settings.
+    bool has_curved_tops = config->opt_bool("curved_tops_enabled");
+    for (auto el : {"curved_tops_layers", "curved_tops_max_angle"})
+        toggle_line(el, has_curved_tops);
+
     bool have_sequential_printing = (config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
     // for (auto el : { "extruder_clearance_radius", "extruder_clearance_height_to_rod", "extruder_clearance_height_to_lid" })
     //     toggle_field(el, have_sequential_printing);

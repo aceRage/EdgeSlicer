@@ -2630,7 +2630,10 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
             }
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between)
+            // EdgeSlicer SPIKE: a curved-tops block reaches down into the layers it emptied.
+            const bool curved_tops_block = layer_to_print.object_layer != nullptr && layer_to_print.object_layer->curved_tops_block;
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between &&
+                ! curved_tops_block)
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
@@ -11387,6 +11390,17 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool   zaa_contoured = path.z_contoured();
     const double zaa_base_z    = m_nominal_z + double(path.z_offset) * double(path.height);
     const double zaa_first_z   = zaa_contoured ? zaa_base_z + double(path.z_contour->z_at(path.first_point())) : zaa_base_z;
+    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): a conformal path is reached from above. Lift to
+    // a Z that clears the whole surface, travel in XY there and only then descend vertically, so
+    // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
+    const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
+    const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
+    if (curved_top) {
+        if (m_writer.get_position().z() < curved_safe_z - EPSILON)
+            gcode += this->writer().travel_to_z(curved_safe_z, "curved tops: lift clear of the surface", true);
+        // A detour would drop back to the layer's nominal Z at its first point; go straight at the safe Z.
+        m_avoid_crossing_perimeters.disable_once();
+    }
 
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
@@ -11404,7 +11418,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
-                                 sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
+                                 sloped == nullptr ? (curved_top ? curved_safe_z :
+                                                      (zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
         // Orca: ensure Z matches planned layer height
         // Ultra: slope_need_z_travel is also set for a flat path whose planned start Z (zaa_first_z: offset
@@ -11933,6 +11948,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
+    // EdgeSlicer SPIKE, curved tops: every conformal move also moves Z, and a printer's Z axis is far
+    // slower than XY (Elegoo Centauri Carbon: 20 mm/s, 100-500 mm/s2), so the role speed would only be
+    // throttled segment by segment by the firmware, i.e. stutter. Cap the path speed instead.
+    if (curved_top)
+        F = std::min(F, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
 
     // Snapmaker (feedrate guard): hand the writer the provenance of this feedrate and the
     // preferred substitute, so that if F turns out to be non-positive / non-finite the guard can
@@ -12003,7 +12023,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // grading and curled-perimeter slowdown in new_points below (which sets its own per-point F,
     // scaled here in turn), small-perimeter / resonance avoidance, the initial-layer ramp, and the
     // filament_max_volumetric_speed cap that `speed` has already been clamped to.
-    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value;
+    const bool   zaa_speed_scaling = zaa_contoured && !curved_top && m_config.zaa_speed_scaling.value;
     const double zaa_h_nominal     = double(path.height);
     const double zaa_max_vol       = filament_max_volumetric_speed;
     // The local height that set the F currently in force, mm; <= 0 means "no scaled F emitted yet
@@ -12287,7 +12307,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                         // reads as fuzz. The trapezoid rule is the exact volume for a linear ramp.
                         const double z_prev = double(path.z_contour->z_at(line.a));
                         const double z_mean = 0.5 * (z_prev + z_diff);
-                        const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                        // Curved tops: z is a placement, not a bead height; the flow is stored per sample.
+                        const double ratio  = curved_top ?
+                            0.5 * (double(path.z_contour->flow_at(line.a)) + double(path.z_contour->flow_at(line.b))) :
+                            contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                         const double e      = dE * ratio;
                         // ZAA speed scaling. The segment's local height is exactly the height the
                         // E above was derived from (the trapezoid mean), so scaling F by the same
@@ -12508,7 +12531,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 const double z_diff = double(path.z_contour->z_at(processed_point.p));
                 const double z_prev = double(path.z_contour->z_at(pre_processed_point.p));
                 const double z_mean = 0.5 * (z_prev + z_diff);
-                const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                const double ratio  = curved_top ?
+                    0.5 * (double(path.z_contour->flow_at(pre_processed_point.p)) + double(path.z_contour->flow_at(processed_point.p))) :
+                    contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                 const double e      = dE * ratio;
                 // ZAA speed scaling on top of the per-point dynamic speed: the reference is
                 // last_set_speed, i.e. the F the overhang / curled-perimeter estimator just put in

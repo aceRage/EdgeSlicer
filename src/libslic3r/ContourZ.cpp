@@ -36,6 +36,18 @@ void ContourZSamples::build_index()
         // were raycast against the same mesh at the same layer, so they agree to within the
         // resampling resolution.
         this->m_index.emplace(contour_key(this->points[i]), this->z[i]);
+    this->m_flow_index.clear();
+    if (this->flow.size() == this->points.size())
+        for (size_t i = 0; i < this->points.size(); ++i)
+            this->m_flow_index.emplace(contour_key(this->points[i]), this->flow[i]);
+}
+
+float ContourZSamples::flow_at(const Point &p) const
+{
+    if (this->m_flow_index.empty())
+        return 1.f;
+    auto it = this->m_flow_index.find(contour_key(p));
+    return it == this->m_flow_index.end() ? 1.f : it->second;
 }
 
 float ContourZSamples::z_at(const Point &p) const
@@ -254,6 +266,10 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
     // Guard (2), sloped entities: scarf-joint seams already own the Z of their path. Upstream
     // throws here; we skip, because this fork emits sloped loops routinely.
     if (dynamic_cast<const ExtrusionPathSloped *>(&path) != nullptr)
+        return false;
+
+    // Curved tops (CurvedTops.cpp) already own the Z of their conformal paths.
+    if (path.z_contour != nullptr && path.z_contour->curved_top)
         return false;
 
     Layer         *layer = region->layer();
