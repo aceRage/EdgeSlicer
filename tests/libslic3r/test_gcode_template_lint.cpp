@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/GCodeTemplateLint.hpp"
+#include "libslic3r/Config.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -254,7 +255,12 @@ TEST_CASE("G-code template lint: shipped machine G-code has no errors", "[GCodeT
                 if (kv.key().find("gcode") == std::string::npos || !kv.value().is_string())
                     continue;
                 ++templates;
-                const Result r = analyze(kv.value().get<std::string>(), is_known);
+                // A string option is C-unescaped when a profile is loaded (ConfigOptionString::deserialize):
+                // some profiles store \" and \n escapes inside the JSON string. Check what the editor shows.
+                std::string gcode;
+                if (!unescape_string_cstyle(kv.value().get<std::string>(), gcode))
+                    gcode = kv.value().get<std::string>();
+                const Result r = analyze(gcode, is_known);
                 for (const Issue &is : r.issues) {
                     if (is.severity == Severity::Warning) {
                         unknown_names.insert(is.name);
