@@ -183,6 +183,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_state.cpp
+	test_preset_printer_own_presets.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
