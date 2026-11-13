@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/iostream.hpp>
 
 #include <algorithm>
 #include <boost/log/trivial.hpp>
@@ -17,6 +18,7 @@
 #include <optional>
 #include "slic3r/plugin/PluginFsUtils.hpp"
 #include <slic3r/plugin/PythonPluginInterface.hpp>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -26,6 +28,7 @@
 #include "PluginDescriptor.hpp"
 #include "PluginLoader.hpp"
 #include "PluginConfig.hpp"
+#include "PluginTrust.hpp"
 
 struct _object;
 using PyObject = _object;
@@ -190,6 +193,9 @@ public:
     bool try_get_plugin_descriptor_for_capability(const std::string& capability_name,
                                                   PluginCapabilityType type,
                                                   PluginDescriptor& out) const;
+    // The "name;uuid;capability" reference for a loaded capability, as stored in a preset's
+    // "plugins" manifest; std::nullopt when no loaded package provides it.
+    std::optional<PluginCapabilityRef> resolve_capability_ref(const std::string& capability_name, PluginCapabilityType type) const;
     // Per-plugin storage directory under orca_plugins/plugin_data, created if missing. Throws
     // std::runtime_error if the plugin is unregistered, the key is invalid, or (cloud plugins)
     // no user is logged in yet.
@@ -477,8 +483,15 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
 
     const bool has_any = std::any_of(capabilities.values.begin(), capabilities.values.end(),
                                      [](const std::string& s) { return !s.empty(); });
+    // Headless --slice has no notification UI. Mirror skip/timeout warnings to stderr so a
+    // missing plugin or a 10s load timeout is not silent. Do not fail the slice: GUI
+    // skip-with-warning is the documented missing-plugin semantics.
+    auto warn_skip = [](const std::string& msg) {
+        BOOST_LOG_TRIVIAL(warning) << msg;
+        boost::nowide::cerr << msg << std::endl;
+    };
     if (has_any && !plugin_mgr.wait_for_all_plugin_loads(std::chrono::seconds(10))) {
-        BOOST_LOG_TRIVIAL(warning) << tag << ": timed out waiting for plugin loads; unresolved capabilities will be skipped";
+        warn_skip(tag + ": timed out waiting for plugin loads; unresolved capabilities will be skipped");
     }
 
     for (const std::string& capability : capabilities.values) {
@@ -496,25 +509,43 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
             }
         }
 
+        // The manifest is derived from the picker value only when that value changes, so it can be
+        // stale or empty even though the capability is loaded now. Resolve it by name instead of
+        // silently skipping the step.
         if (!ref) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": no plugin reference found for capability '" << capability << "'; skipping";
+            ref = plugin_mgr.resolve_capability_ref(capability, type);
+            if (ref)
+                BOOST_LOG_TRIVIAL(warning) << tag << ": capability '" << capability << "' missing from the plugins manifest; resolved by name";
+        }
+
+        if (!ref) {
+            warn_skip(tag + ": no plugin reference found for capability '" + capability + "'; skipping");
             continue;
         }
 
         const std::string cap_name   = ref->capability_name;
         const std::string plugin_key = ref->uuid.empty() ? ref->name : ref->uuid;
 
+        PluginDescriptor descriptor;
+        if (plugin_mgr.try_get_plugin_descriptor(plugin_key, descriptor)) {
+            const auto trust = plugin_trust::evaluate(descriptor);
+            if (!trust.allowed()) {
+                throw std::runtime_error(
+                    "Slicing pipeline plugin '" + cap_name + "' is untrusted. " +
+                    plugin_trust::refuse_untrusted_message());
+            }
+        }
+
         // only_enabled = false so that "not loaded" and "loaded but disabled" stay distinguishable
         // and each keeps its own diagnostic.
         auto cap = plugin_mgr.get_plugin_capability({type, cap_name, plugin_key}, /*only_enabled=*/false);
         if (!cap) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": no loaded capability '" << cap_name << "' for plugin '" << plugin_key << "'; skipping";
+            warn_skip(tag + ": no loaded capability '" + cap_name + "' for plugin '" + plugin_key + "'; skipping");
             continue;
         }
 
         if (!cap->is_enabled()) {
-            BOOST_LOG_TRIVIAL(warning) << tag << ": capability '" << cap_name << "' for plugin '" << plugin_key
-                                       << "' is disabled; skipping";
+            warn_skip(tag + ": capability '" + cap_name + "' for plugin '" + plugin_key + "' is disabled; skipping");
             continue;
         }
 

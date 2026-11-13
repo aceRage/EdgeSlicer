@@ -54,6 +54,9 @@
 #include "EditGCodeDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginWarnings.hpp"
+#endif
 
 #include "Widgets/Label.hpp"
 #include "Widgets/TabCtrl.hpp"
@@ -9814,6 +9817,12 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
         detach           = detach || dlg.get_detach_value(m_type);
     }
+
+#ifdef EDGE_PYTHON_PLUGINS
+    m_presets->get_edited_preset().config.update_plugin_manifest();
+    if (!confirm_save_with_unresolved_plugins(this, m_presets->get_edited_preset().config))
+        return;
+#endif
 
     //BBS record current preset name
     std::string curr_preset_name = m_presets->get_edited_preset().name;

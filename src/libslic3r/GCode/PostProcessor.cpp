@@ -19,6 +19,17 @@
 #include <new>
 #include <fstream>
 
+namespace {
+
+Slic3r::GCodePostProcessPluginFn s_gcode_post_process_plugin_fn;
+
+}
+
+void Slic3r::set_gcode_post_process_plugin_fn(Slic3r::GCodePostProcessPluginFn fn)
+{
+    s_gcode_post_process_plugin_fn = std::move(fn);
+}
+
 #ifdef WIN32
 
 // The standard Windows includes.
@@ -238,13 +249,14 @@ void gcode_add_line_number(const std::string& path, const DynamicPrintConfig& co
 // output_name is the final name of the G-code on SD card or when uploaded to PrusaLink or OctoPrint.
 // If uploading to PrusaLink or OctoPrint, then the file will be renamed to output_name first on the target host.
 // The post-processing script may change the output_name.
-static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config)
+static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config, const std::function<bool()> &canceled)
 {
     const auto *post_process = config.opt<ConfigOptionStrings>("post_process");
-    if (// likely running in SLA mode
-        post_process == nullptr || 
-        // no post-processing script
-        post_process->values.empty())
+    const auto *slicing_pipeline_plugin = config.opt<ConfigOptionStrings>("slicing_pipeline_plugin");
+    const bool  have_scripts = post_process != nullptr && !post_process->values.empty();
+    const bool  have_plugins = s_gcode_post_process_plugin_fn && slicing_pipeline_plugin != nullptr &&
+                              !slicing_pipeline_plugin->values.empty();
+    if (!have_scripts && !have_plugins)
         return false;
 
     std::string path;
@@ -304,34 +316,41 @@ static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy,
     remove_output_name_file();
 
     try {
-        for (const std::string &scripts : post_process->values) {
-    		std::vector<std::string> lines;
-    		boost::split(lines, scripts, boost::is_any_of("\r\n"));
-            for (std::string script : lines) {
-                // Ignore empty post processing script lines.
-                boost::trim(script);
-                if (script.empty())
-                    continue;
-                BOOST_LOG_TRIVIAL(info) << "Executing script " << script << " on file " << path;
-                std::string std_err;
-                const int result = run_script(script, gcode_file.string(), std_err);
-                if (result != 0) {
-                    const std::string msg = std_err.empty() ? (boost::format("Post-processing script %1% on file %2% failed.\nError code: %3%") % script % path % result).str()
-                        : (boost::format("Post-processing script %1% on file %2% failed.\nError code: %3%\nOutput:\n%4%") % script % path % result % std_err).str();
-                    BOOST_LOG_TRIVIAL(error) << msg;
-                    delete_copy();
-                    throw Slic3r::RuntimeError(msg);
-                }
-                if (! boost::filesystem::exists(gcode_file)) {
-                    const std::string msg = (boost::format(_(L(
-                        "Post-processing script %1% failed.\n\n"
-                        "The post-processing script is expected to change the G-code file %2% in place, but the G-code file was deleted and likely saved under a new name.\n"
-                        "Please adjust the post-processing script to change the G-code in place and consult the manual on how to optionally rename the post-processed G-code file.\n")))
-                        % script % path).str();
-                    BOOST_LOG_TRIVIAL(error) << msg;
-                    throw Slic3r::RuntimeError(msg);
+        if (have_scripts) {
+            for (const std::string &scripts : post_process->values) {
+        		std::vector<std::string> lines;
+        		boost::split(lines, scripts, boost::is_any_of("\r\n"));
+                for (std::string script : lines) {
+                    // Ignore empty post processing script lines.
+                    boost::trim(script);
+                    if (script.empty())
+                        continue;
+                    BOOST_LOG_TRIVIAL(info) << "Executing script " << script << " on file " << path;
+                    std::string std_err;
+                    const int result = run_script(script, gcode_file.string(), std_err);
+                    if (result != 0) {
+                        const std::string msg = std_err.empty() ? (boost::format("Post-processing script %1% on file %2% failed.\nError code: %3%") % script % path % result).str()
+                            : (boost::format("Post-processing script %1% on file %2% failed.\nError code: %3%\nOutput:\n%4%") % script % path % result % std_err).str();
+                        BOOST_LOG_TRIVIAL(error) << msg;
+                        delete_copy();
+                        throw Slic3r::RuntimeError(msg);
+                    }
+                    if (! boost::filesystem::exists(gcode_file)) {
+                        const std::string msg = (boost::format(_(L(
+                            "Post-processing script %1% failed.\n\n"
+                            "The post-processing script is expected to change the G-code file %2% in place, but the G-code file was deleted and likely saved under a new name.\n"
+                            "Please adjust the post-processing script to change the G-code in place and consult the manual on how to optionally rename the post-processed G-code file.\n")))
+                            % script % path).str();
+                        BOOST_LOG_TRIVIAL(error) << msg;
+                        throw Slic3r::RuntimeError(msg);
+                    }
                 }
             }
+        }
+        if (have_plugins) {
+            if (canceled && canceled())
+                throw CanceledException();
+            s_gcode_post_process_plugin_fn(path, host, output_name, config, canceled);
         }
         if (boost::filesystem::exists(path_output_name)) {
             try {
@@ -384,10 +403,10 @@ static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy,
 // reported as an ExportError, which does not invalidate the plater, so the user can retry (see
 // SlicingProcessCompletedEvent::invalidate_plater()). A cancel, a fatal error and running out of memory keep
 // their own handling.
-bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config)
+bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config, std::function<bool()> canceled)
 {
     try {
-        return run_post_process_scripts_impl(src_path, make_copy, host, output_name, config);
+        return run_post_process_scripts_impl(src_path, make_copy, host, output_name, config, canceled);
     } catch (const CanceledException &) {
         throw;
     } catch (const HardCrash &) {

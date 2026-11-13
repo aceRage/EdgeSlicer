@@ -42,6 +42,8 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
+ConfigBase::ResolveCapabilityFn ConfigBase::resolve_capability_fn = nullptr;
+
 //BBS: add json support
 //static const std::string CONFIG_VERSION_KEY = "version";
 //static const std::string CONFIG_NAME_KEY = "name";
@@ -1519,6 +1521,28 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
         // Do legacy conversion on a completely loaded dictionary.
         // Perform composite conversions, for example merging multiple keys into one key.
         this->handle_legacy_composite();
+        // Empty plugin keys are omitted from project JSON/3MF so OFF profile bytes match main.
+        // A full project dump still round-trips: restore the defaults so has() holds.
+        // Only when the document already has print settings (layer_height): a custom-model
+        // 3MF or a sparse User/System preset must stay empty / inherit, not grow these keys.
+        {
+            auto from_it = key_values.find(BBL_JSON_KEY_FROM);
+            const bool project_dump =
+                is_project_settings ||
+                (from_it != key_values.end() && ascii_iequals(from_it->second, "project"));
+            if (project_dump && this->has("layer_height")) {
+                static const char *const plugin_keys[] = {
+                    "plugins",
+                    "slicing_pipeline_plugin",
+                    "print_plugin_config_overrides",
+                    "printer_plugin_config_overrides",
+                    "filament_plugin_config_overrides",
+                };
+                for (const char *key : plugin_keys)
+                    if (config_def->get(key) != nullptr && !this->has(key))
+                        this->option(key, true);
+            }
+        }
         return 0;
     }
     catch (const std::ifstream::failure &err)  {
@@ -2011,6 +2035,22 @@ bool ConfigBase::save_to_json(const std::string &file, const std::string &name, 
     return true;
 }
 
+bool ConfigBase::plugin_option_is_empty(const std::string &opt_key, const ConfigOption *opt)
+{
+    if (opt_key != "plugins" && opt_key != "slicing_pipeline_plugin" &&
+        opt_key != "print_plugin_config_overrides" && opt_key != "printer_plugin_config_overrides" &&
+        opt_key != "filament_plugin_config_overrides")
+        return false;
+    if (opt == nullptr)
+        return true;
+    auto blank = [](const std::string &v) { return v.find_first_not_of(" \t") == std::string::npos; };
+    if (const auto *s = dynamic_cast<const ConfigOptionString *>(opt))
+        return blank(s->value);
+    if (const auto *ss = dynamic_cast<const ConfigOptionStrings *>(opt))
+        return std::all_of(ss->values.begin(), ss->values.end(), blank);
+    return opt->serialize().empty();
+}
+
 void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8, const std::string is_custom) const
 {
     json j;
@@ -2025,6 +2065,8 @@ void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const s
     for (const std::string &opt_key : this->keys())
     {
         const ConfigOption* opt = this->option(opt_key);
+        if (plugin_option_is_empty(opt_key, opt))
+            continue;
         if ( opt->is_scalar() ) {
             if (opt->type() == coString && (opt_key != "bed_custom_texture" && opt_key != "bed_custom_model"))
                 //keep \n, \r, \t
@@ -2048,6 +2090,18 @@ void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const s
         }
     }
 
+    // Serialize the top-level "plugins" manifest: the individual plugin-backed options keep bare
+    // capability names; the full "name;uuid;capability" references are derived here. Only with a
+    // resolver (GUI); without one (CLI/headless) leave whatever the "plugins" option already
+    // serialized above, so a round-trip never drops the manifest.
+    if (resolve_capability_fn) {
+        std::vector<std::string> unique_refs = this->collect_plugin_manifest();
+        if (unique_refs.empty())
+            j.erase("plugins");
+        else
+            j["plugins"] = unique_refs;
+    }
+
     // 4-space indent matches the previous std::setw(4) << j file format.
     os << j.dump(4, ' ', false, replace_invalid_utf8 ? json::error_handler_t::replace : json::error_handler_t::strict) << std::endl;
 }
@@ -2057,11 +2111,77 @@ void ConfigBase::save(const std::string &file) const
     boost::nowide::ofstream c;
     c.open(file, std::ios::out | std::ios::trunc);
     c << "# " << Slic3r::header_slic3r_generated() << std::endl;
-    for (const std::string &opt_key : this->keys())
+    for (const std::string &opt_key : this->keys()) {
+        if (plugin_option_is_empty(opt_key, this->option(opt_key)))
+            continue;
         c << opt_key << " = " << this->opt_serialize(opt_key) << std::endl;
+    }
     c.close();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;
+}
+
+void ConfigBase::for_each_plugin_capability(const std::function<void(const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name)>& fn) const
+{
+    const ConfigDef* def = this->def();
+    if (def == nullptr)
+        return;
+
+    for (const std::string& opt_key : this->keys()) {
+        const ConfigOptionDef* opt_def = def->get(opt_key);
+        const ConfigOption*    opt     = this->option(opt_key);
+        if (opt_def == nullptr || opt == nullptr || !opt_def->is_plugin_backed())
+            continue;
+
+        if (const auto* scalar_option = dynamic_cast<const ConfigOptionString*>(opt)) {
+            if (!scalar_option->value.empty())
+                fn(opt_key, opt_def->plugin_type, scalar_option->value);
+        } else if (const auto* vector_option = dynamic_cast<const ConfigOptionVectorBase*>(opt)) {
+            for (const std::string& capability_name : vector_option->vserialize())
+                if (!capability_name.empty())
+                    fn(opt_key, opt_def->plugin_type, capability_name);
+        }
+    }
+}
+
+std::vector<std::string> ConfigBase::collect_plugin_manifest() const
+{
+    std::vector<std::string> refs;
+    if (!resolve_capability_fn)
+        return refs;
+
+    this->for_each_plugin_capability([&refs](const std::string& /* opt_key */, const std::string& plugin_type, const std::string& capability_name) {
+        std::string ref = resolve_capability_fn(capability_name, plugin_type);
+        if (!ref.empty() && std::find(refs.begin(), refs.end(), ref) == refs.end())
+            refs.emplace_back(std::move(ref));
+    });
+    return refs;
+}
+
+std::vector<ConfigBase::UnresolvedPluginCapability> ConfigBase::unresolved_plugin_capabilities() const
+{
+    std::vector<UnresolvedPluginCapability> unresolved;
+    if (!resolve_capability_fn)
+        return unresolved;
+
+    this->for_each_plugin_capability([&unresolved](const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name) {
+        if (!resolve_capability_fn(capability_name, plugin_type).empty())
+            return;
+        const auto matches = [&opt_key, &capability_name](const UnresolvedPluginCapability& entry) {
+            return entry.opt_key == opt_key && entry.capability_name == capability_name;
+        };
+        if (std::none_of(unresolved.begin(), unresolved.end(), matches))
+            unresolved.push_back(UnresolvedPluginCapability{ opt_key, capability_name });
+    });
+    return unresolved;
+}
+
+void ConfigBase::update_plugin_manifest()
+{
+    if (!resolve_capability_fn)
+        return;
+    if (auto* manifest = this->option<ConfigOptionStrings>("plugins", true))
+        manifest->values = this->collect_plugin_manifest();
 }
 
 // Set all the nullable values to nils.

@@ -134,7 +134,7 @@ bool PluginManager::initialize()
     // leaves the store empty (see PluginConfig::load), never blocking startup.
     m_config.load();
 
-    // Install the libslic3r hooks (Phase 1: lifecycle only).
+    // Install the libslic3r hooks (lifecycle, capability resolver, slicing pipeline, G-code post-process).
     // Uninstalled in shutdown() before the interpreter finalizes.
     plugin_hooks::install();
 
@@ -570,6 +570,22 @@ bool PluginManager::try_get_plugin_descriptor_for_capability(const std::string& 
     }
 
     return false;
+}
+
+std::optional<PluginCapabilityRef> PluginManager::resolve_capability_ref(const std::string& capability_name,
+                                                                         PluginCapabilityType type) const
+{
+    // only_enabled = false: a stored reference must stay resolvable whether or not the user
+    // currently has the capability enabled; the dispatchers report "disabled" separately.
+    if (!get_plugin_capability(capability_name, type, /*only_enabled=*/false))
+        return std::nullopt;
+
+    PluginDescriptor descriptor;
+    if (!try_get_plugin_descriptor_for_capability(capability_name, type, descriptor))
+        return std::nullopt;
+
+    const std::string identity = descriptor.is_cloud_plugin() ? descriptor.name : descriptor.plugin_key;
+    return PluginCapabilityRef{identity, capability_name, descriptor.cloud_uuid()};
 }
 
 std::string PluginManager::get_storage_dir(const std::string& plugin_key) const

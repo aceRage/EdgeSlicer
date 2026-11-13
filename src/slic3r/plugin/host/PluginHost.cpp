@@ -44,8 +44,8 @@ void PluginHost::RegisterBindings(pybind11::module_& module)
 
     PluginHostUi::RegisterBindings(host);
 
-    // Slicing print-graph data model: registered as a stub that raises a clear
-    // "not available in this Edge build" error. Pipeline plugins are Phase 6.
+    // Slicing print-graph data model (Phase 6). Early steps hand live Print* / PrintObject*
+    // in-process; they run unsandboxed.
     host_bindings::register_slicing(host);
 }
 

@@ -201,6 +201,9 @@
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "PluginWarnings.hpp"
+#endif
 #include "PresetComboBoxes.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
@@ -14434,6 +14437,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             log_substitutions(preset_substitutions, path.string());
                         else if (!preset_substitutions.empty())
                             show_substitutions_info(preset_substitutions);
+#ifdef EDGE_PYTHON_PLUGINS
+                        warn_if_missing_plugins(q, preset_bundle);
+#endif
                     }
                     if (project_presets.size() > 0) {
                         for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
@@ -14857,6 +14863,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
                     preset_substitutions                     = preset_bundle.load_project_embedded_presets(project_presets, ForwardCompatibilitySubstitutionRule::Enable);
                     if (!preset_substitutions.empty()) show_substitutions_info(preset_substitutions);
+#ifdef EDGE_PYTHON_PLUGINS
+                    warn_if_missing_plugins(q, preset_bundle);
+#endif
 
                     for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
                     project_presets.clear();

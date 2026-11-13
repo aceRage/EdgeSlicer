@@ -1,9 +1,8 @@
 #pragma once
 
-// The plugin layer's installers for the hooks libslic3r exposes. Phase 1
-// installs only the lifecycle-event hook. Capability resolver and slicing
-// pipeline seams stay unwired so Print.hpp / ConfigBase G-code paths are
-// unchanged (Phase 0 blocker B3).
+// The plugin layer's installers for the hooks libslic3r exposes. Phase 6 installs the
+// lifecycle-event hook, the capability-name resolver, the slicing-pipeline hook, and the
+// G-code post-process plugin seam.
 
 namespace Slic3r::plugin_hooks {
 

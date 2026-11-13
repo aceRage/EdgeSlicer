@@ -247,7 +247,8 @@ void BackgroundSlicingProcess::process_fff()
 		// is kept (Edge stores nozzle grouping on Print, not on GCodeProcessorResult).
 		if (m_fff_print->is_BBL_printer()) {
 			try {
-				if (run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config()))
+				if (run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config(),
+				                             [this] { return m_fff_print->canceled(); }))
 					m_fff_print->reload_gcode_moves(m_gcode_result);
 			} catch (...) {
 				// A failed script or plugin may have left the G-code half edited, so the next run exports
@@ -854,7 +855,8 @@ void BackgroundSlicingProcess::finalize_gcode()
 	// collide with the G-code viewer memory mapping of the unprocessed G-code. G-code viewer maps unprocessed G-code, because m_gcode_result 
 	// is calculated for the unprocessed G-code and it references lines in the memory mapped G-code file by line numbers.
 	// export_path may be changed by the post-processing script as well if the post processing script decides so, see GH #6042.
-	bool post_processed = run_post_process_scripts(output_path, true, "File", export_path, m_fff_print->full_print_config());
+	bool post_processed = run_post_process_scripts(output_path, true, "File", export_path, m_fff_print->full_print_config(),
+	                                               [this] { return m_fff_print->canceled(); });
 	auto remove_post_processed_temp_file = [post_processed, &output_path]() {
 		if (post_processed)
 			try {
@@ -1000,7 +1002,8 @@ void BackgroundSlicingProcess::prepare_upload()
                 std::string source_path_str = source_path.string();
                 std::string output_name_str = m_upload_job.upload_data.upload_path.string();
                 if (run_post_process_scripts(source_path_str, false, m_upload_job.printhost->get_name(), output_name_str,
-                                             m_fff_print->full_print_config()))
+                                             m_fff_print->full_print_config(),
+                                             [this] { return m_fff_print->canceled(); }))
 			    m_upload_job.upload_data.upload_path = output_name_str;
 			}
 		}

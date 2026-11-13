@@ -1,0 +1,277 @@
+#include <catch2/catch.hpp>
+
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/GCode.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Surface.hpp"
+#include "test_data.hpp"
+
+#include <algorithm>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+static TriangleMesh cube20() { return mesh(TestMesh::cube_20x20x20); }
+
+static const char *const k_plugin_dump_keys[] = {
+    "plugins",
+    "slicing_pipeline_plugin",
+    "print_plugin_config_overrides",
+    "printer_plugin_config_overrides",
+    "filament_plugin_config_overrides",
+};
+
+TEST_CASE("Default G-code config dump omits empty plugin keys", "[slicing_pipeline][gcode_dump]")
+{
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    init_print({cube20()}, print, model, config);
+    std::string dump;
+    GCode::append_full_config(print, dump);
+    for (const char *key : k_plugin_dump_keys)
+        CHECK(dump.find(std::string("; ") + key + " =") == std::string::npos);
+}
+
+TEST_CASE("Non-empty plugin keys are dumped in the G-code config block", "[slicing_pipeline][gcode_dump]")
+{
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"Stamp"}));
+    config.set_key_value("plugins", new ConfigOptionStrings({"PipelineStamp;;Stamp"}));
+    config.set_key_value("print_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"Stamp\"}]"));
+    config.set_key_value("printer_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"PrinterCap\"}]"));
+    config.set_key_value("filament_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"FilamentCap\"}]"));
+    init_print({cube20()}, print, model, config);
+    std::string dump;
+    GCode::append_full_config(print, dump);
+    CHECK(dump.find("; slicing_pipeline_plugin =") != std::string::npos);
+    CHECK(dump.find("; plugins =") != std::string::npos);
+    CHECK(dump.find("; print_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("; printer_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("; filament_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("Stamp") != std::string::npos);
+}
+
+TEST_CASE("slicing_pipeline_plugin option exists and defaults empty", "[slicing_pipeline]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    const ConfigOptionStrings* opt = cfg.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(opt != nullptr);
+    CHECK(opt->values.empty());
+    const ConfigOptionDef* def = cfg.def()->get("slicing_pipeline_plugin");
+    REQUIRE(def != nullptr);
+    CHECK(def->plugin_type == "slicing-pipeline");
+    CHECK(def->is_plugin_backed());
+    CHECK(def->gui_type == ConfigOptionDef::GUIType::plugin_picker);
+}
+
+TEST_CASE("slicing pipeline hook setter is a no-op-safe injection", "[slicing_pipeline]")
+{
+    int calls = 0;
+    Print::set_slicing_pipeline_hook_fn(
+        [&](Print&, const PrintObject*, SlicingPipelineStepPlugin) { ++calls; });
+    Print::set_slicing_pipeline_hook_fn(nullptr);
+    CHECK(calls == 0);
+}
+
+TEST_CASE("SlicingPipeline hook fires once per step per object in order", "[slicing_pipeline]")
+{
+    struct Call {
+        const PrintObject*          obj;
+        SlicingPipelineStepPlugin   step;
+    };
+    std::vector<Call> calls;
+    Print::set_slicing_pipeline_hook_fn([&](Print&, const PrintObject* o, SlicingPipelineStepPlugin s) { calls.push_back({o, s}); });
+
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+    init_print({cube20()}, print, model, config);
+    print.process();
+    Print::set_slicing_pipeline_hook_fn(nullptr);
+
+    using S = SlicingPipelineStepPlugin;
+    auto count = [&](S s) { return std::count_if(calls.begin(), calls.end(), [&](const Call& c) { return c.step == s; }); };
+    CHECK(count(S::posSlice) == 1);
+    CHECK(count(S::posPerimeters) == 1);
+    CHECK(count(S::posPrepareInfill) == 1);
+    CHECK(count(S::posInfill) == 1);
+    CHECK(count(S::psWipeTower) == 1);
+    CHECK(count(S::psSkirtBrim) == 1);
+    CHECK(count(S::psGCodePostProcess) == 0);
+    for (const auto& c : calls)
+        if (c.step == S::psWipeTower || c.step == S::psSkirtBrim)
+            CHECK(c.obj == nullptr);
+    auto idx = [&](S s) {
+        for (size_t i = 0; i < calls.size(); ++i)
+            if (calls[i].step == s)
+                return (int) i;
+        return -1;
+    };
+    CHECK(idx(S::posSlice) < idx(S::posPerimeters));
+    CHECK(idx(S::posPerimeters) < idx(S::posPrepareInfill));
+    CHECK(idx(S::posPrepareInfill) < idx(S::posInfill));
+}
+
+static std::string strip_nondeterministic_gcode_lines(const std::string& gcode)
+{
+    std::string out;
+    out.reserve(gcode.size());
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.compare(0, 15, "; generated by ") == 0)
+            continue;
+        if (line.compare(0, 18, "; model label id: ") == 0)
+            continue;
+        if (line.find("printing object, unique label id: ") != std::string::npos)
+            continue;
+        if (line.find("slicing_pipeline_plugin") != std::string::npos)
+            continue;
+        out += line;
+        out += '\n';
+    }
+    return out;
+}
+
+TEST_CASE("Inactive hook: process output is byte-identical (no-op hook == unset)", "[slicing_pipeline]")
+{
+    auto run = [](bool activate, bool set_noop_hook) {
+        Print print;
+        Model model;
+        auto  config = DynamicPrintConfig::full_print_config();
+        if (activate)
+            config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+        if (set_noop_hook)
+            Print::set_slicing_pipeline_hook_fn([](Print&, const PrintObject*, SlicingPipelineStepPlugin) {});
+        else
+            Print::set_slicing_pipeline_hook_fn(nullptr);
+        init_print({cube20()}, print, model, config);
+        std::string g = gcode(print);
+        Print::set_slicing_pipeline_hook_fn(nullptr);
+        return g;
+    };
+    const std::string baseline = strip_nondeterministic_gcode_lines(run(false, false));
+    CHECK(strip_nondeterministic_gcode_lines(run(false, true)) == baseline);
+    CHECK(strip_nondeterministic_gcode_lines(run(true, true)) == baseline);
+}
+
+TEST_CASE("Empty option: registered hook is gated off and never fires", "[slicing_pipeline]")
+{
+    int calls = 0;
+    Print::set_slicing_pipeline_hook_fn(
+        [&](Print&, const PrintObject*, SlicingPipelineStepPlugin) { ++calls; });
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    init_print({cube20()}, print, model, config);
+    print.process();
+    Print::set_slicing_pipeline_hook_fn(nullptr);
+    CHECK(calls == 0);
+}
+
+TEST_CASE("Two instances of one object: Slice hook fires exactly once", "[slicing_pipeline]")
+{
+    int slice_calls = 0, perim_calls = 0;
+    Print::set_slicing_pipeline_hook_fn([&](Print&, const PrintObject*, SlicingPipelineStepPlugin s) {
+        if (s == SlicingPipelineStepPlugin::posSlice)
+            ++slice_calls;
+        if (s == SlicingPipelineStepPlugin::posPerimeters)
+            ++perim_calls;
+    });
+
+    Print print;
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+
+    init_print({cube20()}, print, model, config);
+    ModelObject* o1 = model.objects.front();
+    REQUIRE(o1->instances.size() == 1);
+    ModelInstance* inst2 = o1->add_instance(*o1->instances.front());
+    inst2->set_offset(inst2->get_offset() + Vec3d(40.0, 0.0, 0.0));
+
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+    Print::set_slicing_pipeline_hook_fn(nullptr);
+
+    REQUIRE(print.objects().size() == 1);
+    CHECK(slice_calls == 1);
+    CHECK(perim_calls == 1);
+}
+
+TEST_CASE("Changing slicing_pipeline_plugin invalidates posSlice", "[slicing_pipeline]")
+{
+    Print print;
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    init_print({cube20()}, print, model, config);
+    print.process();
+    REQUIRE(print.objects().front()->is_step_done(posSlice));
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+    print.apply(model, config);
+    CHECK_FALSE(print.objects().front()->is_step_done(posSlice));
+}
+
+TEST_CASE("Changing print_plugin_config_overrides invalidates posSlice", "[slicing_pipeline]")
+{
+    Print print;
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    init_print({cube20()}, print, model, config);
+    print.process();
+    REQUIRE(print.objects().front()->is_step_done(posSlice));
+    config.set_key_value("print_plugin_config_overrides",
+                         new ConfigOptionString("[{\"type\":\"slicing-pipeline\",\"name\":\"Stamp\",\"config\":{}}]"));
+    print.apply(model, config);
+    CHECK_FALSE(print.objects().front()->is_step_done(posSlice));
+}
+
+TEST_CASE("Mutating slices at the Slice boundary cascades downstream", "[slicing_pipeline]")
+{
+    auto fill_area = [](bool inset) {
+        Print print;
+        Model model;
+        auto  config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+        if (inset)
+            Print::set_slicing_pipeline_hook_fn([](Print&, const PrintObject* o, SlicingPipelineStepPlugin s) {
+                if (s != SlicingPipelineStepPlugin::posSlice || !o)
+                    return;
+                for (Layer* l : const_cast<PrintObject*>(o)->layers())
+                    for (LayerRegion* r : l->regions()) {
+                        Surfaces in = r->slices.surfaces;
+                        for (auto& sf : in) {
+                            ExPolygons e = offset_ex(sf.expolygon, -scale_(1.0));
+                            if (!e.empty())
+                                sf.expolygon = e.front();
+                        }
+                        r->slices.set(std::move(in));
+                    }
+            });
+        else
+            Print::set_slicing_pipeline_hook_fn(nullptr);
+        init_print({cube20()}, print, model, config);
+        print.process();
+        double a = 0;
+        for (auto* l : print.objects().front()->layers())
+            for (auto* r : l->regions())
+                for (auto& s : r->fill_surfaces.surfaces)
+                    a += s.expolygon.area();
+        Print::set_slicing_pipeline_hook_fn(nullptr);
+        return a;
+    };
+    CHECK(fill_area(true) < fill_area(false));
+}

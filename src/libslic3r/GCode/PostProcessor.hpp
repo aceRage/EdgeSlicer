@@ -1,6 +1,7 @@
 #ifndef slic3r_GCode_PostProcessor_hpp_
 #define slic3r_GCode_PostProcessor_hpp_
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,15 @@
 #include "../PrintConfig.hpp"
 
 namespace Slic3r {
+
+// Cross-layer injection: the plugin layer registers a dispatcher that runs
+// SlicingPipelinePluginCapability at psGCodePostProcess. libslic3r stays free of pybind11.
+using GCodePostProcessPluginFn = std::function<void(const std::string& gcode_path,
+                                                    const std::string& host,
+                                                    const std::string& output_name,
+                                                    const DynamicPrintConfig& config,
+                                                    const std::function<bool()>& canceled)>;
+void set_gcode_post_process_plugin_fn(GCodePostProcessPluginFn fn);
 
 // Run post processing script / scripts if defined.
 // Returns true if a post-processing script was executed.
@@ -20,7 +30,7 @@ namespace Slic3r {
 // output_name is the final name of the G-code on SD card or when uploaded to PrusaLink or OctoPrint.
 // If uploading to PrusaLink or OctoPrint, then the file will be renamed to output_name first on the target host.
 // The post-processing script may change the output_name.
-extern bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config);
+extern bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config, std::function<bool()> canceled = {});
 
 inline bool run_post_process_scripts(std::string &src_path, const DynamicPrintConfig &config)
 {

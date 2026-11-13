@@ -61,6 +61,11 @@ TEST_CASE("Plugin host API exposes host-owned bundle and preset surface to Pytho
     REQUIRE(has_attr(host, "Model"));
     REQUIRE(has_attr(host, "ModelObject"));
     REQUIRE(has_attr(host, "Plater"));
+    REQUIRE(has_attr(host, "Print"));
+    REQUIRE(has_attr(host, "PrintObject"));
+    REQUIRE(has_attr(host, "Layer"));
+    REQUIRE(has_attr(host, "LayerRegion"));
+    REQUIRE(has_attr(host, "Surface"));
     REQUIRE(has_attr(host, "preset"));
     py::object preset = host.attr("preset");
     REQUIRE(has_attr(preset, "bundles"));

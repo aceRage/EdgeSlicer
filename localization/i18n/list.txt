@@ -222,4 +222,6 @@ src/slic3r/GUI/PluginsInspectorDialog.cpp
 src/slic3r/plugin/PluginAuditManager.cpp
 src/slic3r/plugin/PluginTrust.cpp
 src/slic3r/plugin/PluginLoader.cpp
+src/slic3r/plugin/PluginHooks.cpp
+src/slic3r/GUI/PluginWarnings.cpp
 src/slic3r/GUI/HomePlugins.cpp
