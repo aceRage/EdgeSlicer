@@ -898,6 +898,8 @@ private:
     // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
     // Returns false (and leaves volume alone) when old and new share an extruder.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
+    // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
+    float hotend_flush_volume(int new_filament_id) const;
 
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS

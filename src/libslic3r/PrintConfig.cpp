@@ -591,6 +591,14 @@ bool has_nozzle_rack(const PrintConfig &config)
     return std::any_of(counts.begin(), counts.end(), [](int c) { return c > 1; });
 }
 
+bool hotend_as_extruder(const PrintConfig &config)
+{
+    if (config.handle_hotend_as_extruder.value)
+        return true;
+    const std::vector<int> &counts = config.extruder_max_nozzle_count.values;
+    return config.nozzle_diameter.values.size() == 1 && counts.size() == 1 && counts.front() > 1;
+}
+
 // Mixed nozzle sizes (Phase 1), ported from OrcaSlicer PR #13782 (LixNix) - see PrintConfig.hpp.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
@@ -4504,6 +4512,15 @@ void PrintConfigDef::init_fff_params()
     def = this->add("has_filament_switcher", coBool);
     def->label = "Has filament switcher";
     def->tooltip = "Whether a filament switcher is connected to the printer";
+    def->set_default_value(new ConfigOptionBool{ false });
+
+    // Bambu Studio 2.9.1 (H3C): every rack hotend keeps its own filament loaded, so changing to a
+    // filament that already sits in its hotend is a hotend swap (machine_switch_extruder_time), not an
+    // unload + load, and needs no flush. Printer profile key, no UI.
+    def = this->add("handle_hotend_as_extruder", coBool);
+    def->label = "Handle hotend as extruder";
+    def->tooltip = "Each hotend keeps its own filament loaded, so switching to it is a hotend swap rather than a filament change";
+    def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool{ false });
 
     def = this->add("prime_volume_mode", coEnum);

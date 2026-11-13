@@ -7367,9 +7367,19 @@ void Print::_make_wipe_tower()
                 }))
                 local_z_layers_to_print = GCode::collect_layers_to_print(*this);
             size_t local_z_layers_to_print_idx = 0;
+            // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C, Print.cpp _make_wipe_tower): every rack hotend keeps
+            // its own filament, so a change only flushes when the target hotend holds another filament. Without
+            // this every H3C change asked the firmware for the full filament-to-filament flush (M620.10 L / SYNC T)
+            // into hotends that already held the next filament.
+            MultiNozzleUtils::HotendFilamentTracker hotends(hotend_as_extruder(m_config), get_layered_nozzle_group_result());
+            hotends.load(current_extruder_id, 0);
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
-                if (!layer_tools.has_wipe_tower)
+                const int layer_idx = int(&layer_tools - &m_wipe_tower_data.tool_ordering.front());
+                if (!layer_tools.has_wipe_tower) {
+                    for (const unsigned int filament_id : layer_tools.extruders)
+                        hotends.load(filament_id, layer_idx);
                     continue;
+                }
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
                 const unsigned int layer_start_extruder_id = current_extruder_id;
                 if (!local_z_layers_to_print.empty()) {
@@ -7381,6 +7391,8 @@ void Print::_make_wipe_tower()
                         const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
                             collect_local_z_wipe_tower_toolchanges(*this, local_z_layers_to_print[local_z_layers_to_print_idx].second,
                                                                    int(current_extruder_id));
+                        for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges)
+                            hotends.load(toolchange.new_tool, layer_idx);
                         if (!local_z_toolchanges.empty())
                             current_extruder_id = local_z_toolchanges.back().new_tool;
                     }
@@ -7401,14 +7413,23 @@ void Print::_make_wipe_tower()
                     if (/*(first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || */ extruder_id !=
                         current_extruder_id) {
                         float volume_to_purge = wipe_volumes[current_extruder_id][extruder_id];
+                        if (hotends.active()) {
+                            // The hotend's own filament decides the flush (none when it already holds this one).
+                            const int held = hotends.filament_in_hotend_of(extruder_id, layer_idx);
+                            volume_to_purge = held < 0 || held == int(extruder_id) || size_t(held) >= wipe_volumes.size() ?
+                                                  0.f :
+                                                  wipe_volumes[size_t(held)][extruder_id];
+                            hotends.load(extruder_id, layer_idx);
+                        }
                         volume_to_purge *= m_config.flush_multiplier;
 
                         // Not all of that can be used for infill purging:
                         // volume_to_purge -= (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
                         // try to assign some infills/objects for the wiping:
-                        volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                                 volume_to_purge);
+                        if (volume_to_purge > 0.f || !hotends.active())
+                            volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
+                                                                                                     volume_to_purge);
 
                         // add back the minimal amount toforce on the wipe tower:
                         // volume_to_purge += (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);

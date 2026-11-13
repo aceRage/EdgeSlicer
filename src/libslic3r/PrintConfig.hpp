@@ -2389,6 +2389,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_self_index))
     ((ConfigOptionBool,                enable_filament_dynamic_map))
     ((ConfigOptionBool,                has_filament_switcher))
+    ((ConfigOptionBool,                handle_hotend_as_extruder)) // BBS 2.9.1 H3C: rack hotends keep their filament
     ((ConfigOptionEnum<PrimeVolumeMode>, prime_volume_mode))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
@@ -2883,6 +2884,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 // machine has a swappable nozzle rack (H2C: extruder_max_nozzle_count = 1,6). H2D is 1,1 and
 // P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
 bool has_nozzle_rack(const PrintConfig &config);
+
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament, so
+// a change to a hotend that already holds the next filament is a hotend swap, not an unload + load,
+// and needs no flush. True when the printer sets the key, or for a single extruder with a rack
+// (extruder_max_nozzle_count > 1), which also covers projects saved before the key was read.
+bool hotend_as_extruder(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 1): map a 1-based FILAMENT index to the 0-based PHYSICAL extruder
 // (nozzle) that filament prints through. nozzle_diameter, min_layer_height / max_layer_height and

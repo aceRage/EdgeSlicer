@@ -2,6 +2,7 @@
 #define MULTI_NOZZLE_UTILS_HPP
 
 #include <vector>
+#include <memory>
 #include <map>
 #include <optional>
 #include <set>
@@ -236,6 +237,43 @@ public:
     const std::unordered_map<int, int>& get_nozzle_filament_map() const { return nozzle_filament_status; }
     // key: 挤出机id, value: 喷嘴id (-1表示该挤出机内没有装载喷嘴)
     const std::unordered_map<int, int>& get_extruder_nozzle_map() const { return extruder_nozzle_status; }
+};
+
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament. Tracks the
+// filament each hotend holds while the wipe tower is planned, so a change into a hotend that already holds
+// the next filament flushes nothing. A hotend is the filament's logical nozzle in the plate grouping (the
+// filament id itself when there is no grouping, i.e. one hotend per filament). Inactive on other printers.
+class HotendFilamentTracker
+{
+public:
+    HotendFilamentTracker(bool active, std::shared_ptr<const LayeredNozzleGroupResult> group)
+        : m_active(active), m_group(std::move(group))
+    {}
+    bool active() const { return m_active; }
+    int  hotend_of(int filament_id, int layer_id) const
+    {
+        if (m_group) {
+            const int nozzle = m_group->get_nozzle_id(filament_id, layer_id);
+            if (nozzle >= 0)
+                return nozzle;
+        }
+        return filament_id;
+    }
+    // The filament the hotend of filament_id holds, -1 when it holds none yet.
+    int filament_in_hotend_of(int filament_id, int layer_id) const
+    {
+        return m_recorder.get_filament_in_nozzle(hotend_of(filament_id, layer_id));
+    }
+    void load(int filament_id, int layer_id)
+    {
+        if (m_active && filament_id >= 0)
+            m_recorder.set_nozzle_status(hotend_of(filament_id, layer_id), filament_id);
+    }
+
+private:
+    bool                                              m_active;
+    std::shared_ptr<const LayeredNozzleGroupResult>   m_group;
+    NozzleStatusRecorder                              m_recorder;
 };
 
 struct FilamentChangeSimResult {

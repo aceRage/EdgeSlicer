@@ -556,6 +556,8 @@ void GCodeProcessor::TimeProcessor::reset()
     filament_load_times = 0.0f;
     filament_unload_times = 0.0f;
     machine_tool_change_time = 0.0f;
+    hotend_as_extruder = false;
+    extruder_change_time = 0.0f;
 
 
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
@@ -960,6 +962,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     m_time_processor.filament_unload_times = static_cast<float>(config.machine_unload_filament_time.value);
     m_time_processor.machine_tool_change_time = static_cast<float>(config.machine_tool_change_time.value);
     m_time_processor.machine_prepare_time = static_cast<float>(config.machine_prepare_time.value);
+    m_time_processor.hotend_as_extruder = hotend_as_extruder(config);
+    m_time_processor.extruder_change_time = static_cast<float>(config.machine_switch_extruder_time.value);
 
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         float max_acceleration = get_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, i);
@@ -1205,6 +1209,18 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     if (machine_tool_change_time != nullptr)
         m_time_processor.machine_tool_change_time = static_cast<float>(machine_tool_change_time->value);
 
+    if (const ConfigOptionFloat *switch_time = config.option<ConfigOptionFloat>("machine_switch_extruder_time"); switch_time != nullptr)
+        m_time_processor.extruder_change_time = static_cast<float>(switch_time->value);
+    {
+        // hotend_as_extruder(const PrintConfig &) for a G-code / project config.
+        const ConfigOptionBool *flag = config.option<ConfigOptionBool>("handle_hotend_as_extruder");
+        const auto *diameters = config.option<ConfigOptionFloats>("nozzle_diameter");
+        const auto *counts    = dynamic_cast<const ConfigOptionInts *>(config.option("extruder_max_nozzle_count"));
+        m_time_processor.hotend_as_extruder = (flag != nullptr && flag->value) ||
+            (diameters != nullptr && diameters->values.size() == 1 && counts != nullptr && counts->values.size() == 1 &&
+             counts->values.front() > 1);
+    }
+
 
     if (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfKlipper) {
         const ConfigOptionFloats* machine_max_acceleration_x = config.option<ConfigOptionFloats>("machine_max_acceleration_x");
@@ -1352,6 +1368,9 @@ void GCodeProcessor::reset()
     m_output_tool_filaments.clear();
     m_booked_times.clear();
     m_booking_tool_change = false;
+    m_next_hotend_id = -1;
+    m_current_hotend_id = -1;
+    m_hotend_filament.clear();
     m_skip_end_gcode_delays = false;
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
@@ -2176,6 +2195,22 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // producers tags
     if (producers_enabled && process_producers_tags(comment))
         return;
+
+    // "; NOZZLE_CHANGE_START OF<f> NF<f> ON<n> NN<n>" (GCode.cpp format_nozzle_change_block): the hotend the
+    // following T line goes to, read on hotend_as_extruder printers (Bambu Studio reads the same tag).
+    if (m_time_processor.hotend_as_extruder) {
+        const size_t tag = comment.find("NOZZLE_CHANGE_START");
+        if (tag != std::string_view::npos) {
+            const size_t nn = comment.find(" NN", tag);
+            if (nn != std::string_view::npos) {
+                int id = -1;
+                const std::string_view v = comment.substr(nn + 3);
+                if (std::from_chars(v.data(), v.data() + v.size(), id).ec == std::errc())
+                    m_next_hotend_id = id;
+            }
+            return;
+        }
+    }
 
     // extrusion role tag
     if (boost::starts_with(comment, reserved_tag(ETags::Role))) {
@@ -4230,9 +4265,30 @@ void GCodeProcessor::process_T(const std::string_view command)
                     // Specific to the MK3 MMU2:
                     // The initial value of extruder_unloaded is set to true indicating
                     // that the filament is parked in the MMU2 unit and there is nothing to be unloaded yet.
-                    float extra_time = get_filament_unload_time(static_cast<size_t>(m_last_extruder_id));
-                    m_time_processor.extruder_unloaded = false;
-                    extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
+                    float extra_time = 0.f;
+                    if (m_time_processor.hotend_as_extruder) {
+                        // Bambu Studio 2.9.1 process_filament_change() with handle_hotend_as_extruder (H3C): every
+                        // rack hotend keeps its filament, so switching to a hotend that already holds the next
+                        // filament costs the hotend swap only; unload / load is booked only when that hotend
+                        // has to take another filament (first use of the hotend: load only).
+                        const int hotend = m_next_hotend_id >= 0 ? m_next_hotend_id : int(id);
+                        m_next_hotend_id = -1;
+                        if (m_current_hotend_id != -1 && m_current_hotend_id != hotend)
+                            extra_time += m_time_processor.extruder_change_time;
+                        auto it = m_hotend_filament.find(hotend);
+                        if (it == m_hotend_filament.end() || it->second != int(id)) {
+                            if (it != m_hotend_filament.end())
+                                extra_time += m_time_processor.filament_unload_times;
+                            extra_time += m_time_processor.filament_load_times;
+                        }
+                        m_hotend_filament[hotend] = int(id);
+                        m_current_hotend_id = hotend;
+                        m_time_processor.extruder_unloaded = false;
+                    } else {
+                        extra_time = get_filament_unload_time(static_cast<size_t>(m_last_extruder_id));
+                        m_time_processor.extruder_unloaded = false;
+                        extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
+                    }
                     extra_time += m_time_processor.machine_tool_change_time;
 
                     // Orca #14573: store the tool-change move first, then attribute the filament-change delay to

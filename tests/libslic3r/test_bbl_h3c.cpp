@@ -389,3 +389,61 @@ TEST_CASE("H3C spiral lifts are G3 arcs with arc fitting off, as in Bambu Studio
     const std::string other = slice_cube(cfg, false);
     CHECK(count(other, "\nG3 Z") + count(other, "\nG2 Z") == 0);
 }
+
+// Owner 2026-11-13: an 8-filament H3C project estimated 5d6h against Bambu Studio 2.9.1's 2d12h52m. Every H3C rack
+// hotend keeps its own filament (Bambu Studio handle_hotend_as_extruder), so a change into the hotend that already
+// holds the next filament is a ~4 s hotend swap with no flush. Edge charged unload + load (43 s) per change and asked
+// the firmware for the full filament-to-filament flush (M620.10 L156 / SYNC T10) every time.
+TEST_CASE("H3C: a change into a hotend that already holds the filament flushes nothing", "[BblH3C][HotendAsExtruder]")
+{
+    PresetBundle &b = h3c_bundle();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H3C", true));
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1919E0" });
+    b.filament_presets = { "Bambu PLA Basic @BBL H3C", "Bambu PLA Basic @BBL H3C" };
+    DynamicPrintConfig cfg = b.full_config_secure();
+    REQUIRE(cfg.opt_bool("handle_hotend_as_extruder")); // read from the H3C machine preset
+    cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+    cfg.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({ 0., 300., 300., 0. }));
+    {
+        PrintConfig pc;
+        pc.apply(cfg, true);
+        CHECK(hotend_as_extruder(pc));
+    }
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(Test::mesh(Test::TestMesh::cube_20x20x20, Vec3d::Zero(), Vec3d(0.5, 0.5, 0.25)));
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(150. + 30. * i, 160., 0.));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", i + 1);
+    }
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    size_t changes = 0, flushes = 0;
+    for (size_t pos = gcode.find("
+M620.10 A1 "); pos != std::string::npos; pos = gcode.find("
+M620.10 A1 ", pos + 1)) {
+        const std::string line = gcode.substr(pos + 1, gcode.find('
+', pos + 1) - pos - 1);
+        ++changes;
+        if (line.find(" L0 ") == std::string::npos) {
+            ++flushes;
+            INFO(line);
+        }
+    }
+    INFO("filament changes: " << changes);
+    REQUIRE(changes > 5); // both cubes on every layer
+    CHECK(flushes == 0);
+    CHECK(gcode.find("
+SYNC T5") == std::string::npos);
+}

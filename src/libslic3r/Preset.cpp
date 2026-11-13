@@ -1401,6 +1401,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
     "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
+    "handle_hotend_as_extruder", // BBS 2.9.1 H3C: rack hotends keep their filament (estimate, flush)
     "tool_slot_model", "support_filament_nozzle_mapping", "extruder_rack_nozzle_diameter", // per-nozzle process P4
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",

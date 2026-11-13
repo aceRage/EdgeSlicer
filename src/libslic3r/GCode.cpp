@@ -13162,8 +13162,20 @@ int GCode::logical_extruder_for_filament(int filament_id) const
 int GCode::nozzle_key_for_filament(int filament_id) const
 {
     const int extruder = logical_extruder_for_filament(filament_id);
-    if (extruder < 0)
-        return -1;
+    if (extruder < 0) {
+        // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C, one extruder): key on the filament's rack hotend
+        // (the filament itself without a grouping result: one hotend per filament).
+        if (filament_id < 0 || !hotend_as_extruder(m_config))
+            return -1;
+        int hotend = filament_id;
+        if (m_curr_print != nullptr)
+            if (auto group_result = m_curr_print->get_layered_nozzle_group_result()) {
+                const int nozzle = group_result->get_nozzle_id(filament_id, m_layer_index);
+                if (nozzle >= 0)
+                    hotend = nozzle;
+            }
+        return 1000 + hotend;
+    }
     // A rack (H2C) has several nozzles on one extruder: key on the logical nozzle id there.
     if (has_nozzle_rack(m_config) && m_curr_print != nullptr)
         if (auto group_result = m_curr_print->get_layered_nozzle_group_result()) {
@@ -13278,6 +13290,19 @@ void GCode::note_filament_loaded(int filament_id)
     const int key = nozzle_key_for_filament(filament_id);
     if (key >= 0)
         m_filament_in_nozzle[key] = filament_id;
+}
+
+float GCode::hotend_flush_volume(int new_filament_id) const
+{
+    auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
+    if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
+        return 0.f; // empty hotend, or it already holds the new filament
+    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
+    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
+    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
+    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
+        return float(matrix[idx] * m_config.flush_multiplier.value);
+    return 0.f;
 }
 
 bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
@@ -13504,7 +13529,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // change (the old "Phase 7" rule) told the firmware "M620.10 ... L0" when it went back to a
         // nozzle loaded with a different colour.
         float cross_extruder_volume = 0.f;
-        if (cross_extruder_flush_volume(previous_extruder_id, int(extruder_id), cross_extruder_volume)) {
+        if (hotend_as_extruder(m_config)) {
+            // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): the next filament's own rack hotend is swapped in,
+            // so the flush is what that hotend still holds: nothing when it is empty or already holds this filament.
+            wipe_volume = hotend_flush_volume(int(extruder_id));
+        } else if (cross_extruder_flush_volume(previous_extruder_id, int(extruder_id), cross_extruder_volume)) {
             wipe_volume = cross_extruder_volume;
         } else {
             // Ultra (Phase 7): other machines with a filament_map: a nozzle switch is not a colour purge.
