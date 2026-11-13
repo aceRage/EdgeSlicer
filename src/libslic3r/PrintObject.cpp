@@ -748,11 +748,13 @@ void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_s
     std::string message;
     if (classic && !thin_walls) {
         // Classic walls without thin-wall detection need room for one whole external wall.
-        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is narrower than the first-layer "
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
                                       "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
-                                      "contact must be at least %3% mm wide."),
+                                      "contact must be comfortably wider than %3% mm."),
                                  this->model_object()->name, mm(contact), mm(line_width));
-        const double suggest = std::floor((contact - 0.02) * 100.) / 100.;
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
         if (suggest >= 0.6 * nozzle)
             message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
                                             mm(suggest));
