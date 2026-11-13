@@ -6077,6 +6077,10 @@ void TabFilament::build()
             DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
 
             update_dirty();
+            // The target against the material's safe chamber temperature. Asked of "chamber_temperatures" (Bambu
+            // Studio's name for the key) in the bed temperature group's handler, it never ran.
+            if (opt_key == "chamber_temperature")
+                m_config_manipulation.check_chamber_temperature(&filament_config);
             if (opt_key == "chamber_minimal_temperature" || opt_key == "chamber_temperature")
                 m_config_manipulation.check_chamber_minimal_temperature(&filament_config);
 
@@ -6167,9 +6171,6 @@ void TabFilament::build()
             }
             else if (opt_key == "nozzle_temperature_initial_layer") {
                 m_config_manipulation.check_nozzle_temperature_initial_layer_range(&filament_config, int(flow_variant_view_index()));
-            }
-            else if (opt_key == "chamber_temperatures") {
-                m_config_manipulation.check_chamber_temperature(&filament_config);
             }
 
             on_value_change(opt_key, value);
@@ -6884,7 +6885,7 @@ void TabFilament::toggle_options()
         } else if (support_multi_bed_types) {
             // u1 has 7 plates
             toggle_line("supertack_plate_temp_initial_layer", true);
-            toggle_line("cool_plate_temp", true);
+            toggle_line("supertack_plate_temp", true);
             toggle_line("cool_plate_temp_initial_layer", true);
             toggle_line("cool_plate_temp", true);
             toggle_line("textured_cool_plate_temp_initial_layer", true);
@@ -8541,7 +8542,9 @@ void TabPrinter::toggle_options()
         toggle_option("retract_restart_extra_toolchange", have_multiple_extruders && toolchange_retraction, at("retract_restart_extra_toolchange"));
 
         toggle_option("long_retractions_when_cut", !use_firmware_retraction && m_config->opt_int("enable_long_retraction_when_cut"), at("long_retractions_when_cut"));
-        toggle_line("retraction_distances_when_cut#0", m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
+        // The line of this extruder's page, keyed by the value it edits (not #0, which is on the first page only).
+        toggle_line("retraction_distances_when_cut#" + std::to_string(at("retraction_distances_when_cut")),
+                    m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
         //toggle_option("retraction_distances_when_cut", m_config->opt_bool("long_retractions_when_cut",i),i);
 
         toggle_option("travel_slope", m_config->opt_enum("z_hop_types", at("z_hop_types")) != ZHopType::zhtNormal, at("travel_slope"));

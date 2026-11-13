@@ -264,7 +264,9 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
         return false;
 
     // Guard (2), sloped entities: scarf-joint seams already own the Z of their path. Upstream
-    // throws here; we skip, because this fork emits sloped loops routinely.
+    // throws here; we skip, because this fork emits sloped loops routinely. (The scarf is made in
+    // GCode::extrude_loop, after this pass, so no sloped path reaches it; extrude_loop makes no scarf
+    // on a contoured loop instead.)
     if (dynamic_cast<const ExtrusionPathSloped *>(&path) != nullptr)
         return false;
 

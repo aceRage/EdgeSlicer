@@ -28391,21 +28391,8 @@ void Plater::on_filaments_delete(size_t num_filaments, size_t filament_id, int r
     }
 
     // update customize gcode
-    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item) {
-        auto iter = std::remove_if(item->second.gcodes.begin(), item->second.gcodes.end(), [filament_id](const CustomGCode::Item& gcode_item) {
-            return (gcode_item.type == CustomGCode::Type::ToolChange && gcode_item.extruder == filament_id + 1);
-        });
-        if (replace_filament_id == -1)
-            item->second.gcodes.erase(iter, item->second.gcodes.end());
-        else if (iter != item->second.gcodes.end()) {
-            iter->extruder = replace_filament_id + 1;
-        }
-
-        for (auto& item : item->second.gcodes) {
-            if (item.type == CustomGCode::Type::ToolChange && item.extruder > filament_id)
-                item.extruder--;
-        }
-    }
+    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item)
+        CustomGCode::update_tool_changes_when_delete_filament(item->second, filament_id, replace_filament_id);
 }
 
 
@@ -30635,6 +30622,7 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     dlg.sync_spiral_mode(curr_plate->get_spiral_vase_mode(), !curr_plate->has_spiral_mode_config());
 
     dlg.Bind(EVT_SET_BED_TYPE_CONFIRM, [this, plate_index, &dlg](wxCommandEvent& e) {
+        take_snapshot(_u8L("Plate Settings"));
         PartPlate* curr_plate = p->partplate_list.get_curr_plate();
         BedType old_bed_type = curr_plate->get_bed_type(true);
         auto bt_sel = BedType(dlg.get_bed_type_choice());
@@ -30682,6 +30670,8 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         });
     dlg.set_plate_name(from_u8(curr_plate->get_plate_name()));
 
+    // One undo step for the dialog: the settings snapshot taken on OK covers a rename too.
+    Plater::SingleSnapshot single(this);
     dlg.ShowModal();
     rename_plate(p->partplate_list.get_curr_plate_index(), dlg.get_plate_name().ToUTF8().data());
 }
@@ -30909,6 +30899,9 @@ int Plater::duplicate_plate(int plate_index)
     if (plate_index == -1)
         index = p->partplate_list.get_curr_plate_index();
 
+    if (!p->can_add_plate())
+        return -1;
+    take_snapshot(_u8L("Duplicate Current Plate"));
     ret = p->partplate_list.duplicate_plate(index);
 
     //need to call update

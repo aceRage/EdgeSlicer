@@ -251,6 +251,12 @@ public:
 	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
 	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
 	static std::string url_host(const std::string &url);
+	// The URL without its "user:password@", for the log: an address typed as
+	// https://user:password@host keeps working, but its password is never written out.
+	static std::string url_without_userinfo(const std::string &url);
+	// url_without_userinfo plus the value of secret query parameters (apikey=, token=, password= ...)
+	// replaced by ***: the form to put in a log line.
+	static std::string url_for_log(const std::string &url);
 	// True for hosts on this machine or the local network: localhost, loopback, RFC 1918, link-local,
 	// CGNAT/Tailscale (100.64/10), IPv6 ULA and link-local, single-label names and the usual LAN
 	// suffixes (.local, .lan, .home, .internal, .localdomain, .home.arpa, .ts.net).

@@ -32,8 +32,10 @@
 // callers.
 //
 // Secrets: an API key / password is written in clear, exactly as the printer preset writes
-// printhost_apikey today - there is no secret store anywhere in this codebase (no wxSecretStore, no
-// CredWrite, no keychain call), so this file is no more exposed than the preset next to it.
+// printhost_apikey / printhost_password. On POSIX the file is created readable by its owner alone
+// (save_store); the preset files are not. Moving both into the OS credential store (wxSecretStore,
+// as HomeVendors does for vendor tokens) is the full fix and has to cover the preset too, or the
+// same key stays in clear one folder over.
 
 namespace Slic3r {
 
