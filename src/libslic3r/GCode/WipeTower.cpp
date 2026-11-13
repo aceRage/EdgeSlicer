@@ -2216,8 +2216,10 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         else {
             // limit max chamfer width to 3 mm
             int chamfer_loops_num = (int)(max_chamfer_width / spacing);
-            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, size_t(m_layer_info - m_plan.begin()));
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer,
+            // and a tower with no sparse layers one loop per layer it lays, not per print layer between.
+            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, size_t(m_layer_info - m_plan.begin()),
+                                                                [this](size_t idx) { return plan_layer_is_laid(idx); });
             // A layer below the tower's first real layer gets no chamfer. With "no sparse layers"
             // the first real layer is the first tool change, which can sit far up the print; the
             // layers below it are sparse and never printed, but their walls still go into
@@ -2365,6 +2367,13 @@ void WipeTower::make_rib_tower_square()
                                         tool_line_width(toolchange.new_tool);
 }
 
+// With sparse layers skipped WipeTowerIntegration::tool_change() leaves out a layer whose only result
+// is the finish (wipe_tower_layer_is_sparse); that is a planned layer without tool changes.
+bool WipeTower::plan_layer_is_laid(size_t layer_idx) const
+{
+    return layer_idx < m_plan.size() && (! m_sparse_layers_skipped || ! m_plan[layer_idx].tool_changes.empty());
+}
+
 // Orca #15841: a folded layer is generated like any other but thrown away by the emitter, so its
 // extrusions must not be charged to the filament used.
 bool WipeTower::layer_is_printed(bool toolchanges_on_layer) const
@@ -2436,9 +2445,12 @@ void WipeTower::plan_tower()
         } else
             m_extra_spacing = 1.f;
 
+        // The tower's first layer: the print's first, or with sparse layers skipped its first tool
+        // change, which is the layer the tower lays on the bed (the print's first is not laid then).
+        const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
         for (int idx = 0; idx < m_plan.size(); idx++) {
             auto& info = m_plan[idx];
-            if (idx == 0 && m_extra_spacing > 1.f + EPSILON) {
+            if (size_t(idx) == first_tower_layer && m_extra_spacing > 1.f + EPSILON) {
                 // apply solid fill for the first layer
                 info.extra_spacing = 1.f;
                 for (auto& toolchange : info.tool_changes) {
@@ -2917,11 +2929,20 @@ void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInf
 }
 
 bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {
-    if (m_layer_info == m_plan.begin() || (m_layer_info - 1) == m_plan.begin())
+    if (m_layer_info == m_plan.begin() || m_layer_info == m_plan.end())
+        return false;
+    // The tower layer this one is laid on: the one below, or with sparse layers skipped the last one
+    // laid. A layer that is left out has no tool changes and would read as open from wall to wall.
+    size_t below = size_t(m_layer_info - m_plan.begin()) - 1;
+    while (below > 0 && ! plan_layer_is_laid(below))
+        --below;
+    // Nothing is open over the solid first layer (nor under the tower's first, with nothing below).
+    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
+    if (below == 0 || below == first_tower_layer || ! plan_layer_is_laid(below))
         return false;
 
-    float last_layer_fill_box_y = (m_layer_info - 1)->toolchanges_depth() + m_perimeter_width;
-    float last_layer_wipe_depth = (m_layer_info - 1)->depth;
+    float last_layer_fill_box_y = m_plan[below].toolchanges_depth() + m_perimeter_width;
+    float last_layer_wipe_depth = m_plan[below].depth;
     if (last_layer_wipe_depth - last_layer_fill_box_y <= 2 * m_perimeter_width)
         return false;
 
