@@ -82,11 +82,19 @@ static std::string diameter_string(float d)
 }
 
 // The nozzles obj reports: mounted ones (pos 0/1) and rack slots (0x10 + n).
-static void add_reported_nozzles(DualNozzleSync::PrinterState &s, MachineObject *obj)
+void add_reported_nozzles(DualNozzleSync::PrinterState &s, const MachineObject *obj)
 {
     for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
         DualNozzleSync::PrinterNozzle pn;
         pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
+        // H3C: a rack nozzle names its rack position (addr_id, Bambu Studio DevNozzle::GetNozzlePosId), and one whose
+        // "exist" bit is clear is an empty position (DevNozzle::IsEmpty). Racks without addr_id (H2C) read as before.
+        if (n.on_rack() && n.addr_id >= 0 && n.addr_id < 0x10) {
+            if (!n.exist)
+                continue;
+            pn.pos  = 0x10 + n.addr_id;
+            pn.addr = n.addr_id;
+        }
         pn.diameter = diameter_string(n.diameter);
         pn.volume   = n.volume_exact;
         pn.normal   = n.is_normal();

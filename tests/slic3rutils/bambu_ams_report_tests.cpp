@@ -11,7 +11,12 @@
 #include "slic3r/GUI/FilamentCommands.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
+#include "slic3r/GUI/DualNozzleState.hpp"
+#include "libslic3r/BambuDualNozzleSync.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 using namespace Slic3r;
@@ -658,4 +663,125 @@ TEST_CASE("A report without an ams block leaves the AMS state alone", "[BambuAms
     REQUIRE_NOTHROW(obj.parse_ams_report(json::object(), false));
     REQUIRE_NOTHROW(obj.parse_ams_report(json { { "ams", "x" } }, false));
     CHECK(obj.ams_exist_bits == 1);
+}
+
+// ---- Sync nozzle sizes on the H3C (owner bug 2026-11-13) -------------------------------------------------------
+// The H3C mounts no nozzle between prints: its extruder's hnow (0) names none of the reported nozzles, which all sit
+// in the rack (ids 0x10..0x18, addr_id 0..8). "Sync nozzle sizes" said "The printer did not report its nozzle sizes."
+// because it read only the mounted nozzle's size; the rack's sizes now give the extruder's size and the nine slots.
+
+static DualNozzleSync::PrinterState reported_nozzles(const MachineObject& obj)
+{
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = { 0 }; // the H3C profile's
+    DualNozzle::add_reported_nozzles(s, &obj);
+    return s;
+}
+
+TEST_CASE("H3C: Sync nozzle sizes reads the extruder's size and the nine rack slots", "[BambuAmsReport][NozzleSync]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000010", "127.0.0.1" };
+    parse_h3c(obj);
+
+    REQUIRE(obj.m_extder_data.extders.size() == 1);
+    CHECK(obj.m_extder_data.extders[0].current_nozzle_diameter == Approx(0.f)); // nothing mounted
+    REQUIRE(obj.m_nozzle_data.nozzles.size() == 9);
+    for (const Nozzle& n : obj.m_nozzle_data.nozzles) {
+        CHECK(n.on_rack());
+        CHECK(n.exist);
+        CHECK(n.addr_id == n.id - 0x10);
+    }
+
+    const DualNozzleSync::PrinterState s = reported_nozzles(obj);
+    REQUIRE(s.nozzles.size() == 9);
+    // What the old sync read: no mounted nozzle, so nothing.
+    CHECK(reported_extruder_nozzle_sizes(s, 1) == std::vector<double>{ 0. });
+    // Now: the first rack position's size.
+    CHECK(reported_sync_nozzle_sizes(s, 1) == std::vector<double>{ 0.4 });
+
+    // The nine slots in rack order, slot 8 the TPU 2.85 nozzle ("HT01"), as the H3C profile's default.
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 1);
+    REQUIRE(layout.size() == 1);
+    REQUIRE(layout[0].size() == 9);
+    CHECK(layout[0][7].volume_type == nvtTPU285);
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4" });
+}
+
+TEST_CASE("H3C: rack nozzles stay at their rack positions", "[BambuAmsReport][NozzleSync]")
+{
+    json print = n10_print();
+    json& info = print["device"]["nozzle"]["info"];
+    // Report order is not rack order, and sizes differ per position.
+    for (json& n : info) {
+        const int addr = n["addr_id"].get<int>();
+        if (addr == 0) n["diameter"] = 0.6;
+        if (addr == 1) n["diameter"] = 0.2;
+        if (addr == 2) n["type"] = "HH01"; // High Flow
+    }
+    std::reverse(info.begin(), info.end());
+    // Position 4 is empty: its "exist" bit (id 0x14 = 20) is clear.
+    print["device"]["nozzle"]["exist"] = 33488896 & ~(1 << 20);
+
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000011", "127.0.0.1" };
+    obj.printer_type = "N10";
+    obj.parse_ams_report(print, false);
+    obj.parse_new_info(print);
+
+    const DualNozzleSync::PrinterState s = reported_nozzles(obj);
+    CHECK(s.nozzles.size() == 8); // the empty position is not a nozzle
+    CHECK(reported_sync_nozzle_sizes(s, 1) == std::vector<double>{ 0.6 });
+
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 1);
+    REQUIRE(layout.size() == 1);
+    REQUIRE(layout[0].size() == 9);
+    CHECK(layout[0][4].diameter == Approx(0.)); // a gap, not the next nozzle moved up
+    CHECK(layout[0][5].diameter == Approx(0.4));
+    // The empty position keeps the slot the project has there; the rest come from the printer.
+    CHECK(rack_override_from_reported(layout, { "0.4,0.4,0.4,0.4,0.8,0.4,0.4,0.4,0.4" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.6,0.2,0.4:high_flow,0.4,0.8,0.4,0.4,0.4:tpu285,0.4" });
+    // With no slot there yet it takes the first reported size.
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.6,0.2,0.4:high_flow,0.4,0.6,0.4,0.4,0.4:tpu285,0.4" });
+    // reported_rack_layout leaves the gap out.
+    CHECK(reported_rack_layout(s, 1)[0].size() == 8);
+}
+
+TEST_CASE("H2C-style racks without addr_id read as before", "[BambuAmsReport][NozzleSync]")
+{
+    // Two mounted nozzles (ids 0, 1) and rack ids 0x11..0x15 without addr_id: the mounted nozzle first, then the rack
+    // nozzles in id order, no gaps (the H2C path is unchanged).
+    json print = n10_print();
+    json& dev  = print["device"];
+    dev["extruder"] = json::parse(R"({"info":[{"hnow":0,"hpre":0,"htar":0,"id":0,"info":1545,"snow":65535,"spre":65535,
+        "star":65535,"stat":2048,"temp":33},{"hnow":1,"hpre":1,"htar":1,"id":1,"info":1048,"snow":65279,"spre":65279,
+        "star":65279,"stat":0,"temp":29}],"state":32770})");
+    json nozzles = json::array();
+    auto add = [&nozzles](int id, double d, const char* type) {
+        nozzles.push_back({ { "id", id }, { "diameter", d }, { "type", type }, { "stat", 0 }, { "tm", 350 }, { "wear", 0 } });
+    };
+    add(18, 0.6, "HS01");
+    add(0, 0.4, "HS01");
+    add(1, 0.4, "HS01");
+    add(17, 0.2, "HS01");
+    add(21, 0.8, "HH01");
+    dev["nozzle"] = { { "exist", 4063235 }, { "info", nozzles }, { "src_id", 16 }, { "state", 0 }, { "tar_id", 16 } };
+
+    MachineObject obj { nullptr, "fake-h2c", "FAKEO1C000001", "127.0.0.1" };
+    obj.printer_type = "O1C2";
+    obj.parse_new_info(print);
+    REQUIRE(obj.m_extder_data.extders.size() == 2);
+    CHECK(obj.m_extder_data.extders[0].current_nozzle_diameter == Approx(0.4f));
+
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = { 1, 0 };
+    DualNozzle::add_reported_nozzles(s, &obj);
+    CHECK(s.nozzles.size() == 5);
+    // Rack nozzles belong to physical 0 = logical 1 here; the mounted size wins over the rack.
+    CHECK(reported_sync_nozzle_sizes(s, 2) == reported_extruder_nozzle_sizes(s, 2));
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 2);
+    REQUIRE(layout.size() == 2);
+    CHECK(layout[0].empty());
+    REQUIRE(layout[1].size() == 4);
+    CHECK(reported_rack_layout(s, 2)[1] == std::vector<double>{ 0.4, 0.2, 0.6, 0.8 });
 }

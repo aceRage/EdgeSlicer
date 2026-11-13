@@ -56,6 +56,8 @@ struct PrinterNozzle
     int              wear{ -1 };             // -1 = not reported
     std::string      fila_id;                // filament last used in the nozzle ("fila_id"), may be empty
     std::string      color;                  // its colour ("color_m"), may be empty
+    int              addr{ -1 };             // rack position the printer names (H3C "addr_id"), -1 = not reported;
+                                             // a rack with these is positional: a missing position is an empty slot
 
     bool on_rack() const { return pos >= 0x10; }
     int  rack_slot() const { return pos - 0x10; }
