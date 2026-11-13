@@ -163,16 +163,16 @@ void GLGizmoMeshBoolean::on_set_state()
     if (m_state == EState::On) {
         m_src.reset();
         m_tool.reset();
-        bool m_diff_delete_input = false;
-        bool m_inter_delete_input = false;
+        m_diff_delete_input = false;
+        m_inter_delete_input = false;
         m_operation_mode = MeshBooleanOperation::Union;
         m_selecting_state = MeshBooleanSelectingState::SelectSource;
     }
     else if (m_state == EState::Off) {
         m_src.reset();
         m_tool.reset();
-        bool m_diff_delete_input = false;
-        bool m_inter_delete_input = false;
+        m_diff_delete_input = false;
+        m_inter_delete_input = false;
         m_operation_mode = MeshBooleanOperation::Undef;
         m_selecting_state = MeshBooleanSelectingState::Undef;
         wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
