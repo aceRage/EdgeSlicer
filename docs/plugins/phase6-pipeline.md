@@ -46,9 +46,11 @@ grant, if any, is posted asynchronously.
 ## Presets and 3MF
 
 `slicing_pipeline_plugin` (capability names) and `plugins` (`name;uuid;capability` manifest)
-are print options. They survive a project 3MF round-trip. `ConfigBase::collect_plugin_manifest`
-/ `update_plugin_manifest` / `unresolved_plugin_capabilities` rewrite the manifest when a
-resolver is installed (GUI). Headless / CLI leave the stored `plugins` values as-is.
+are print options. They survive a project 3MF round-trip. Empty plugin keys are omitted from
+project JSON so OFF profile bytes match main; a project load restores them to their defaults
+so `has()` holds. `ConfigBase::collect_plugin_manifest` / `update_plugin_manifest` /
+`unresolved_plugin_capabilities` rewrite the manifest when a resolver is installed (GUI).
+Headless / CLI leave the stored `plugins` values as-is.
 
 ## Retry (upstream #17095)
 

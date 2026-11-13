@@ -1521,6 +1521,28 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
         // Do legacy conversion on a completely loaded dictionary.
         // Perform composite conversions, for example merging multiple keys into one key.
         this->handle_legacy_composite();
+        // Empty plugin keys are omitted from project JSON/3MF so OFF profile bytes match main.
+        // A full project dump still round-trips: restore the defaults so has() holds.
+        // Only when the document already has print settings (layer_height): a custom-model
+        // 3MF or a sparse User/System preset must stay empty / inherit, not grow these keys.
+        {
+            auto from_it = key_values.find(BBL_JSON_KEY_FROM);
+            const bool project_dump =
+                is_project_settings ||
+                (from_it != key_values.end() && ascii_iequals(from_it->second, "project"));
+            if (project_dump && this->has("layer_height")) {
+                static const char *const plugin_keys[] = {
+                    "plugins",
+                    "slicing_pipeline_plugin",
+                    "print_plugin_config_overrides",
+                    "printer_plugin_config_overrides",
+                    "filament_plugin_config_overrides",
+                };
+                for (const char *key : plugin_keys)
+                    if (config_def->get(key) != nullptr && !this->has(key))
+                        this->option(key, true);
+            }
+        }
         return 0;
     }
     catch (const std::ifstream::failure &err)  {
