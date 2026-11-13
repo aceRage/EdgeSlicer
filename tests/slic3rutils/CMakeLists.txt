@@ -7,9 +7,11 @@ add_executable(${_TEST_NAME}_tests
     qidi_send_policy_tests.cpp
     slot_send_policy_tests.cpp
     printhost_error_tests.cpp
+    print_host_secrets_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
+    print_host_sending_tests.cpp
     plugin_guard_tests.cpp
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
@@ -89,6 +91,7 @@ add_executable(${_TEST_NAME}_tests
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     plate_cut_membership_tests.cpp
+    plate_duplicate_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp
@@ -119,6 +122,7 @@ add_executable(${_TEST_NAME}_tests
     nozzle_info_tests.cpp
     device_controls_tests.cpp
     bambu_fans_tests.cpp
+    bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp

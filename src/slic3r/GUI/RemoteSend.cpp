@@ -220,6 +220,7 @@ static std::vector<FilamentInfo> ams_mapping(MachineObject* obj, const std::vect
         in.filament_ids.push_back(pr ? pr->filament_id : std::string());
     }
     in.nozzle_filament_map = fil_map;
+    in.blocked_ams_ids     = obj->mapping_blocked_ams_ids(); // never the H3C's AMS 3H yet
     BambuSendMapping::compose(result, filaments, in, v0, v1, info);
     return result;
 }

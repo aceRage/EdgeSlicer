@@ -45,7 +45,9 @@ std::string tray_name(int ams_id, int slot_id)
     return "A1";
 }
 
-AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id)
+std::string rack_tray_name(int slot_id) { return std::to_string(slot_id + 1); }
+
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id, bool rack_ams)
 {
     AmsListEntry entry;
     int          ams  = -1;
@@ -59,7 +61,7 @@ AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_i
     if (ams < 0 || slot < 0)
         return entry;
     entry.key       = ams * 4 + slot;
-    entry.tray_name = tray_name(ams, slot);
+    entry.tray_name = rack_ams ? rack_tray_name(slot) : tray_name(ams, slot);
     return entry;
 }
 

@@ -715,8 +715,71 @@ void PrintObject::infill()
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         det_dump_extrusions(*this, "4_infill_extrusions");
+        this->warn_if_first_layer_prints_nothing(*this);
         this->set_done(posInfill);
     }
+}
+
+// An object whose bed contact is narrower than the first-layer wall gets no first-layer extrusion
+// at all: it starts in mid-air, and because getObjectExtruderMap (Print.cpp) finds no first-layer
+// extruder for it, it gets no brim of any kind either (brim types and painted ears alike). Nothing
+// here changes the slice; it only says so, with the width needed and the settings that fix it.
+void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_src)
+{
+    if (layers_src.layers().empty() || this->has_raft())
+        return;
+    const Layer *first = layers_src.layers().front();
+    if (first->lslices.empty() || first->has_extrusions())
+        return;
+
+    // Contact width: the narrowest inward offset that erases the whole first-layer footprint.
+    BoundingBox bbox = get_extents(first->lslices);
+    double lo = 0., hi = unscaled(std::max(bbox.size().x(), bbox.size().y()));
+    for (int i = 0; i < 24 && hi - lo > 0.002; ++ i) {
+        const double mid = 0.5 * (lo + hi);
+        if (offset_ex(first->lslices, -float(scale_(mid / 2.))).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    const double contact = hi;
+
+    // Wall settings of the first region that has first-layer slices.
+    const LayerRegion *layerm = nullptr;
+    for (const LayerRegion *r : first->regions())
+        if (!r->slices.empty()) { layerm = r; break; }
+    if (layerm == nullptr && !first->regions().empty())
+        layerm = first->regions().front();
+    if (layerm == nullptr)
+        return;
+    const Flow   ext_flow   = layerm->flow(frExternalPerimeter);
+    const double line_width = ext_flow.width();
+    const double nozzle     = ext_flow.nozzle_diameter();
+    const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
+    const bool   thin_walls = layerm->region().config().detect_thin_wall.value;
+
+    auto mm = [](double v) { return Slic3r::format("%.2f", v); };
+    std::string message;
+    if (classic && !thin_walls) {
+        // Classic walls without thin-wall detection need room for one whole external wall.
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
+                                      "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
+                                      "contact must be comfortably wider than %3% mm."),
+                                 this->model_object()->name, mm(contact), mm(line_width));
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
+        if (suggest >= 0.6 * nozzle)
+            message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
+                                            mm(suggest));
+        else
+            message += " " + _u8L("To fix it, set Wall generator to Arachne or turn on Detect thin wall, or give the part a wider base.");
+    } else {
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow to print, "
+                                      "so it gets no brim and starts in mid-air. Give the part a wider base or reorient it."),
+                                 this->model_object()->name, mm(contact));
+    }
+    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message, PrintStateBase::SlicingEmptyFirstLayer);
 }
 
 void PrintObject::ironing()
@@ -3206,6 +3269,86 @@ static bool prints_dense(const Surface &surface, const PrintRegionConfig &region
     }
 }
 
+// Orca: Derive the fallback bridge direction from the supplied anchor geometry.
+// Pattern-specific angle selection belongs at the call site, where the supporting
+// layer and region are known; this helper must not override it with a base config angle.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors)
+{
+    AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
+
+    std::map<double, int> counted_directions;
+    for (const Polygon &p : bridged_area) {
+        double acc_distance = 0;
+        for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
+            Vec2d  start        = p.points[point_idx].cast<double>();
+            Vec2d  next         = p.points[point_idx + 1].cast<double>();
+            Vec2d  v            = next - start; // vector from next to current
+            double dist_to_next = v.norm();
+            acc_distance += dist_to_next;
+            if (acc_distance > scaled(2.0)) {
+                acc_distance = 0.0;
+                v.normalize();
+                int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
+                float step_size   = dist_to_next / lines_count;
+                for (int i = 0; i < lines_count; ++i) {
+                    Point a                   = (start + v * (i * step_size)).cast<coord_t>();
+                    auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
+                    double angle = lines_tree.get_line(index).orientation();
+                    if (angle > PI) {
+                        angle -= PI;
+                    }
+                    angle += PI * 0.5;
+                    counted_directions[angle]++;
+                }
+            }
+        }
+    }
+
+    std::pair<double, int> best_dir{0, 0};
+    // sliding window accumulation
+    for (const auto &dir : counted_directions) {
+        int    score_acc          = 0;
+        double dir_acc            = 0;
+        double window_start_angle = dir.first - PI * 0.1;
+        double window_end_angle   = dir.first + PI * 0.1;
+        for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
+             dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
+            dir_acc += dirs_window->first * dirs_window->second;
+            score_acc += dirs_window->second;
+        }
+        // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
+        //  opposite direction.
+        if (window_start_angle < 0.5 * PI) {
+            for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
+                 dirs_window != counted_directions.end(); dirs_window++) {
+                dir_acc += (dirs_window->first - PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+        // A window reaching above the top of the span takes in the directions at the bottom of it, as for the window
+        // reaching below the bottom just above. (Asked of window_start_angle, which never comes above 1.4 PI, and with
+        // a bound of window_start_angle - 1.5 PI, this was never run, and votes near 1.5 PI were never pooled with
+        // the votes near 0.5 PI they agree with.)
+        if (window_end_angle > 1.5 * PI) {
+            for (auto dirs_window = counted_directions.begin();
+                 dirs_window != counted_directions.upper_bound(window_end_angle - PI); dirs_window++) {
+                dir_acc += (dirs_window->first + PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+
+        if (score_acc > best_dir.second) {
+            best_dir = {dir_acc / score_acc, score_acc};
+        }
+    }
+    double bridging_angle = best_dir.first;
+    if (bridging_angle == 0) {
+        bridging_angle = 0.001;
+    }
+
+    return bridging_angle;
+}
+
 // This method applies bridge flow to the first internal solid layer above sparse infill.
 void PrintObject::bridge_over_infill()
 {
@@ -3563,11 +3706,13 @@ void PrintObject::bridge_over_infill()
     }
 
     // LAMBDA to gather areas with sparse infill deep enough that we can fit thick bridges there.
-    auto gather_areas_w_depth = [target_flow_height_factor](const PrintObject *po, int lidx, float target_flow_height) {
+    // target_flow_height is the depth a thick bridge sinks to, target_flow_height_factor of its height already: the
+    // caller applies the factor. Applying it again here looked only 0.81 of a thread deep.
+    auto gather_areas_w_depth = [](const PrintObject *po, int lidx, float target_flow_height) {
         // Gather layers sparse infill areas, to depth defined by used bridge flow
         ExPolygons layers_sparse_infill{};
         ExPolygons not_sparse_infill{};
-        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height * target_flow_height_factor - EPSILON;
+        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height - EPSILON;
         for (int i = int(lidx) - 1; i >= 0; --i) {
             // Stop iterating if layer is lower than bottom_z and at least one iteration was made
             const Layer *layer = po->get_layer(i);
@@ -3590,81 +3735,6 @@ void PrintObject::bridge_over_infill()
         not_sparse_infill    = union_ex(not_sparse_infill);
         not_sparse_infill    = closing_ex(not_sparse_infill, float(SCALED_EPSILON));
         return diff(layers_sparse_infill, not_sparse_infill);
-    };
-
-    // Orca: Derive the fallback bridge direction from the supplied anchor geometry.
-    // Pattern-specific angle selection belongs at the call site, where the supporting
-    // layer and region are known; this helper must not override it with a base config angle.
-    auto determine_bridging_angle = [](const Polygons &bridged_area, const Lines &anchors) {
-        AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
-
-        std::map<double, int> counted_directions;
-        for (const Polygon &p : bridged_area) {
-            double acc_distance = 0;
-            for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
-                Vec2d  start        = p.points[point_idx].cast<double>();
-                Vec2d  next         = p.points[point_idx + 1].cast<double>();
-                Vec2d  v            = next - start; // vector from next to current
-                double dist_to_next = v.norm();
-                acc_distance += dist_to_next;
-                if (acc_distance > scaled(2.0)) {
-                    acc_distance = 0.0;
-                    v.normalize();
-                    int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
-                    float step_size   = dist_to_next / lines_count;
-                    for (int i = 0; i < lines_count; ++i) {
-                        Point a                   = (start + v * (i * step_size)).cast<coord_t>();
-                        auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
-                        double angle = lines_tree.get_line(index).orientation();
-                        if (angle > PI) {
-                            angle -= PI;
-                        }
-                        angle += PI * 0.5;
-                        counted_directions[angle]++;
-                    }
-                }
-            }
-        }
-
-        std::pair<double, int> best_dir{0, 0};
-        // sliding window accumulation
-        for (const auto &dir : counted_directions) {
-            int    score_acc          = 0;
-            double dir_acc            = 0;
-            double window_start_angle = dir.first - PI * 0.1;
-            double window_end_angle   = dir.first + PI * 0.1;
-            for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
-                 dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
-                dir_acc += dirs_window->first * dirs_window->second;
-                score_acc += dirs_window->second;
-            }
-            // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
-            //  opposite direction.
-            if (window_start_angle < 0.5 * PI) {
-                for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
-                     dirs_window != counted_directions.end(); dirs_window++) {
-                    dir_acc += (dirs_window->first - PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-            if (window_start_angle > 1.5 * PI) {
-                for (auto dirs_window = counted_directions.begin();
-                     dirs_window != counted_directions.upper_bound(window_start_angle - 1.5 * PI); dirs_window++) {
-                    dir_acc += (dirs_window->first + PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-
-            if (score_acc > best_dir.second) {
-                best_dir = {dir_acc / score_acc, score_acc};
-            }
-        }
-        double bridging_angle = best_dir.first;
-        if (bridging_angle == 0) {
-            bridging_angle = 0.001;
-        }
-
-        return bridging_angle;
     };
 
     // Orca: Extend scan sections to the nearest anchors and reconstruct the bridge area.
@@ -3854,7 +3924,6 @@ void PrintObject::bridge_over_infill()
                                                                                            target_flow_height_factor, &surfaces_by_layer,
                                                                                            &clustered_layers_for_threads,
                                                                                            gather_areas_w_depth, &infill_lines,
-                                                                                           determine_bridging_angle,
                                                                                            construct_anchored_polygon](
                                                                                               tbb::blocked_range<size_t> r) {
         PRINT_OBJECT_TIME_LIMIT_MILLIS(PRINT_OBJECT_TIME_LIMIT_DEFAULT);

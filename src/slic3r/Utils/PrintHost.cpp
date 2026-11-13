@@ -45,6 +45,11 @@ using Slic3r::GUI::PrintHostQueueDialog;
 namespace Slic3r {
 
 
+std::string print_host_address(const std::string& ip, int port)
+{
+    return ip + (port == -1 ? "" : ":" + std::to_string(port));
+}
+
 PrintHost::~PrintHost() {}
 
 void PrintHost::set_tls_config(const DynamicPrintConfig *config)
@@ -368,7 +373,7 @@ void PrintHostJobQueue::priv::bg_thread_main()
         BOOST_LOG_TRIVIAL(debug) << boost::format("PrintHostJobQueue/bg_thread: Received job: [%1%]: `%2%` -> `%3%`, cancelled: %4%")
             % job_id
             % job.upload_data.upload_path
-            % job.printhost->get_host()
+            % Http::url_without_userinfo(job.printhost->get_host())
             % job.cancelled;
 
         // One throwing job must not kill the worker: later sends would sit in the queue forever,
@@ -516,27 +521,13 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const std::string history_printer = !the_job.history_printer_name.empty() ? the_job.history_printer_name : host_name;
     const std::string history_model   = the_job.history_printer_model;
 
-    // "http://192.0.2.106:80/" and friends: SnapmakerLan::run_script wants the bare host and a port.
-    auto script_target = [&the_job]() {
-        GUI::SnapmakerLan::Device d;
-        std::string h = the_job.printhost->get_host();
-        const size_t scheme = h.find("://");
-        if (scheme != std::string::npos)
-            h = h.substr(scheme + 3);
-        if (const size_t slash = h.find('/'); slash != std::string::npos)
-            h = h.substr(0, slash);
-        // The port is the colon after the host: "[fe80::1]:7125" has one, "[fe80::1]" has none.
-        const size_t close = h.rfind(']');
-        const size_t colon = h.rfind(':');
-        if (colon != std::string::npos && (close != std::string::npos ? colon > close : h.find(':') == colon)) {
-            try {
-                d.port = std::stoi(h.substr(colon + 1));
-            } catch (...) {}
-            h = h.substr(0, colon);
-        }
-        d.ip = h;
-        return d;
-    };
+    // Where the Klipper scripts below go: the print host's own origin - its scheme and port, never
+    // a user:password@ - as the QIDI state checks next to them already use, and for a Moonraker
+    // host its API key, the same X-Api-Key the upload itself sends.
+    const std::string script_base = PrinterStorage::base_url_of(host_url);
+    std::string       script_key;
+    if (const auto* moonraker = dynamic_cast<const Moonraker*>(the_job.printhost.get()))
+        script_key = moonraker->get_apikey();
 
     // A QIDI printer that is printing or paused is left alone: its start-of-print script re-points
     // the Box (value_t<n>, enable_box) and would change what a running print is fed. So before any
@@ -573,7 +564,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // the wrong material.
     if (archive_print && !the_job.qidi_start_script.empty()) {
         std::string err;
-        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_start_script, err)) {
+        if (!GUI::SnapmakerLan::run_script(script_base, script_key, the_job.qidi_start_script, err)) {
             BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI print options (" << err << ")";
             error_fn(_L("The printer did not accept the QIDI print options or Box slot mapping, so the print was not started:") + " " +
                      wxString::FromUTF8(err.c_str()));
@@ -602,7 +593,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // is logged and the print goes ahead on the saved mesh. It never blocks the mapping or the print.
     if (archive_print && !the_job.qidi_leveling_script.empty()) {
         std::string err;
-        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_leveling_script, err))
+        if (!GUI::SnapmakerLan::run_script(script_base, script_key, the_job.qidi_leveling_script, err))
             BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI bed leveling choice (" << err
                                      << "); the print goes ahead without it";
         else
@@ -645,7 +636,6 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // extra statement for it, and a failure to set the preference is logged and never fails the send: the
     // print is what the person asked for, the unload is a convenience on top of it.
     if (archive_unload && archive_print) {
-        const GUI::SnapmakerLan::Device d = script_target();
         // Which toolheads this print uses: the dialog's own mapping ("0:1,1:2" - filament:slot),
         // and, when nothing was mapped, the file goes out as sliced and toolhead 0 is the one it
         // runs on.
@@ -677,7 +667,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
             used.push_back(0);
         const std::string script = "SET_PRINT_PREFERENCES " + GUI::SnapmakerLan::end_unload_parameter(used);
         std::string       err;
-        if (!GUI::SnapmakerLan::run_script(d, script, err))
+        if (!GUI::SnapmakerLan::run_script(script_base, script_key, script, err))
             BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the end-of-print unload preference ("
                                      << err << "); the print goes ahead without it";
         else

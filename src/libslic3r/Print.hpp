@@ -315,6 +315,10 @@ struct PrintInstance
 
 typedef std::vector<PrintInstance> PrintInstances;
 
+// Bridge over infill: the direction (radians) a bridge over bridged_area is to run in when nothing else sets it, by a
+// vote of the nearest of the anchors every 2 mm or so along its outline. Declared here for the unit tests.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors);
+
 class PrintObjectRegions
 {
 public:
@@ -810,6 +814,9 @@ private:
     void combine_adaptive_infill();
     void prepare_infill();
     void infill();
+    // Raises SlicingEmptyFirstLayer on this object when the first layer of `layers_src` (this object,
+    // or the object it shares its layers with) has slices but no extrusions. Needs posInfill started.
+    void warn_if_first_layer_prints_nothing(const PrintObject &layers_src);
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();

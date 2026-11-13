@@ -1,4 +1,7 @@
 #include "CustomGCode.hpp"
+
+#include <algorithm>
+
 #include "Config.hpp"
 #include "GCode.hpp"
 #include "GCodeWriter.hpp"
@@ -70,6 +73,24 @@ std::vector<std::pair<double, unsigned int>> custom_tool_changes(const Info& cus
             custom_tool_changes.emplace_back(custom_gcode.print_z, static_cast<unsigned int>(size_t(custom_gcode.extruder) > num_filaments ? 1 : custom_gcode.extruder));
         }
     return custom_tool_changes;
+}
+
+void update_tool_changes_when_delete_filament(Info& custom_gcode_per_print_z, size_t filament_id, int replace_filament_id)
+{
+    std::vector<Item> &gcodes  = custom_gcode_per_print_z.gcodes;
+    const int          deleted = int(filament_id) + 1; // 1-based, as Item::extruder
+    if (replace_filament_id < 0)
+        gcodes.erase(std::remove_if(gcodes.begin(), gcodes.end(),
+                                    [deleted](const Item &item) { return item.type == ToolChange && item.extruder == deleted; }),
+                     gcodes.end());
+    for (Item &item : gcodes)
+        if (item.type == ToolChange) {
+            if (item.extruder == deleted)
+                // Already numbered after the deletion.
+                item.extruder = replace_filament_id + 1;
+            else if (item.extruder > deleted)
+                -- item.extruder;
+        }
 }
 
 } // namespace CustomGCode

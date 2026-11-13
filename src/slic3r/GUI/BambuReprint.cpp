@@ -239,6 +239,10 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
     std::vector<Tray> out;
     if (!obj) return out;
     const bool dual = obj->is_multi_extruders();
+    // A nozzle rack's printer (H3C): only the slots a rack nozzle is fed from (rack_bound_slots).
+    const bool rack_printer = obj->is_rack_printer();
+    const std::vector<std::pair<int, int>> rack_bound = rack_printer ? obj->rack_bound_slots() : std::vector<std::pair<int, int>>();
+    auto bound = [&rack_bound](int ams, int slot) { return std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ams, slot)) != rack_bound.end(); };
     for (const auto& kv : obj->amsList) {
         const Ams* a = kv.second;
         if (!a) continue;
@@ -251,10 +255,11 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
             Tray tr;
             tr.ams_id = ams_id;
             try { tr.slot_id = std::stoi(tk.first); } catch (...) { continue; }
-            tr.tray_id           = ams_id * 4 + tr.slot_id;
+            if (a->is_rack() && !bound(ams_id, tr.slot_id)) continue;
+            tr.tray_id           = GUI::AmsTypes::mapping_tray_index(a->type, ams_id, tr.slot_id); // 28 + slot on the AMS 3H
             tr.physical_extruder = a->nozzle;
             tr.extruder          = dual ? BambuExtruderMap::physical_to_logical(physical_extruder_map, a->nozzle) : -1;
-            tr.name              = BambuExtruderMap::tray_name(ams_id, tr.slot_id);
+            tr.name              = a->is_rack() ? BambuExtruderMap::rack_tray_name(tr.slot_id) : BambuExtruderMap::tray_name(ams_id, tr.slot_id);
             tr.exists            = t->is_exists;
             tr.ready             = t->is_exists && t->is_tray_info_ready();
             if (tr.ready) {
@@ -282,6 +287,32 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
             tr.physical_extruder = BambuExtruderMap::external_spool_physical_extruder(ext_id);
             tr.extruder          = BambuExtruderMap::physical_to_logical(physical_extruder_map, tr.physical_extruder);
             tr.name              = BambuExtruderMap::tray_display_name(ext_id, 0);
+            tr.ready             = ext.is_tray_info_ready();
+            tr.exists            = tr.ready;
+            if (tr.ready) {
+                tr.type         = ext.get_filament_type();
+                tr.display_type = ext.get_display_filament_type();
+                tr.color        = ext.color;
+                tr.colors       = ext.cols;
+                tr.ctype        = ext.ctype;
+                tr.filament_id  = ext.setting_id;
+            }
+            out.push_back(tr);
+        }
+    }
+    // A nozzle rack's spool holders (255 down to 247), those a rack nozzle is fed from: named by
+    // their own id, as the send dialog maps them.
+    if (rack_printer) {
+        for (AmsTray ext : obj->vir_slots) {
+            const int ext_id = atoi(ext.id.c_str());
+            if (!GUI::AmsTypes::is_rack_virtual_slot(ext_id) || !bound(ext_id, 0)) continue;
+            Tray tr;
+            tr.ams_id            = ext_id;
+            tr.slot_id           = 0;
+            tr.tray_id           = ext_id;
+            tr.physical_extruder = 0;
+            tr.extruder          = -1;
+            tr.name              = GUI::AmsTypes::rack_ext_label(ext_id);
             tr.ready             = ext.is_tray_info_ready();
             tr.exists            = tr.ready;
             if (tr.ready) {
@@ -576,6 +607,7 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         in.project_filament_count = job.project_filament_count;
         in.filament_ids           = job.filament_ids;
         if (job.dual()) in.nozzle_filament_map = job.filament_map;
+        in.blocked_ams_ids = pr.blocked_ams_ids;
         if (problems.empty())
             BambuSendMapping::compose(ev.result, filaments, in, ev.ams_mapping, ev.ams_mapping2, ev.ams_mapping_info);
     } else if (!ev.use_ams && !filaments.empty()) {
@@ -757,6 +789,7 @@ Printer snapshot(MachineObject* obj, const Job& job)
         pr.nozzle_hrc.push_back(hrc);
     }
     pr.trays   = trays_of(obj, job.physical_extruder_map);
+    pr.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     pr.nozzles = DualNozzle::printer_state(obj).nozzles;
     return pr;
 }

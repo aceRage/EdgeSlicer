@@ -10,6 +10,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -143,4 +144,162 @@ TEST_CASE("A second internal bridge layer leaves every layer as much to fill as 
     {
         check_nothing_lost(steps(), "disabled", 5);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Bridge over infill (PrintObject::bridge_over_infill): errors the Rust port turned up.
+
+namespace {
+
+// A short run of the outline of a bridged area that the direction vote samples `votes` times, at y = 0 from x = x0 on,
+// with an anchor line under it running at `degrees`. The vote takes the run's first edge only (the polygon's two other
+// edges are too short to be sampled, the last never is), and the runs lie 100 mm apart, so each run's samples all go
+// to its own anchor. `votes` is 2 or more.
+void add_run(Polygons &bridged, Lines &anchors, double x0, int votes, double degrees)
+{
+    const double length = 2. * votes - 1.; // sampled ceil(length / 2) times; a run under 2 mm is not sampled
+    bridged.emplace_back(Points{Point::new_scale(x0, 0.), Point::new_scale(x0 + length, 0.), Point::new_scale(x0 + length, 0.01)});
+    const double a = Geometry::deg2rad(degrees);
+    const Vec2d  mid{x0 + 0.5 * length, -1.};
+    const Vec2d  half{30. * std::cos(a), 30. * std::sin(a)};
+    anchors.emplace_back(Point::new_scale(mid - half), Point::new_scale(mid + half));
+}
+
+// An undirected direction in degrees, from 0 to 180.
+double undirected_degrees(double radians)
+{
+    double deg = std::fmod(Geometry::rad2deg(radians), 180.);
+    return deg < 0. ? deg + 180. : deg;
+}
+
+} // namespace
+
+// The vote on a bridge's direction counts each sample as square to its nearest anchor, a direction from 0.5 PI to
+// 1.5 PI, and pools the votes within 0.1 PI of each other. A direction just above 0.5 PI and one just below 1.5 PI are
+// near each other as lines; a window reaching below 0.5 PI took in the votes near 1.5 PI, but the test for a window
+// reaching above 1.5 PI asked for one starting above it, which none does, so those were never pooled with the votes
+// near 0.5 PI. Here anchors at 5, 170 and 155 degrees vote 95, 260 and 245 degrees: the window around 260 holds all
+// nine votes, but was scored as five, and the window around 95 (four at 95 and two at 260) won with six.
+TEST_CASE("The bridge direction vote pools the votes across both ends of its range", "[BridgeOverInfill][Regression]")
+{
+    Polygons bridged;
+    Lines    anchors;
+    add_run(bridged, anchors, 0., 4, 5.);
+    add_run(bridged, anchors, 100., 2, 170.);
+    add_run(bridged, anchors, 200., 3, 155.);
+    // Each anchor's own vote, as the function works it out from the scaled line.
+    const auto vote = [](const Line &l) {
+        double a = l.orientation();
+        if (a > PI)
+            a -= PI;
+        return Geometry::rad2deg(a + 0.5 * PI);
+    };
+    const double v5 = vote(anchors[0]), v170 = vote(anchors[1]), v155 = vote(anchors[2]);
+    // All nine votes, the ones near 95 degrees taken round to near 275.
+    const double expected = undirected_degrees(Geometry::deg2rad((4. * (v5 + 180.) + 2. * v170 + 3. * v155) / 9.));
+    // What it chose before: the window around 95 degrees with six votes.
+    const double before = undirected_degrees(Geometry::deg2rad((4. * v5 + 2. * (v170 - 180.)) / 6.));
+    REQUIRE(std::abs(expected - before) > 5.);
+
+    const double got = undirected_degrees(determine_bridging_angle(bridged, anchors));
+    INFO("chose " << got << " degrees; all the votes pooled give " << expected << ", the low end's window " << before);
+    CHECK(std::abs(got - expected) < 0.01);
+}
+
+// The same anchors mirrored (each direction d becomes 180 - d) must give the mirrored direction: the vote has no
+// reason to favour either end of its range. Before the fix it favoured the low end only.
+TEST_CASE("The bridge direction vote gives the mirrored direction for mirrored anchors", "[BridgeOverInfill][Regression]")
+{
+    const std::vector<std::pair<int, double>> runs{{4, 5.}, {2, 170.}, {3, 155.}};
+    Polygons bridged, bridged_mirrored;
+    Lines    anchors, anchors_mirrored;
+    double   x0 = 0.;
+    for (const auto &[votes, degrees] : runs) {
+        add_run(bridged, anchors, x0, votes, degrees);
+        add_run(bridged_mirrored, anchors_mirrored, x0, votes, 180. - degrees);
+        x0 += 100.;
+    }
+    const double got      = undirected_degrees(determine_bridging_angle(bridged, anchors));
+    const double mirrored = undirected_degrees(determine_bridging_angle(bridged_mirrored, anchors_mirrored));
+    INFO("direction " << got << " degrees, mirrored " << mirrored);
+    // Within the rounding of the anchors' ends to whole nanometres.
+    const double diff = std::abs(undirected_degrees(Geometry::deg2rad(got + mirrored)));
+    CHECK(std::min(diff, 180. - diff) < 0.01);
+}
+
+namespace {
+
+// A 30 x 30 mm block with a sealed 12 x 12 mm cavity in the middle. With 0.12 mm layers, two bottom and three top
+// shell layers, the layers over the cavity's footprint run, from the cavity's ceiling up: a bridge over the cavity,
+// one internal solid layer, two sparse, and the three of the top shell. The first layer of the top shell lies on
+// sparse infill and becomes an internal bridge where the sparse infill under it is deep enough for a thick bridge.
+TriangleMesh block_with_cavity(int cavity_top_layer, int layers)
+{
+    constexpr double lh = 0.12;
+    indexed_triangle_set block  = its_make_cube(30., 30., lh * layers);
+    indexed_triangle_set cavity = its_make_cube(12., 12., 1.2);
+    for (stl_vertex &v : cavity.vertices)
+        v += stl_vertex(9.f, 9.f, float(lh * cavity_top_layer - 1.2));
+    // Turned inside out, a hole.
+    for (stl_triangle_vertex_indices &f : cavity.indices)
+        std::swap(f[1], f[2]);
+    its_merge(block, cavity);
+    return TriangleMesh(block);
+}
+
+} // namespace
+
+// A thick bridge sinks about 0.9 of its thread's height into the layers beneath, and bridges over infill only where
+// those layers are all sparse infill. The depth handed to the lambda that gathers them is 0.9 of the thread already,
+// and the lambda took 0.9 of it again: it looked 0.81 of a thread deep. With a 0.4 mm thread that is 0.324 mm
+// instead of 0.36 mm, two layers of 0.12 mm instead of three, so a solid layer three layers down went unseen and the
+// top shell over the cavity was laid as a bridge sinking onto it.
+TEST_CASE("Bridge over infill looks 0.9 of a thick bridge deep for solid layers", "[BridgeOverInfill][Regression]")
+{
+    // The cavity's ceiling at layer 20 (z = 2.4): layer 21 bridges the cavity, 22 is solid, 23 and 24 sparse, 25 to
+    // 27 the top shell.
+    const int    cavity_top = 20, layers = 27, first_top_shell = 24; // 0-based index of layer 25
+    Print        print;
+    init_and_process_print({block_with_cavity(cavity_top, layers)}, print, {
+        {"layer_height", "0.12"},
+        {"initial_layer_print_height", "0.12"},
+        {"nozzle_diameter", "0.4"},
+        {"bridge_flow", "1"},
+        {"top_shell_layers", "3"},
+        {"top_shell_thickness", "0"},
+        {"bottom_shell_layers", "2"},
+        {"bottom_shell_thickness", "0"},
+        {"sparse_infill_pattern", "grid"},
+        {"sparse_infill_density", "15%"},
+        {"wall_loops", "2"},
+        {"wall_generator", "classic"},
+        {"enable_support", "0"},
+    });
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layer_count() == size_t(layers));
+
+    const double     mm2    = SCALING_FACTOR * SCALING_FACTOR;
+    // The layers are in the object's own coordinates, centred on it.
+    const Polygons   middle = {Polygon::new_scale({{-4., -4.}, {4., -4.}, {4., 4.}, {-4., 4.}})};
+    // mm2 of the 8 x 8 mm in the middle of the cavity's footprint, and of the whole layer, filled as `type`.
+    const auto fill_of = [&](size_t layer_idx, SurfaceType type, bool in_middle) {
+        double out = 0.;
+        for (const LayerRegion *region : object.get_layer(int(layer_idx))->regions())
+            for (const Surface &surface : region->fill_surfaces.surfaces)
+                if (surface.surface_type == type)
+                    out += in_middle ? area(intersection(to_polygons(surface.expolygon), middle)) * mm2 : surface.expolygon.area() * mm2;
+        return out;
+    };
+    // The layers are what the comment above says they are, over the middle.
+    CHECK(fill_of(first_top_shell - 3, stInternalSolid, true) > 60.);
+    CHECK(fill_of(first_top_shell - 2, stInternal, true) > 60.);
+    CHECK(fill_of(first_top_shell - 1, stInternal, true) > 60.);
+
+    const double bridge_middle = fill_of(first_top_shell, stInternalBridge, true);
+    const double bridge_all    = fill_of(first_top_shell, stInternalBridge, false);
+    INFO("internal bridge on the first top shell layer: " << bridge_all << " mm2, " << bridge_middle << " mm2 of it over the cavity");
+    // Around the cavity the sparse infill runs all the way down: a bridge there.
+    CHECK(bridge_all > 100.);
+    // Over the cavity a solid layer lies 0.36 mm down: no bridge.
+    CHECK(bridge_middle < 1.);
 }

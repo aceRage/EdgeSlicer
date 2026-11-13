@@ -335,6 +335,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsDualLayout.hpp
     GUI/AmsDrying.cpp
     GUI/AmsDrying.hpp
+    GUI/AmsTypes.hpp
     GUI/AMSDryCtrlDialog.cpp
     GUI/AMSDryCtrlDialog.hpp
     GUI/AmsUiPreview.cpp

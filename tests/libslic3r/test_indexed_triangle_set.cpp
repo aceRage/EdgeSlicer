@@ -385,3 +385,36 @@ TEST_CASE("Flipped faces keep the mass properties", "[its]")
     CHECK_THAT((flipped.center - solid.center).norm(), WithinAbs(0., 1e-9));
     CHECK_THAT((flipped.spread - solid.spread).norm(), WithinAbs(0., 1e-9));
 }
+
+// create_face_neighbors_index() under the parallel policy (its_face_neighbors_par, used by the mesh slicer, the
+// short edge collapse and SurfaceMesh) paired an edge from the lower of its two faces and wrote the other face's
+// entry too, while that face's own iteration might be reading and writing it on another thread. At an edge where
+// more than two faces meet, which face got which neighbour depended on the timing. Cubes standing corner to corner
+// in a checkerboard meet four faces to an edge; the parallel index must be the sequential one, every time.
+TEST_CASE("The parallel face neighbour index is the sequential one on a non-manifold mesh", "[its][Regression]")
+{
+    using namespace Slic3r;
+
+    indexed_triangle_set board;
+    for (int i = 0; i < 40; ++i)
+        for (int j = 0; j < 40; ++j)
+            if ((i + j) % 2 == 0) {
+                indexed_triangle_set cube = its_make_cube(1., 1., 1.);
+                its_transform(cube, identity3f().translate(Vec3f{float(i), float(j), 0.f}));
+                its_merge(board, cube);
+            }
+    its_merge_vertices(board);
+
+    REQUIRE(board.indices.size() == 800 * 12);
+    const std::vector<Vec3i32> sequential = its_face_neighbors(board);
+
+    int differing_runs = 0;
+    for (int run = 0; run < 100; ++run)
+        if (its_face_neighbors_par(board) != sequential)
+            ++differing_runs;
+    CHECK(differing_runs == 0);
+
+    // A closed manifold mesh, for which both always agreed.
+    const indexed_triangle_set sphere = its_make_sphere(10., PI / 90.);
+    CHECK(its_face_neighbors_par(sphere) == its_face_neighbors(sphere));
+}

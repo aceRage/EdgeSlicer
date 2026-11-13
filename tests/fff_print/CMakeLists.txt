@@ -6,6 +6,7 @@ add_executable(${_TEST_NAME}_tests
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
 	test_fill.cpp
+	test_narrow_solid_infill.cpp
 	test_flow.cpp
 	test_gcode.cpp
 	test_cooling.cpp
@@ -20,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_avoid_crossing_perimeters.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
 	test_temp_retract_grid.cpp
@@ -35,6 +37,8 @@ add_executable(${_TEST_NAME}_tests
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
+	test_h2c_timelapse_placement.cpp
+	test_h2c_tower_wait_pos.cpp
 	test_nozzle_process_gcode.cpp
 	test_tool_slots_gcode.cpp
 	test_nozzle_widths_gcode.cpp
@@ -55,6 +59,7 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
+	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
 	test_over_support_surfaces.cpp
@@ -63,11 +68,13 @@ add_executable(${_TEST_NAME}_tests
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
+	test_counterbore_bridging.cpp
 	test_extra_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
+	test_scarf_seam.cpp
 	test_slice_bake.cpp
 	test_status_callback_race.cpp
 	test_modifier_effect.cpp
@@ -80,6 +87,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
+	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
 	test_ironing_overrides.cpp
