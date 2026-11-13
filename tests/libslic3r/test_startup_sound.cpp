@@ -357,7 +357,7 @@ TEST_CASE("Startup sound: Ode to Joy converts within the default caps", "[Startu
 TEST_CASE("Startup sound: calibrated unit is 10 ms", "[StartupSound]")
 {
     // H3C recording: 478 units played in 4.78 s, so one B/D/F unit is 10 ms.
-    CHECK(Options().ms_per_unit == Approx(10.));
+    CHECK(Options().ms_per_unit == 10.);
 }
 
 // Writes the owner's demo files. Hidden: run with
