@@ -701,8 +701,71 @@ void PrintObject::infill()
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         det_dump_extrusions(*this, "4_infill_extrusions");
+        this->warn_if_first_layer_prints_nothing(*this);
         this->set_done(posInfill);
     }
+}
+
+// An object whose bed contact is narrower than the first-layer wall gets no first-layer extrusion
+// at all: it starts in mid-air, and because getObjectExtruderMap (Print.cpp) finds no first-layer
+// extruder for it, it gets no brim of any kind either (brim types and painted ears alike). Nothing
+// here changes the slice; it only says so, with the width needed and the settings that fix it.
+void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_src)
+{
+    if (layers_src.layers().empty() || this->has_raft())
+        return;
+    const Layer *first = layers_src.layers().front();
+    if (first->lslices.empty() || first->has_extrusions())
+        return;
+
+    // Contact width: the narrowest inward offset that erases the whole first-layer footprint.
+    BoundingBox bbox = get_extents(first->lslices);
+    double lo = 0., hi = unscaled(std::max(bbox.size().x(), bbox.size().y()));
+    for (int i = 0; i < 24 && hi - lo > 0.002; ++ i) {
+        const double mid = 0.5 * (lo + hi);
+        if (offset_ex(first->lslices, -float(scale_(mid / 2.))).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    const double contact = hi;
+
+    // Wall settings of the first region that has first-layer slices.
+    const LayerRegion *layerm = nullptr;
+    for (const LayerRegion *r : first->regions())
+        if (!r->slices.empty()) { layerm = r; break; }
+    if (layerm == nullptr && !first->regions().empty())
+        layerm = first->regions().front();
+    if (layerm == nullptr)
+        return;
+    const Flow   ext_flow   = layerm->flow(frExternalPerimeter);
+    const double line_width = ext_flow.width();
+    const double nozzle     = ext_flow.nozzle_diameter();
+    const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
+    const bool   thin_walls = layerm->region().config().detect_thin_wall.value;
+
+    auto mm = [](double v) { return Slic3r::format("%.2f", v); };
+    std::string message;
+    if (classic && !thin_walls) {
+        // Classic walls without thin-wall detection need room for one whole external wall.
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
+                                      "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
+                                      "contact must be comfortably wider than %3% mm."),
+                                 this->model_object()->name, mm(contact), mm(line_width));
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
+        if (suggest >= 0.6 * nozzle)
+            message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
+                                            mm(suggest));
+        else
+            message += " " + _u8L("To fix it, set Wall generator to Arachne or turn on Detect thin wall, or give the part a wider base.");
+    } else {
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow to print, "
+                                      "so it gets no brim and starts in mid-air. Give the part a wider base or reorient it."),
+                                 this->model_object()->name, mm(contact));
+    }
+    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message, PrintStateBase::SlicingEmptyFirstLayer);
 }
 
 void PrintObject::ironing()

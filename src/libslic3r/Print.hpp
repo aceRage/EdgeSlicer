@@ -793,6 +793,9 @@ private:
     void combine_adaptive_infill();
     void prepare_infill();
     void infill();
+    // Raises SlicingEmptyFirstLayer on this object when the first layer of `layers_src` (this object,
+    // or the object it shares its layers with) has slices but no extrusions. Needs posInfill started.
+    void warn_if_first_layer_prints_nothing(const PrintObject &layers_src);
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();
