@@ -128,6 +128,15 @@ public:
     /// <returns>True when constain emboss data otherwise False</returns>
     static bool is_svg(const ModelVolume &volume);
 
+    /// <summary>
+    /// Make the mesh of an embossed volume (SVG, or text placed straight) again after its type was
+    /// changed outside of the tool (object list "Change type"): a part is raised out of the surface,
+    /// a modifier or negative volume is sunk into it, so the old mesh would sit on the wrong side.
+    /// </summary>
+    /// <param name="volume">Volume whose type was just changed</param>
+    /// <returns>True when the update job was started</returns>
+    static bool remake_after_type_change(const ModelVolume &volume);
+
 protected:
     bool on_init() override;
     std::string on_get_name() const override;

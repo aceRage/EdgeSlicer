@@ -220,6 +220,17 @@ public:
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
 	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f);
+	// The last planned layer starts with `tool` loaded: its Local-Z passes changed filament directly
+	// (GCode::process_layer phase b) from `prev_tool` before the tower's planned changes.
+	// Only before the layer's first planned change: a later object layer joined to this tower layer
+	// keeps the order already planned.
+	void set_last_layer_start_tool(unsigned int prev_tool, unsigned int tool)
+	{
+		if (! m_plan.empty() && m_plan.back().tool_changes.empty() && m_plan.back().local_z_start_tool < 0) {
+			m_plan.back().local_z_prev_tool  = int(prev_tool);
+			m_plan.back().local_z_start_tool = int(tool);
+		}
+	}
 
 	// Iterates through prepared m_plan, generates ToolChangeResults and appends them to "result"
 	void generate(std::vector<std::vector<ToolChangeResult>> &result);
@@ -585,6 +596,10 @@ private:
 		float toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
 
 		std::vector<ToolChange> tool_changes;
+		// Local-Z / mixed color sublayer passes changed filament directly before this layer's tower
+		// changes (no tower block): the filament they left loaded, or -1, and the one loaded before them.
+		int local_z_start_tool{-1};
+		int local_z_prev_tool{-1};
 
 		WipeTowerInfo(float z_par, float layer_height_par)
 			: z{z_par}, height{layer_height_par}, depth{0}, extra_spacing{1.f} {}

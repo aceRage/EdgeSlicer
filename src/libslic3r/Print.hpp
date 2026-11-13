@@ -80,6 +80,13 @@ struct LocalZInterval
 };
 
 struct SubLayerPlan;
+// Mixed color sublayer P3: what PrintObject::adapt_local_z_ratio_plan_to_merge_bands() did.
+struct MixedRatioMergeStats
+{
+    size_t split_bands { 0 };         // band tops split into passes
+    size_t whole_bands { 0 };         // band tops printed in one colour: no pass reached above the swallowed layers
+    size_t reordered_top_bands { 0 }; // Bambu Studio order asked for (or a top surface), but the first pass had to change
+};
 // The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
 bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
 // The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
@@ -104,6 +111,14 @@ struct SubLayerPlan
     bool   ratio_pass { false };
     // The top pass of its Ratio row on this layer: ironing prints here only, once (D6).
     bool   ratio_last_pass { false };
+    // How the planner ordered this Ratio row on this layer (Bambu Studio's ascending order, asked for or forced by a
+    // top surface) and the gradient share of component A it used (< 0: none). The AdaptiveLayerMerge band split
+    // (P3, D9) re-plans the row's passes over the band heights with the same choices.
+    bool   ratio_ascending { false };
+    double ratio_gradient_a { -1.0 };
+    // The height a Ratio pass takes its share of: the layer height, or the merged band height (P3). Every path of the
+    // pass keeps pass height / this of its own flow (bridges included).
+    double ratio_layer_height { 0.0 };
     std::vector<ExPolygons> painted_masks_by_extruder;
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;
@@ -519,12 +534,18 @@ public:
     {
         m_local_z_intervals = std::move(intervals);
         m_local_z_sublayer_plan = std::move(sublayers);
+        m_local_z_plan_before_merge.reset();
     }
     void                                clear_local_z_plan()
     {
         m_local_z_intervals.clear();
         m_local_z_sublayer_plan.clear();
+        m_local_z_plan_before_merge.reset();
     }
+    // Mixed color sublayer P3 (D9): re-plan the Ratio rows whose region AdaptiveLayerMerge merged into bands, so
+    // their passes split each band patch's height on its top and skip the swallowed footprint. Runs right after
+    // compute_adaptive_merge_groups(); idempotent (the slice-time plan is kept and restored first).
+    MixedRatioMergeStats                adapt_local_z_ratio_plan_to_merge_bands();
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
@@ -859,6 +880,8 @@ private:
     SupportLayerPtrs                        m_support_layers;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
+    // The slice-time Local-Z plan, kept while adapt_local_z_ratio_plan_to_merge_bands() has replaced it.
+    std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 

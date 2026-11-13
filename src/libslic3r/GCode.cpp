@@ -3910,6 +3910,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
+        // (Mixed color sublayer: ToolOrdering lists every Ratio pass filament too, see collect_extruder_statistics.)
         this->set_extruders(tool_ordering.all_extruders());
         print_object_instances_ordering =
             // By default, order object instances using a nearest neighbor search.
@@ -6327,10 +6328,22 @@ inline GCode::ObjectByExtruder& object_by_extruder(std::map<unsigned int, std::v
     return objects_by_extruder[object_idx];
 }
 
-static inline void apply_local_z_flow_height_override(ExtrusionPath& path, const double flow_height_override)
+// `flow_reference_height` > 0 (a Ratio pass, mixed color sublayer): the pass prints that share of the layer (or merged
+// band) height, so every path keeps that share of its own flow and height, as Bambu Studio scales mm3/mm by
+// sub_h / lh (GCode.cpp:7694). This matters for paths whose height is not the layer height (bridges, a thick bridge is
+// as tall as its nozzle), which the plain override would cut down to the pass height. Subdivide passes keep the
+// plain override.
+static inline void apply_local_z_flow_height_override(ExtrusionPath& path, const double flow_height_override,
+                                                      const double flow_reference_height = 0.)
 {
     if (flow_height_override <= EPSILON)
         return;
+    if (flow_reference_height > EPSILON) {
+        const double ratio = flow_height_override / flow_reference_height;
+        path.mm3_per_mm *= ratio;
+        path.height = float(path.height > EPSILON ? path.height * ratio : flow_height_override);
+        return;
+    }
     if (path.height > EPSILON) {
         const double ratio = flow_height_override / path.height;
         path.mm3_per_mm *= ratio;
@@ -6342,7 +6355,8 @@ static inline void append_clipped_path(const ExtrusionPath& src_path,
                                        const ExPolygons*    include_masks,
                                        const ExPolygons*    exclude_masks,
                                        const double         flow_height_override,
-                                       std::vector<ExtrusionPath>& dst)
+                                       std::vector<ExtrusionPath>& dst,
+                                       const double         flow_reference_height = 0.)
 {
     Polylines segments{src_path.polyline};
     if (include_masks != nullptr && !include_masks->empty())
@@ -6354,7 +6368,7 @@ static inline void append_clipped_path(const ExtrusionPath& src_path,
         if (!segment.is_valid())
             continue;
         ExtrusionPath clipped(segment, src_path);
-        apply_local_z_flow_height_override(clipped, flow_height_override);
+        apply_local_z_flow_height_override(clipped, flow_height_override, flow_reference_height);
         dst.emplace_back(std::move(clipped));
     }
 }
@@ -6570,7 +6584,8 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
     const ExPolygons*                include_masks,
     const ExPolygons*                exclude_masks,
     const double                     flow_height_override,
-    const LocalZLoopSeamPlacer*      seam_placer = nullptr)
+    const LocalZLoopSeamPlacer*      seam_placer = nullptr,
+    const double                     flow_reference_height = 0.)
 {
     if (source.entities.empty())
         return nullptr;
@@ -6588,12 +6603,12 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
     for (const ExtrusionEntity* entity : flattened.entities) {
         if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity)) {
             std::vector<ExtrusionPath> clipped_paths;
-            append_clipped_path(*path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+            append_clipped_path(*path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             append_clipped_paths(std::move(clipped_paths), *out);
         } else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
             std::vector<ExtrusionPath> clipped_paths;
             for (const ExtrusionPath& path : multipath->paths)
-                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             append_clipped_paths(std::move(clipped_paths), *out);
         } else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity)) {
             ExtrusionLoop seam_loop = *loop;
@@ -6602,7 +6617,7 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
                 seam_placer != nullptr && (*seam_placer)(*loop, seam_loop, seam_anchor);
             std::vector<ExtrusionPath> clipped_paths;
             for (const ExtrusionPath& path : seam_loop.paths)
-                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             if (seam_ready)
                 local_z_order_clipped_paths_for_seam(clipped_paths, seam_anchor);
             append_clipped_paths(std::move(clipped_paths), *out);
@@ -8087,6 +8102,10 @@ LayerResult GCode::process_layer(const Print& print,
         size_t                  base_clip_leak_warnings { 0 };
         // A Ratio (mixed color sublayer) pass is on this layer: its passes cover infill too.
         bool                    has_ratio_pass { false };
+        // P3: a Subdivide (or other non-Ratio) pass shares the layer with a Ratio one. Each row keeps its own infill
+        // policy then: only the Ratio passes take the infill, and the base infill only gives up the Ratio region.
+        bool                    has_non_ratio_pass { false };
+        ExPolygons              ratio_masks_union_for_base_exclude;
         std::vector<LocalZPassBucket> pass_buckets;
     };
 
@@ -8190,8 +8209,13 @@ LayerResult GCode::process_layer(const Print& print,
                     ++split_plan_with_raw_masks;
                 if (pass_has_compensated_masks) {
                     ++split_plan_with_compensated_masks;
-                    if (plan.ratio_pass)
+                    if (plan.ratio_pass) {
                         ctx.has_ratio_pass = true;
+                        for (const ExPolygons &masks : plan.painted_masks_by_extruder)
+                            if (!masks.empty())
+                                append(ctx.ratio_masks_union_for_base_exclude, masks);
+                    } else
+                        ctx.has_non_ratio_pass = true;
                     ctx.pass_buckets.emplace_back(std::move(bucket));
 
                     const LocalZPassBucket& appended_bucket = ctx.pass_buckets.back();
@@ -8216,6 +8240,11 @@ LayerResult GCode::process_layer(const Print& print,
                 ctx.mixed_masks_union_for_base_exclude =
                     local_z_compensate_masks(base_exclude_source, local_z_base_mask_expand, true);
             }
+            if (ctx.has_ratio_pass && ctx.has_non_ratio_pass && !ctx.ratio_masks_union_for_base_exclude.empty())
+                ctx.ratio_masks_union_for_base_exclude =
+                    local_z_compensate_masks(union_ex(ctx.ratio_masks_union_for_base_exclude), local_z_base_mask_expand, true);
+            else
+                ctx.ratio_masks_union_for_base_exclude.clear();
             if (ctx.pass_buckets.empty() || ctx.mixed_masks_union.empty()) {
                 ctx.enabled = false;
                 if (local_z_rejected_context_logs < 50) {
@@ -8743,9 +8772,17 @@ LayerResult GCode::process_layer(const Print& print,
                             (local_z_infill_for_layer && entity_type == ObjectByExtruder::Island::Region::INFILL);
                         const bool local_z_entity_is_ironing =
                             entity_type == ObjectByExtruder::Island::Region::INFILL && extrusions->role() == erIroning;
+                        // P3: infill split only for the Ratio rows of a layer that also has Subdivide passes (each row
+                        // keeps its own infill policy, Subdivide's infill stays whole unless "Local-Z infill" is on).
+                        const bool local_z_infill_ratio_only = entity_type == ObjectByExtruder::Island::Region::INFILL &&
+                                                               !local_z_infill_enabled && local_z_ctx != nullptr &&
+                                                               local_z_ctx->has_ratio_pass && local_z_ctx->has_non_ratio_pass &&
+                                                               !local_z_ctx->ratio_masks_union_for_base_exclude.empty();
                         if (local_z_entity_enabled && local_z_ctx != nullptr && !local_z_ctx->mixed_masks_union.empty()) {
                             for (LocalZPassBucket& pass_bucket : local_z_ctx->pass_buckets) {
                                 if (pass_bucket.plan == nullptr)
+                                    continue;
+                                if (local_z_infill_ratio_only && !pass_bucket.plan->ratio_pass)
                                     continue;
                                 // D6: ironing in a Ratio region prints once, after the last pass, at its own flow.
                                 if (local_z_entity_is_ironing && pass_bucket.plan->ratio_pass && !pass_bucket.plan->ratio_last_pass)
@@ -8763,14 +8800,17 @@ LayerResult GCode::process_layer(const Print& print,
                                                                                                &pass_masks,
                                                                                                nullptr,
                                                                                                pass_flow_height,
-                                                                                               &local_z_loop_seam_placer);
+                                                                                               &local_z_loop_seam_placer,
+                                                                                               pass_bucket.plan->ratio_pass ? pass_bucket.plan->ratio_layer_height : 0.);
                                     if (!clipped_local)
                                         continue;
 
                                     const ExtrusionEntityCollection* clipped_ptr = clipped_local.get();
                                     const LocalZPathHeightStats local_height_stats = collect_local_z_path_height_stats(*clipped_ptr);
                                     ++local_z_ctx->local_clipped_collections;
-                                    if (pass_flow_height > 0. && local_height_stats.count > 0 &&
+                                    // A Ratio pass scales every path's own height (bridges keep theirs), so only Subdivide
+                                    // passes are expected to carry exactly the pass height.
+                                    if (pass_flow_height > 0. && !pass_bucket.plan->ratio_pass && local_height_stats.count > 0 &&
                                         (std::abs(local_height_stats.min - pass_bucket.plan->flow_height) > 1e-3 ||
                                          std::abs(local_height_stats.max - pass_bucket.plan->flow_height) > 1e-3)) {
                                         BOOST_LOG_TRIVIAL(warning) << "Local-Z local pass height mismatch"
@@ -8801,6 +8841,7 @@ LayerResult GCode::process_layer(const Print& print,
                             }
 
                             const ExPolygons* base_exclude_masks =
+                                local_z_infill_ratio_only ? &local_z_ctx->ratio_masks_union_for_base_exclude :
                                 local_z_ctx->mixed_masks_union_for_base_exclude.empty() ? &local_z_ctx->mixed_masks_union
                                                                                         : &local_z_ctx->mixed_masks_union_for_base_exclude;
                             auto clipped_base = clip_extrusion_collection_for_local_z(*extrusions,
@@ -9701,13 +9742,13 @@ LayerResult GCode::process_layer(const Print& print,
 
         nominal_layer_start_extruder = local_z_phase_b_active_extruder;
 
-        // Mixed color sublayer, Bambu Lab (Type1) tower: the tower's plan for this layer does not know the Ratio
-        // passes' own filament changes, so its next planned change starts from the filament the layer began with.
-        // Go back to it before the planned changes, or the tower and the G-code disagree (append_tcr throws).
-        if (has_wipe_tower && m_wipe_tower && wipe_tower_type() == WipeTowerType::Type1 &&
-            std::any_of(local_z_pass_refs.begin(), local_z_pass_refs.end(), [](const LocalZPassRef& ref) {
-                return ref.bucket != nullptr && ref.bucket->plan != nullptr && ref.bucket->plan->ratio_pass;
-            })) {
+        // Bambu Lab (Type1) tower: the passes above changed filament directly. Print::_make_wipe_tower() plans the
+        // layer's tower changes from the filament the last pass leaves loaded (the same pass order, replayed by
+        // collect_local_z_wipe_tower_toolchanges()), so this is normally a no-op. Should the replay and the passes
+        // printed here ever end on different filaments, go to the one the tower's next change starts from, so the
+        // nominal order below asks for exactly the changes the tower planned (append_tcr throws otherwise). Any
+        // pass counts, Ratio or Subdivide (#937 hand test: Subdivide + a plain colour on an H3C threw here).
+        if (has_wipe_tower && m_wipe_tower && wipe_tower_type() == WipeTowerType::Type1) {
             const int planned_tool = m_wipe_tower->planned_current_tool();
             if (planned_tool >= 0 && m_writer.extruder() != nullptr && int(m_writer.extruder()->id()) != planned_tool) {
                 gcode += this->set_extruder(unsigned(planned_tool), print_z);
