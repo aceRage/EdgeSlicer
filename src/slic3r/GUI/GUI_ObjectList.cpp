@@ -46,6 +46,8 @@
 #include "QuadRemeshDialog.hpp"
 // RE-EDITABLE CUTS: edit_cut() arms the Cut gizmo with a stored recipe.
 #include "Gizmos/GLGizmoCut.hpp"
+#include "Gizmos/GLGizmoSVG.hpp" // remake an SVG / text after a type change
+#include "libslic3r/EmbossPlacement.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -6046,6 +6048,9 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
 
     std::set<const ModelVolume*> changed_volumes;
     std::set<int>                touched_objects;
+    // Edge: text and SVG volumes that moved to the other side of the surface (part <-> modifier or
+    // negative volume) get their mesh made again, as the Text / SVG tool does on its own type change.
+    std::vector<ObjectID>        remake_emboss;
     for (const auto& sel : volumes) {
         const ModelVolumeType target   = effective_new_type(sel.volume);
         const ModelVolumeType old_type = sel.volume->type();
@@ -6057,6 +6062,8 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
             continue;
 
         sel.volume->set_type(target);
+        if (sel.volume->emboss_shape.has_value() && Slic3r::Emboss::type_change_needs_new_mesh(old_type, target))
+            remake_emboss.push_back(sel.volume->id());
 
         if (precise_seam_group_changed(old_type, target))
             move_volume_to_end((*m_objects)[sel.object_idx], sel.volume);
@@ -6079,6 +6086,13 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
         SetSelections(new_selection);
         m_prevent_list_events = false;
     }
+
+    for (const ObjectID &id : remake_emboss)
+        for (const ModelObject *object : *m_objects)
+            for (const ModelVolume *volume : object->volumes)
+                if (volume->id() == id && !GLGizmoSVG::remake_after_type_change(*volume))
+                    BOOST_LOG_TRIVIAL(info) << "Change part type: the embossed mesh of \"" << volume->name
+                                            << "\" is kept as it was (edit it in its tool to remake it)";
 }
 
 void ObjectList::last_volume_is_deleted(const int obj_idx)

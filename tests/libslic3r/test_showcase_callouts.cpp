@@ -589,16 +589,22 @@ TEST_CASE("Callout targets from filament assignments", "[Showcase][Callouts]")
         CHECK(plan_callout_targets(model, { 2 }, nullptr).size() == 1);
     }
 
-    SECTION("a part with its own filament, a modifier draws nothing") {
+    SECTION("a part with its own filament, a modifier on a filament shows it") {
         ModelVolume *part = a->add_volume(make_cube(5., 5., 5.));
         part->config.set("extruder", 3);
         ModelVolume *mod = a->add_volume(make_cube(5., 5., 5.), ModelVolumeType::PARAMETER_MODIFIER);
         mod->config.set("extruder", 4);
+        // a modifier that only changes settings says nothing
+        ModelVolume *speed = a->add_volume(make_cube(5., 5., 5.), ModelVolumeType::PARAMETER_MODIFIER);
+        speed->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(50));
         const std::vector<CalloutTarget> t = plan_callout_targets(model, { 0 }, nullptr);
-        REQUIRE(t.size() == 2);
+        REQUIRE(t.size() == 3);
         CHECK(t[0].key == "f2");
         CHECK(t[1].key == "f3");
         CHECK(t[1].source == CalloutSource::Part);
+        // the Showcase draws the modifier's filament on the part it covers
+        CHECK(t[2].key == "f4");
+        CHECK(t[2].source == CalloutSource::Part);
     }
 
     SECTION("painted regions") {

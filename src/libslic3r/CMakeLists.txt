@@ -111,6 +111,8 @@ set(lisbslic3r_sources
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
     Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseSurfaceColours.cpp
+    Showcase/ShowcaseSurfaceColours.hpp
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp

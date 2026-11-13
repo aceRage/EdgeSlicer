@@ -118,6 +118,23 @@ std::string svg_split_path_in_3mf(const std::string &group_id, size_t index)
     return "3D/svgsplit_" + group_id + "_" + std::to_string(index + 1) + ".svg";
 }
 
+std::string svg_split_group_of(const std::string &path_in_3mf)
+{
+    static const std::string prefix = "3D/svgsplit_";
+    static const std::string suffix = ".svg";
+    if (path_in_3mf.size() <= prefix.size() + suffix.size() || path_in_3mf.compare(0, prefix.size(), prefix) != 0 ||
+        path_in_3mf.compare(path_in_3mf.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return {};
+    const std::string middle = path_in_3mf.substr(prefix.size(), path_in_3mf.size() - prefix.size() - suffix.size());
+    const size_t      sep    = middle.rfind('_');
+    if (sep == std::string::npos || sep == 0 || sep + 1 >= middle.size())
+        return {};
+    for (size_t i = sep + 1; i < middle.size(); ++i)
+        if (middle[i] < '0' || middle[i] > '9')
+            return {};
+    return middle.substr(0, sep);
+}
+
 double svg_split_min_area(const BoundingBox &drawing, double floor)
 {
     if (!drawing.defined)
