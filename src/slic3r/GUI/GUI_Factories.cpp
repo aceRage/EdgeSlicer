@@ -2573,8 +2573,9 @@ void MenuFactory::create_bbl_part_menu()
         [](wxCommandEvent&) { plater()->split_by_color(); }, "menu_split_parts", menu,
         []() { return plater()->can_split_by_color(); }, m_parent);
 
+    // A part is never split to objects (can_split(true) is false for a part), so "To parts" must enable the sub-menu too.
     append_submenu(menu, split_menu, wxID_ANY, _L("Split"), _L("Split the selected object"), "",
-        []() { return plater()->can_split(true) || plater()->can_split_by_color(); }, m_parent);
+        []() { return plater()->can_split(true) || plater()->can_split(false) || plater()->can_split_by_color(); }, m_parent);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);
@@ -3408,6 +3409,8 @@ void MenuFactory::append_menu_item_locked(wxMenu* menu)
 
     auto item = append_menu_item(menu, wxID_ANY, lock_text, "",
         [plate](wxCommandEvent&) {
+            // As the plate's lock icon does: one undo step, which also marks the project modified.
+            plater()->take_snapshot("lock partplate");
             bool lock = plate->is_locked();
             plate->lock(!lock);
         }, "", nullptr, []() { return true; }, m_parent);

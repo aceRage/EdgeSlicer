@@ -1180,9 +1180,21 @@ void prefer_lan(json& printers)
 // --------------------------------------------------------------- sending ----
 
 bool upload(const Device& d, const std::string& source_path, const std::string& filename, std::function<void(int)> progress,
-            std::string& error)
+            std::string& error, int stall_s)
 {
     bool ok = false;
+    // No time limit for the whole upload - a big file on slow Wi-Fi takes as long as it takes - but
+    // one that stops moving is given up: curl's progress callback runs about once a second even
+    // when nothing goes out, and a printer that stopped reading would otherwise hang the send for good.
+    // Once the last byte is out the printer still writes the file away (and, on some firmware, scans it)
+    // before it answers, with nothing moving: that wait gets a limit of its own, UPLOAD_ANSWER_FACTOR
+    // times longer (10 min for the default 120 s), so a big file on slow storage is not cut off while a
+    // printer that never answers still does not hang the send for good.
+    using Clock               = std::chrono::steady_clock;
+    size_t            sent      = 0;
+    Clock::time_point moved     = Clock::now();
+    bool              stalled   = false;
+    bool              answering = false;
     // print=false always: a print that will not start must still leave a file the person can use
     // from the printer's own screen.
     Http::post(base_url(d) + "/server/files/upload").tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
@@ -1190,8 +1202,21 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
         .form_add("print", "false")
         .form_add("root", "gcodes")
         .form_add_file("file", fs::path(source_path), filename)
-        .on_progress([&progress](Http::Progress prog, bool& cancel) {
+        .on_progress([&](Http::Progress prog, bool& cancel) {
             cancel = false;
+            if (stalled)
+                return;
+            const Clock::time_point now = Clock::now();
+            answering                   = prog.ultotal > 0 && prog.ulnow >= prog.ultotal;
+            const int limit_s           = answering ? stall_s * UPLOAD_ANSWER_FACTOR : stall_s;
+            if (prog.ulnow != sent) {
+                sent  = prog.ulnow;
+                moved = now;
+            } else if (stall_s > 0 && now - moved >= std::chrono::seconds(limit_s)) {
+                stalled = true;
+                cancel  = true;
+                return;
+            }
             if (progress && prog.ultotal > 0)
                 progress((int) std::min<size_t>(100, prog.ulnow * 100 / prog.ultotal));
         })
@@ -1208,6 +1233,11 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
             }
         })
         .perform_sync();
+    if (stalled) {
+        error = answering ? "the printer took the whole file but did not answer for " + std::to_string(stall_s * UPLOAD_ANSWER_FACTOR) + " s" :
+                            "the printer stopped taking the file: nothing was sent for " + std::to_string(stall_s) + " s";
+        ok    = false;
+    }
     return ok;
 }
 
@@ -1241,13 +1271,21 @@ bool metadata(const Device& d, const std::string& filename, long long& size, std
 // printer's websocket and MQTT transports only: over HTTP it answers "Method not found".
 bool run_script(const Device& d, const std::string& script, std::string& error)
 {
+    return run_script(base_url(d), std::string(), script, error);
+}
+
+bool run_script(const std::string& base, const std::string& apikey, const std::string& script, std::string& error)
+{
     bool ok = false;
-    Http::post(base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(script)).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+    auto http = Http::post(base + "/printer/gcode/script?script=" + Http::url_encode(script));
+    http.tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(5)
-        .timeout_max(60) // the printer answers a script only once it has run it
-        // Everything is in the query string, but the body has to be set: without it the Http
-        // wrapper leaves CURLOPT_POSTFIELDS alone and curl waits for a body nobody will write.
-        .header("Content-Type", "application/json")
+        .timeout_max(60); // the printer answers a script only once it has run it
+    if (!apikey.empty())
+        http.header("X-Api-Key", apikey);
+    // Everything is in the query string, but the body has to be set: without it the Http
+    // wrapper leaves CURLOPT_POSTFIELDS alone and curl waits for a body nobody will write.
+    http.header("Content-Type", "application/json")
         .set_post_body(std::string("{}"))
         .on_complete([&ok](std::string, unsigned) { ok = true; })
         .on_error([&error](std::string body, std::string err, unsigned status) {

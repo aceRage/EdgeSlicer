@@ -851,6 +851,54 @@ bool Http::url_scheme_is(const std::string &url, const char *scheme)
 	return boost::iequals(url.substr(0, sep), scheme);
 }
 
+std::string Http::url_without_userinfo(const std::string &url)
+{
+    const size_t scheme_end = url.find("://");
+    const size_t start      = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    const size_t end        = std::min(url.find_first_of("/?#", start), url.size());
+    // The last '@' of the authority: a password may hold an '@' of its own.
+    const size_t at = url.rfind('@', end == 0 ? 0 : end - 1);
+    if (at == std::string::npos || at < start)
+        return url;
+    return url.substr(0, start) + url.substr(at + 1);
+}
+
+std::string Http::url_for_log(const std::string &url)
+{
+    std::string out = url_without_userinfo(url);
+    const size_t q = out.find('?');
+    if (q == std::string::npos)
+        return out;
+    const size_t frag = out.find('#', q);
+    const size_t qend = frag == std::string::npos ? out.size() : frag;
+    std::string result = out.substr(0, q + 1);
+    size_t pos = q + 1;
+    while (pos <= qend) {
+        size_t amp = out.find('&', pos);
+        if (amp == std::string::npos || amp > qend)
+            amp = qend;
+        const std::string pair = out.substr(pos, amp - pos);
+        const size_t eq = pair.find('=');
+        if (eq == std::string::npos) {
+            result += pair;
+        } else {
+            const std::string key = pair.substr(0, eq);
+            std::string lkey = key;
+            boost::algorithm::to_lower(lkey);
+            static const char *secret_keys[] = {"apikey", "api_key", "api-key", "key", "token", "access_token", "auth", "password", "passwd", "pwd", "secret", "access_code", "code"};
+            bool secret = false;
+            for (const char *k : secret_keys)
+                if (lkey == k) { secret = true; break; }
+            result += key + "=" + (secret ? std::string("***") : pair.substr(eq + 1));
+        }
+        if (amp >= qend)
+            break;
+        result += '&';
+        pos = amp + 1;
+    }
+    return result + out.substr(qend);
+}
+
 std::string Http::url_host(const std::string &url)
 {
     const size_t scheme_end = url.find("://");

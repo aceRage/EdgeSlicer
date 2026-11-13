@@ -59,6 +59,7 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
+	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
 	test_over_support_surfaces.cpp
