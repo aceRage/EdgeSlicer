@@ -115,6 +115,10 @@ float interclaim_absorb_effective_claim_width(const ExPolygons &island, const st
                                                const std::vector<float> &claim_width_gapfill_off_by_color,
                                                float min_claim_width, float eps);
 
+// Clean-up of one layer contour's colouring along the wall (runs of 0.2 mm and 0.5 mm or less,
+// times run_scale). Exposed (not static) so it is directly unit-testable.
+ColoredLines filter_colorized_polygon(ColoredLines &&new_lines, float run_scale);
+
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
 

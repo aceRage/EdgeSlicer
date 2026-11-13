@@ -880,7 +880,7 @@ static ColoredLines colorize_line(const Line &line_to_process,
     return final_lines;
 }
 
-static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines, const float run_scale) {
+ColoredLines filter_colorized_polygon(ColoredLines &&new_lines, const float run_scale) {
     for (size_t line_idx = 2; line_idx < new_lines.size(); ++line_idx) {
         const ColoredLine &line_0 = new_lines[line_idx - 2];
         ColoredLine       &line_1 = new_lines[line_idx - 1];
@@ -960,9 +960,12 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines, const flo
             int color2 = new_lines[segments[next_next_idx].first].color;
 
             if (color0 > 0 && color0 == color2 && color0 != color1 && segment_length(segments[next_idx]) <= scale_(0.5 * run_scale)) {
-                for (size_t seg_start_idx = segments[next_next_idx].first; seg_start_idx != segments[next_next_idx].second; seg_start_idx = (seg_start_idx + 1 < new_lines.size()) ? seg_start_idx + 1 : 0)
+                // Give the short middle run (next_idx) the colour of the runs either side of it. This
+                // recoloured segments[next_next_idx] since PrusaSlicer 2.4, which has color0 already
+                // (color2 == color0), so the pass changed nothing.
+                for (size_t seg_start_idx = segments[next_idx].first; seg_start_idx != segments[next_idx].second; seg_start_idx = (seg_start_idx + 1 < new_lines.size()) ? seg_start_idx + 1 : 0)
                     new_lines[seg_start_idx].color = color0;
-                new_lines[segments[next_next_idx].second].color = color0;
+                new_lines[segments[next_idx].second].color = color0;
             }
         }
 
