@@ -9742,13 +9742,13 @@ LayerResult GCode::process_layer(const Print& print,
 
         nominal_layer_start_extruder = local_z_phase_b_active_extruder;
 
-        // Mixed color sublayer, Bambu Lab (Type1) tower: the tower's plan for this layer does not know the Ratio
-        // passes' own filament changes, so its next planned change starts from the filament the layer began with.
-        // Go back to it before the planned changes, or the tower and the G-code disagree (append_tcr throws).
-        if (has_wipe_tower && m_wipe_tower && wipe_tower_type() == WipeTowerType::Type1 &&
-            std::any_of(local_z_pass_refs.begin(), local_z_pass_refs.end(), [](const LocalZPassRef& ref) {
-                return ref.bucket != nullptr && ref.bucket->plan != nullptr && ref.bucket->plan->ratio_pass;
-            })) {
+        // Bambu Lab (Type1) tower: the passes above changed filament directly. Print::_make_wipe_tower() plans the
+        // layer's tower changes from the filament the last pass leaves loaded (the same pass order, replayed by
+        // collect_local_z_wipe_tower_toolchanges()), so this is normally a no-op. Should the replay and the passes
+        // printed here ever end on different filaments, go to the one the tower's next change starts from, so the
+        // nominal order below asks for exactly the changes the tower planned (append_tcr throws otherwise). Any
+        // pass counts, Ratio or Subdivide (#937 hand test: Subdivide + a plain colour on an H3C threw here).
+        if (has_wipe_tower && m_wipe_tower && wipe_tower_type() == WipeTowerType::Type1) {
             const int planned_tool = m_wipe_tower->planned_current_tool();
             if (planned_tool >= 0 && m_writer.extruder() != nullptr && int(m_writer.extruder()->id()) != planned_tool) {
                 gcode += this->set_extruder(unsigned(planned_tool), print_z);

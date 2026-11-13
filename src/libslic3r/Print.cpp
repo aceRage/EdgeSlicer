@@ -7351,12 +7351,44 @@ void Print::_make_wipe_tower()
         {
             // BBS: priming logic is removed, so get the initial extruder by first_extruder()
             unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+            // Local-Z (Subdivide Mix Layer) and mixed color sublayer passes print first on their layer and change
+            // filament directly on a Type1 tower (WipeTowerIntegration::tool_change, local_z_unplanned). The layer's
+            // tower changes then start from the filament the last pass left loaded, as GCode::process_layer()
+            // starts its nominal order there; planning them from the filament the layer began with asked the tower
+            // for a change the export never requested (append_tcr "unexpected toolchange", #937 hand test).
+            // Flushing into objects / infill / support turns the passes off at export (the writer's phase b is not
+            // aware of wiping extrusions), so such a plate keeps planning from the layer's first filament.
+            std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> local_z_layers_to_print;
+            if (std::any_of(m_objects.begin(), m_objects.end(),
+                            [](const PrintObject *object) { return !object->local_z_sublayer_plan().empty(); }) &&
+                std::none_of(m_objects.begin(), m_objects.end(), [](const PrintObject *object) {
+                    return object->config().flush_into_infill || object->config().flush_into_objects ||
+                           (object->config().flush_into_support && object->has_support_material());
+                }))
+                local_z_layers_to_print = GCode::collect_layers_to_print(*this);
+            size_t local_z_layers_to_print_idx = 0;
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
                 if (!layer_tools.has_wipe_tower)
                     continue;
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
+                const unsigned int layer_start_extruder_id = current_extruder_id;
+                if (!local_z_layers_to_print.empty()) {
+                    while (local_z_layers_to_print_idx + 1 < local_z_layers_to_print.size() &&
+                           local_z_layers_to_print[local_z_layers_to_print_idx].first + EPSILON < layer_tools.print_z)
+                        ++local_z_layers_to_print_idx;
+                    if (local_z_layers_to_print_idx < local_z_layers_to_print.size() &&
+                        std::abs(local_z_layers_to_print[local_z_layers_to_print_idx].first - layer_tools.print_z) <= EPSILON) {
+                        const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
+                            collect_local_z_wipe_tower_toolchanges(*this, local_z_layers_to_print[local_z_layers_to_print_idx].second,
+                                                                   int(current_extruder_id));
+                        if (!local_z_toolchanges.empty())
+                            current_extruder_id = local_z_toolchanges.back().new_tool;
+                    }
+                }
                 wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id);
+                if (current_extruder_id != layer_start_extruder_id)
+                    wipe_tower.set_last_layer_start_tool(current_extruder_id);
 
                 // The order GCode::process_layer() prints the layer in: rotated to start with the loaded
                 // extruder, unless Cyclic ordering or a custom sequence fixed it. Planning the plain

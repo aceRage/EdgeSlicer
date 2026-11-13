@@ -22,9 +22,11 @@
 #include "test_data.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <map>
+#include <set>
 #include <tuple>
 #include <sstream>
 #include <string>
@@ -968,4 +970,170 @@ TEST_CASE("Mixed sublayer: a mixed filament's line widths are checked against it
         // check against the finest component's nozzle refuses the plate.
         CHECK(!err.string.empty());
     }
+}
+
+// ---- A Type1 (Bambu) prime tower with Local-Z passes and a plain colour on one layer (owner hand test on #937) --
+
+namespace {
+
+// A 20 x 20 x 3 mm box split at x = 10 (no T-junctions), outward facing.
+indexed_triangle_set split_box_20x20x3()
+{
+    indexed_triangle_set its;
+    auto vid = [&its](float x, float y, float z) {
+        for (size_t i = 0; i < its.vertices.size(); ++i)
+            if (its.vertices[i] == Vec3f(x, y, z))
+                return int(i);
+        its.vertices.emplace_back(x, y, z);
+        return int(its.vertices.size() - 1);
+    };
+    std::vector<std::array<int, 4>> quads;
+    for (float x0 : { 0.f, 10.f }) {
+        const float x1 = x0 + 10.f;
+        quads.push_back({ vid(x0, 0.f, 0.f), vid(x1, 0.f, 0.f), vid(x1, 20.f, 0.f), vid(x0, 20.f, 0.f) });
+        quads.push_back({ vid(x0, 0.f, 3.f), vid(x1, 0.f, 3.f), vid(x1, 20.f, 3.f), vid(x0, 20.f, 3.f) });
+        quads.push_back({ vid(x0, 0.f, 0.f), vid(x1, 0.f, 0.f), vid(x1, 0.f, 3.f), vid(x0, 0.f, 3.f) });
+        quads.push_back({ vid(x0, 20.f, 0.f), vid(x1, 20.f, 0.f), vid(x1, 20.f, 3.f), vid(x0, 20.f, 3.f) });
+    }
+    quads.push_back({ vid(0.f, 0.f, 0.f), vid(0.f, 20.f, 0.f), vid(0.f, 20.f, 3.f), vid(0.f, 0.f, 3.f) });
+    quads.push_back({ vid(20.f, 0.f, 0.f), vid(20.f, 20.f, 0.f), vid(20.f, 20.f, 3.f), vid(20.f, 0.f, 3.f) });
+    const Vec3f centre(10.f, 10.f, 1.5f);
+    for (const std::array<int, 4> &q : quads)
+        for (const stl_triangle_vertex_indices &tri :
+             { stl_triangle_vertex_indices(q[0], q[1], q[2]), stl_triangle_vertex_indices(q[0], q[2], q[3]) }) {
+            const Vec3f a = its.vertices[tri[0]], b = its.vertices[tri[1]], c = its.vertices[tri[2]];
+            const Vec3f n = (b - a).cross(c - a);
+            its.indices.emplace_back(n.dot((a + b + c) / 3.f - centre) < 0.f ? stl_triangle_vertex_indices(tri[0], tri[2], tri[1]) : tri);
+        }
+    return its;
+}
+
+// Three filaments, the mixed row 2 + 3 at 50 % (filament 4), a Bambu (Type1) prime tower: either three heads (filament 1
+// on a 0.4, filaments 2 and 3 on 0.8 nozzles, H2C / H3C-like) or one shared nozzle (X1C-like).
+// The split box has its -X half painted with filament 1 and its +X half with the mixed row, so every layer prints
+// the plain colour and the mixed row's passes.
+std::string slice_type1_tower_mixed_and_plain(Print &print, Model &model, bool shared_nozzle, MixedSublayerMethod method)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(shared_nozzle ? 1 : 3);
+    config.set_num_filaments(3);
+    const std::vector<std::string> colours { "#FF0000", "#00FF00", "#0000FF" };
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = colours;
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = shared_nozzle ? std::vector<double>{ 0.4 } : std::vector<double>{ 0.4, 0.8, 0.8 };
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = { 15. };
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = { 15. };
+    config.set_deserialize_strict({
+        { "filament_map", shared_nozzle ? "1,1,1" : "1,2,3" },
+        { "single_extruder_multi_material", shared_nozzle ? "1" : "0" },
+        { "enable_prime_tower", "1" },
+        { "wipe_tower_type", "type1" },
+        { "prime_tower_width", "35" },
+        { "enable_support", "0" },
+        { "enable_arc_fitting", "0" },
+        { "wall_generator", "classic" },
+        { "skirt_loops", "0" },
+        { "brim_type", "no_brim" },
+        { "machine_start_gcode", "" },
+        { "change_filament_gcode", "T{next_extruder}" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "min_layer_height", shared_nozzle ? "0.04" : "0.04,0.04,0.04" },
+        { "use_relative_e_distances", "1" },
+        { "enable_mixed_color_sublayer", "0" },
+        { "dithering_local_z_mode", "0" },
+    });
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(2, 3, 50, colours);
+    REQUIRE(mgr.mixed_filaments().size() == 1);
+    mgr.mixed_filaments()[0].sublayer_method = int(method);
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    ModelObject *object = model.add_object();
+    object->name        = "half_mixed";
+    ModelVolume *v      = object->add_volume(TriangleMesh(split_box_20x20x3()));
+    v->config.set("extruder", 1);
+    TriangleSelector            selector(v->mesh());
+    const indexed_triangle_set &its = v->mesh().its;
+    for (int f = 0; f < int(its.indices.size()); ++f) {
+        const stl_triangle_vertex_indices &tri = its.indices[size_t(f)];
+        const float cx = (its.vertices[tri[0]].x() + its.vertices[tri[1]].x() + its.vertices[tri[2]].x()) / 3.f;
+        selector.set_facet(f, EnforcerBlockerType(cx < 10.f ? 1 : 4));
+    }
+    REQUIRE(v->mmu_segmentation_facets.set(selector));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    // A second apply, as the wipe tower tests do: the first one can still see one filament and drop the tower.
+    print.apply(model, config);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: Local-Z passes next to a plain colour on a Type1 tower", "[MixedSublayer][Slice][WipeTower][P3]")
+{
+    // Owner hand test (H3C, 0.4 + 0.8): a Subdivide mix of the two 0.8 filaments on part of a cube and filament 1
+    // painted on the rest threw "WipeTowerIntegration::append_tcr unexpected toolchange" (requested 0, expected 1):
+    // the Bambu tower planned the layer from the filament it began with, while the export started its tower changes
+    // from the filament the last pass left loaded. The tower now plans from there too; Ratio rows and a shared
+    // nozzle (X1C-like, which threw the same way) take the same path.
+    const MixsubAutoGenerateOff auto_generate_off;
+    const bool                shared_nozzle = GENERATE(false, true);
+    const MixedSublayerMethod method  = GENERATE(MixedSublayerMethod::Subdivide, MixedSublayerMethod::Ratio);
+    CAPTURE(shared_nozzle, int(method));
+
+    Print       print;
+    Model       model;
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = slice_type1_tower_mixed_and_plain(print, model, shared_nozzle, method));
+    REQUIRE(!gcode.empty());
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE(print.wipe_tower_type() == WipeTowerType::Type1);
+    const PrintObject *object = print.objects().front();
+    const std::vector<SubLayerPlan> &plans = object->local_z_sublayer_plan();
+    REQUIRE(!plans.empty());
+    const bool want_ratio = method == MixedSublayerMethod::Ratio;
+    CHECK(std::any_of(plans.begin(), plans.end(), [want_ratio](const SubLayerPlan &plan) { return plan.ratio_pass == want_ratio; }));
+
+    // All three filaments print, and the writer never needs its fallback switch back to the tower's filament after
+    // the passes (a tool change between the last pass extrusion and the end-of-passes marker): the tower's plan
+    // starts where the passes end.
+    std::set<int>      printing_tools;
+    size_t             fallback_switches = 0, pass_blocks = 0;
+    bool               in_passes = false, change_after_pass = false;
+    int                tool = -1;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("; local-z phase-b path passes begin", 0) == 0) {
+            in_passes         = true;
+            change_after_pass = false;
+            ++pass_blocks;
+        } else if (line.rfind("; local-z phase-b path passes end", 0) == 0) {
+            if (in_passes && change_after_pass)
+                ++fallback_switches;
+            in_passes = false;
+        } else if (line.size() >= 2 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+            tool = std::atoi(line.c_str() + 1);
+            if (in_passes)
+                change_after_pass = true;
+        } else if (line.rfind("G1 ", 0) == 0 && line.find(" E") != std::string::npos &&
+                   (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
+                   std::atof(line.c_str() + line.find(" E") + 2) > 0.) {
+            if (tool >= 0)
+                printing_tools.insert(tool);
+            if (in_passes)
+                change_after_pass = false;
+        }
+    }
+    CHECK(pass_blocks > 0);
+    CHECK(printing_tools.count(0) == 1);
+    CHECK(printing_tools.count(1) == 1);
+    CHECK(printing_tools.count(2) == 1);
+    CHECK(fallback_switches == 0);
 }
