@@ -7388,7 +7388,7 @@ void Print::_make_wipe_tower()
                 wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id);
                 if (current_extruder_id != layer_start_extruder_id)
-                    wipe_tower.set_last_layer_start_tool(current_extruder_id);
+                    wipe_tower.set_last_layer_start_tool(layer_start_extruder_id, current_extruder_id);
 
                 // The order GCode::process_layer() prints the layer in: rotated to start with the loaded
                 // extruder, unless Cyclic ordering or a custom sequence fixed it. Planning the plain

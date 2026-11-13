@@ -2622,11 +2622,16 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     // every later pass. A layer with no toolchange prints with the filament the layer below left loaded.
     if (m_sparse_layers_combined) {
         size_t start_tool = m_current_tool;
-        for (const WipeTowerInfo &layer : m_plan)
+        for (const WipeTowerInfo &layer : m_plan) {
+            if (layer.local_z_start_tool >= 0) {
+                start_tool = size_t(layer.local_z_prev_tool);
+                break;
+            }
             if (! layer.tool_changes.empty()) {
                 start_tool = layer.tool_changes.front().old_tool;
                 break;
             }
+        }
         combine_sparse_wipe_tower_plan(
             m_plan, m_filpar, m_first_layer_idx, start_tool, [](const WipeTowerInfo &layer) { return layer.tool_changes.empty(); },
             [](const WipeTowerInfo &layer, size_t tool) {
@@ -2653,6 +2658,11 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 
     // we don't know which extruder to start with - we'll set it according to the first toolchange
     for (const auto& layer : m_plan) {
+        // A layer whose Local-Z passes changed filament first started with the one loaded before them.
+        if (layer.local_z_start_tool >= 0) {
+            m_current_tool = size_t(layer.local_z_prev_tool);
+            break;
+        }
         if (!layer.tool_changes.empty()) {
             m_current_tool = layer.tool_changes.front().old_tool;
             break;

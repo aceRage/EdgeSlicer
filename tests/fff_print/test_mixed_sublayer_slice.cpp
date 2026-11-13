@@ -1088,7 +1088,41 @@ TEST_CASE("Mixed sublayer: Local-Z passes next to a plain colour on a Type1 towe
     Print       print;
     Model       model;
     std::string gcode;
-    REQUIRE_NOTHROW(gcode = slice_type1_tower_mixed_and_plain(print, model, shared_nozzle, method));
+    std::string error;
+    try {
+        gcode = slice_type1_tower_mixed_and_plain(print, model, shared_nozzle, method);
+    } catch (const std::exception &ex) {
+        error = ex.what();
+    }
+    if (!error.empty()) {
+        // What the tower planned against what the passes print, for the first layers.
+        std::ostringstream diag;
+        diag << error << "\nfirst_extruder=" << print.wipe_tower_data().tool_ordering.first_extruder();
+        size_t n = 0;
+        for (const LayerTools &lt : print.wipe_tower_data().tool_ordering.layer_tools()) {
+            if (n++ >= 3)
+                break;
+            diag << "\nlayer z=" << lt.print_z << " tower=" << lt.has_wipe_tower << " extruders=";
+            for (unsigned int e : lt.extruders)
+                diag << e << ' ';
+        }
+        for (size_t l = 0; l < std::min<size_t>(3, print.wipe_tower_data().tool_changes.size()); ++l) {
+            diag << "\ntower layer " << l << ":";
+            for (const WipeTower::ToolChangeResult &tcr : print.wipe_tower_data().tool_changes[l])
+                diag << ' ' << tcr.initial_tool << "->" << tcr.new_tool;
+        }
+        if (!print.objects().empty())
+            for (const SubLayerPlan &plan : print.objects().front()->local_z_sublayer_plan()) {
+                if (plan.layer_id > 1)
+                    break;
+                diag << "\npass layer=" << plan.layer_id << " z=" << plan.print_z << " split=" << plan.split_interval << " ratio=" << plan.ratio_pass
+                     << " extruders=";
+                for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e)
+                    if (!plan.painted_masks_by_extruder[e].empty())
+                        diag << e << ' ';
+            }
+        FAIL(diag.str());
+    }
     REQUIRE(!gcode.empty());
     REQUIRE(print.has_wipe_tower());
     REQUIRE(print.wipe_tower_type() == WipeTowerType::Type1);
