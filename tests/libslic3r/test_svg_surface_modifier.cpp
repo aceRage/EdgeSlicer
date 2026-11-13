@@ -451,6 +451,8 @@ TEST_CASE("A wrapped SVG modifier round-trips through 3MF", "[SvgSurface][3mf]")
     Model model;
     add_jar_with_svg_modifier(model);
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    // two filaments, or the loader resets filament 2 on the modifier to the default
+    cfg.option<ConfigOptionStrings>("filament_colour", true)->values = { "#FFFFFF", "#F2C200" };
     REQUIRE(store_project(model, cfg, path));
 
     Model              loaded;
@@ -464,7 +466,7 @@ TEST_CASE("A wrapped SVG modifier round-trips through 3MF", "[SvgSurface][3mf]")
     REQUIRE(mod->emboss_shape.has_value());
     const EmbossShape &es = *mod->emboss_shape;
     CHECK(es.projection.use_surface);
-    CHECK_THAT(es.projection.depth, WithinAbs(1.2, 1e-9));
+    CHECK_THAT(es.projection.depth, WithinAbs(1.2, 1e-6)); // stored as a float
     REQUIRE(es.svg_file.has_value());
     CHECK(es.svg_file->path_in_3mf == "3D/jar_star.svg");
     REQUIRE(es.svg_file->file_data != nullptr);
