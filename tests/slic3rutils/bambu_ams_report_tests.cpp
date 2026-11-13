@@ -785,3 +785,58 @@ TEST_CASE("H2C-style racks without addr_id read as before", "[BambuAmsReport][No
     REQUIRE(layout[1].size() == 4);
     CHECK(reported_rack_layout(s, 2)[1] == std::vector<double>{ 0.4, 0.2, 0.6, 0.8 });
 }
+
+TEST_CASE("AMS Slots picker: a nine-slot AMS 3H row is wide enough for all nine slots", "[BambuAmsReport][MappingPopup]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    // Four-slot units, the AMS HT and the external holders keep the old 230 DIP row.
+    CHECK(mapping_container_width_dip(1) == 230);
+    CHECK(mapping_container_width_dip(4) == 230);
+    // Bambu Studio MappingContainer: 54 per slot + 20.
+    CHECK(mapping_container_width_dip(9) == 506);
+    CHECK(mapping_container_width_dip(5) == 290);
+    // add_ams_mapping lays out a 6 DIP lead and 6 + 47.6 DIP per slot: all nine fit.
+    const double nine_items = 6 + 9 * (6 + 68 * 0.7);
+    CHECK(nine_items <= mapping_container_width_dip(9));
+    // ... which the old fixed 230 DIP row cut off after four and a half slots.
+    CHECK((230 - 6) / (6 + 68 * 0.7) < 5.0);
+}
+
+TEST_CASE("AMS Slots picker stays on the screen", "[BambuAmsReport][MappingPopup]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    const ScreenRect work{0, 0, 1920, 1040}; // 1080p minus the taskbar
+    SECTION("below the filament when it fits")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 200, 60, 40}, 520, 260, work);
+        CHECK(p.x == 100);
+        CHECK(p.y == 240);
+    }
+    SECTION("moved left from the right edge")
+    {
+        const ScreenPoint p = mapping_popup_origin({1800, 200, 60, 40}, 520, 260, work);
+        CHECK(p.x == 1920 - 520);
+        CHECK(p.y == 240);
+    }
+    SECTION("flipped above near the bottom")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 900, 60, 40}, 520, 260, work);
+        CHECK(p.y == 900 - 260);
+    }
+    SECTION("kept on the work area when it fits neither above nor below")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 100, 60, 40}, 520, 1000, work);
+        CHECK(p.y == 40);
+        CHECK(p.y + 1000 <= 1040);
+    }
+    SECTION("a second monitor's offset work area")
+    {
+        const ScreenPoint p = mapping_popup_origin({3800, 200, 60, 40}, 520, 260, {1920, 0, 1920, 1040});
+        CHECK(p.x == 3840 - 520);
+    }
+    SECTION("wider than the work area starts at its left edge")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 200, 60, 40}, 2000, 260, work);
+        CHECK(p.x == 0);
+    }
+}

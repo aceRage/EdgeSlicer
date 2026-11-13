@@ -139,4 +139,37 @@ RackSlot bound_slot(const RackNozzle& n, int rack_ams_id, int rack_ams_slots, in
     return {};
 }
 
+// The width (DIP) of one unit's row in the send dialog's "AMS Slots" picker (Bambu Studio
+// MappingContainer): 230 for up to four slots, as always; 54 per slot plus 20 beyond that, so the
+// AMS 3H's nine slots sit on one row (506 DIP) instead of being clipped after slot 4.
+inline int mapping_container_width_dip(int slots) { return slots > 4 ? slots * 54 + 20 : 230; }
+
+// Where the picker opens next to its anchor (the filament it maps), all in screen pixels: below the
+// anchor, flipped above when it does not fit below, and moved left / up so it stays on the work
+// area (a wide AMS 3H row opened from a filament near the right edge stays reachable).
+struct ScreenRect
+{
+    int x{0}, y{0}, w{0}, h{0};
+};
+struct ScreenPoint
+{
+    int x{0}, y{0};
+};
+inline ScreenPoint mapping_popup_origin(const ScreenRect& anchor, int popup_w, int popup_h, const ScreenRect& work_area)
+{
+    const int   right = work_area.x + work_area.w, bottom = work_area.y + work_area.h;
+    ScreenPoint p{anchor.x, anchor.y + anchor.h};
+    if (p.x + popup_w > right)
+        p.x = right - popup_w;
+    if (p.x < work_area.x)
+        p.x = work_area.x;
+    if (p.y + popup_h > bottom) {
+        if (anchor.y - popup_h >= work_area.y)
+            p.y = anchor.y - popup_h;
+        else
+            p.y = bottom - popup_h > work_area.y ? bottom - popup_h : work_area.y;
+    }
+    return p;
+}
+
 }}} // namespace Slic3r::GUI::AmsTypes
