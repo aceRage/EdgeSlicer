@@ -394,6 +394,16 @@ Result convert(const std::vector<MidiNote> &notes_in, const Options &opt_in)
     std::sort(order.begin(), order.end(), [&q](size_t a, size_t b) { return q[a].qs < q[b].qs; });
 
     std::vector<bool>   played(q.size(), false);
+    std::vector<int>    slot_of(q.size(), -1);
+    // Most distinct pitches sounding together anywhere in the tune.
+    int max_poly = 0;
+    for (size_t b = 0; b + 1 < bounds.size(); ++b) {
+        std::vector<int> keys;
+        for (const QNote &n : q)
+            if (n.qs <= bounds[b] && n.qe > bounds[b] && std::find(keys.begin(), keys.end(), n.folded) == keys.end())
+                keys.push_back(n.folded);
+        max_poly = std::max(max_poly, int(keys.size()));
+    }
     std::vector<size_t> active;
     size_t              next = 0;
     const int           max_total_units = std::max(1, int(std::floor(opt.max_seconds * 1000. / opt.ms_per_unit + 1e-9)));
@@ -404,37 +414,67 @@ Result convert(const std::vector<MidiNote> &notes_in, const Options &opt_in)
             active.push_back(order[next++]);
         active.erase(std::remove_if(active.begin(), active.end(), [&](size_t i) { return q[i].qe <= t0; }), active.end());
 
-        // Highest original pitch first: the melody is usually on top.
+        // Highest original pitch first: the melody is usually on top. The three highest distinct
+        // pitches are heard; a note keeps the voice slot it first got, so when the melody pauses
+        // between two notes the held bass stays in its own voice and the melody voice goes silent
+        // (instead of the bass moving up and being played on every voice).
         std::vector<size_t> sounding = active;
         std::sort(sounding.begin(), sounding.end(), [&q](size_t a, size_t b) {
             return q[a].key > q[b].key || (q[a].key == q[b].key && q[a].volume > q[b].volume);
         });
-        Step step;
-        int  used = 0;
         std::vector<size_t> chosen;
-        for (size_t i : sounding) {
-            bool same = false;
-            for (int v = 0; v < used; ++v)
-                if (step.note[v] == q[i].folded) {
-                    step.volume[v] = std::max(step.volume[v], q[i].volume);
-                    same = true;
+        {
+            std::vector<int> distinct;
+            for (size_t i : sounding) {
+                const bool known = std::find(distinct.begin(), distinct.end(), q[i].folded) != distinct.end();
+                if (known || int(distinct.size()) < VOICES) {
+                    if (!known)
+                        distinct.push_back(q[i].folded);
+                    chosen.push_back(i); // a duplicate pitch merges with the first and is heard
                 }
-            if (same) {
-                chosen.push_back(i); // merged with an equal pitch: it is heard
-                continue;
-            }
-            if (used < VOICES) {
-                step.note[used]   = q[i].folded;
-                step.volume[used] = q[i].volume;
-                ++used;
-                chosen.push_back(i);
             }
         }
-        if (opt.unison_fill && used > 0)
-            for (int v = used; v < VOICES; ++v) {
-                step.note[v]   = step.note[0];
-                step.volume[v] = step.volume[0];
+        Step step;
+        bool taken[VOICES] = {false, false, false};
+        int  used = 0;
+        auto place = [&](size_t i, int slot) {
+            step.note[slot]   = q[i].folded;
+            step.volume[slot] = q[i].volume;
+            taken[slot]       = true;
+            slot_of[i]        = slot;
+            ++used;
+        };
+        auto merge_equal = [&](size_t i) {
+            for (int v = 0; v < VOICES; ++v)
+                if (taken[v] && step.note[v] == q[i].folded) {
+                    step.volume[v] = std::max(step.volume[v], q[i].volume);
+                    slot_of[i]     = v;
+                    return true;
+                }
+            return false;
+        };
+        for (int pass = 0; pass < 2; ++pass)
+            for (size_t i : chosen) {
+                if ((pass == 0) != (slot_of[i] >= 0) || merge_equal(i))
+                    continue;
+                int slot = (pass == 0 && !taken[slot_of[i]]) ? slot_of[i] : -1;
+                for (int v = 0; slot < 0 && v < VOICES; ++v)
+                    if (!taken[v])
+                        slot = v;
+                if (slot >= 0)
+                    place(i, slot);
             }
+        // Only a tune that never has two notes at once is doubled on the free voices; with a bass
+        // line the free voice stays silent (a duplicate of the melody adds nothing).
+        if (opt.unison_fill && max_poly <= 1 && used > 0)
+            for (int v = 0; v < VOICES; ++v)
+                if (!taken[v]) {
+                    int src = 0;
+                    while (!taken[src])
+                        ++src;
+                    step.note[v]   = step.note[src];
+                    step.volume[v] = step.volume[src];
+                }
 
         // Units from rounded absolute times, so rounding errors do not add up along the tune.
         const long long origin = bounds.front();

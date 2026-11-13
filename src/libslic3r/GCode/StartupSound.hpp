@@ -47,9 +47,10 @@ struct Step
 
 struct Options
 {
-    // Milliseconds per B/D/F unit. Not documented by Bambu: a guess the owner calibrates with
-    // h3c_m1006_timing.gcode (stock tunes use 9..20 units per step and last about 1.5..4 s).
-    double ms_per_unit        = 20.;
+    // Milliseconds per B/D/F unit: 10 ms, measured from a recording of an H3C playing a converted
+    // tune (tests/startup_sound_calibration.md; 478 units played in 4.78 s, no per-line overhead,
+    // the three voices of a line sound together). Stock tunes use 9..20 units per step.
+    double ms_per_unit        = 10.;
     // Note starts and ends snap to this grid (ms). Shorter notes are stretched to one grid step.
     double quantise_ms        = 50.;
     // Notes outside this range are moved by whole octaves until they fit (stock tunes use 37..61).
@@ -64,8 +65,9 @@ struct Options
     double max_seconds        = 10.;
     // Ignore channel 10 (General MIDI drums): a buzzer cannot play a drum kit.
     bool   skip_percussion    = true;
-    // When fewer than three notes sound, repeat the melody note on the free voices (the stock
-    // H2/H3 tunes play every note in unison on all three voices).
+    // For a tune that never has two notes at once, repeat the note on the free voices (the stock
+    // H2/H3 tunes play every note in unison on all three voices). A tune with a bass line keeps
+    // its free voice silent.
     bool   unison_fill        = true;
     // Drop silence before the first note.
     bool   trim_leading_rest  = true;

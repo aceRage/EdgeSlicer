@@ -87,8 +87,8 @@ StartupSoundDialog::StartupSoundDialog(wxWindow *parent)
     };
     const StartupSound::Options def;
     m_ms_per_unit = add_double(_L("Milliseconds per unit"),
-        _L("How long one unit of the M1006 duration (B/D/F) lasts on this printer. Bambu does not document it: "
-           "measure it with h3c_m1006_timing.gcode and enter it here."), 1., 200., def.ms_per_unit, 0.5);
+        _L("How long one unit of the M1006 duration (B/D/F) lasts. Bambu does not document it; "
+           "10 ms was measured on an H3C. Change it only if your printer plays the tune too fast or too slow."), 1., 200., def.ms_per_unit, 0.5);
     m_quantise = add_int(_L("Snap notes to (ms)"),
         _L("Note starts and ends snap to this grid. Larger values give fewer, longer steps."), 10, 1000, int(def.quantise_ms));
     m_min_note = add_int(_L("Lowest note"),
@@ -102,8 +102,8 @@ StartupSoundDialog::StartupSoundDialog(wxWindow *parent)
     v_sizer->Add(grid, 0, wxLEFT | wxRIGHT | wxBOTTOM, gap);
 
     m_unison = new wxCheckBox(this, wxID_ANY, _L("Play the melody on the free voices"));
-    m_unison->SetToolTip(_L("The printer has three voices. When fewer than three notes sound, repeat the top note "
-                            "on the others, as the stock Bambu tunes do (louder)."));
+    m_unison->SetToolTip(_L("The printer has three voices. For a tune that never has two notes at once, repeat the "
+                            "note on the other voices, as the stock Bambu tunes do (louder). A tune with a bass line keeps the third voice silent."));
     m_unison->SetValue(def.unison_fill);
     m_unison->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { update_preview(); });
     v_sizer->Add(m_unison, 0, wxLEFT | wxRIGHT | wxBOTTOM, gap);

@@ -335,10 +335,29 @@ TEST_CASE("Startup sound: Ode to Joy converts within the default caps", "[Startu
     CHECK_FALSE(r.truncated);
     // 32 quarters at 200 bpm = 9.6 s; the last note sounds for 90% of a half note.
     CHECK(r.duration_s == Approx(9.6 - 0.06).margin(0.06));
-    // Two notes sound at the start: melody E4 on top, bass C3, melody repeated on the third voice.
+    // Two notes sound at the start: melody E4 on top, bass C3; the third voice stays silent.
     CHECK(r.steps.front().note[0] == 64);
     CHECK(r.steps.front().note[1] == 48);
-    CHECK(r.steps.front().note[2] == 64);
+    CHECK(r.steps.front().note[2] == 0);
+    CHECK(r.steps.front().volume[2] == 0);
+    // Between two melody notes only the held bass sounds, in its own voice (no bass blip on every
+    // voice): the melody voice is silent in those gap steps.
+    int gaps = 0;
+    for (const Step &s : r.steps)
+        if (s.note[0] == 0 && s.note[1] != 0) {
+            ++gaps;
+            CHECK(s.volume[0] == 0);
+            CHECK(s.note[2] == 0);
+        }
+    CHECK(gaps > 0);
+    for (const Step &s : r.steps)
+        CHECK_FALSE((s.note[0] == s.note[1] && s.note[0] != 0));
+}
+
+TEST_CASE("Startup sound: calibrated unit is 10 ms", "[StartupSound]")
+{
+    // H3C recording: 478 units played in 4.78 s, so one B/D/F unit is 10 ms.
+    CHECK(Options().ms_per_unit == Approx(10.));
 }
 
 // Writes the owner's demo files. Hidden: run with
@@ -358,7 +377,7 @@ TEST_CASE("Startup sound: write the Ode to Joy demo files", "[.][startup_sound_d
     std::ofstream g(std::string(dir) + "/h3c_ode_to_joy.gcode", std::ios::binary);
     g << "; EdgeSlicer startup sound demo: Ode to Joy (Beethoven, public domain)\n"
       << "; NOT a print. No heating, no homing, no movement: only the buzzer/motor tune.\n"
-      << "; Made by the StartupSound converter with " << o.ms_per_unit << " ms per B unit (a guess until calibrated),\n"
+      << "; Made by the StartupSound converter with " << o.ms_per_unit << " ms per B unit (calibrated on an H3C),\n"
       << "; quantise " << o.quantise_ms << " ms. " << r.steps.size() << " steps, " << r.total_units << " units, about "
       << r.duration_s << " s.\n"
       << "M17\nM400 S1\n"
