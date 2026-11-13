@@ -7677,18 +7677,14 @@ int CLI::run(int argc, char **argv)
             }
             // add wipe tower bounding box
             if (print->has_wipe_tower()) {
-                BBoxData data;
                 auto   wt_corners = print->first_layer_wipe_tower_corners();
                 // when loading gcode.3mf, wipe tower info may not be correct
                 if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
-                    bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    // Numbered by the plate being exported (the current plate is not it here), its
+                    // area and layer height set rather than left as the stack held them.
+                    BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, part_plate->get_index(),
+                                                                     float(print->config().initial_layer_print_height.value));
+                    bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
                     id_bboxes.emplace_back(std::move(data));
                 }
             }

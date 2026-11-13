@@ -14348,6 +14348,16 @@ std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_co
         map.push_back(int(i % extruders) + 1); // 1-based, wrapping past the last toolhead
     return map;
 }
+
+int identity_filament_group(const ConfigBase &cfg, int filament_id)
+{
+    if (filament_id < 0)
+        return 0;
+    const auto  *colours = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option("filament_colour"));
+    const size_t filament_count = colours != nullptr ? colours->size() : 0;
+    const std::vector<int> map = identity_filament_map(cfg, filament_count);
+    return size_t(filament_id) < map.size() ? map[size_t(filament_id)] - 1 : 0; // the map is 1-based
+}
 } // namespace Slic3r
 
 #include <cereal/types/polymorphic.hpp>

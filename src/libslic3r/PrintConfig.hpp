@@ -3104,6 +3104,15 @@ bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
 // a flush, which leaves the executable G-code byte-identical.
 std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
 
+// The 0-based toolhead a sliced plate's metadata (slice_info.config's <filament group_id>) reports
+// filament `filament_id` (0-based) on: identity_filament_map over ALL of the project's filaments
+// (filament_colour), the same map slice_info.config's filament_maps is written from. 0 where that
+// map says nothing (not an identical multi-toolhead machine, a negative id, an id past the
+// project's filaments). The map is indexed by filament number, so it must not be sized by the
+// number of filaments a plate uses: with filaments 2-7 of 7 used, a six-long map put filament 7
+// on toolhead 0.
+int identity_filament_group(const ConfigBase &cfg, int filament_id);
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
