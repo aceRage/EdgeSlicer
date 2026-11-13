@@ -118,7 +118,8 @@ void install_slicing_pipeline_hook()
             if (caps == nullptr || caps->values.empty())
                 return;
 
-            execute_capabilities_from_refs<SlicingPipelinePluginCapability>(
+            try {
+                execute_capabilities_from_refs<SlicingPipelinePluginCapability>(
                 *caps, plugs, PluginCapabilityType::SlicingPipeline,
                 [&](std::shared_ptr<SlicingPipelinePluginCapability> cap, const PluginCapabilityRef& ref) {
                     ExecutionResult r;
@@ -155,6 +156,13 @@ void install_slicing_pipeline_hook()
                                                 << "' [" << step_name << "]: " << r.message;
                     }
                 });
+            } catch (const CanceledException&) {
+                throw;
+            } catch (const SlicingError&) {
+                throw;
+            } catch (const std::exception& ex) {
+                throw SlicingError(ex.what());
+            }
         });
 }
 
