@@ -83,6 +83,7 @@ add_executable(${_TEST_NAME}_tests
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
+	test_filament_delete.cpp
 	test_default_bed_type.cpp
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp

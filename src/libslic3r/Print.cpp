@@ -6125,8 +6125,13 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             else {
                 if (obj->set_started(posPrepareInfill))
                     obj->set_done(posPrepareInfill);
-                if (obj->set_started(posInfill))
+                if (obj->set_started(posInfill)) {
+                    // A sharing object follows its source in m_objects, so the source's
+                    // first layer is filled by now; warn on this copy too, by its own name.
+                    if (const PrintObject *src = obj->get_shared_object())
+                        obj->warn_if_first_layer_prints_nothing(*src);
                     obj->set_done(posInfill);
+                }
             }
         }
         for (PrintObject *obj : m_objects) {

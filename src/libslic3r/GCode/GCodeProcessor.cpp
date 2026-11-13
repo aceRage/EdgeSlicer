@@ -1004,6 +1004,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     if (z_offset != nullptr)
         m_z_offset = z_offset->value;
 
+    // BBS: the old filament left in the nozzle is flushed first, as when the G-code is loaded in the viewer.
+    m_nozzle_volume = float(config.nozzle_volume.value);
 }
 
 void GCodeProcessor::apply_config(const DynamicPrintConfig& config)

@@ -178,6 +178,8 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
+    int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
@@ -1403,22 +1405,38 @@ public:
     // Bit `index` of a 64-bit report mask; an index outside 0..63 is not set.
     static bool hex_bit_set(long long bits, int index) { return index >= 0 && index < 64 && ((bits >> index) & 1LL) != 0; }
 
-    // Rack AMS units (the H3C's AMS 3H, GUI::AmsTypes::is_rack_ams). Shown on the Device page and
-    // read by the filament sync, but not mapped or sent to yet: their slot numbering in the print
-    // command (Bambu Studio's 28 + slot, plus the rack nozzle pairing) is not ported.
+    // Rack AMS units (the H3C's AMS 3H, GUI::AmsTypes::is_rack_ams): each slot feeds one rack nozzle.
     bool has_rack_ams() const;
+    // A printer with a nozzle rack's spool holders (one per rack position, ids 255 down to 247).
+    bool is_rack_printer() const { return has_rack_ams() || vir_slots.size() > 2; }
     // zone_info[] of one AMS unit into ams.zones (strings or numbers, never throws).
     static void parse_ams_zones(const json& zone_info, Ams& ams);
     bool is_rack_ams_id(const std::string& ams_id) const;
-    // A slot the send mapping must never name on this printer: a rack AMS unit, or, on a printer with
-    // a nozzle rack's external spool holders (ids 247..255, more than two), any of those holders.
+    // The tray number a send mapping names (ams_id, slot_id) by (GUI::AmsTypes::mapping_tray_index):
+    // 28 + slot on the AMS 3H, the holder's own id for a spool holder, ams_id * 4 + slot otherwise.
+    int  tray_index_of(const std::string& ams_id, const std::string& slot_id) const;
+    int  tray_index_of(int ams_id, int slot_id) const { return tray_index_of(std::to_string(ams_id), std::to_string(slot_id)); }
+    // The inverse: false when the number names no unit this printer reports.
+    bool decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const;
+    // Whether the printer reports that slot (Bambu Studio get_tray: a spool holder ignores the slot).
+    bool slot_reported(int ams_id, int slot_id) const;
+    // The slot each rack nozzle is fed from (GUI::AmsTypes::bound_slot): what the send mapping may
+    // map to on a rack printer. A spool holder comes back as (holder id, 0).
+    std::vector<std::pair<int, int>> rack_bound_slots() const;
+    // Kept as the one switch for slots that cannot be sent to: none since the AMS 3H numbering and the
+    // rack pairing are ported (phase 2). The gates that call it stay in place.
     bool mapping_blocked_ams_id(const std::string& ams_id) const;
     std::set<std::string> mapping_blocked_ams_ids() const;
     // Takes every entry that names a blocked slot out of a mapping result (tray -1, no ams/slot) and
     // returns how many it took out.
     int strip_blocked_mapping(std::vector<FilamentInfo>& result) const;
-    // Device page actions (load, unload, edit, RFID re-read) on that slot are not supported yet.
+    // Device page actions (load, unload, edit, RFID re-read) refused on that slot: none since phase 2.
     bool slot_actions_blocked(const std::string& ams_id) const { return mapping_blocked_ams_id(ams_id); }
+    // Load / unload on a rack AMS slot or rack spool holder, as Bambu Studio's hotend page sends it
+    // (GUI::FilamentCommands::rack_change_filament_json).
+    int command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp);
+    // RFID re-read of one rack AMS slot (Bambu Studio command_ams_refresh_rfid2, mode 0).
+    int command_ams_get_rfid(int ams_id, int slot_id, int mode = 0);
 
     /* Device Filament Check */
     struct FilamentData

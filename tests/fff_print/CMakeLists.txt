@@ -59,6 +59,7 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
+	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
 	test_over_support_surfaces.cpp
@@ -86,6 +87,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
+	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
 	test_ironing_overrides.cpp

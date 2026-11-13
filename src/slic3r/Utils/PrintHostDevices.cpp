@@ -66,10 +66,32 @@ static void save_store(const json& j)
         const fs::path temp = final.parent_path() / (final.filename().string() + ".tmp");
         {
             boost::nowide::ofstream out(temp.string(), std::ios::binary | std::ios::trunc);
+#ifndef _WIN32
+            // API keys and passwords are in here: readable by this user alone, set before any of
+            // them is written. The rename below keeps the mode. (On Windows the file sits in the
+            // user's own profile folder, whose ACL already keeps other users out.)
+            fs::permissions(temp, fs::owner_read | fs::owner_write, ec);
+#endif
             out << j.dump(1);
+            out.flush();
+            if (!out.good()) {
+                // A short write (a full disk) must not replace the list that is there.
+                out.close();
+                fs::remove(temp, ec);
+                BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] could not write the device list; the saved one is kept";
+                return;
+            }
         }
-        fs::remove(final, ec);
+        // rename replaces the old file in one step (MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows,
+        // rename(2) elsewhere). The old file used to be removed first: a failed rename then lost the whole
+        // list, and another instance reading between the two steps found none and could save an empty one.
         fs::rename(temp, final, ec);
+        if (ec) {
+            BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] could not replace the device list (" << ec.message()
+                                       << "); the saved one is kept";
+            boost::system::error_code ec2;
+            fs::remove(temp, ec2);
+        }
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] could not write the device list: " << e.what();
     }

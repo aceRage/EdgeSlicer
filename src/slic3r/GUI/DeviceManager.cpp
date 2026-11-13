@@ -952,10 +952,14 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         return -1;
 
     auto feeds_requested_extruder = [only_physical_extruder](const Ams *ams) {
-        // A rack AMS (H3C AMS 3H) is never a mapping target yet: see has_rack_ams().
-        if (ams && ams->is_rack())
-            return false;
         return only_physical_extruder < 0 || (ams && ams->nozzle == only_physical_extruder);
+    };
+    // A rack printer (H3C): only the slots a rack nozzle is fed from can print (Bambu Studio
+    // DevMapping _collect_mapping_hotend_item_candidates), the AMS 3H's and the spool holders'.
+    const bool rack_printer = is_rack_printer();
+    const std::vector<std::pair<int, int>> rack_bound = rack_printer ? rack_bound_slots() : std::vector<std::pair<int, int>>();
+    auto rack_slot_bound = [&rack_bound](int ams, int slot) {
+        return std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ams, slot)) != rack_bound.end();
     };
 
     // tray_index : tray_color
@@ -969,7 +973,10 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
             int ams_id = atoi(ams->first.c_str());
             int tray_id = atoi(tray->first.c_str());
-            int tray_index = ams_id * 4 + tray_id;
+            // 28 + slot on the AMS 3H (GUI::AmsTypes::mapping_tray_index), ams_id * 4 + slot otherwise.
+            int tray_index = GUI::AmsTypes::mapping_tray_index(ams->second->type, ams_id, tray_id);
+            if (ams->second->is_rack() && !rack_slot_bound(ams_id, tray_id))
+                continue; // no rack nozzle is fed from this slot now
             // skip exclude id
             for (int i = 0; i < exclude_id.size(); i++) {
                 if (tray_index == exclude_id[i])
@@ -1011,11 +1018,38 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
             tray_filaments.emplace(std::make_pair(ext_id, ext_info));
     }
 
+    /* A rack printer's spool holders (255 down to 247): a holder a rack nozzle is fed from is a
+     * candidate like an AMS slot, named by its own id (Bambu Studio _parse_tray_info, EXT_SPOOL). */
+    if (rack_printer) {
+        for (const AmsTray& t : vir_slots) {
+            const int id = atoi(t.id.c_str());
+            if (!GUI::AmsTypes::is_rack_virtual_slot(id) || !rack_slot_bound(id, 0))
+                continue;
+            AmsTray tray = t;
+            if (!tray.is_tray_info_ready())
+                continue;
+            FilamentInfo info;
+            info.color       = tray.color;
+            info.type        = tray.get_filament_type();
+            info.id          = id;
+            info.tray_id     = id;
+            info.filament_id = tray.setting_id;
+            info.ctype       = tray.ctype;
+            info.colors      = tray.cols;
+            info.ams_id      = std::to_string(id);
+            info.slot_id     = "0";
+            tray_filaments.emplace(std::make_pair(id, info));
+        }
+    }
+
     // tray info list
     std::vector<FilamentInfo> tray_info_list;
     int flament_index_id = 0;
     for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
         if (!feeds_requested_extruder(ams->second))
+            continue;
+        // No order-based fallback onto a rack AMS: a running index is no AMS 3H tray number.
+        if (ams->second && ams->second->is_rack())
             continue;
         for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
 
@@ -1254,7 +1288,7 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
     bool valid_ams_mapping_result = true;
     if (result.empty()) return false;
 
-    // A rack AMS slot or rack spool holder is never valid yet (strip_blocked_mapping).
+    // A rack slot no rack nozzle is fed from is not valid; a rack AMS slot gets its own number.
     if (strip_blocked_mapping(result) > 0)
         valid_ams_mapping_result = false;
 
@@ -1267,16 +1301,20 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
             // A two-extruder printer's external spool holder (tray 254/255, ams_id "254"/"255"):
             // not an AMS, valid as BambuStudio's is_valid_mapping_result accepts it. tray_id / 4
             // below would look for "AMS 63" and throw the mapping away.
+        } else if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(result[i].tray_id) &&
+                   result[i].tray_id == atoi(result[i].ams_id.c_str())) {
+            // A rack printer's spool holder (H3C): valid, strip_blocked_mapping checked it is fed.
         } else {
-            int ams_id = result[i].tray_id / 4;
-            auto ams_item = amsList.find(std::to_string(ams_id));
+            // ams_id * 4 + slot, or 28 + slot on the AMS 3H (decode_tray_index).
+            std::string dec_ams, dec_slot;
+            decode_tray_index(result[i].tray_id, dec_ams, dec_slot);
+            auto ams_item = amsList.find(dec_ams);
             if (ams_item == amsList.end()) {
                 result[i].tray_id = -1;
                 valid_ams_mapping_result = false;
             } else {
                 if (check_empty_slot) {
-                    int  tray_id   = result[i].tray_id % 4;
-                    auto tray_item = ams_item->second->trayList.find(std::to_string(tray_id));
+                    auto tray_item = ams_item->second->trayList.find(dec_slot);
                     if (tray_item == ams_item->second->trayList.end()) {
                         result[i].tray_id        = -1;
                         valid_ams_mapping_result = false;
@@ -1300,8 +1338,12 @@ bool MachineObject::is_mapping_exceed_filament(std::vector<FilamentInfo> & resul
         if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
             BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id))
             continue; // an external spool holder, not an AMS slot (see is_valid_mapping_result)
-        int ams_id = result[i].tray_id / 4;
-        if (amsList.find(std::to_string(ams_id)) == amsList.end()) {
+        if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(result[i].tray_id) &&
+            result[i].tray_id == atoi(result[i].ams_id.c_str()))
+            continue; // a rack printer's spool holder
+        std::string dec_ams, dec_slot;
+        decode_tray_index(result[i].tray_id, dec_ams, dec_slot);
+        if (amsList.find(dec_ams) == amsList.end()) {
             exceed_index = result[i].tray_id;
             result[i].tray_id = -1;
             is_exceed = true;
@@ -2318,6 +2360,29 @@ int MachineObject::command_ams_change_filament(bool load, std::string ams_id, st
         j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
     } catch (const std::exception &) {}
 
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp)
+{
+    json j;
+    try {
+        const bool holder         = GUI::AmsTypes::is_rack_virtual_slot(std::atoi(ams_id.c_str()));
+        j["print"]                = GUI::FilamentCommands::rack_change_filament_json(load, ams_id, slot_id, old_temp, new_temp, holder);
+        j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
+    } catch (const std::exception &) {}
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ams_get_rfid(int ams_id, int slot_id, int mode)
+{
+    // Bambu Studio command_ams_refresh_rfid2 (the reply token is not tracked here).
+    json j;
+    j["print"]["command"]     = "ams_get_rfid";
+    j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
+    j["print"]["ams_id"]      = ams_id;
+    j["print"]["slot_id"]     = slot_id;
+    j["print"]["mode"]        = mode;
     return this->publish_json(j.dump());
 }
 
@@ -3945,8 +4010,7 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
                         auto curr_time = std::chrono::system_clock::now();
                         auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - extrusion_cali_set_hold_start);
                         if (diff.count() > HOLD_TIMEOUT || diff.count() < 0
-                            || ams_id_int != (extrusion_cali_set_tray_id / 4)
-                            || tray_id_int != (extrusion_cali_set_tray_id % 4)) {
+                            || tray_index_of(ams_id_int, tray_id_int) != extrusion_cali_set_tray_id) { // 28 + slot on the AMS 3H
                             if (tray_it->contains("k")) {
                                 curr_tray->k = (*tray_it)["k"].get<float>();
                             }
@@ -5535,6 +5599,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             else if (curr_tray_id >= 0 && curr_tray_id < 16){
                                 ams_id = curr_tray_id / 4;
                                 tray_id = curr_tray_id % 4;
+                            } else if (std::string dec_ams, dec_slot; decode_tray_index(curr_tray_id, dec_ams, dec_slot) && is_rack_ams_id(dec_ams)) {
+                                ams_id  = atoi(dec_ams.c_str()); // the AMS 3H: 28 + slot
+                                tray_id = atoi(dec_slot.c_str());
                             } else {
                                 BOOST_LOG_TRIVIAL(trace) << "extrusion_cali_set: unsupported tray_id = " << curr_tray_id;
                             }
@@ -5588,6 +5655,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             else if (curr_tray_id >= 0 && curr_tray_id < 16) {
                                 ams_id  = curr_tray_id / 4;
                                 tray_id = curr_tray_id % 4;
+                            } else if (std::string dec_ams, dec_slot; decode_tray_index(curr_tray_id, dec_ams, dec_slot) && is_rack_ams_id(dec_ams)) {
+                                ams_id  = atoi(dec_ams.c_str()); // the AMS 3H: 28 + slot
+                                tray_id = atoi(dec_slot.c_str());
                             } else {
                                 BOOST_LOG_TRIVIAL(trace) << "extrusion_cali_sel: unsupported tray_id = " << curr_tray_id;
                             }
@@ -6577,6 +6647,10 @@ void MachineObject::parse_new_info(json print)
                 nozzle_obj.stat         = njon.contains("stat") && njon["stat"].is_number() ? njon["stat"].get<int>() : 0;
                 if (njon.contains("fila_id") && njon["fila_id"].is_string()) nozzle_obj.fila_id = njon["fila_id"].get<std::string>();
                 if (njon.contains("color_m") && njon["color_m"].is_string()) nozzle_obj.color_m = njon["color_m"].get<std::string>();
+                // A rack nozzle's fixed position and the slot it is fed from now (ams << 8 | slot), used
+                // to pair the H3C's AMS 3H slots and spool holders with rack nozzles.
+                nozzle_obj.addr_id = njon.contains("addr_id") && njon["addr_id"].is_number_integer() ? njon["addr_id"].get<int>() : -1;
+                nozzle_obj.snow    = njon.contains("snow") && njon["snow"].is_number_integer() ? njon["snow"].get<int>() : -1;
                 if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
@@ -6835,16 +6909,9 @@ bool MachineObject::is_rack_ams_id(const std::string& ams_id) const
 
 bool MachineObject::mapping_blocked_ams_id(const std::string& ams_id) const
 {
-    if (is_rack_ams_id(ams_id))
-        return true;
-    // A nozzle rack's external spool holders (one per rack position, 255 down to 247): which
-    // holder feeds which rack nozzle is part of the rack pairing that is not ported yet.
-    if (has_rack_ams() || vir_slots.size() > 2) {
-        char*      end = nullptr;
-        const long id  = std::strtol(ams_id.c_str(), &end, 10);
-        if (end != ams_id.c_str() && *end == '\0' && GUI::AmsTypes::is_rack_virtual_slot(int(id)))
-            return true;
-    }
+    // Phase 2: the AMS 3H and the rack spool holders are mapped with Bambu Studio's numbering and
+    // rack pairing (tray_index_of, rack_bound_slots), so nothing is blocked any more.
+    (void) ams_id;
     return false;
 }
 
@@ -6852,45 +6919,129 @@ std::set<std::string> MachineObject::mapping_blocked_ams_ids() const
 {
     std::set<std::string> out;
     for (const auto& kv : amsList)
-        if (kv.second && kv.second->is_rack())
+        if (kv.second && mapping_blocked_ams_id(kv.first))
             out.insert(kv.first);
-    if (has_rack_ams() || vir_slots.size() > 2)
-        for (int id = 247; id <= 255; ++id)
-            out.insert(std::to_string(id));
+    return out;
+}
+
+int MachineObject::tray_index_of(const std::string& ams_id, const std::string& slot_id) const
+{
+    const int ams  = std::atoi(ams_id.c_str());
+    const int slot = std::atoi(slot_id.c_str());
+    // A spool holder is named by its own id (254 / 255; on a rack printer also 253..247).
+    if (BambuExtruderMap::is_external_spool_ams_id(ams) || (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(ams)))
+        return ams;
+    auto it = amsList.find(ams_id);
+    const int type = (it != amsList.end() && it->second) ? it->second->type : GUI::AmsTypes::AMS;
+    return GUI::AmsTypes::mapping_tray_index(type, ams, slot);
+}
+
+bool MachineObject::decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const
+{
+    if (tray_index < 0) {
+        // What the old tray_index / 4, tray_index % 4 gave: callers that decode "no tray" keep that.
+        ams_id  = std::to_string(tray_index / 4);
+        slot_id = std::to_string(tray_index % 4);
+        return false;
+    }
+    // A rack AMS first: its numbers (28 + slot) would otherwise read as AMS 7 / AMS 8.
+    for (const auto& kv : amsList) {
+        if (!kv.second || !kv.second->is_rack())
+            continue;
+        const int base = GUI::AmsTypes::mapping_tray_index(kv.second->type, std::atoi(kv.first.c_str()), 0);
+        const int slot = tray_index - base;
+        if (slot >= 0 && kv.second->trayList.count(std::to_string(slot)) != 0) {
+            ams_id  = kv.first;
+            slot_id = std::to_string(slot);
+            return true;
+        }
+    }
+    if (is_rack_printer() && GUI::AmsTypes::is_rack_virtual_slot(tray_index)) {
+        ams_id  = std::to_string(tray_index);
+        slot_id = "0";
+        return true;
+    }
+    ams_id  = std::to_string(tray_index / 4);
+    slot_id = std::to_string(tray_index % 4);
+    return true;
+}
+
+bool MachineObject::slot_reported(int ams_id, int slot_id) const
+{
+    auto it = amsList.find(std::to_string(ams_id));
+    if (it != amsList.end() && it->second && it->second->trayList.count(std::to_string(slot_id)) != 0)
+        return true;
+    // Bambu Studio's get_tray falls back to the spool holder of that id, whatever the slot.
+    for (const AmsTray& t : vir_slots)
+        if (t.id == std::to_string(ams_id))
+            return true;
+    return false;
+}
+
+std::vector<std::pair<int, int>> MachineObject::rack_bound_slots() const
+{
+    std::vector<std::pair<int, int>> out;
+    if (!is_rack_printer())
+        return out;
+    int rack_ams_id = -1, rack_ams_slots = 0;
+    for (const auto& kv : amsList)
+        if (kv.second && kv.second->is_rack()) {
+            rack_ams_id    = std::atoi(kv.first.c_str());
+            rack_ams_slots = int(kv.second->trayList.size());
+            break;
+        }
+    int rack_size = 0;
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        if (n.on_rack() || n.addr_id >= 0)
+            ++rack_size;
+    auto exists = [this](int ams, int slot) { return slot_reported(ams, slot); };
+    for (const Nozzle& n : m_nozzle_data.nozzles) {
+        if (!n.on_rack() && n.addr_id < 0)
+            continue;
+        GUI::AmsTypes::RackNozzle rn;
+        rn.addr     = n.addr_id >= 0 ? n.addr_id : (n.id & 0xF);
+        rn.snow     = n.snow;
+        rn.tpu_flow = n.volume_exact == NozzleVolumeType::nvtTPU285;
+        GUI::AmsTypes::RackSlot s = GUI::AmsTypes::bound_slot(rn, rack_ams_id, rack_ams_slots, rack_size, exists);
+        if (!s.valid())
+            continue;
+        if (GUI::AmsTypes::is_rack_virtual_slot(s.ams_id))
+            s.slot_id = 0; // a holder has one slot
+        out.emplace_back(s.ams_id, s.slot_id);
+    }
     return out;
 }
 
 int MachineObject::strip_blocked_mapping(std::vector<FilamentInfo>& result) const
 {
+    // The last check on a mapping before it is used: an entry naming a rack AMS slot (the AMS 3H)
+    // carries that slot's own tray number (28 + slot, never ams_id * 4 + slot: 128..136 is the AMS
+    // HT's range on other printers), and a slot no rack nozzle is fed from is not mapped at all.
     int stripped = 0;
-    // A tray number alone (no ams id) is checked too: a rack AMS unit's trays as the old
-    // ams_id * 4 + slot numbering would name them, and the rack spool holders' own ids.
-    auto tray_blocked = [this](int tray_id) {
-        if (tray_id < 0)
-            return false;
-        if (mapping_blocked_ams_id(std::to_string(tray_id)) && GUI::AmsTypes::is_rack_virtual_slot(tray_id))
-            return true;
-        for (const auto& kv : amsList) {
-            if (!kv.second || !kv.second->is_rack())
-                continue;
-            const int first = std::atoi(kv.first.c_str()) * 4;
-            if (tray_id >= first && tray_id < first + std::max<int>(9, int(kv.second->trayList.size())))
-                return true;
-        }
-        return false;
-    };
+    if (!is_rack_printer())
+        return 0;
+    const std::vector<std::pair<int, int>> bound = rack_bound_slots();
     for (FilamentInfo& f : result) {
-        const bool blocked = (!f.ams_id.empty() && mapping_blocked_ams_id(f.ams_id)) || tray_blocked(f.tray_id);
-        if (!blocked)
+        if (f.ams_id.empty() || f.tray_id < 0)
             continue;
-        f.tray_id  = -1;
-        f.distance = 99999;
-        f.ams_id.clear();
-        f.slot_id.clear();
-        ++stripped;
+        const int ams = std::atoi(f.ams_id.c_str());
+        const bool rack_unit = is_rack_ams_id(f.ams_id);
+        const bool holder    = GUI::AmsTypes::is_rack_virtual_slot(ams);
+        if (!rack_unit && !holder)
+            continue;
+        const int slot = holder ? 0 : std::atoi(f.slot_id.c_str());
+        if (std::find(bound.begin(), bound.end(), std::make_pair(ams, slot)) == bound.end()) {
+            f.tray_id  = -1;
+            f.distance = 99999;
+            f.ams_id.clear();
+            f.slot_id.clear();
+            ++stripped;
+            continue;
+        }
+        f.tray_id = tray_index_of(f.ams_id, f.slot_id);
     }
     if (stripped > 0)
-        BOOST_LOG_TRIVIAL(info) << "ams_mapping: " << stripped << " filament(s) not mapped to a rack AMS / rack spool holder (not supported yet)";
+        BOOST_LOG_TRIVIAL(info) << "ams_mapping: " << stripped << " filament(s) named a rack slot no rack nozzle is fed from, left unmapped";
     return stripped;
 }
 
