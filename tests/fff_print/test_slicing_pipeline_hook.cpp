@@ -2,6 +2,7 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -18,6 +19,47 @@ using namespace Slic3r;
 using namespace Slic3r::Test;
 
 static TriangleMesh cube20() { return mesh(TestMesh::cube_20x20x20); }
+
+static const char *const k_plugin_dump_keys[] = {
+    "plugins",
+    "slicing_pipeline_plugin",
+    "print_plugin_config_overrides",
+    "printer_plugin_config_overrides",
+    "filament_plugin_config_overrides",
+};
+
+TEST_CASE("Default G-code config dump omits empty plugin keys", "[slicing_pipeline][gcode_dump]")
+{
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    init_print({cube20()}, print, model, config);
+    std::string dump;
+    GCode::append_full_config(print, dump);
+    for (const char *key : k_plugin_dump_keys)
+        CHECK(dump.find(std::string("; ") + key + " =") == std::string::npos);
+}
+
+TEST_CASE("Non-empty plugin keys are dumped in the G-code config block", "[slicing_pipeline][gcode_dump]")
+{
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"Stamp"}));
+    config.set_key_value("plugins", new ConfigOptionStrings({"PipelineStamp;;Stamp"}));
+    config.set_key_value("print_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"Stamp\"}]"));
+    config.set_key_value("printer_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"PrinterCap\"}]"));
+    config.set_key_value("filament_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"FilamentCap\"}]"));
+    init_print({cube20()}, print, model, config);
+    std::string dump;
+    GCode::append_full_config(print, dump);
+    CHECK(dump.find("; slicing_pipeline_plugin =") != std::string::npos);
+    CHECK(dump.find("; plugins =") != std::string::npos);
+    CHECK(dump.find("; print_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("; printer_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("; filament_plugin_config_overrides =") != std::string::npos);
+    CHECK(dump.find("Stamp") != std::string::npos);
+}
 
 TEST_CASE("slicing_pipeline_plugin option exists and defaults empty", "[slicing_pipeline]")
 {

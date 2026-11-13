@@ -10205,6 +10205,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
             continue;
         if (!dump_mass_model_keys && mass_model_keys.find(key) != mass_model_keys.end())
             continue;
+        // Plugin keys only when a job names a plugin or override, so OFF (and ON with
+        // nothing selected) G-code headers stay byte-identical to main. Empty is not nil.
+        if (ConfigBase::plugin_option_is_empty(key, cfg.option(key)))
+            continue;
         if (!is_banned(key) && !cfg.option(key)->is_nil()) {
             if (key == "wipe_tower_x" || key == "wipe_tower_y") {
                 ss << std::fixed << std::setprecision(3) << "; " << key << " = "

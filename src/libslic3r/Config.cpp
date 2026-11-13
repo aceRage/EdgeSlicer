@@ -2013,6 +2013,22 @@ bool ConfigBase::save_to_json(const std::string &file, const std::string &name, 
     return true;
 }
 
+bool ConfigBase::plugin_option_is_empty(const std::string &opt_key, const ConfigOption *opt)
+{
+    if (opt_key != "plugins" && opt_key != "slicing_pipeline_plugin" &&
+        opt_key != "print_plugin_config_overrides" && opt_key != "printer_plugin_config_overrides" &&
+        opt_key != "filament_plugin_config_overrides")
+        return false;
+    if (opt == nullptr)
+        return true;
+    auto blank = [](const std::string &v) { return v.find_first_not_of(" \t") == std::string::npos; };
+    if (const auto *s = dynamic_cast<const ConfigOptionString *>(opt))
+        return blank(s->value);
+    if (const auto *ss = dynamic_cast<const ConfigOptionStrings *>(opt))
+        return std::all_of(ss->values.begin(), ss->values.end(), blank);
+    return opt->serialize().empty();
+}
+
 void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8, const std::string is_custom) const
 {
     json j;
@@ -2027,6 +2043,8 @@ void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const s
     for (const std::string &opt_key : this->keys())
     {
         const ConfigOption* opt = this->option(opt_key);
+        if (plugin_option_is_empty(opt_key, opt))
+            continue;
         if ( opt->is_scalar() ) {
             if (opt->type() == coString && (opt_key != "bed_custom_texture" && opt_key != "bed_custom_model"))
                 //keep \n, \r, \t
@@ -2071,8 +2089,11 @@ void ConfigBase::save(const std::string &file) const
     boost::nowide::ofstream c;
     c.open(file, std::ios::out | std::ios::trunc);
     c << "# " << Slic3r::header_slic3r_generated() << std::endl;
-    for (const std::string &opt_key : this->keys())
+    for (const std::string &opt_key : this->keys()) {
+        if (plugin_option_is_empty(opt_key, this->option(opt_key)))
+            continue;
         c << opt_key << " = " << this->opt_serialize(opt_key) << std::endl;
+    }
     c.close();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;

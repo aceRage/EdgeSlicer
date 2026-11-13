@@ -2460,6 +2460,10 @@ public:
     };
     std::vector<UnresolvedPluginCapability> unresolved_plugin_capabilities() const;
     void update_plugin_manifest();
+    // True for plugins / slicing_pipeline_plugin / *_plugin_config_overrides when empty or
+    // all-empty. G-code headers, --export-settings and preset/3MF JSON omit them so an OFF
+    // build's bytes match main. Non-empty values still serialize (ON round-trip).
+    static bool plugin_option_is_empty(const std::string &opt_key, const ConfigOption *opt);
 
 	// Set all the nullable values to nils.
     void null_nullables();
