@@ -21,6 +21,7 @@
 #include "libslic3r/Geometry.hpp" // covex hull 2d
 #include "libslic3r/Timer.hpp" // covex hull 2d
 #include "libslic3r/Emboss.hpp" // heal_shape
+#include "libslic3r/EmbossPlacement.hpp" // raised or sunk by the volume type
 
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/SvgSplit.hpp" // SVG (Split)
@@ -529,9 +530,10 @@ namespace {
 std::optional<EmbossShape> create_split_part_shape(const SvgSplitPart &part, const std::string &group_id, size_t index)
 {
     EmbossShape shape;
-    // same as the plain SVG import (select_shape)
+    // same as the plain SVG import (select_shape); the creation turns the surface off where it
+    // cannot follow it (a new object, a part off the surface)
     shape.projection.depth       = 10.;
-    shape.projection.use_surface = false;
+    shape.projection.use_surface = true;
     EmbossShape::SvgFile svg;
     // Generated SVG holds only the outline of the part, never the local path of the file
     svg.path_in_3mf = svg_split_path_in_3mf(group_id, index);
@@ -625,6 +627,31 @@ bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::opt
 
 bool GLGizmoSVG::is_svg(const ModelVolume &volume) {
     return volume.emboss_shape.has_value() && volume.emboss_shape->svg_file.has_value();
+}
+
+bool GLGizmoSVG::remake_after_type_change(const ModelVolume &volume)
+{
+    if (!volume.emboss_shape.has_value() || volume.get_object() == nullptr)
+        return false;
+    EmbossShape shape = *volume.emboss_shape; // copy
+    if (volume.text_configuration.has_value()) {
+        // Text placed letter by letter (per glyph, curved) needs the font: the Text tool remakes it.
+        if (volume.text_configuration->style.prop.per_glyph || shape.projection.bend.is_active() || shape.shapes_with_ids.empty())
+            return false;
+    } else if (!shape.svg_file.has_value() || !ensure_shapes(shape))
+        return false;
+
+    GUI_App &app = wxGetApp();
+    if (app.plater() == nullptr || app.plater()->canvas3D() == nullptr)
+        return false;
+    auto cancel      = std::make_shared<std::atomic<bool>>(false);
+    auto base        = std::make_unique<DataBase>(volume.name, cancel, std::move(shape));
+    base->is_outside = Slic3r::Emboss::is_raised(volume.type());
+    // the type change has its own undo step
+    DataUpdate data{std::move(base), volume.id(), false};
+    // the ray caster is only used to start using the surface, which a type change never does
+    static RaycastManager raycaster;
+    return start_update_volume(std::move(data), volume, app.plater()->canvas3D()->get_selection(), raycaster);
 }
 
 bool GLGizmoSVG::is_svg_object(const ModelVolume &volume) {
@@ -2458,7 +2485,12 @@ void GLGizmoSVG::draw_use_surface()
         m_detached_projection.reset();
         m_placement_key.reset();
         process();
-    }
+    } else if (ImGui::IsItemHovered())
+        m_imgui->tooltip(m_volume->is_model_part() ?
+                             _u8L("Wrap the shape onto the curved surface under it. As a part it stands Depth out of the surface.") :
+                             _u8L("Wrap the shape onto the curved surface under it. As a modifier or cut it reaches Depth into the object, "
+                                  "following the surface (a modifier on another filament colours the surface it covers)."),
+                         m_gui_cfg->max_tooltip_width);
 }
 
 void GLGizmoSVG::draw_distance()
@@ -3280,7 +3312,11 @@ EmbossShape select_shape(std::string_view filepath, double tesselation_tolerance
 {
     EmbossShape shape;
     shape.projection.depth       = 10.;
-    shape.projection.use_surface = false;
+    // Edge: an SVG placed on an object follows its surface, as codes, simple shapes and traced
+    // images do (a curved jar or a sphere included; as a modifier it then colours the surface it
+    // covers). The creation turns it off where there is no surface to follow (a new object, an SVG
+    // that does not fit on the surface there).
+    shape.projection.use_surface = true;
     
     EmbossShape::SvgFile svg;
     if (filepath.empty()) {

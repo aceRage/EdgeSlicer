@@ -14,6 +14,7 @@
 #include "libslic3r/Showcase/GlowFilament.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
+#include "libslic3r/Showcase/ShowcaseSurfaceColours.hpp"
 
 #include "../3DScene.hpp"
 #include "../Camera.hpp"
@@ -66,18 +67,60 @@ static constexpr int SHOWCASE_CONTACT_UNIT    = 2;
 static constexpr int SHOWCASE_CONTACT_SIZE    = 512;
 
 // A multi-material painted volume as one model per painted state (state s = filament s, 0 = the
-// volume's own), rebuilt when the painting changed.
-static void showcase_ensure_painted_parts(GLVolume &v, const ModelVolume &mv)
+// volume's own), rebuilt when the painting changed. Edge: modifiers (and height ranges) that put
+// another filament on the part colour it the same way (ShowcaseSurfaceColours.hpp), so a part is
+// drawn in parts when it is painted or when such a modifier covers it. Returns whether it is.
+static bool showcase_ensure_painted_parts(GLVolume &v, const ModelVolume &mv, const Transform3d &instance_matrix, size_t num_filaments)
 {
-    if (mv.mmu_segmentation_facets.timestamp() == v.mmuseg_ts)
-        return;
+    if (!v.printable || !mv.is_model_part())
+        return false;
+    const bool painted = !mv.mmu_segmentation_facets.empty();
+    // The regions are only looked for on objects that have a modifier or a height range.
+    const ModelObject *mo = mv.get_object();
+    const bool may_colour = mo != nullptr && num_filaments >= 2 &&
+                            (!mo->layer_config_ranges.empty() ||
+                             std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *o) { return o->is_modifier(); }));
+    if (!painted && !may_colour) {
+        if (v.mmuseg_ts != 0) {
+            v.mmuseg_models.clear();
+            v.mmuseg_ts = 0;
+        }
+        return false;
+    }
+    // Key: the painting's timestamp alone (as before) when nothing else can colour the part.
+    ObjectBase::Timestamp key = mv.mmu_segmentation_facets.timestamp();
+    if (may_colour)
+        key = ObjectBase::Timestamp(Showcase::colour_regions_key(mv, instance_matrix, num_filaments) ^ (uint64_t(key) * 0x9e3779b97f4a7c15ull));
+    if (key == 0)
+        key = 1;
+    if (key == v.mmuseg_ts)
+        return !v.mmuseg_models.empty();
     v.mmuseg_models.clear();
+    v.mmuseg_ts = key;
     std::vector<indexed_triangle_set> its_per_color;
-    mv.mmu_segmentation_facets.get_facets(mv, its_per_color);
+    const std::vector<Showcase::ColourRegion> regions = may_colour ? Showcase::colour_regions_for(mv, instance_matrix, num_filaments) :
+                                                                     std::vector<Showcase::ColourRegion>();
+    if (regions.empty()) {
+        if (!painted)
+            return false;
+        mv.mmu_segmentation_facets.get_facets(mv, its_per_color);
+    } else {
+        const float edge = Showcase::surface_colour_edge_limit(instance_matrix * mv.get_matrix());
+        Showcase::surface_colour_facets(mv.mesh(), painted ? &mv.mmu_segmentation_facets.get_data() : nullptr, regions, edge, its_per_color);
+    }
     v.mmuseg_models.resize(its_per_color.size());
     for (size_t i = 0; i < its_per_color.size(); ++i)
-        v.mmuseg_models[i].init_from(its_per_color[i]);
-    v.mmuseg_ts = mv.mmu_segmentation_facets.timestamp();
+        if (!its_per_color[i].indices.empty())
+            v.mmuseg_models[i].init_from(its_per_color[i]);
+    return !v.mmuseg_models.empty();
+}
+
+// The instance matrix of a volume (identity when it is gone).
+static Transform3d showcase_instance_matrix(const GLVolume &v, const ModelObject *mo)
+{
+    if (mo != nullptr && v.instance_idx() >= 0 && size_t(v.instance_idx()) < mo->instances.size())
+        return mo->instances[size_t(v.instance_idx())]->get_matrix();
+    return Transform3d::Identity();
 }
 
 static ColorRGBA showcase_color(const std::string &hex, const ColorRGBA &fallback)
@@ -1474,9 +1517,9 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             item.filament = filament;
             (Showcase::material_params(item.finish).alpha < 1.f || item.color.a() < 1.f ? translucent : opaque).push_back(item);
         };
-        if (mv != nullptr && v->printable && !mv->mmu_segmentation_facets.empty()) {
-            // Multi-material painting: one part per filament, as GLVolume::simple_render keeps them.
-            showcase_ensure_painted_parts(*v, *mv);
+        if (mv != nullptr && showcase_ensure_painted_parts(*v, *mv, showcase_instance_matrix(*v, mo), colors.size())) {
+            // Multi-material painting (and modifiers on a filament): one part per filament, as
+            // GLVolume::simple_render keeps them.
             for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
                 if (!v->mmuseg_models[i].is_initialized())
                     continue;
@@ -3878,6 +3921,7 @@ bool ShowcaseRenderer::render_id_pass(int long_side, ShowcaseIdPass &out)
         const uint32_t v = uint32_t(id + 1);
         return ColorRGBA(float(v & 0xFF) / 255.f, float((v >> 8) & 0xFF) / 255.f, float((v >> 16) & 0xFF) / 255.f, 1.f);
     };
+    const size_t n_filaments = get_extruders_colors().size();
     shader->start_using();
     shader->set_uniform("projection_matrix", proj);
     for (GLVolume *v : m_canvas.m_volumes.volumes) {
@@ -3903,14 +3947,14 @@ bool ShowcaseRenderer::render_id_pass(int long_side, ShowcaseIdPass &out)
         e.base.object_default = own <= 0;
         e.base.source         = own > 0 ? Showcase::CalloutSource::Part : Showcase::CalloutSource::Object;
         shader->set_uniform("view_model_matrix", view * v->world_matrix());
-        if (v->printable && !mv->mmu_segmentation_facets.empty()) {
-            showcase_ensure_painted_parts(*v, *mv);
+        if (showcase_ensure_painted_parts(*v, *mv, showcase_instance_matrix(*v, mo), n_filaments)) {
+            const bool painted = !mv->mmu_segmentation_facets.empty();
             for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
                 if (!v->mmuseg_models[i].is_initialized())
                     continue;
                 ShowcaseIdPass::Entry part = e;
                 if (i > 0)
-                    part.base = Showcase::BaseRegion{ int(i), false, Showcase::CalloutSource::Paint };
+                    part.base = Showcase::BaseRegion{ int(i), false, painted ? Showcase::CalloutSource::Paint : Showcase::CalloutSource::Part };
                 v->mmuseg_models[i].set_color(id_color(out.entries.size()));
                 out.entries.push_back(part);
                 v->mmuseg_models[i].render();

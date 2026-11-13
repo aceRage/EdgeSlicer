@@ -141,6 +141,11 @@ std::string svg_split_part_svg(const ExPolygons &shape, const BoundingBox &drawi
 std::string svg_split_path_in_3mf(const std::string &group_id, size_t index);
 
 /// <summary>
+/// Group id of a part of a split SVG from its path inside of .3mf, empty for any other path
+/// </summary>
+std::string svg_split_group_of(const std::string &path_in_3mf);
+
+/// <summary>
 /// "#rrggbb"
 /// </summary>
 std::string svg_split_color_to_hex(const std::array<uint8_t, 3> &color);

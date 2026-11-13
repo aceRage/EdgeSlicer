@@ -53,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
 	test_color_split.cpp
 	test_code_emboss.cpp
 	test_emboss_bend.cpp
+	test_svg_surface_modifier.cpp
 	test_inline_shapes.cpp
 	test_inline_text.cpp
 	test_simple_shape.cpp
