@@ -165,6 +165,7 @@ add_executable(${_TEST_NAME}_tests
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
 	test_preset_load_full_set.cpp
+	test_create_printer_custom_vendor.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_preset_extra_extruders.cpp

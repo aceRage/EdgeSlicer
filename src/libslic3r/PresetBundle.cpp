@@ -2052,6 +2052,29 @@ VendorProfile PresetBundle::get_custom_vendor_models() const
     return vendor;
 }
 
+void PresetBundle::add_custom_vendor_models(VendorMap &vendors, const VendorProfile &custom_models)
+{
+    if (custom_models.models.empty())
+        return;
+    // The person's models go under the custom vendor's key ("Custom"). The profiles' own
+    // "Custom Printer" vendor (Custom.json) has that same key, so add to it, never replace it.
+    auto [it, inserted] = vendors.emplace(custom_models.name, custom_models);
+    if (inserted)
+        return;
+    VendorProfile &vendor = it->second;
+    for (const VendorProfile::PrinterModel &model : custom_models.models) {
+        auto same = std::find_if(vendor.models.begin(), vendor.models.end(),
+                                 [&model](const VendorProfile::PrinterModel &m) { return m.name == model.name; });
+        if (same == vendor.models.end()) {
+            vendor.models.push_back(model);
+            continue;
+        }
+        for (const VendorProfile::PrinterVariant &variant : model.variants)
+            if (same->variant(variant.name) == nullptr)
+                same->variants.push_back(variant);
+    }
+}
+
 // Merge one vendor's presets with the other vendor's presets, report duplicates.
 std::vector<std::string> PresetBundle::merge_presets(PresetBundle &&other)
 {

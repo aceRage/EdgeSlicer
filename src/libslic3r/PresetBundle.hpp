@@ -669,6 +669,9 @@ public:
     std::pair<PresetsConfigSubstitutions, std::string> load_system_models_from_json(ForwardCompatibilitySubstitutionRule compatibility_rule);
     std::pair<PresetsConfigSubstitutions, std::string> load_system_filaments_json(ForwardCompatibilitySubstitutionRule compatibility_rule);
     VendorProfile                                      get_custom_vendor_models() const;
+    // Create Printer's vendor choices: adds the person's own printer models (get_custom_vendor_models)
+    // to the vendors, merged into an existing "Custom" vendor rather than replacing it.
+    static void                                        add_custom_vendor_models(VendorMap &vendors, const VendorProfile &custom_models);
 
     // SM_FEATURE: add Snapmaker machine as default
     static const char *SM_BUNDLE;

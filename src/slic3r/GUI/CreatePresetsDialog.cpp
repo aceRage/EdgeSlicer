@@ -340,10 +340,7 @@ static wxArrayString get_exist_vendor_choices(VendorMap& vendors)
     VendorProfile users_models  = preset_bundle->get_custom_vendor_models();
 
     vendors = temp_preset_bundle.vendors;
-
-    if (!users_models.models.empty()) {
-        vendors[users_models.name] = users_models;
-    }
+    PresetBundle::add_custom_vendor_models(vendors, users_models);
 
     for (const auto& vendor : vendors) {
         if (vendor.second.models.empty() || vendor.second.id.empty()) continue;
