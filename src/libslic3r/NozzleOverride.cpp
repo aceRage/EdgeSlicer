@@ -307,10 +307,13 @@ std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync:
 {
     // Per logical extruder: (order key, nozzle); the mounted nozzle sorts first, rack positions after it in their order.
     std::vector<std::vector<std::pair<int, RackNozzle>>> found(extruders);
+    std::vector<std::vector<int>>                        positional_rack(extruders); // positions named by addr
     for (const DualNozzleSync::PrinterNozzle &nozzle : state.nozzles) {
+        const int logical = state.logical_extruder_of(nozzle);
+        if (logical >= 0 && size_t(logical) < extruders && nozzle.on_rack() && nozzle.addr >= 0)
+            positional_rack[size_t(logical)].push_back(nozzle.addr);
         if (nozzle.on_rack() && !nozzle.normal)
             continue;
-        const int logical = state.logical_extruder_of(nozzle);
         if (logical < 0 || size_t(logical) >= extruders)
             continue;
         try {
@@ -331,8 +334,34 @@ std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync:
         // Only an extruder with rack nozzles has a rack to describe.
         if (std::none_of(found[e].begin(), found[e].end(), [](const auto &n) { return n.first > 0; }))
             continue;
-        for (const auto &n : found[e])
+        // A positional rack (H3C: every nozzle names its rack position, none is mounted) keeps each nozzle at its
+        // position: a position the printer did not report becomes a gap (diameter 0) instead of moving the rest up.
+        const bool positional = !positional_rack[e].empty() &&
+                                std::none_of(found[e].begin(), found[e].end(), [](const auto &n) { return n.first == 0; });
+        int next = 1;
+        for (const auto &n : found[e]) {
+            if (positional)
+                for (; next < n.first; ++next)
+                    out[e].push_back(RackNozzle{});
             out[e].push_back(n.second);
+            next = n.first + 1;
+        }
+    }
+    return out;
+}
+
+std::vector<double> reported_sync_nozzle_sizes(const DualNozzleSync::PrinterState &state, size_t extruders)
+{
+    std::vector<double>                        out  = reported_extruder_nozzle_sizes(state, extruders);
+    const std::vector<std::vector<RackNozzle>> rack = reported_rack_nozzles(state, extruders);
+    for (size_t e = 0; e < extruders && e < rack.size(); ++e) {
+        if (out[e] > 0.)
+            continue;
+        for (const RackNozzle &n : rack[e])
+            if (n.diameter > 0.) {
+                out[e] = n.diameter;
+                break;
+            }
     }
     return out;
 }
@@ -343,7 +372,8 @@ std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::Prin
     std::vector<std::vector<double>>           out(nozzles.size());
     for (size_t e = 0; e < nozzles.size(); ++e)
         for (const RackNozzle &n : nozzles[e])
-            out[e].push_back(n.diameter);
+            if (n.diameter > 0.) // not the gaps of a positional rack
+                out[e].push_back(n.diameter);
     return out;
 }
 

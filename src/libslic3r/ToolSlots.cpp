@@ -1059,9 +1059,24 @@ std::vector<std::string> rack_override_from_reported(const std::vector<std::vect
             bare = nvtStandard;
         std::string text;
         size_t      written = 0;
-        for (const RackNozzle &n : mounted_then_rack[e]) {
+        // A gap (diameter 0: a position of a positional rack the printer did not report) keeps the slot the project has
+        // there, else takes the first reported size, so the nozzles after it stay at their positions.
+        const std::vector<RackNozzle> have  = e < current.size() ? parse_rack_nozzles(current[e]) : std::vector<RackNozzle>();
+        const auto                    first = std::find_if(mounted_then_rack[e].begin(), mounted_then_rack[e].end(),
+                                                           [](const RackNozzle &n) { return n.diameter > 0.; });
+        if (first == mounted_then_rack[e].end())
+            continue;
+        for (RackNozzle n : mounted_then_rack[e]) {
             if (written == size_t(slots))
                 break; // more nozzles than the printer profile has slots: the rack cannot list them
+            if (!(n.diameter > 0.)) {
+                if (written < have.size()) {
+                    n = have[written];
+                } else {
+                    n              = RackNozzle{};
+                    n.diameter     = first->diameter;
+                }
+            }
             const NozzleVolumeType type = n.volume_given && n.volume_type != nvtHybrid ? n.volume_type : bare;
             text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(n.diameter);
             if (type != bare)

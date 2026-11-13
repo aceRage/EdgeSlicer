@@ -6651,6 +6651,9 @@ void MachineObject::parse_new_info(json print)
                 // to pair the H3C's AMS 3H slots and spool holders with rack nozzles.
                 nozzle_obj.addr_id = njon.contains("addr_id") && njon["addr_id"].is_number_integer() ? njon["addr_id"].get<int>() : -1;
                 nozzle_obj.snow    = njon.contains("snow") && njon["snow"].is_number_integer() ? njon["snow"].get<int>() : -1;
+                // Bambu Studio DevNozzleSystemParser: bit <id> of "exist" says whether the nozzle is there (IsEmpty otherwise).
+                if (nozzle.contains("exist") && nozzle["exist"].is_number_integer() && nozzle_obj.id >= 0 && nozzle_obj.id < 31)
+                    nozzle_obj.exist = ((nozzle["exist"].get<long long>() >> nozzle_obj.id) & 1) != 0;
                 if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
