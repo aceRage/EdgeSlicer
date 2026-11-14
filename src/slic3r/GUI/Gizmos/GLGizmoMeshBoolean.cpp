@@ -15,6 +15,7 @@ namespace Slic3r {
 namespace GUI {
 
 static const std::string warning_text = _u8L("Unable to perform boolean operation on selected parts");
+static const std::string empty_text   = _u8L("The boolean operation leaves nothing of the selected parts: they do not overlap, or the tool covers the whole part");
 
 GLGizmoMeshBoolean::GLGizmoMeshBoolean(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -384,14 +385,24 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
         TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
         temp_tool_mesh.transform(m_tool.trafo, true);
         std::vector<TriangleMesh> temp_mesh_resuls;
-        if (!Slic3r::MeshBoolean::mfd::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, op))
-            Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, op);
-        if (temp_mesh_resuls.size() != 0) {
+        // An empty result (an intersection of parts that do not meet) is not a failure: say so
+        // rather than "unable to perform". A Manifold boolean that fails part way goes on to mcut.
+        auto *notifications = wxGetApp().notification_manager();
+        switch (Slic3r::MeshBoolean::make_boolean_with_fallback(temp_src_mesh, temp_tool_mesh, op, temp_mesh_resuls,
+                                                                "Mesh Boolean gizmo")) {
+        case Slic3r::MeshBoolean::BooleanOutcome::Done:
             generate_new_volume(delete_input, *temp_mesh_resuls.begin());
-            wxGetApp().notification_manager()->close_plater_warning_notification(warning_text);
-        }
-        else {
-            wxGetApp().notification_manager()->push_plater_warning_notification(warning_text);
+            notifications->close_plater_warning_notification(warning_text);
+            notifications->close_plater_warning_notification(empty_text);
+            break;
+        case Slic3r::MeshBoolean::BooleanOutcome::Empty:
+            notifications->close_plater_warning_notification(warning_text);
+            notifications->push_plater_warning_notification(empty_text);
+            break;
+        case Slic3r::MeshBoolean::BooleanOutcome::Failed:
+            notifications->close_plater_warning_notification(empty_text);
+            notifications->push_plater_warning_notification(warning_text);
+            break;
         }
     };
 

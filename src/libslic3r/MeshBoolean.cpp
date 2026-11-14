@@ -7,6 +7,7 @@
 
 #include <boost/next_prior.hpp>
 #include "boost/log/trivial.hpp"
+#include <algorithm>
 #include <iterator>
 // Include igl first. It defines "L" macro which then clashes with our localization
 #include <igl/copyleft/cgal/mesh_boolean.h>
@@ -1093,7 +1094,15 @@ bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
                                     << int(a.Status()) << " tool=" << int(b.Status()) << ")";
             return false;
         }
-        manifold::MeshGL out = a.Boolean(b, op).GetMeshGL();
+        manifold::Manifold result = a.Boolean(b, op);
+        // A boolean that fails part way (ResultTooLarge, Cancelled) comes back EMPTY with an error
+        // status, which must not pass for an empty result: the caller would give up instead of
+        // trying mcut.
+        if (result.Status() != manifold::Manifold::Error::NoError) {
+            BOOST_LOG_TRIVIAL(warning) << "MeshBoolean::mfd: boolean failed (" << int(result.Status()) << "), falling back";
+            return false;
+        }
+        manifold::MeshGL out = result.GetMeshGL();
         if (out.triVerts.empty())
             return true; // legitimately empty result (e.g. void intersection)
 
@@ -1159,22 +1168,37 @@ bool union_all(const std::vector<indexed_triangle_set> &meshes, indexed_triangle
 
 } // namespace mfd
 
+BooleanOutcome make_boolean_with_fallback(const TriangleMesh &a, const TriangleMesh &b, const std::string &op,
+                                          std::vector<TriangleMesh> &dst, const char *log_tag)
+{
+    std::vector<TriangleMesh> res;
+    if (mfd::make_boolean(a, b, res, op)) {
+        const bool empty = std::all_of(res.begin(), res.end(), [](const TriangleMesh &m) { return m.empty(); });
+        if (empty)
+            return BooleanOutcome::Empty;
+        dst = std::move(res);
+        return BooleanOutcome::Done;
+    }
+    BOOST_LOG_TRIVIAL(warning) << log_tag << ": Manifold boolean " << op << " failed, falling back to mcut";
+    res.clear();
+    try {
+        mcut::make_boolean(a, b, res, op);
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << log_tag << ": mcut boolean " << op << " failed: " << ex.what();
+        return BooleanOutcome::Failed;
+    }
+    // mcut does not say whether it did the boolean, so an empty mcut result stays a failure.
+    if (std::all_of(res.begin(), res.end(), [](const TriangleMesh &m) { return m.empty(); }))
+        return BooleanOutcome::Failed;
+    dst = std::move(res);
+    return BooleanOutcome::Done;
+}
+
 bool make_boolean_chain(const TriangleMesh &a, const TriangleMesh &b, const std::string &op, TriangleMesh &out,
                         const char *log_tag)
 {
     std::vector<TriangleMesh> dst;
-    bool ok = mfd::make_boolean(a, b, dst, op);
-    if (!ok) {
-        BOOST_LOG_TRIVIAL(warning) << log_tag << ": Manifold boolean " << op << " failed, falling back to mcut";
-        dst.clear();
-        try {
-            mcut::make_boolean(a, b, dst, op);
-        } catch (const std::exception &ex) {
-            BOOST_LOG_TRIVIAL(error) << log_tag << ": mcut boolean " << op << " failed: " << ex.what();
-            return false;
-        }
-    }
-    if (dst.empty())
+    if (make_boolean_with_fallback(a, b, op, dst, log_tag) != BooleanOutcome::Done)
         return false;
     TriangleMesh merged = dst.front();
     for (size_t i = 1; i < dst.size(); ++ i)

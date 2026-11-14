@@ -256,14 +256,26 @@ void perform_csgmesh_booleans_mcut(MeshBoolean::mcut::McutMeshPtr& mcutm,
 }
 
 
+// The first part (in collection order) the check refused, and its name.
+template<class It>
+std::pair<BooleanFailReason, std::string> first_fail_reason(const Range<It> &csgrange, const std::vector<BooleanFailReason> &fail_reasons)
+{
+    auto it = csgrange.begin();
+    for (size_t i = 0; i < fail_reasons.size(); ++i, ++it)
+        if (fail_reasons[i] != BooleanFailReason::OK)
+            return { fail_reasons[i], it->name };
+    return { BooleanFailReason::OK, std::string() };
+}
+
 template<class It, class Visitor>
 std::tuple<BooleanFailReason,std::string, It> check_csgmesh_booleans(const Range<It> &csgrange, Visitor &&vfn)
 {
     using namespace detail_cgal;
-    BooleanFailReason fail_reason = BooleanFailReason::OK;
-    std::string fail_part_name;
     std::vector<CGALMeshPtr> cgalmeshes(csgrange.size());
-    auto check_part = [&csgrange, &cgalmeshes,&fail_reason,&fail_part_name](size_t i)
+    // One slot per part: the parts are checked in parallel, so they must not share the reason and
+    // the name (a std::string). The first refused part is reported, the same one every time.
+    std::vector<BooleanFailReason> fail_reasons(csgrange.size(), BooleanFailReason::OK);
+    auto check_part = [&csgrange, &cgalmeshes, &fail_reasons](size_t i)
     {
         auto it = csgrange.begin();
         std::advance(it, i);
@@ -279,22 +291,19 @@ std::tuple<BooleanFailReason,std::string, It> check_csgmesh_booleans(const Range
         try {
             if (!m || MeshBoolean::cgal::empty(*m)) {
                 BOOST_LOG_TRIVIAL(info) << "check_csgmesh_booleans fails! mesh " << i << "/" << csgrange.size() << " is empty, cannot do boolean!";
-                fail_reason= BooleanFailReason::MeshEmpty;
-                fail_part_name = csgpart.name;
+                fail_reasons[i] = BooleanFailReason::MeshEmpty;
                 return;
             }
 
             if (!MeshBoolean::cgal::does_bound_a_volume(*m)) {
                 BOOST_LOG_TRIVIAL(info) << "check_csgmesh_booleans fails! mesh "<<i<<"/"<<csgrange.size()<<" does_bound_a_volume is false, cannot do boolean!";
-                fail_reason= BooleanFailReason::NotBoundAVolume;
-                fail_part_name = csgpart.name;
+                fail_reasons[i] = BooleanFailReason::NotBoundAVolume;
                 return;
             }
 
             if (MeshBoolean::cgal::does_self_intersect(*m)) {
                 BOOST_LOG_TRIVIAL(info) << "check_csgmesh_booleans fails! mesh " << i << "/" << csgrange.size() << " does_self_intersect is true, cannot do boolean!";
-                fail_reason= BooleanFailReason::SelfIntersect;
-                fail_part_name = csgpart.name;
+                fail_reasons[i] = BooleanFailReason::SelfIntersect;
                 return;
             }
         }
@@ -303,6 +312,7 @@ std::tuple<BooleanFailReason,std::string, It> check_csgmesh_booleans(const Range
         cgalmeshes[i] = std::move(m);
     };
     execution::for_each(ex_tbb, size_t(0), csgrange.size(), check_part);
+    auto [fail_reason, fail_part_name] = first_fail_reason(csgrange, fail_reasons);
 
     It ret = csgrange.end();
     for (size_t i = 0; i < csgrange.size(); ++i) {
@@ -326,11 +336,9 @@ std::tuple<BooleanFailReason, std::string, It> check_csgmesh_booleans(const Rang
         return check_csgmesh_booleans(csgrange, [](auto &) {});
     else {
         using namespace detail_mcut;
-        BooleanFailReason fail_reason = BooleanFailReason::OK;
-        std::string fail_part_name;
-
         std::vector<McutMeshPtr> McutMeshes(csgrange.size());
-        auto check_part = [&csgrange, &McutMeshes,&fail_reason,&fail_part_name](size_t i) {
+        std::vector<BooleanFailReason> fail_reasons(csgrange.size(), BooleanFailReason::OK);
+        auto check_part = [&csgrange, &McutMeshes, &fail_reasons](size_t i) {
             auto it = csgrange.begin();
             std::advance(it, i);
             auto& csgpart = *it;
@@ -344,8 +352,7 @@ std::tuple<BooleanFailReason, std::string, It> check_csgmesh_booleans(const Rang
 
             try {
                 if (!m || MeshBoolean::mcut::empty(*m)) {
-                    fail_reason=BooleanFailReason::MeshEmpty;
-                    fail_part_name = csgpart.name;
+                    fail_reasons[i] = BooleanFailReason::MeshEmpty;
                     return;
                 }
             }
@@ -354,6 +361,7 @@ std::tuple<BooleanFailReason, std::string, It> check_csgmesh_booleans(const Rang
             McutMeshes[i] = std::move(m);
         };
         execution::for_each(ex_tbb, size_t(0), csgrange.size(), check_part);
+        auto [fail_reason, fail_part_name] = first_fail_reason(csgrange, fail_reasons);
         return { fail_reason,fail_part_name, csgrange.end() };
     }
 }
