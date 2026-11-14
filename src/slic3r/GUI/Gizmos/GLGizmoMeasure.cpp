@@ -2256,9 +2256,51 @@ void GLGizmoMeasure::show_face_face_assembly_senior()
             set_to_reverse_rotation(m_same_model_object, 1);
         }
 
-        // Ultra: the "Parallel distance" / "Rotate around center" text boxes were replaced by the live
-        // Adjust sliders (ultra_show_adjust_ui), which work in every assembly mode.
-        (void) action; (void) parallel_distance_size; (void) rotate_around_center_size;
+        // Absolute inputs next to the live Adjust sliders (ultra_show_adjust_ui). The distance is read from the
+        // current feature poses every frame, so it follows the sliders; a typed value moves part 2 by the
+        // difference and the slider baseline restarts from there.
+        (void) action;
+        const Measure::AssemblyAction live = Measure::get_assembly_action(*m_selected_features.first.feature,
+                                                                          *m_selected_features.second.feature);
+        const double unit = m_use_inches ? GizmoObjectManipulation::mm_to_in : 1.0;
+        if (live.has_parallel_distance) {
+            m_imgui->text(_u8L("Parallel distance:"));
+            ImGui::SameLine(parallel_distance_size + m_space_size);
+            ImGui::PushItemWidth(m_input_size_max);
+            if (!m_ultra_para_editing) m_ultra_para_buf = double(live.parallel_distance) * unit;
+            ImGui::BBLInputDouble("##parallel_distance_z", &m_ultra_para_buf, 0.0f, 0.0f, "%.2f");
+            m_ultra_para_editing = ImGui::IsItemActive();
+            const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            m_imgui->text(m_units);
+            if (committed) {
+                const double target_mm = m_ultra_para_buf / unit;
+                const double delta_mm  = target_mm - double(live.parallel_distance);
+                if (std::abs(delta_mm) > 1e-4) {
+                    if (m_same_model_object) set_parallel_distance(true, float(target_mm));
+                    else                     ultra_adjust_offset(delta_mm, true); // keeps the assembly pose in step
+                    m_ultra_adjust_off = 0.f; // sliders restart from the new position
+                    m_ultra_adjust_rot = 0.f;
+                }
+            }
+        }
+        if (live.can_around_center_of_faces) {
+            m_imgui->text(_u8L("Rotate around center:"));
+            ImGui::SameLine(rotate_around_center_size + m_space_size);
+            ImGui::PushItemWidth(m_input_size_max);
+            ImGui::BBLInputDouble("##rotate_around_center", &m_buffered_around_center, 0.0f, 0.0f, "%.2f");
+            const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            m_imgui->text("°");
+            if (committed && std::abs(m_buffered_around_center) > EPSILON) {
+                ultra_adjust_rotate(m_buffered_around_center, true);
+                m_buffered_around_center = 0;
+                m_ultra_adjust_rot       = 0.f;
+                m_ultra_adjust_off       = 0.f;
+            }
+        }
     }
 }
 

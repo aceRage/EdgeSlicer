@@ -375,6 +375,8 @@ protected:
     bool                     m_only_select_plane{false};
     float                    m_ultra_adjust_rot{0.f}; // Ultra: cumulative slider spin (deg) since the last mate / pick
     float                    m_ultra_adjust_off{0.f}; // Ultra: cumulative slider offset (mm) since the last mate / pick
+    double                   m_ultra_para_buf{0.0};   // Ultra: typed Parallel distance (display units)
+    bool                     m_ultra_para_editing{false};
     // Ultra (Curve mode): total normal spread a Curve pick may grow across, and the "no total cap, stop
     // only at sharp edges" mode. Loaded from app config on first use, saved on every change.
     float                    m_ultra_curve_angle{20.f};
