@@ -988,7 +988,12 @@ BoundingBox WipeTowerIntegration::printer_travel_bounds(GCode &gcodegen) const
 // through that opening instead of dragging across the printed wall (BBS append_tcr parity). Emits only
 // the waypoints leading up to the opening; the caller still travels to start_wipe_pos itself. Empty when
 // the gap wall is off, the envelope is unknown, or the approach already starts inside the tower.
-std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const
+// Edge: the opening is level with gap_entry_pos (tcr.gap_entry), not with start_wipe_pos: the gap is cut
+// at the staggered purge start (wipe_tower_stagger_toolchange_start) or the ramming end. The route goes
+// in level with gap_entry_pos, through the opening, to gap_entry_pos, from where the caller's move to
+// start_wipe_pos stays on the tower. Upstream's gap is at the entry, so it routes to start_wipe_pos.
+std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos,
+                                                      const Point &gap_entry_pos) const
 {
     if (!WipeTower2::use_gap_wall(gcodegen.config()) || !m_wipe_tower_bbx.defined)
         return {};
@@ -1008,15 +1013,17 @@ std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Poi
         return {};
     // Edge (#700): the entry's wall faces tower-local -X or +X, whichever side of the tower the entry is on;
     // turned into plate axes by the tower rotation, so on a 90 degree tower the hop crosses the wall.
-    const Vec2f  entry_bed   = unscaled<float>(start_wipe_pos) + gcodegen.origin().cast<float>() - plate_origin_2d;
+    const Vec2f  entry_bed   = unscaled<float>(gap_entry_pos) + gcodegen.origin().cast<float>() - plate_origin_2d;
     const Vec2f  entry_local = Eigen::Rotation2Df(-alpha) * (entry_bed - m_wipe_tower_pos);
     const float  side        = entry_local.x() < 0.5f * float(m_wipe_tower_bbx.min.x() + m_wipe_tower_bbx.max.x()) ? -1.f : 1.f;
     const Vec2f  outward     = Eigen::Rotation2Df(alpha) * Vec2f(side, 0.f);
-    const Polyline travel_polyline = generate_path_to_wipe_tower(route_start, start_wipe_pos, avoid_bbx, printer_travel_bounds(gcodegen), outward);
+    const Polyline travel_polyline = generate_path_to_wipe_tower(route_start, gap_entry_pos, avoid_bbx, printer_travel_bounds(gcodegen), outward);
     std::string    gcode;
-    // The polyline's last point is start_wipe_pos itself, emitted by the caller.
+    // The polyline's last point is gap_entry_pos itself; start_wipe_pos is emitted by the caller.
     for (size_t i = 0; i + 1 < travel_polyline.points.size(); ++i)
         gcode += gcodegen.travel_to(travel_polyline.points[i], erMixed, "Travel to a Wipe Tower");
+    if (gap_entry_pos != start_wipe_pos)
+        gcode += gcodegen.travel_to(gap_entry_pos, erMixed, "Travel to a Wipe Tower");
     return gcode;
 }
 
@@ -1726,6 +1733,10 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                                                          || tool_change_on_wipe_tower);
 
     const Point start_wipe_pos      = wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d);
+    // Edge: where the entry comes in through the wall's gap (see travel_to_tower_gap).
+    const Point gap_entry_pos = tcr.has_gap_entry && !tcr.priming ?
+                                    wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(tcr.gap_entry) + plate_origin_2d) :
+                                    start_wipe_pos;
     // The final purge (new_extruder_id == -1) is not a real tool change: need_toolchange(-1)
     // is true, so !needs_toolchange cannot force this travel. finalize() already pre-travels,
     // but the lift below is gated on z_hop_when_prime; with that flag off there is no lift.
@@ -1755,7 +1766,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
         // Orca #15035: with wall gaps, approach around the tower and enter through this tcr's opening.
         if (!tcr.priming && gcodegen.last_pos_defined())
-            gcode += travel_to_tower_gap(gcodegen, gcodegen.last_pos(), start_wipe_pos);
+            gcode += travel_to_tower_gap(gcodegen, gcodegen.last_pos(), start_wipe_pos, gap_entry_pos);
         gcode += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
         gcode += gcodegen.unretract();
     } else {
@@ -1823,7 +1834,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             if (have_start) {
                 gcodegen.set_last_pos(route_start);
                 gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
-                std::string travel = travel_to_tower_gap(gcodegen, route_start, start_wipe_pos);
+                std::string travel = travel_to_tower_gap(gcodegen, route_start, start_wipe_pos, gap_entry_pos);
                 travel += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
                 check_add_eol(travel);
                 toolchange_gcode_str += travel;

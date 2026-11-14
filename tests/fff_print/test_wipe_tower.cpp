@@ -5,6 +5,7 @@
 #include <clocale>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -971,6 +972,147 @@ TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", 
         REQUIRE(entries > 0);
         if (!gaps && angle == 0)
             CHECK(crossing > 0); // stock: the far-side entries hop straight over the tower
+    }
+}
+
+// The tower entry goes in through the wall's gap, not across the wall beside it. With the purge start
+// staggered (wipe_tower_stagger_toolchange_start, on in the U1 profiles) the gap is cut at the staggered
+// row (get_all_wall_skip_points), up to 16 rows past where the block starts (tcr.start_pos), and the
+// route was aimed at the block start, so the nozzle crossed the wall up to a few mm beside the gap. With
+// three filaments a layer has two tool changes and the first lays the wall (finish_layer), so the second
+// entry crosses a wall of its own layer; with z_hop 0 the nozzle is at that wall's height.
+TEST_CASE("The tower entry crosses the wall only through its gap when the purge start is staggered", "[WipeTower][SkipPoints]")
+{
+    const int  filaments = GENERATE(2, 3);
+    const int  angle     = GENERATE(0, 90);
+    DYNAMIC_SECTION(filaments << " filaments, rotation " << angle) {
+        DynamicPrintConfig config = wait_for_temp_config(false);
+        config.set_num_extruders(filaments);
+        config.set_num_filaments(filaments);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = std::vector<double>(filaments, 1.75);
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = std::vector<double>(filaments, 0.4);
+        config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+        config.option<ConfigOptionStrings>("filament_colour")->values.resize(filaments);
+        config.set_deserialize_strict({
+            { "wipe_tower_wall_type", "rectangle" },
+            { "wipe_tower_wall_gap", "1" },
+            { "wipe_tower_stagger_toolchange_start", "1" },
+            { "wipe_tower_rotation_angle", angle },
+            { "prime_tower_brim_width", "0" },
+            { "filament_multitool_ramming", filaments == 2 ? "0,0" : "0,0,0" },
+            { "z_hop", filaments == 2 ? "0,0" : "0,0,0" },
+            { "wipe_tower_x", "120" },
+            { "wipe_tower_y", "60" },
+            { "wall_filament", "1" },
+            { "outer_wall_filament", "2" },
+            { "sparse_infill_filament", filaments == 2 ? "1" : "3" },
+            { "solid_infill_filament", filaments == 2 ? "1" : "3" },
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.has_wipe_tower());
+        const std::string gcode = Test::gcode(print);
+
+        REQUIRE(print.wipe_tower_data().wipe_tower_mesh_data.has_value());
+        Polygon envelope = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+        envelope.rotate(double(angle) * M_PI / 180.);
+        envelope.translate(Point::new_scale(120., 60.));
+        BoundingBox near_tower = get_extents(envelope);
+        near_tower.offset(scale_(1.));
+        const Eigen::Rotation2Dd to_local(-double(angle) * M_PI / 180.);
+
+        struct Move { Vec2d a, b; double z; bool extrudes; };
+        std::vector<Move> moves;
+        {
+            Vec2d  pos(0., 0.);
+            double z = 0.;
+            for (const std::string &line : split_lines(gcode)) {
+                if (line.rfind("G1 ", 0) != 0)
+                    continue;
+                Vec2d  next     = pos;
+                bool   extrudes = false;
+                std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+                for (std::string w; words >> w;) {
+                    if (w.size() < 2)
+                        continue;
+                    if (w[0] == 'X' || w[0] == 'Y')
+                        (w[0] == 'X' ? next.x() : next.y()) = std::atof(w.c_str() + 1);
+                    else if (w[0] == 'Z')
+                        z = std::atof(w.c_str() + 1);
+                    else if (w[0] == 'E' && std::atof(w.c_str() + 1) > 0.)
+                        extrudes = true;
+                }
+                if (next != pos)
+                    moves.push_back({ pos, next, z, extrudes });
+                pos = next;
+            }
+        }
+        auto on_tower = [&near_tower](const Vec2d &p) { return near_tower.contains(Point::new_scale(p.x(), p.y())); };
+        // Each layer's tower wall: the tower's lines along the edges of the box round that layer's tower
+        // lines, in tower-local axes (a rectangle wall).
+        std::map<long, std::vector<const Move *>> tower_lines;
+        for (const Move &m : moves)
+            if (m.extrudes && on_tower(m.a) && on_tower(m.b))
+                tower_lines[std::lround(m.z * 1000.)].push_back(&m);
+        auto wall_of = [&](long layer) {
+            std::vector<std::pair<Vec2d, Vec2d>> wall;
+            BoundingBoxf box;
+            for (const Move *m : tower_lines[layer]) {
+                box.merge(to_local * m->a);
+                box.merge(to_local * m->b);
+            }
+            auto on_edge = [&box](const Vec2d &p) {
+                return std::min({ std::abs(p.x() - box.min.x()), std::abs(p.x() - box.max.x()), std::abs(p.y() - box.min.y()),
+                                  std::abs(p.y() - box.max.y()) }) < 0.05;
+            };
+            for (const Move *m : tower_lines[layer]) {
+                const Vec2d a = to_local * m->a, b = to_local * m->b;
+                if (on_edge(a) && on_edge(b) && (std::abs(a.x() - b.x()) < 0.05 || std::abs(a.y() - b.y()) < 0.05))
+                    wall.emplace_back(m->a, m->b);
+            }
+            return wall;
+        };
+        auto crosses = [](const Vec2d &p, const Vec2d &q, const Vec2d &a, const Vec2d &b, Vec2d &at) {
+            const Vec2d  r = q - p, s = b - a;
+            const double den = cross2(r, s);
+            if (std::abs(den) < 1e-12)
+                return false;
+            const double t = cross2(Vec2d(a - p), s) / den, u = cross2(Vec2d(a - p), r) / den;
+            at = p + t * r;
+            return t > 1e-6 && t < 1. - 1e-6 && u > 1e-6 && u < 1. - 1e-6;
+        };
+
+        // The entries: runs of travels from off the tower to the tower, then extruding on it. Each one's
+        // crossings of that layer's wall.
+        int entries = 0, across_the_wall = 0;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            if (moves[i].extrudes || on_tower(moves[i].a))
+                continue;
+            size_t k = i;
+            while (k < moves.size() && !moves[k].extrudes)
+                ++k;
+            if (k == moves.size() || !on_tower(moves[k].a) || !on_tower(moves[k].b)) {
+                i = k;
+                continue;
+            }
+            ++entries;
+            const long layer = std::lround(moves[k].z * 1000.);
+            for (const auto &[a, b] : wall_of(layer))
+                for (size_t j = i; j < k; ++j) {
+                    Vec2d at;
+                    if (crosses(moves[j].a, moves[j].b, a, b, at)) {
+                        ++across_the_wall;
+                        INFO("layer z " << moves[k].z << ": the travel " << moves[j].a.transpose() << " -> " << moves[j].b.transpose()
+                                        << " at z " << moves[j].z << " crosses the wall line " << a.transpose() << " -> " << b.transpose()
+                                        << " at " << at.transpose());
+                        CHECK(false);
+                    }
+                }
+            i = k;
+        }
+        REQUIRE(entries > 0);
+        CHECK(across_the_wall == 0);
     }
 }
 
