@@ -387,6 +387,7 @@ protected:
     double                   m_ultra_para_buf{0.0};   // Ultra: typed Parallel distance (display units)
     bool                     m_ultra_para_editing{false};
     bool                     m_ultra_para_sliding{false};
+    bool                     m_ultra_adjusting{false}; // an Adjust slider/box is active this frame
     float                    m_ultra_para_sval{0.f};
     double                   m_ultra_rot_buf{0.0}, m_ultra_off_buf{0.0}, m_ultra_cen_buf{0.0};
     float                    m_ultra_cen_rot{0.f}; // Ultra: cumulative Rotate-around-center slider (deg)

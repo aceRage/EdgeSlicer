@@ -1386,11 +1386,15 @@ void GLGizmoMeasure::render_dimensioning()
         m_imgui->set_next_window_pos(label_position.x(), viewport[3] - label_position.y(), ImGuiCond_Always, 0.0f, 1.0f);
         m_imgui->set_next_window_bg_alpha(0.0f);
 
-        if (!m_editing_distance && show_label) {
+        // The label is an ImGui window that appears / disappears as the gap crosses small values. A window
+        // that appears takes focus (ImGui::FocusWindow), and focusing another window cancels the active item
+        // of the Adjust slider being dragged -- the drag stuck near zero. So: never take focus, and stay
+        // hidden while an Adjust control is being dragged (the box shows the value).
+        if (!m_editing_distance && show_label && !m_ultra_adjusting) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 1.0f, 1.0f });
-            m_imgui->begin(std::string("distance"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration);
+            m_imgui->begin(std::string("distance"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
             ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
             ImGui::AlignTextToFramePadding();
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -3421,6 +3425,7 @@ void GLGizmoMeasure::ultra_show_curve_pick_ui()
 // applied as a delta. One undo snapshot per drag (taken when the slider is grabbed).
 void GLGizmoMeasure::ultra_show_adjust_ui()
 {
+    m_ultra_adjusting = false;
     if (m_measure_mode != EMeasureMode::ONLY_ASSEMBLY || m_hit_different_volumes.size() != 2) return;
     if (!m_selected_features.first.feature.has_value() || !m_selected_features.second.feature.has_value()) return;
     Vec3d d, p;
@@ -3532,6 +3537,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
                 if (std::abs(delta) > 1e-4) { ultra_adjust_orbit(delta, true); m_ultra_cen_rot = float(typed); }
             });
     }
+    m_ultra_adjusting = ImGui::IsAnyItemActive(); // read next frame by render_dimensioning
 }
 
 void GLGizmoMeasure::set_parallel_distance(bool same_model_object, float dist)
