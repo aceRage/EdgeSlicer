@@ -6,7 +6,6 @@
 #include "PluginIpcProtocol.hpp"
 
 #include <libslic3r/PrintConfig.hpp>
-#include <libslic3r/UntrustedInput.hpp>
 #include <libslic3r/Utils.hpp>
 #include <slic3r/GUI/GUI.hpp>
 #include <slic3r/GUI/GUI_App.hpp>
@@ -25,7 +24,6 @@
 #include <deque>
 #include <future>
 #include <mutex>
-#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <wx/app.h>
@@ -38,21 +36,6 @@ std::atomic<bool>          g_force_in_process{false};
 std::atomic<int>           g_execute_timeout_ms{k_default_timeout_ms};
 std::atomic<std::uint64_t> g_spawn_count{0};
 std::atomic<bool>          g_logged_fallback{false};
-
-bool is_config_snapshot_banned(const std::string& key)
-{
-    if (is_visual_only_option(key))
-        return true;
-    static const std::unordered_set<std::string_view> extra{"compatible_printers", "compatible_prints",
-                                                            "filament_colour_type"};
-    if (extra.count(key) != 0)
-        return true;
-    for (const std::string& banned : untrusted::network_endpoint_keys()) {
-        if (banned == key)
-            return true;
-    }
-    return false;
-}
 
 void log_host_fallback_once(const char* reason)
 {
@@ -92,7 +75,7 @@ void attach_plugin_identity(nlohmann::json& msg, const std::string& plugin_key)
 
 struct Job
 {
-    enum class Kind { Script, PostProcess };
+    enum class Kind { Script, PostProcess, Unload };
     Kind                                         kind{Kind::Script};
     std::string                                  plugin_key;
     std::string                                  capability_name;
@@ -112,7 +95,7 @@ nlohmann::json PluginHostClient::config_snapshot(const DynamicPrintConfig* confi
     if (config == nullptr)
         return out;
     for (const std::string& key : config->keys()) {
-        if (is_config_snapshot_banned(key))
+        if (is_gcode_full_config_banned(key))
             continue;
         try {
             out[key] = config->opt_serialize(key);
@@ -153,6 +136,9 @@ struct PluginHostClient::Impl
     std::atomic<bool>       stopping{false};
     std::atomic<bool>       cancel_requested{false};
     std::atomic<std::int64_t> live_pid{0};
+#ifdef _WIN32
+    std::atomic<void*>      live_process{nullptr};
+#endif
     std::string             cancel_plugin_key;
     std::string             running_plugin_key;
     std::atomic<std::uint64_t> next_id{1};
@@ -178,8 +164,23 @@ struct PluginHostClient::Impl
         worker = std::thread([this] { worker_loop(); });
     }
 
+    void kill_live()
+    {
+#ifdef _WIN32
+        void* h = live_process.load(std::memory_order_acquire);
+        if (h)
+            kill_host_handle(h);
+#else
+        const std::int64_t pid = live_pid.load(std::memory_order_acquire);
+        if (pid > 0)
+            kill_host_pid(pid);
+#endif
+    }
+
     void fail_job(Job& job, const std::string& error, bool cancelled)
     {
+        if (job.kind == Job::Kind::Unload)
+            return;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             active.erase(job.plugin_key);
@@ -206,18 +207,17 @@ struct PluginHostClient::Impl
         }
         const std::string current_data = Slic3r::data_dir();
         const std::string current_res  = Slic3r::resources_dir();
-        if (host.valid() && (current_data != data_dir || current_res != resources_dir)) {
-            kill_host(host);
-            close_host(host);
-            live_pid.store(0, std::memory_order_release);
-            loaded.clear();
-        }
+        if (host.valid() && (current_data != data_dir || current_res != resources_dir))
+            reset_child_locked();
         if (host.valid())
             return true;
         if (!spawn_host(host, error))
             return false;
         g_spawn_count.fetch_add(1, std::memory_order_relaxed);
         live_pid.store(host.pid, std::memory_order_release);
+#ifdef _WIN32
+        live_process.store(host.process, std::memory_order_release);
+#endif
         data_dir      = current_data;
         resources_dir = current_res;
 
@@ -251,11 +251,16 @@ struct PluginHostClient::Impl
 
     void reset_child_locked()
     {
+        // Drop the published pid/handle before reap so a recycled pid (or a
+        // reused HANDLE) cannot be killed by a concurrent cancel.
+        live_pid.store(0, std::memory_order_release);
+#ifdef _WIN32
+        live_process.store(nullptr, std::memory_order_release);
+#endif
         if (host.valid()) {
             kill_host(host);
             close_host(host);
         }
-        live_pid.store(0, std::memory_order_release);
         loaded.clear();
     }
 
@@ -279,7 +284,7 @@ struct PluginHostClient::Impl
             return false;
         }
         const auto got = reply.value("id", static_cast<std::uint64_t>(0));
-        if (got != 0 && got != id) {
+        if (got != id) {
             error = "plugin host request id mismatch";
             reset_child_locked();
             return false;
@@ -423,8 +428,33 @@ struct PluginHostClient::Impl
         }
     }
 
+    void run_unload(Job& job)
+    {
+        std::unique_lock<std::mutex> io(io_mutex);
+        loaded.erase(job.plugin_key);
+        if (!host.valid())
+            return;
+        std::string    error;
+        nlohmann::json msg = {
+            {"type", k_type_unload},
+            {"id", next_id.fetch_add(1, std::memory_order_relaxed)},
+            {"plugin_key", job.plugin_key},
+        };
+        if (!host.channel.write_json(msg, 5000, error)) {
+            reset_child_locked();
+            return;
+        }
+        nlohmann::json reply;
+        if (!host.channel.read_json(reply, 5000, error))
+            reset_child_locked();
+    }
+
     void run_job(Job& job)
     {
+        if (job.kind == Job::Kind::Unload) {
+            run_unload(job);
+            return;
+        }
         std::string error;
         bool        cancelled_before_io = false;
         {
@@ -487,6 +517,8 @@ struct PluginHostClient::Impl
             active.erase(job.plugin_key);
             if (running_plugin_key == job.plugin_key)
                 running_plugin_key.clear();
+            if (is_cancelled_locked(job.plugin_key))
+                consume_cancel_locked(job.plugin_key);
         }
         if (job.kind == Job::Kind::Script) {
             ScriptCompletion completion;
@@ -692,29 +724,20 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
 
 void PluginHostClient::unload(const std::string& plugin_key)
 {
-    Impl& i = impl();
+    Impl& i   = impl();
+    auto  job = std::make_shared<Job>();
+    job->kind       = Job::Kind::Unload;
+    job->plugin_key = plugin_key;
     {
         std::lock_guard<std::mutex> lock(i.state_mutex);
         if (plugin_key.empty() || i.active.count(plugin_key))
             return;
+        if (i.stopping.load(std::memory_order_acquire))
+            return;
+        i.queue.push_back(job);
+        i.ensure_worker_locked();
+        i.cv.notify_one();
     }
-    std::lock_guard<std::mutex> io(i.io_mutex);
-    i.loaded.erase(plugin_key);
-    if (!i.host.valid())
-        return;
-    std::string    error;
-    nlohmann::json msg = {
-        {"type", k_type_unload},
-        {"id", i.next_id.fetch_add(1, std::memory_order_relaxed)},
-        {"plugin_key", plugin_key},
-    };
-    if (!i.host.channel.write_json(msg, 5000, error)) {
-        i.reset_child_locked();
-        return;
-    }
-    nlohmann::json reply;
-    if (!i.host.channel.read_json(reply, 5000, error))
-        i.reset_child_locked();
 }
 
 void PluginHostClient::cancel(const std::string& plugin_key)
@@ -727,21 +750,13 @@ void PluginHostClient::cancel(const std::string& plugin_key)
         i.cancel_requested.store(true, std::memory_order_release);
         i.cancel_plugin_key = plugin_key;
     }
-    {
-        std::unique_lock<std::mutex> io(i.io_mutex, std::try_to_lock);
-        if (io.owns_lock() && i.host.valid()) {
-            std::string    error;
-            nlohmann::json msg = {{"type", k_type_cancel}, {"plugin_key", plugin_key}};
-            (void) i.host.channel.write_json(msg, 100, error);
-        }
-    }
-    // live_pid can still be 0 if the job is only queued. Re-read it after the grace
-    // period, and only kill the host that is running this plugin.
+    // Do not write a cancel frame: during a pump try_lock always fails, and an idle
+    // id-less cancel reply would poison the next job as an id mismatch. Kill by pid
+    // (or the stored process handle on Windows) after the grace period.
     std::thread([plugin_key, impl = m_impl]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(k_cancel_grace_ms));
         if (!impl)
             return;
-        std::int64_t pid = 0;
         {
             std::lock_guard<std::mutex> lock(impl->state_mutex);
             if (!impl->cancel_requested.load(std::memory_order_acquire))
@@ -750,10 +765,8 @@ void PluginHostClient::cancel(const std::string& plugin_key)
                 return;
             if (impl->running_plugin_key != plugin_key)
                 return;
-            pid = impl->live_pid.load(std::memory_order_acquire);
         }
-        if (pid > 0)
-            kill_host_pid(pid);
+        impl->kill_live();
     }).detach();
 }
 
@@ -767,11 +780,15 @@ bool PluginHostClient::has_active_run(const std::string& plugin_key) const
 
 bool PluginHostClient::kill_child_for_testing()
 {
-    Impl&              i   = impl();
-    const std::int64_t pid = i.live_pid.load(std::memory_order_acquire);
-    if (pid <= 0)
+    Impl& i = impl();
+#ifdef _WIN32
+    if (i.live_process.load(std::memory_order_acquire) == nullptr)
         return false;
-    kill_host_pid(pid);
+#else
+    if (i.live_pid.load(std::memory_order_acquire) <= 0)
+        return false;
+#endif
+    i.kill_live();
     return true;
 }
 
@@ -789,10 +806,9 @@ void PluginHostClient::shutdown()
     m_impl->stopping.store(true, std::memory_order_release);
     m_impl->cv.notify_all();
     // Never wait on io_mutex here: the worker holds it for the whole pump. Kill by
-    // pid so a hung execute unblocks, then join, then close leftovers.
-    const std::int64_t pid = m_impl->live_pid.load(std::memory_order_acquire);
-    if (pid > 0)
-        kill_host_pid(pid);
+    // pid (or the stored process handle on Windows) so a hung execute unblocks,
+    // then join, then close leftovers.
+    m_impl->kill_live();
     if (m_impl->worker.joinable())
         m_impl->worker.join();
     std::deque<std::shared_ptr<Job>> leftover;
@@ -810,11 +826,10 @@ void PluginHostClient::shutdown()
             std::string    error;
             nlohmann::json msg = {{"type", k_type_shutdown}};
             (void) m_impl->host.channel.write_json(msg, 200, error);
-            kill_host(m_impl->host);
-            close_host(m_impl->host);
-            m_impl->live_pid.store(0, std::memory_order_release);
+            m_impl->reset_child_locked();
+        } else {
+            m_impl->loaded.clear();
         }
-        m_impl->loaded.clear();
     }
     for (auto& job : leftover)
         m_impl->fail_job(*job, "plugin host is shutting down", false);

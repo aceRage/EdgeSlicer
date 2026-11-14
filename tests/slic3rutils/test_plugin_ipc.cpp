@@ -117,6 +117,28 @@ class Pkg(orca.base):
         orca.register_capability(Hang)
 )PY";
 
+const char* const SLEEP_OK_SOURCE = R"PY(# /// script
+# requires-python = ">=3.12"
+#
+# [tool.orcaslicer.plugin]
+# name = "Ipc Sleep Ok"
+# type = "script"
+# ///
+import time, orca
+
+class SleepOk(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "SleepOk"
+    def execute(self):
+        time.sleep(0.2)
+        return orca.ExecutionResult.success("slept")
+
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(SleepOk)
+)PY";
+
 const char* const KILL_MARKER_SOURCE_PREFIX = R"PY(# /// script
 # requires-python = ">=3.12"
 #
@@ -596,6 +618,9 @@ TEST_CASE("config_snapshot omits print-host secrets", "[PluginIpc][snapshot]")
     CHECK_FALSE(snap.contains("printhost_password"));
     CHECK_FALSE(snap.contains("printhost_cafile"));
     CHECK_FALSE(snap.contains("printhost_port"));
+    CHECK_FALSE(snap.contains("compatible_printers"));
+    CHECK_FALSE(snap.contains("compatible_prints"));
+    CHECK_FALSE(snap.contains("filament_colour_type"));
 }
 
 TEST_CASE("post-process execute timeout scales with G-code size unless tests override it", "[PluginIpc][timeout]")
@@ -690,6 +715,52 @@ TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[Plug
     CHECK((completion.cancelled || !completion.error.empty()));
 }
 
+TEST_CASE("A cancel that races a successful run does not auto-cancel the next job",
+          "[PluginIpc][Python][cancel]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("plugin-ipc-cancel-next");
+    write_plugin(data_dir_guard, "Ipc_SleepOk", SLEEP_OK_SOURCE);
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Ipc_SleepOk", error));
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    done = false;
+    ScriptCompletion        first;
+    auto launch = manager.launch_script_capability("Ipc_SleepOk", "SleepOk", [&](const ScriptCompletion& c) {
+        std::lock_guard<std::mutex> lock(mutex);
+        first = c;
+        done  = true;
+        cv.notify_all();
+    });
+    REQUIRE(launch.launched_async);
+    const auto start = std::chrono::steady_clock::now();
+    while (!PluginHostClient::instance().has_active_run("Ipc_SleepOk")) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(10))
+            FAIL("SleepOk never became active");
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    PluginHostClient::instance().cancel("Ipc_SleepOk");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(15), [&] { return done; }));
+    }
+
+    const ScriptCompletion second = wait_for_script(manager, "Ipc_SleepOk", "SleepOk");
+    CHECK(second.error.empty());
+    CHECK_FALSE(second.cancelled);
+    CHECK(second.result.message == "slept");
+}
+
 const char* const WRITE_PROBE_SOURCE_PREFIX = R"PY(# /// script
 # requires-python = ">=3.12"
 # requires-orca-api = "1.0.0"
@@ -701,8 +772,10 @@ const char* const WRITE_PROBE_SOURCE_PREFIX = R"PY(# /// script
 # version = "1.0"
 # type = "script"
 # ///
-import orca
+import os, time, orca
 
+STARTED_PATH = "__STARTED_PATH__"
+GO_PATH = "__GO_PATH__"
 PROBE_PATH = "__PROBE_PATH__"
 
 class Probe(orca.script.ScriptPluginCapabilityBase):
@@ -710,6 +783,12 @@ class Probe(orca.script.ScriptPluginCapabilityBase):
         return "Probe"
 
     def execute(self):
+        with open(STARTED_PATH, "w", encoding="utf-8") as f:
+            f.write("1")
+        for _ in range(400):
+            if os.path.exists(GO_PATH):
+                break
+            time.sleep(0.05)
         try:
             with open(PROBE_PATH, "w", encoding="utf-8") as f:
                 f.write("from-script")
@@ -723,6 +802,60 @@ class WriteProbePackage(orca.base):
         orca.register_capability(Probe)
 )PY";
 
+const char* const WAIT_STAMP_SOURCE_PREFIX = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "Pipeline Stamp"
+# description = "Waits for a GO flag, then appends a fixed comment block at psGCodePostProcess."
+# author = "tests"
+# version = "1.0.0"
+# type = "slicing-pipeline"
+# ///
+import os, time, orca
+
+STARTED_PATH = "__STARTED_PATH__"
+GO_PATH = "__GO_PATH__"
+STAMP = (
+    "; EDGE_PIPELINE_STAMP begin\n"
+    "; EdgeSlicer pipeline plugin stamp v1\n"
+    "; EDGE_PIPELINE_STAMP end\n"
+)
+
+class Stamp(orca.slicing.SlicingPipelineCapabilityBase):
+    def get_name(self):
+        return "Stamp"
+
+    def execute(self, ctx):
+        if ctx.step != orca.slicing.Step.psGCodePostProcess:
+            return orca.ExecutionResult.success()
+        with open(STARTED_PATH, "w", encoding="utf-8") as f:
+            f.write("1")
+        for _ in range(400):
+            if os.path.exists(GO_PATH):
+                break
+            time.sleep(0.05)
+        if not ctx.gcode_path:
+            return orca.ExecutionResult.failure(orca.PluginResult.FatalError, "missing gcode_path")
+        with open(ctx.gcode_path, "a", encoding="utf-8") as f:
+            f.write(STAMP)
+        return orca.ExecutionResult.success("stamped")
+
+@orca.plugin
+class PipelineStampPackage(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Stamp)
+)PY";
+
+std::string replace_placeholder(std::string src, const std::string& placeholder, const std::string& value)
+{
+    const auto pos = src.find(placeholder);
+    REQUIRE(pos != std::string::npos);
+    src.replace(pos, placeholder.size(), value);
+    return src;
+}
+
 TEST_CASE("Concurrent script and post-process each get their own result; script cannot use the post-process write root",
           "[PluginIpc][Python][concurrent]")
 {
@@ -734,16 +867,25 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
     ScopedDataDir data_dir_guard("plugin-ipc-concurrent");
-    write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
+    PluginAuditManager::instance().add_global_allowed_root(data_dir());
     ScopedTemporaryDir gcode_dir("ipc-concurrent-gcode");
-    const fs::path     gcode = gcode_dir.path() / "box.gcode";
-    const fs::path     probe = gcode_dir.path() / "from_script.txt";
+    const fs::path     gcode          = gcode_dir.path() / "box.gcode";
+    const fs::path     probe          = gcode_dir.path() / "from_script.txt";
+    const fs::path     script_started = data_dir_guard.plugins_dir() / "script_started";
+    const fs::path     script_go      = data_dir_guard.plugins_dir() / "script_go";
+    const fs::path     stamp_started  = data_dir_guard.plugins_dir() / "stamp_started";
+    const fs::path     stamp_go       = data_dir_guard.plugins_dir() / "stamp_go";
     write_file(gcode, "G1 X10 Y10 E0.1\n");
-    std::string       probe_src   = WRITE_PROBE_SOURCE_PREFIX;
-    const std::string placeholder = "__PROBE_PATH__";
-    const auto        pos         = probe_src.find(placeholder);
-    REQUIRE(pos != std::string::npos);
-    probe_src.replace(pos, placeholder.size(), probe.string());
+
+    std::string stamp_src = WAIT_STAMP_SOURCE_PREFIX;
+    stamp_src = replace_placeholder(stamp_src, "__STARTED_PATH__", stamp_started.string());
+    stamp_src = replace_placeholder(stamp_src, "__GO_PATH__", stamp_go.string());
+    write_plugin(data_dir_guard, "PipelineStamp", stamp_src);
+
+    std::string probe_src = WRITE_PROBE_SOURCE_PREFIX;
+    probe_src = replace_placeholder(probe_src, "__STARTED_PATH__", script_started.string());
+    probe_src = replace_placeholder(probe_src, "__GO_PATH__", script_go.string());
+    probe_src = replace_placeholder(probe_src, "__PROBE_PATH__", probe.string());
     write_plugin(data_dir_guard, "Ipc_Probe", probe_src);
 
     PluginManager& manager = PluginManager::instance();
@@ -764,11 +906,29 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
         cv.notify_all();
     });
     REQUIRE(launch.launched_async);
+    REQUIRE(wait_for_file(script_started, std::chrono::seconds(15)));
 
     DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
     std::string        path   = gcode.string();
     std::string        output = gcode.string();
-    REQUIRE(run_post_process_scripts(path, false, "File", output, config));
+    bool               post_ok = false;
+    std::thread        post([&] {
+        post_ok = run_post_process_scripts(path, false, "File", output, config);
+    });
+
+    const auto overlap_start = std::chrono::steady_clock::now();
+    while (!(PluginHostClient::instance().has_active_run("Ipc_Probe") &&
+             PluginHostClient::instance().has_active_run("PipelineStamp"))) {
+        if (std::chrono::steady_clock::now() - overlap_start > std::chrono::seconds(15)) {
+            post.join();
+            FAIL("both jobs never became active together");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    write_file(script_go, "1");
+    write_file(stamp_go, "1");
+    post.join();
+    REQUIRE(post_ok);
 
     {
         std::unique_lock<std::mutex> lock(mutex);

@@ -6,7 +6,6 @@
 
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdlib.hpp>
 
@@ -28,15 +27,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
-#include <spawn.h>
 #include <sys/prctl.h>
 #endif
 #include <cerrno>
 #include <poll.h>
-#endif
-
-#ifndef _WIN32
-extern char** environ;
 #endif
 
 namespace Slic3r::plugin_ipc {
@@ -68,6 +62,27 @@ void set_cloexec(int fd)
     const int fl = ::fcntl(fd, F_GETFD);
     if (fl >= 0)
         ::fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+}
+
+void clear_cloexec(int fd)
+{
+    if (fd < 0)
+        return;
+    const int fl = ::fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        ::fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+}
+
+// Move fd to a number >= min_fd so later dup2(3)/dup2(4) cannot clobber it.
+int move_fd_ge(int fd, int min_fd)
+{
+    if (fd < 0)
+        return -1;
+    const int n = ::fcntl(fd, F_DUPFD, min_fd);
+    if (n < 0)
+        return -1;
+    ::close(fd);
+    return n;
 }
 
 void set_nosigpipe(int fd)
@@ -254,10 +269,15 @@ bool spawn_host(SpawnedHost& out, std::string& error)
     return true;
 }
 
+void kill_host_handle(void* process)
+{
+    if (process)
+        ::TerminateProcess(static_cast<HANDLE>(process), 1);
+}
+
 void kill_host(SpawnedHost& host)
 {
-    if (host.process)
-        ::TerminateProcess(static_cast<HANDLE>(host.process), 1);
+    kill_host_handle(host.process);
 }
 
 void kill_host_pid(std::int64_t pid)
@@ -340,19 +360,25 @@ bool spawn_host_fork(SpawnedHost& out,
         ::close(sv[0]);
         ::close(errp[0]);
         ::close(watchdog[1]);
-        if (sv[1] != 3) {
-            if (::dup2(sv[1], 3) < 0)
-                ::_exit(127);
-            ::close(sv[1]);
-            sv[1] = 3;
-        }
-        if (watchdog[0] != 4) {
-            if (::dup2(watchdog[0], 4) < 0)
-                ::_exit(127);
-            if (watchdog[0] != 3)
-                ::close(watchdog[0]);
-            watchdog[0] = 4;
-        }
+        // Move the kept fds above 10 first so dup2(3)/dup2(4) cannot clobber
+        // watchdog[0] or errp[1], and so a CLOEXEC fd that already is 3 or 4 still
+        // gets a real dup2 (dup2 clears FD_CLOEXEC; skipping it left CLOEXEC set).
+        int ipc = move_fd_ge(sv[1], 11);
+        int wd  = move_fd_ge(watchdog[0], 11);
+        int err = move_fd_ge(errp[1], 11);
+        if (ipc < 0 || wd < 0 || err < 0)
+            ::_exit(127);
+        if (::dup2(ipc, 3) < 0)
+            ::_exit(127);
+        if (ipc != 3)
+            ::close(ipc);
+        if (::dup2(wd, 4) < 0)
+            ::_exit(127);
+        if (wd != 4)
+            ::close(wd);
+        clear_cloexec(3);
+        clear_cloexec(4);
+        errp[1] = err;
         const int ipc_fd = 3;
         const int wd_fd  = 4;
         const int keep[] = {ipc_fd, wd_fd, errp[1]};
@@ -403,71 +429,6 @@ bool spawn_host_fork(SpawnedHost& out,
     return true;
 }
 
-#if defined(__linux__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
-bool spawn_host_posix_spawn(SpawnedHost& out,
-                            const boost::filesystem::path& helper,
-                            int sv[2],
-                            int watchdog[2],
-                            std::string& error)
-{
-    const std::string helper_str = helper.string();
-    char              fd_arg[]   = "3";
-    char              wd_arg[]   = "4";
-    char*             argv[]     = {const_cast<char*>(helper_str.c_str()),
-                                    const_cast<char*>("--ipc-fd"),
-                                    fd_arg,
-                                    const_cast<char*>("--parent-watchdog-fd"),
-                                    wd_arg,
-                                    nullptr};
-
-    posix_spawn_file_actions_t fa;
-    posix_spawnattr_t          attr;
-    if (posix_spawn_file_actions_init(&fa) != 0) {
-        error = "posix_spawn_file_actions_init failed";
-        return false;
-    }
-    if (posix_spawnattr_init(&attr) != 0) {
-        posix_spawn_file_actions_destroy(&fa);
-        error = "posix_spawnattr_init failed";
-        return false;
-    }
-
-    short flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT;
-    posix_spawnattr_setflags(&attr, flags);
-    posix_spawnattr_setpgroup(&attr, 0);
-
-    auto add_dup2 = [&](int from, int to) {
-        return posix_spawn_file_actions_adddup2(&fa, from, to) == 0;
-    };
-    auto add_close = [&](int fd) {
-        if (fd == 3 || fd == 4)
-            return true;
-        return posix_spawn_file_actions_addclose(&fa, fd) == 0;
-    };
-
-    bool ok = add_dup2(sv[1], 3) && add_dup2(watchdog[0], 4) && add_close(sv[0]) && add_close(sv[1]) &&
-              add_close(watchdog[0]) && add_close(watchdog[1]);
-    pid_t pid = 0;
-    int   rc  = ok ? posix_spawn(&pid, helper_str.c_str(), &fa, &attr, argv, environ) : EINVAL;
-    posix_spawnattr_destroy(&attr);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc != 0) {
-        error = "posix_spawn failed";
-        return false;
-    }
-
-    close_fd(sv[1]);
-    close_fd(watchdog[0]);
-    set_nosigpipe(sv[0]);
-    out.channel           = Channel::from_posix_fd(sv[0]);
-    out.pid               = static_cast<std::int64_t>(pid);
-    out.watchdog_write_fd = watchdog[1];
-    sv[0]                 = -1;
-    watchdog[1]           = -1;
-    return true;
-}
-#endif
-
 } // namespace
 
 bool spawn_host(SpawnedHost& out, std::string& error)
@@ -494,14 +455,6 @@ bool spawn_host(SpawnedHost& out, std::string& error)
         error = "watchdog pipe failed";
         return false;
     }
-
-#if defined(__linux__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
-    if (spawn_host_posix_spawn(out, helper, sv, watchdog, error))
-        return true;
-    BOOST_LOG_TRIVIAL(warning) << "posix_spawn of edge-plugin-host failed (" << error
-                               << "); falling back to fork";
-    error.clear();
-#endif
 
     int errp[2] = {-1, -1};
     if (pipe_cloexec(errp) != 0) {

@@ -32,8 +32,8 @@ bool                    helper_exists();
 void set_allow_helper_env_overrides_for_testing(bool allow);
 bool helper_env_overrides_allowed();
 
-// Spawn edge-plugin-host. POSIX: socketpair + fork/exec (Linux: posix_spawn when
-// POSIX_SPAWN_CLOEXEC_DEFAULT is available), keep the IPC fd, own process group.
+// Spawn edge-plugin-host. POSIX: socketpair + fork/exec. POSIX_SPAWN_CLOEXEC_DEFAULT
+// is Apple-only (glibc has no such flag), so Linux never takes a posix_spawn path.
 // Linux child installs PR_SET_PDEATHSIG. Every POSIX spawn also keeps a parent-pipe
 // EOF watchdog so the helper dies if the spawning thread exits while Edge lives.
 // Windows: named pipe + Job object (KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=1, no breakaway),
@@ -42,6 +42,9 @@ bool spawn_host(SpawnedHost& out, std::string& error);
 
 void kill_host(SpawnedHost& host);
 void kill_host_pid(std::int64_t pid);
+#ifdef _WIN32
+void kill_host_handle(void* process);
+#endif
 void close_host(SpawnedHost& host);
 
 } // namespace Slic3r::plugin_ipc

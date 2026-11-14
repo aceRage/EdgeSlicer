@@ -11940,6 +11940,25 @@ const std::set<std::string>& visual_only_option_keys()
     return s_keys;
 }
 
+const std::set<std::string_view>& gcode_full_config_banned_keys()
+{
+    // OrcaSlicer #13507: filament_colour_type crashes the Anycubic Kobra 3 config parser. This fork
+    // has no such option yet; the ban keeps the block safe once a profile sync or port brings it in.
+    static const std::set<std::string_view> s_keys{
+        "compatible_printers",
+        "compatible_prints",
+        "filament_colour_type",
+        "print_host",
+        "print_host_webui",
+        "printhost_apikey",
+        "printhost_cafile",
+        "printhost_user",
+        "printhost_password",
+        "printhost_port",
+    };
+    return s_keys;
+}
+
 namespace {
 
 // One visual-only vector option, whatever its element type, through its typed values vector.
