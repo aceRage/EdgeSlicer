@@ -1673,7 +1673,9 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
                 writer.polygon(wall, wall_feedrate(m_current_tool), false);
                 record_outer_wall(wall);
             } else
-                writer.rectangle(wt_box);
+                // At the wall speed, as the rib wall above and finish_layer() draw it: with no feedrate
+                // the wall ran at whatever the change G-code and the travel back left in force.
+                writer.rectangle(wt_box, wall_feedrate(m_current_tool));
         }
 
         {
