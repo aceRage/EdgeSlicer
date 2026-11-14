@@ -331,6 +331,7 @@ public:
 		m_z_pos 				= print_z;
 		m_layer_height			= layer_height;
 		m_depth_traversed  = 0.f;
+        m_ramming_traversed = 0.f;
         m_current_layer_finished = false;
 		//m_current_shape = (! is_first_layer && m_current_shape == SHAPE_NORMAL) ? SHAPE_REVERSED : SHAPE_NORMAL;
 		m_current_shape = SHAPE_NORMAL;
@@ -577,6 +578,9 @@ private:
 	const float		m_wipe_volume;
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
+    // Edge (review S1): the layer's ramming rows sit behind all of its purges, in their own band, so the purge rows
+    // keep one grid from layer to layer whether or not a layer rams; this is how far into that band the layer is.
+    float           m_ramming_traversed = 0.f;
     bool            m_current_layer_finished = false;
 	bool 			m_left_to_right   = true;
 	float			m_extra_spacing   = 1.f;

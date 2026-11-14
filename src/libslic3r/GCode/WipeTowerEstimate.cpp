@@ -190,6 +190,20 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         }
         if (nozzles.size() > 1)
             purges[longest_ramming].filament_change_length = float(float_at("filament_change_length", filament_ids[longest_ramming], 0.) * double(nozzles.size() - 1));
+        // Bambu Studio 2.9.1 ramming on hotend changes too (review S5): on a hotend_as_extruder printer (H3C) every
+        // filament leaves its own hotend once a layer and rams filament_change_length; on a rack extruder of a
+        // two-nozzle printer (H2C right) a filament leaving its rack hotend rams filament_change_length_nc.
+        // Charged once per filament and layer, which over- rather than under-states the tower.
+        for (size_t i = 0; i < filaments_cnt; ++i) {
+            const unsigned int id = filament_ids[i];
+            if (hotend_rack) {
+                purges[i].filament_change_length = float(float_at("filament_change_length", id, 0.));
+            } else if (dual_nozzle && rack_counts != nullptr) {
+                const int extruder = int_at("filament_map", id, 1) - 1;
+                if (extruder >= 0 && size_t(extruder) < rack_counts->values.size() && rack_counts->values[extruder] > 1)
+                    purges[i].filament_change_length += float(float_at("filament_change_length_nc", id, 0.));
+            }
+        }
     }
 
     const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height));

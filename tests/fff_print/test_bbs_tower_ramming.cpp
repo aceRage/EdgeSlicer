@@ -512,3 +512,37 @@ TEST_CASE("X1C G-code: a single-nozzle printer has no nozzle change", "[BBSTower
     CHECK(gcode.find("; NOZZLE_CHANGE_START") == std::string::npos);
     CHECK(gcode.find("CP TOOLCHANGE START") != std::string::npos);
 }
+
+TEST_CASE("The ramming rows sit behind the layer's purge rows, so the purge rows keep one grid", "[BBSTowerRamming]")
+{
+    DynamicPrintConfig cfg = machine_config(H2D);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_change_length", "4,4" } });
+    WipeTower::NozzleChangePlan ram;
+    ram.need_ramming    = true;
+    ram.extruder_change = true;
+    ram.old_nozzle      = 0;
+    ram.new_nozzle      = 1;
+    ram.old_extruder    = 0;
+    const auto rammed = direct_tower(cfg, ram);
+    for (size_t layer = 0; layer < 2; ++layer) {
+        INFO("layer " << layer);
+        const WipeTower::ToolChangeResult &tc = change_on_layer(*rammed, layer);
+        REQUIRE(tc.nozzle_change_result.has_action());
+        // The purge rows: every Y the tool change prints at between "CP TOOLCHANGE WIPE" and "CP TOOLCHANGE END".
+        static const std::regex y_re(R"(^G1 .*Y([-\d.]+))");
+        float purge_max_y = -1e9f;
+        bool  in_wipe     = false;
+        for (const std::string &line : split_lines(tc.gcode)) {
+            if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
+                in_wipe = true;
+            else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
+                in_wipe = false;
+            std::smatch m;
+            if (in_wipe && std::regex_search(line, m, y_re))
+                purge_max_y = std::max(purge_max_y, std::stof(m[1].str()));
+        }
+        REQUIRE(purge_max_y > -1e9f);
+        // Review S1: the ramming band starts behind the last purge row.
+        CHECK(tc.nozzle_change_result.start_pos.y() > purge_max_y);
+    }
+}

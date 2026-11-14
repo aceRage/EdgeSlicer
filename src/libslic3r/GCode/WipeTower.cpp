@@ -1665,7 +1665,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
                                                                          heater_off_nozzle_change(m_current_tool, tool, *planned);
         } else {
             nozzle_change_result = ramming(m_current_tool, tool, *planned);
-            wipe_depth -= planned->nozzle_change_depth; // ramming() advanced m_depth_traversed by it
+            wipe_depth -= planned->nozzle_change_depth; // the ramming rows take their own band behind the purges
         }
     }
 
@@ -1854,8 +1854,14 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
 
     const bool first_layer = is_first_layer();
     float      dy          = first_layer ? nc_width : m_layer_info->extra_spacing * nc_width;
-    // This tower's purge rows start one perimeter width in (toolchange_Wipe()), Bambu Studio's block cur_depth.
-    const float     cur_depth = m_perimeter_width + m_depth_traversed;
+    // Bambu Studio rams in the outgoing filament's own block. This tower has no blocks: the layer's ramming rows go
+    // behind all of its purges (the purge rows then keep one grid on every layer, rammed or not, and the next
+    // layer's sparse fill or ramming covers them), in change order. Rows start one perimeter width in, like
+    // the purge rows (toolchange_Wipe()), Bambu Studio's block cur_depth.
+    float layer_ramming_depth = 0.f;
+    for (const WipeTowerInfo::ToolChange &tc : m_layer_info->tool_changes)
+        layer_ramming_depth += tc.nozzle_change_depth;
+    const float     cur_depth = m_perimeter_width + (m_layer_info->toolchanges_depth() - layer_ramming_depth) + m_ramming_traversed;
     box_coordinates cleaning_box(Vec2f(x_offset, cur_depth + (nc_width - old_tool_width) / 2.f), box_width, nc_depth);
     const Vec2f     initial_position = cleaning_box.ld;
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
@@ -1901,7 +1907,12 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
                 per_cooling_max_speed = ramming_length / precool_t * 60.f;
         }
         nozzle_change_speed = std::min(nozzle_change_speed, per_cooling_max_speed);
+        // Edge (review S2): on the first layer the ramming rows go straight onto the plate; keep them at the
+        // first-layer speed (GCode::append_tcr sets the first-layer acceleration around them).
+        if (first_layer)
+            nozzle_change_speed = std::min(nozzle_change_speed, m_first_layer_speed * 60.f);
         bridge_speed        = std::min(bridge_speed, per_cooling_max_speed);
+        bridge_speed        = std::min(bridge_speed, nozzle_change_speed);
 
         writer.set_e_speed_limit(max_e_ramming_speed);
         for (int i = 0; true; ++i) {
@@ -1930,7 +1941,7 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
         writer.set_extrusion_flow(nz_extrusion_flow);
         writer.set_e_speed_limit(0.f);
-        m_depth_traversed += nc_depth;
+        m_ramming_traversed += nc_depth;
 
         // Post-ramming: re-arm the hotend change for the travel phase.
         if (!extruder_change)
@@ -3279,14 +3290,13 @@ void WipeTower::plan_interfaces()
             if (tc.run_in) {
                 // The purge starts one perimeter in from the tower's left side and runs to the right,
                 // so the run-in comes in from the left along its first line.
-                // Past the outgoing filament's ramming lines (Bambu Studio 2.9.1 nozzle change).
-                tc.run_in_cross = Vec2f(0.f, m_perimeter_width + traversed + nc_depth);
+                tc.run_in_cross = Vec2f(0.f, m_perimeter_width + traversed);
                 for (int below = 0; below < TowerInterface::GAP_LAYERS && below <= int(layer_id); ++below) {
                     const size_t lower = layer_id - below;
                     m_interface_gaps[lower].push_back({ Vec2f(0.f, tc.run_in_cross.y() + y_shift[layer_id] - y_shift[lower]), true });
                 }
             }
-            traversed += wipe_depth;
+            traversed += wipe_depth - nc_depth; // the ramming rows sit behind the purges
         }
     }
     if (run_in) {

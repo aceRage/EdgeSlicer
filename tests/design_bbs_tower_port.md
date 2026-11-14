@@ -2,7 +2,7 @@
 
 Owner go 2026-11-14. Branch `port/bbs-tower-ramming`, worktree `C:/Dev/wt_bbstower` (from origin/main f34257f97f).
 Reference: `C:/Dev/BambuStudio` tag `v02.09.01.70` (BBS 2.9.1; that clone's master is 2.8.4).
-Follow-up to draft PR #1046 (section 2 of its body: "Tower post-extrusion pre-cooling"); independent of its branch.
+Follow-up to PR #1046 (section 2 of its body: "Tower post-extrusion pre-cooling"); #1046 has since merged into main and this branch.
 
 ## 1. What Bambu Studio 2.9.1 does
 
@@ -246,4 +246,21 @@ BBS 2.9.1 code stays the source either way.
   `filament_adhesiveness_category` key. Size: XL (several agent days, every Bambu tower changes, owner
   prints on X1C + H2D/H2C + H3C). In that package this PR's `ramming()` graft is replaced by Orca's block
   version (about 300 lines dropped), everything else stays.
+
+## 10. Review fixes (Fable review 2026-11-14, tests/pr_review_2026-11-14_1049.md)
+
+- **S1, rows stacking.** Bambu Studio rams inside the outgoing filament's block, so ramming never shifts the
+  purges. Without blocks, ramming in front of the purge shifted every purge row on rammed layers only (H3C
+  PLA/PETG: PETG rams 2 rows, PLA none), so the purge rows of alternate layers no longer stacked and bridged the
+  tower. Now a layer's ramming rows go **behind all of its purges** (band of the layer's total ramming depth at the
+  end of its tool-change area, in change order): the purge rows keep one grid on every layer and the next layer's
+  sparse fill or ramming covers the band. Physically the ramming still happens before the swap; only its Y moves.
+  Tower depth is unchanged.
+- **S2, first layer.** The ramming rows on the first layer are capped at the first-layer speed (Edge; BBS caps
+  none) and printed at `initial_layer_acceleration` (BBS's tower writer sets its first-layer acceleration).
+  Above the first layer: `prime_tower_acceleration` when set (tower's own M204), else `default_acceleration`
+  instead of the travel acceleration (N5).
+- **S5, estimate.** `WipeTowerEstimate` charges `filament_change_length` per filament on hotend_as_extruder
+  printers (H3C) and `filament_change_length_nc` per filament on a rack extruder (H2C right).
+- `test_bambu_idle_precool`: H2D with pre-heating off asserts the markers are there (count > 0).
 

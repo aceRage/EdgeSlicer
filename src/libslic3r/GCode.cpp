@@ -1283,6 +1283,22 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             if (!ncr.zero_flush_idle_cooling) {
                 nozzle_change_str += gcodegen.unretract();
                 check_add_eol(nozzle_change_str);
+                // Edge (review S2/N5): the ramming rows are print moves. Bambu Studio's tower writer sets the
+                // first-layer acceleration (M204 S500 on the H2C) or the prime tower acceleration around them;
+                // ours writes no M204 unless prime_tower_acceleration is set, which left them at the travel
+                // acceleration just used to get there. First layer: initial_layer_acceleration; above it the
+                // tower's own M204 when it has one, else the default acceleration.
+                const double default_acc = gcodegen.process_flow_value(gcodegen.m_config.default_acceleration);
+                if (default_acc > 0.) {
+                    const double first_acc = gcodegen.process_flow_value(gcodegen.m_config.initial_layer_acceleration);
+                    double       acc       = 0.;
+                    if (gcodegen.on_first_layer())
+                        acc = first_acc > 0. ? first_acc : default_acc;
+                    else if (gcodegen.m_config.prime_tower_acceleration.value <= 0.)
+                        acc = default_acc;
+                    if (acc > 0.)
+                        nozzle_change_str += gcodegen.writer().set_print_acceleration((unsigned int) std::floor(acc + 0.5));
+                }
             }
         }
         WipeTower::ToolChangeResult nc_moves;
