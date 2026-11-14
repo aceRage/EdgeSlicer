@@ -1466,11 +1466,11 @@ msgstr "Funkcija 1"
 msgid "Reverse rotation"
 msgstr "Apsukti sukimąsi"
 
-msgid "Rotate around center:"
-msgstr "Pasukti aplink centrą:"
+msgid "Orbit"
+msgstr "Pasukti aplink centrą"
 
-msgid "Parallel distance:"
-msgstr "Lygiagretus atstumas:"
+msgid "Parallel distance"
+msgstr "Lygiagretus atstumas"
 
 msgid "Flip by Face 2"
 msgstr "Apversti pagal paviršių 2"

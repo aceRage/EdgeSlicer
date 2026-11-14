@@ -1472,11 +1472,11 @@ msgstr "Recurso 1"
 msgid "Reverse rotation"
 msgstr "Rotação reversa"
 
-msgid "Rotate around center:"
-msgstr "Rotacionar ao redor do centro:"
+msgid "Orbit"
+msgstr "Rotacionar ao redor do centro"
 
-msgid "Parallel distance:"
-msgstr "Distância paralela:"
+msgid "Parallel distance"
+msgstr "Distância paralela"
 
 msgid "Flip by Face 2"
 msgstr "Virar pela Face 2"

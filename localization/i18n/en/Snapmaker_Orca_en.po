@@ -1423,10 +1423,10 @@ msgstr ""
 msgid "Reverse rotation"
 msgstr ""
 
-msgid "Rotate around center:"
+msgid "Orbit"
 msgstr ""
 
-msgid "Parallel distance:"
+msgid "Parallel distance"
 msgstr ""
 
 msgid "Flip by Face 2"
