@@ -440,12 +440,18 @@ struct PluginHostClient::Impl
             {"id", next_id.fetch_add(1, std::memory_order_relaxed)},
             {"plugin_key", job.plugin_key},
         };
+        const std::uint64_t id = msg["id"].get<std::uint64_t>();
         if (!host.channel.write_json(msg, 5000, error)) {
             reset_child_locked();
             return;
         }
         nlohmann::json reply;
-        if (!host.channel.read_json(reply, 5000, error))
+        if (!host.channel.read_json(reply, 5000, error)) {
+            reset_child_locked();
+            return;
+        }
+        const auto got = reply.value("id", static_cast<std::uint64_t>(0));
+        if (got != id)
             reset_child_locked();
     }
 

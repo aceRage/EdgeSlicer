@@ -74,14 +74,23 @@ void clear_cloexec(int fd)
 }
 
 // Move fd to a number >= min_fd so later dup2(3)/dup2(4) cannot clobber it.
+// F_DUPFD clears FD_CLOEXEC; F_DUPFD_CLOEXEC keeps it so the exec-error pipe
+// closes on execv (ipc/wd then dup2 to 3/4, which clears CLOEXEC on purpose).
 int move_fd_ge(int fd, int min_fd)
 {
     if (fd < 0)
         return -1;
+#ifdef F_DUPFD_CLOEXEC
+    const int n = ::fcntl(fd, F_DUPFD_CLOEXEC, min_fd);
+#else
     const int n = ::fcntl(fd, F_DUPFD, min_fd);
+#endif
     if (n < 0)
         return -1;
     ::close(fd);
+#ifndef F_DUPFD_CLOEXEC
+    set_cloexec(n);
+#endif
     return n;
 }
 
@@ -378,6 +387,9 @@ bool spawn_host_fork(SpawnedHost& out,
             ::close(wd);
         clear_cloexec(3);
         clear_cloexec(4);
+        // Error pipe must stay CLOEXEC so execv closes it and the parent's
+        // poll(errp[0]) sees EOF instead of waiting the full 3 s.
+        set_cloexec(err);
         errp[1] = err;
         const int ipc_fd = 3;
         const int wd_fd  = 4;

@@ -22,9 +22,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -665,6 +668,64 @@ TEST_CASE("Two sequential script runs reuse the same host pid", "[PluginIpc][Pyt
     const std::int64_t pid2 = PluginHostClient::instance().child_pid_for_testing();
     CHECK(pid2 == pid1);
 }
+
+#ifndef _WIN32
+TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pipe", "[PluginIpc][spawn]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedDataDir data_dir_guard("plugin-ipc-spawn-fast");
+    plugin_ipc::SpawnedHost host;
+    std::string             error;
+    const auto              t0 = std::chrono::steady_clock::now();
+    REQUIRE(plugin_ipc::spawn_host(host, error));
+    CHECK(error.empty());
+    const auto spawn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                              .count();
+    // F_DUPFD used to drop CLOEXEC on the exec-error pipe, so poll(errp[0], 3000)
+    // waited the full 3 s on every spawn. spawn_host itself must return promptly.
+    CHECK(spawn_ms < 500);
+#ifdef __linux__
+    {
+        // The exec-error pipe is moved to fd >= 11 and must not survive exec.
+        // Inspect before hello so the helper is blocked in handshake read, not
+        // yet in CPython (which opens its own pipes).
+        const fs::path    fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
+        std::error_code   ec;
+        fs::directory_iterator it(fd_dir, ec);
+        const fs::directory_iterator end;
+        for (; !ec && it != end; it.increment(ec)) {
+            const int n = std::atoi(it->path().filename().string().c_str());
+            if (n < 11)
+                continue;
+            char          dest[128] = {};
+            const ssize_t len       = ::readlink(it->path().c_str(), dest, sizeof(dest) - 1);
+            if (len > 0 && std::strncmp(dest, "pipe:", 5) == 0)
+                FAIL("helper still holds the exec-error pipe at fd " + std::to_string(n) + " -> " + dest);
+        }
+    }
+#endif
+    nlohmann::json hello = {
+        {"type", plugin_ipc::k_type_hello},
+        {"protocol_version", plugin_ipc::k_protocol_version},
+        {"data_dir", data_dir()},
+        {"resources_dir", resources_dir()},
+    };
+    REQUIRE(host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
+    nlohmann::json reply;
+    REQUIRE(host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+#ifdef __SANITIZE_ADDRESS__
+    CHECK(ms < 5000);
+#else
+    CHECK(ms < 1000);
+#endif
+    plugin_ipc::kill_host(host);
+    plugin_ipc::close_host(host);
+}
+#endif
 
 TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[PluginIpc][Python][cancel]")
 {
