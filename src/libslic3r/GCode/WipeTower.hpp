@@ -12,7 +12,11 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
 #include "WipeTowerInterface.hpp"
+
+#include <memory>
+#include <unordered_map>
 
 namespace Slic3r
 {
@@ -183,6 +187,14 @@ public:
         // Bambu Studio 2.9.1: the nozzle change before this toolchange (empty when the nozzle stays).
         NozzleChangeResult nozzle_change_result;
 
+        // Orca #10780: this result holds a tool change, which starts at tool_change_start_pos. A block
+        // filled with the old filament may be merged in front of it (start_pos is then that block's),
+        // so GCode moves to tool_change_start_pos after change_filament_gcode, not to start_pos.
+        bool  is_tool_change        = false;
+        Vec2f tool_change_start_pos = Vec2f::Zero();
+        // Orca #10780: a solid "contact" tool change, where a category starts or stops on the tower.
+        bool  is_contact            = false;
+
 		// Sum the total length of the extrusion.
 		float total_extrusion_length_in_plane() {
 			float e_length = 0.f;
@@ -235,7 +247,13 @@ public:
                                    bool priming,
                                    size_t old_tool,
                                    bool is_finish,
-                                   float purge_volume) const;
+                                   bool is_tool_change,
+                                   float purge_volume,
+                                   bool is_contact) const;
+    // Orca #10780: the fill of one block, printed with filament_id loaded (no tool change).
+    ToolChangeResult construct_block_tcr(WipeTowerWriter& writer,
+                                         size_t filament_id,
+                                         bool is_finish) const;
 
 	// x			-- x coordinates of wipe tower in mm ( left bottom corner )
 	// y			-- y coordinates of wipe tower in mm ( left bottom corner )
@@ -252,6 +270,11 @@ public:
     // Bambu tags) for Bambu Lab printers; false for a non-Bambu printer set to wipe_tower_type
     // Type 1, whose export reads the compatible tags.
     void set_bbl_gcode_tags(bool bbl) { m_bbl_gcode_tags = bbl; }
+
+    // Orca #10780 / #14685: the plate's per-layer nozzle grouping. The tower reads the extruder a filament
+    // prints from on a layer (is_valid_last_layer(): an extruder's last layer above its printable height).
+    // Optional: printers without a grouping leave it unset.
+    void set_nozzle_group_result(std::shared_ptr<const MultiNozzleUtils::LayeredNozzleGroupResult> group) { m_nozzle_group = std::move(group); }
 
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
@@ -331,7 +354,6 @@ public:
 		m_z_pos 				= print_z;
 		m_layer_height			= layer_height;
 		m_depth_traversed  = 0.f;
-        m_ramming_traversed = 0.f;
         m_current_layer_finished = false;
 		//m_current_shape = (! is_first_layer && m_current_shape == SHAPE_NORMAL) ? SHAPE_REVERSED : SHAPE_NORMAL;
 		m_current_shape = SHAPE_NORMAL;
@@ -461,7 +483,37 @@ public:
         std::pair<std::vector<float>, std::vector<float>> precool_t;
         std::pair<std::vector<float>, std::vector<float>> precool_t_first_layer;
         bool                idle_travel_cooling_enabled = true;
+        // Orca #10780: filament_adhesiveness_category, the block this filament purges into.
+        int                 category              = 0;
+        // Orca #15035: wall gap ironing at the start of a purge (retraction around it) and its flat spiral.
+        float               retract_length        = 0.f;
+        float               retract_speed         = 0.f;
+        float               flat_iron_area        = 0.f;
     };
+
+    // Orca #10780 (Bambu Studio): a block holds the purges of one adhesiveness category, in a fixed band
+    // of the tower (start_depth .. start_depth + depth) on every layer.
+    enum class WipeTowerLayerType : unsigned char {
+        Normal,
+        Contact,    // the first layer where the category starts or stops being purged: printed solid and slow
+        Solid,      // one of the layers below such a change: printed solid
+        Contact_UP  // the layer above a contact layer: solid and slow
+    };
+    struct WipeTowerBlock
+    {
+        int                             block_id{0};
+        int                             filament_adhesiveness_category{0};
+        std::vector<float>              layer_depths;  // depth this block takes on each layer
+        std::vector<float>              finish_depth;  // where the previous layer's sparse fill of this block starts
+        std::vector<WipeTowerLayerType> layers_type;
+        float                           depth{0};
+        float                           start_depth{0};
+        float                           cur_depth{0};
+        int                             last_filament_change_id{-1};
+        int                             last_nozzle_change_id{-1};
+    };
+    // The planned blocks, in tower order (valid after generate(); for the tests).
+    const std::vector<WipeTowerBlock> &blocks() const { return m_wipe_tower_blocks; }
 
 private:
 	enum wipe_shape // A fill-in direction
@@ -540,11 +592,11 @@ private:
     Polygon         m_first_layer_wall;
     std::map<float, Polylines> m_outer_wall;
 
-    // Tower interface options. This generator has no wall gaps of its own: they are only cut for
-    // interface run-ins, on the interface layer and the layers below it (m_interface_gaps, per plan
-    // layer, tower-local), so a tower without run-ins prints exactly as before.
+    // Tower interface options. A run-in crosses the wall through a gap on the interface layer and the
+    // layers below it (m_interface_gaps, per plan layer, tower-local); the brim loops get those gaps too.
     TowerInterface::Settings m_interface;
-    bool            m_use_gap_wall              = false; // wipe_tower_wall_gap, which the run-in needs
+    // wipe_tower_wall_gap (Bambu Studio prime_tower_skip_points): a gap at every purge start; the run-in needs it.
+    bool            m_use_gap_wall              = false;
     BoundingBoxf    m_shared_bed;                        // printable area every nozzle reaches, plate coordinates
     float           m_run_in_reserve            = 0.f;
     std::vector<std::vector<TowerInterface::GapPoint>> m_interface_gaps;
@@ -578,12 +630,39 @@ private:
 	const float		m_wipe_volume;
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
-    // Edge (review S1): the layer's ramming rows sit behind all of its purges, in their own band, so the purge rows
-    // keep one grid from layer to layer whether or not a layer rams; this is how far into that band the layer is.
-    float           m_ramming_traversed = 0.f;
     bool            m_current_layer_finished = false;
 	bool 			m_left_to_right   = true;
+	// prime_tower_infill_gap until calc_block_infill_gap() has turned it into the block gaps, then the
+	// stretch plan_tower_new() applies to reach the stability minimum (1 = none).
 	float			m_extra_spacing   = 1.f;
+
+    // Orca #10780 block planner (Bambu Studio's WipeTowerBlock planner).
+    struct BlockDepthInfo
+    {
+        int   category{-1};
+        float depth{0};
+        float nozzle_change_depth{0};
+    };
+    std::vector<std::vector<BlockDepthInfo>> m_all_layers_depth;
+    std::vector<WipeTowerBlock>              m_wipe_tower_blocks;
+    WipeTowerBlock                          *m_cur_block = nullptr;
+    // Per category: the gap between purge lines (.first) and between ramming lines (.second).
+    std::unordered_map<int, std::pair<float, float>> m_block_infill_gap_width;
+    // The widest ramming line of the filaments (Orca: one tower-wide width; equal with uniform nozzles).
+    float           m_nozzle_change_perimeter_width = 0.f;
+    float           m_tpu_fixed_spacing             = 2.f;      // ramming line gap with a reverse travel
+    float           m_contact_speed                 = 20.f * 60.f;
+    // Orca: the tower's first-layer purge flow (Orca reads first_layer_flow_ratio, which this tree does not
+    // have, and Bambu Studio initial_layer_flow_ratio; both default to 1).
+    float           m_first_layer_flow_ratio        = 1.f;
+    bool            m_tower_framework               = false;    // prime_tower_enable_framework
+    bool            m_flat_ironing                  = false;    // prime_tower_flat_ironing (needs the wall gap)
+    // Wall gaps of each layer at the tool changes' start points (prime_tower_skip_points / wipe_tower_wall_gap).
+    std::vector<std::vector<Vec2f>> m_wall_skip_points;
+    // is_valid_last_layer(): each extruder's last tower layer and printable height.
+    std::vector<int>                m_last_layer_id;
+    std::vector<double>             m_printable_height;
+    std::shared_ptr<const MultiNozzleUtils::LayeredNozzleGroupResult> m_nozzle_group;
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
 
@@ -591,17 +670,14 @@ private:
 	float volume_to_length(float volume, float line_width, float layer_height) const {
 		return std::max(0.f, volume / (layer_height * (line_width - layer_height * (1.f - float(M_PI) / 4.f))));
 	}
+    // Calculates volume of extrusion line
+    float length_to_volume(float length, float line_width, float layer_height) const
+    {
+        return std::max(0.f, length * (layer_height * (line_width - layer_height * (1.f - float(M_PI) / 4.f))));
+    }
 
-	// Calculates depth for all layers and propagates them downwards
-	void plan_tower();
 	// Orca #15841: whether the layer reaches the G-code, and so whether its extrusions count as filament used.
 	bool layer_is_printed(bool toolchanges_on_layer) const;
-
-	// Goes through m_plan and recalculates depths and width of the WT to make it exactly square - experimental
-	void make_wipe_tower_square();
-
-    // Goes through m_plan, calculates border and finish_layer extrusions and subtracts them from last wipe
-    void save_on_last_wipe();
 
 	// BBS
 	box_coordinates align_perimeter(const box_coordinates& perimeter_box);
@@ -614,9 +690,6 @@ private:
     // Records an extruded wall / brim loop (tower-local) for the fake tower the conflict checker and
     // the object brim use.
     void    record_outer_wall(const Polygon &wall);
-    // Squares a rib tower off (Bambu Studio's plan_tower_new(): width = sqrt(depth * width)) and
-    // re-plans every tool change's depth at that width.
-    void    make_rib_tower_square();
     // Measures the first printed layer's wall and sets m_rib_offset / m_rib_footprint from it.
     void    set_rib_offset();
     // Speed of the outer wall and brim: Bambu Studio caps it at prime_tower_max_speed.
@@ -635,11 +708,12 @@ private:
 			float wipe_length;
 			// BBS
 			float purge_volume;
-            // Tower interface: whether the trigger picks this change, and where its run-in crosses
-            // the outer wall (tower-local, on the left side). Set by plan_interfaces().
+            // Tower interface: whether the trigger picks this change (mark_interfaces()), and where its
+            // purge starts on the outer wall (tower-local, x = 0 or the tower width), where a wall gap and
+            // the run-in cross it (get_wall_skip_points()).
             bool  is_interface = false;
             bool  run_in    = false;
-            Vec2f run_in_cross = Vec2f::Zero();
+            Vec2f start_point = Vec2f::Zero();
             // Bambu Studio 2.9.1: the ramming before a nozzle change, part of required_depth.
             NozzleChangePlan nozzle_change;
             float nozzle_change_length = 0.f; // mm of ramming path
@@ -669,22 +743,53 @@ private:
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
 
-    // Tower interface: marks the interface tool changes, plans their run-in gaps and the reserve.
-    void    plan_interfaces();
-    // The current layer's outer wall (rectangle or rib), cut open for interface run-ins when it has any.
-    bool    print_wall_with_interface_gaps(WipeTowerWriter &writer, const box_coordinates &wt_box, float feedrate);
+    // Tower interface: marks the interface tool changes and sizes the run-in reserve.
+    void    mark_interfaces();
+    // The current layer's outer wall (rectangle or rib) around wt_box, cut open at its wall gaps (the tool
+    // changes' start points and interface run-ins) when it has any. Returns the wall polygon (the brim
+    // grows from it); extrude false only builds it.
+    Polygon print_outer_wall(WipeTowerWriter &writer, const box_coordinates &wt_box, float feedrate, bool extrude);
     // Tower interface steps around a purge; the writer stands at the start of the purge.
     void    interface_before_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
     void    interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
 
+    // Orca #10780 / #15035 block planner (Bambu Studio's plan_tower_new() / generate_new()).
+    void               plan_tower_new();
+    void               generate_wipe_tower_blocks(bool add_solid_flag);
+    void               calc_block_infill_gap();
+    void               update_all_layer_depth(float idle_depth);
+    void               set_nozzle_last_layer_id();
+    // Bambu Studio set_toolchange(): a change's purge and ramming depth at the current width and block gaps.
+    void               replan_toolchange(WipeTowerInfo::ToolChange &tool_change, float layer_height) const;
+    WipeTowerBlock    *get_block_by_category(int category, bool create);
+    void               add_depth_to_block(int category, float depth, bool is_nozzle_change = false);
+    int                get_filament_category(size_t tool) const { return tool < m_filpar.size() ? m_filpar[tool].category : 0; }
+    void               reset_block_status();
+    int                get_wall_filament_for_all_layer() const;
+    // The gap between tool's purge lines (nozzle_change: its ramming lines) in its category's block.
+    float              get_block_gap_width(size_t tool, bool nozzle_change) const;
+    // Whether tool's extruder may still print on layer_id at layer_z (its printable height).
+    bool               is_valid_last_layer(size_t tool, int layer_id, double layer_z) const;
+    // Edge (#937): the filament loaded when the tower starts printing a layer (its Local-Z passes may have
+    // changed it), given the one the layer below left loaded.
+    static size_t      layer_start_tool(const WipeTowerInfo &layer, size_t carried);
+    static size_t      layer_end_tool(const WipeTowerInfo &layer, size_t carried);
+    void               get_all_wall_skip_points();
+    void               get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const std::vector<float> &y_shifts);
+    Vec2f              get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool) const;
+    ToolChangeResult   tool_change_new(size_t new_tool, bool solid_toolchange = false, bool solid_nozzlechange = false);
+    ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true);
+    ToolChangeResult   finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill = true);
+    ToolChangeResult   finish_block_solid(const WipeTowerBlock &block, size_t filament_id, WipeTowerLayerType layer_type);
+    // reheat: "Wipe tower reheat before wipe"; after_nozzle_change: the ramming announced its own line width.
+    void               toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length,
+                                           bool solid_toolchange, bool reheat, bool after_nozzle_change);
+    ToolChangeResult   merge_tcr(ToolChangeResult &first, ToolChangeResult &second) const;
+    // The y shift generate() gives each layer (a single-block tower narrows towards the top, centred).
+    std::vector<float> layer_y_shifts() const;
+
     // Stores information about used filament length per extruder:
     std::vector<float> m_used_filament_length;
-
-    // BBS: consider both soluable and support properties
-    // Return index of first toolchange that switches to non-soluble extruder
-    // ot -1 if there is no such toolchange.
-    int first_toolchange_to_nonsoluble_nonsupport(
-            const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
 
 	void toolchange_Unload(
 		WipeTowerWriter &writer,
@@ -700,15 +805,11 @@ private:
 	void toolchange_Load(
 		WipeTowerWriter &writer,
 		const box_coordinates  &cleaning_box);
-	
-	void toolchange_Wipe(
-		WipeTowerWriter &writer,
-		const box_coordinates  &cleaning_box,
-		float wipe_volume);
 
-    // Bambu Studio 2.9.1 nozzle-change modes (WipeTower.cpp 3727-4054), picked by tool_change() like
-    // tool_change_new() does. They write at m_depth_traversed; ramming() advances it by the ramming depth.
-    NozzleChangeResult ramming(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned);
+    // Bambu Studio 2.9.1 nozzle-change modes (WipeTower.cpp 3727-4054), picked by tool_change_new(). ramming()
+    // rams in the outgoing filament's block and advances it; idle_travel_cooling() travels over the new
+    // filament's purge area.
+    NozzleChangeResult ramming(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned, bool solid_nozzlechange);
     NozzleChangeResult heater_off_nozzle_change(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned) const;
     NozzleChangeResult idle_travel_cooling(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned);
     std::string        nozzle_change_marker(bool start, size_t old_tool, size_t new_tool, const NozzleChangePlan &plan) const;

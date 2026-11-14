@@ -1168,9 +1168,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
     Vec2f start_pos = tcr.start_pos;
     Vec2f end_pos   = tcr.end_pos;
+    // Orca #10780: a block filled with the old filament may come before the tool change in this tower visit;
+    // after change_filament_gcode the head goes to where the tool change's purge starts.
+    Vec2f tool_change_start_pos = tcr.is_tool_change ? tcr.tool_change_start_pos : tcr.start_pos;
     if (!tcr.priming) {
         start_pos = transform_wt_pt(start_pos);
         end_pos   = transform_wt_pt(end_pos);
+        tool_change_start_pos = transform_wt_pt(tool_change_start_pos);
     }
 
     Vec2f wipe_tower_offset   = tcr.priming ? Vec2f::Zero() : m_wipe_tower_pos;
@@ -1479,8 +1483,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             config.set_key_value("new_retract_length_toolchange", new ConfigOptionFloat(new_retract_length_toolchange));
             config.set_key_value("old_filament_temp", new ConfigOptionInt(old_filament_temp));
             config.set_key_value("new_filament_temp", new ConfigOptionInt(new_filament_temp));
-            config.set_key_value("x_after_toolchange", new ConfigOptionFloat(start_pos(0)));
-            config.set_key_value("y_after_toolchange", new ConfigOptionFloat(start_pos(1)));
+            config.set_key_value("x_after_toolchange", new ConfigOptionFloat(tool_change_start_pos(0)));
+            config.set_key_value("y_after_toolchange", new ConfigOptionFloat(tool_change_start_pos(1)));
             config.set_key_value("z_after_toolchange", new ConfigOptionFloat(nozzle_pos(2)));
             config.set_key_value("first_flush_volume", new ConfigOptionFloat(purge_length / 2.f));
             config.set_key_value("second_flush_volume", new ConfigOptionFloat(purge_length / 2.f));
@@ -1498,7 +1502,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             // BBS (Bambu Studio GCode.cpp append_tcr, "point for nozzle heating"): the H2C change_filament
             // template's M620.14 X[wipe_tower_center_pos_x] Y[wipe_tower_center_pos_y].
             if (m_heating_tower_bbx.defined && m_heating_printer_bbx.defined && !tcr.priming) {
-                const Vec2d stop_pos = bambu_heating_stop_at_toolchange(start_pos.cast<double>(), m_heating_tower_bbx, m_heating_printer_bbx);
+                const Vec2d stop_pos = bambu_heating_stop_at_toolchange(tool_change_start_pos.cast<double>(), m_heating_tower_bbx, m_heating_printer_bbx);
                 config.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(stop_pos.x()));
                 config.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(stop_pos.y()));
                 config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(true));
@@ -1596,7 +1600,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
         // move to start_pos for wiping after toolchange
         std::string start_pos_str;
-        start_pos_str = gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
+        start_pos_str = gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, tool_change_start_pos + plate_origin_2d), erMixed,
                                            "Move to start pos");
         check_add_eol(start_pos_str);
         toolchange_gcode_str += start_pos_str;
