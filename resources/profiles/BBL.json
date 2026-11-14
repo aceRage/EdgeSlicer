@@ -1,7 +1,7 @@
 {
     "name": "Bambulab",
     "url": "http://www.bambulab.com/Parameters/vendor/BBL.json",
-    "version": "02.00.00.83",
+    "version": "02.00.00.84",
     "force_update": "0",
     "description": "the initial version of BBL configurations",
     "machine_model_list": [
@@ -12012,6 +12012,278 @@
         {
             "name": "Bambu ABS @BBL H3C 0.8 nozzle",
             "sub_path": "filament/Bambu ABS @BBL H3C 0.8 nozzle.json"
+        },
+        {
+            "name": "Fiberon ASA-CF08 @BBL H3C",
+            "sub_path": "filament/Fiberon ASA-CF08 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PA12-CF10 @BBL H3C",
+            "sub_path": "filament/Fiberon PA12-CF10 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PA6-CF20 @BBL H3C",
+            "sub_path": "filament/Fiberon PA6-CF20 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PA6-GF25 @BBL H3C",
+            "sub_path": "filament/Fiberon PA6-GF25 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PA612-CF15 @BBL H3C",
+            "sub_path": "filament/Fiberon PA612-CF15 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PA612-ESD @BBL H3C",
+            "sub_path": "filament/Fiberon PA612-ESD @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PET-CF17 @BBL H3C",
+            "sub_path": "filament/Fiberon PET-CF17 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PET-GF15 @BBL H3C",
+            "sub_path": "filament/Fiberon PET-GF15 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PETG-ESD @BBL H3C",
+            "sub_path": "filament/Fiberon PETG-ESD @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PETG-rCF08 @BBL H3C",
+            "sub_path": "filament/Fiberon PETG-rCF08 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PPS-CF10 @BBL H3C",
+            "sub_path": "filament/Fiberon PPS-CF10 @BBL H3C.json"
+        },
+        {
+            "name": "Fiberon PPS-GF20 @BBL H3C",
+            "sub_path": "filament/Fiberon PPS-GF20 @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma CoPE @BBL H3C",
+            "sub_path": "filament/Panchroma CoPE @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA @BBL H3C",
+            "sub_path": "filament/Panchroma PLA @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Celestial @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Celestial @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Galaxy @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Galaxy @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Glow @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Glow @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Luminous @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Luminous @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Marble @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Marble @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Matte @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Matte @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Metallic @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Metallic @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Neon @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Neon @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Satin @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Satin @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Silk @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Silk @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Starlight @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Starlight @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA Translucent @BBL H3C",
+            "sub_path": "filament/Panchroma PLA Translucent @BBL H3C.json"
+        },
+        {
+            "name": "Panchroma PLA UV Shift @BBL H3C",
+            "sub_path": "filament/Panchroma PLA UV Shift @BBL H3C.json"
+        },
+        {
+            "name": "PolyCast @BBL H3C",
+            "sub_path": "filament/PolyCast @BBL H3C.json"
+        },
+        {
+            "name": "PolyFlex TPU95 @BBL H3C",
+            "sub_path": "filament/PolyFlex TPU95 @BBL H3C.json"
+        },
+        {
+            "name": "PolyFlex TPU95-HF @BBL H3C",
+            "sub_path": "filament/PolyFlex TPU95-HF @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite ABS @BBL H3C",
+            "sub_path": "filament/PolyLite ABS @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite ASA @BBL H3C",
+            "sub_path": "filament/PolyLite ASA @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite CosPLA @BBL H3C",
+            "sub_path": "filament/PolyLite CosPLA @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite LW-PLA @BBL H3C",
+            "sub_path": "filament/PolyLite LW-PLA @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PC @BBL H3C",
+            "sub_path": "filament/PolyLite PC @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PETG @BBL H3C",
+            "sub_path": "filament/PolyLite PETG @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PETG Translucent @BBL H3C",
+            "sub_path": "filament/PolyLite PETG Translucent @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA @BBL H3C",
+            "sub_path": "filament/PolyLite PLA @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Galaxy @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Galaxy @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Glow @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Glow @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Luminous @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Luminous @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Neon @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Neon @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Pro @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Pro @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Pro Metallic @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Pro Metallic @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Starlight @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Starlight @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA Translucent @BBL H3C",
+            "sub_path": "filament/PolyLite PLA Translucent @BBL H3C.json"
+        },
+        {
+            "name": "PolyLite PLA-CF @BBL H3C",
+            "sub_path": "filament/PolyLite PLA-CF @BBL H3C.json"
+        },
+        {
+            "name": "PolyMax PC @BBL H3C",
+            "sub_path": "filament/PolyMax PC @BBL H3C.json"
+        },
+        {
+            "name": "PolyMax PETG @BBL H3C",
+            "sub_path": "filament/PolyMax PETG @BBL H3C.json"
+        },
+        {
+            "name": "PolyMax PLA @BBL H3C",
+            "sub_path": "filament/PolyMax PLA @BBL H3C.json"
+        },
+        {
+            "name": "PolySupport @BBL H3C",
+            "sub_path": "filament/PolySupport @BBL H3C.json"
+        },
+        {
+            "name": "PolySupport for PA12 @BBL H3C",
+            "sub_path": "filament/PolySupport for PA12 @BBL H3C.json"
+        },
+        {
+            "name": "PolyTerra PLA @BBL H3C",
+            "sub_path": "filament/PolyTerra PLA @BBL H3C.json"
+        },
+        {
+            "name": "PolyTerra PLA Marble @BBL H3C",
+            "sub_path": "filament/PolyTerra PLA Marble @BBL H3C.json"
+        },
+        {
+            "name": "PolyTerra PLA+ @BBL H3C",
+            "sub_path": "filament/PolyTerra PLA+ @BBL H3C.json"
+        },
+        {
+            "name": "Polylite ASA for TYC Americas @BBL H3C",
+            "sub_path": "filament/Polylite ASA for TYC Americas @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker ABS Max @BBL H3C",
+            "sub_path": "filament/Polymaker ABS Max @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker ABS Pro @BBL H3C",
+            "sub_path": "filament/Polymaker ABS Pro @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker ABS Pro Galaxy @BBL H3C",
+            "sub_path": "filament/Polymaker ABS Pro Galaxy @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker ASA @BBL H3C",
+            "sub_path": "filament/Polymaker ASA @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA @BBL H3C",
+            "sub_path": "filament/Polymaker HT-PLA @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA Pro @BBL H3C",
+            "sub_path": "filament/Polymaker HT-PLA Pro @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA-GF @BBL H3C",
+            "sub_path": "filament/Polymaker HT-PLA-GF @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker PETG @BBL H3C",
+            "sub_path": "filament/Polymaker PETG @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker PETG Galaxy @BBL H3C",
+            "sub_path": "filament/Polymaker PETG Galaxy @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker PLA @BBL H3C",
+            "sub_path": "filament/Polymaker PLA @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker PLA Pro @BBL H3C",
+            "sub_path": "filament/Polymaker PLA Pro @BBL H3C.json"
+        },
+        {
+            "name": "Polymaker PLA Pro Metallic @BBL H3C",
+            "sub_path": "filament/Polymaker PLA Pro Metallic @BBL H3C.json"
         }
     ],
     "machine_list": [

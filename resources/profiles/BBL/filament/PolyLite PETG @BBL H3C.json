@@ -1,0 +1,29 @@
+{
+    "type": "filament",
+    "name": "PolyLite PETG @BBL H3C",
+    "inherits": "Generic PETG @BBL H3C",
+    "from": "system",
+    "setting_id": "GFSPM04_60",
+    "filament_id": "GFG60",
+    "instantiation": "true",
+    "filament_flow_ratio": [
+        "0.95",
+        "0.95"
+    ],
+    "filament_max_volumetric_speed": [
+        "11.5",
+        "11.5"
+    ],
+    "filament_prime_volume": [
+        "30"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "temperature_vitrification": [
+        "70"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H3C 0.4 nozzle"
+    ]
+}
