@@ -1672,6 +1672,11 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
 
     std::string gcode;
 
+    // Close the object's label before anything of the tool change: the retraction, wipe and lift,
+    // the T and the filament start G-code belong to no object, so cancelling the object (Klipper
+    // EXCLUDE_OBJECT, M486) must not skip them. append_tcr (Type 1) does the same.
+    gcodegen.m_writer.add_object_end_labels(gcode);
+
     // Toolchangeresult.gcode assumes the wipe tower corner is at the origin (except for priming lines)
     // We want to rotate and shift all extrusions (gcode postprocessing) and starting and ending position
     float alpha = m_wipe_tower_rotation / 180.f * float(M_PI);
@@ -10023,7 +10028,9 @@ LayerResult GCode::process_layer(const Print& print,
                                 (print.config().print_sequence == PrintSequence::ByObject && print.objects().size() == 1));
         if (has_prime_tower) {
             int   plate_idx = print.get_plate_index();
-            Point wt_pos(print.config().wipe_tower_x.get_at(plate_idx), print.config().wipe_tower_y.get_at(plate_idx));
+            // The tower in the instances' coordinates: scaled, with the plate's origin (as Print places it).
+            const Point wt_pos = Point::new_scale(print.config().wipe_tower_x.get_at(plate_idx) + print.get_plate_origin().x(),
+                                                  print.config().wipe_tower_y.get_at(plate_idx) + print.get_plate_origin().y());
 
             std::vector<GCode::ObjectByExtruder>& objects_by_extruder = objects_by_extruder_it->second;
             std::vector<const PrintObject*>       print_objects;
