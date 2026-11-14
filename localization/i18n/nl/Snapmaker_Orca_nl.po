@@ -1443,10 +1443,10 @@ msgstr "Feature 1"
 msgid "Reverse rotation"
 msgstr ""
 
-msgid "Rotate around center:"
+msgid "Rotate around center"
 msgstr ""
 
-msgid "Parallel distance:"
+msgid "Parallel distance"
 msgstr ""
 
 msgid "Flip by Face 2"

@@ -1489,11 +1489,11 @@ msgstr "Fonction 1"
 msgid "Reverse rotation"
 msgstr "Inverser la rotation"
 
-msgid "Rotate around center:"
-msgstr "Rotation autour du centre :"
+msgid "Rotate around center"
+msgstr "Rotation autour du centre "
 
-msgid "Parallel distance:"
-msgstr "Distance parallèle :"
+msgid "Parallel distance"
+msgstr "Distance parallèle "
 
 msgid "Flip by Face 2"
 msgstr "Retournement par la Face 2"

@@ -1474,11 +1474,11 @@ msgstr "Особливість 1"
 msgid "Reverse rotation"
 msgstr "Зворотне обертання"
 
-msgid "Rotate around center:"
-msgstr "Обертати навколо центру:"
+msgid "Rotate around center"
+msgstr "Обертати навколо центру"
 
-msgid "Parallel distance:"
-msgstr "Паралельна відстань:"
+msgid "Parallel distance"
+msgstr "Паралельна відстань"
 
 msgid "Flip by Face 2"
 msgstr "Перевернути за Гранню 2"

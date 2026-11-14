@@ -1443,11 +1443,11 @@ msgstr "特徵 1"
 msgid "Reverse rotation"
 msgstr "反向旋轉"
 
-msgid "Rotate around center:"
-msgstr "圍繞中心旋轉："
+msgid "Rotate around center"
+msgstr "圍繞中心旋轉"
 
-msgid "Parallel distance:"
-msgstr "平行距離："
+msgid "Parallel distance"
+msgstr "平行距離"
 
 msgid "Flip by Face 2"
 msgstr "通過面 2 翻轉"

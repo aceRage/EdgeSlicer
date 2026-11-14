@@ -2250,57 +2250,9 @@ void GLGizmoMeasure::show_face_face_assembly_senior()
         auto &action                         = m_assembly_action;
         auto  feature_text_size              = m_imgui->calc_button_size(_L("Feature 1")).x + m_imgui->calc_button_size(":").x;
         auto  set_to_reverse_rotation_size   = m_imgui->calc_button_size(_L("Reverse rotation")).x;
-        auto  rotate_around_center_size      = m_imgui->calc_button_size(_L("Rotate around center:")).x;
-        auto  parallel_distance_size         = m_imgui->calc_button_size(_L("Parallel distance:")).x;
 
         if (m_imgui->bbl_checkbox(_L("Flip by Face 2"), m_flip_volume_2)) {
             set_to_reverse_rotation(m_same_model_object, 1);
-        }
-
-        // Absolute inputs next to the live Adjust sliders (ultra_show_adjust_ui). The distance is read from the
-        // current feature poses every frame, so it follows the sliders; a typed value moves part 2 by the
-        // difference and the slider baseline restarts from there.
-        (void) action;
-        const Measure::AssemblyAction live = Measure::get_assembly_action(*m_selected_features.first.feature,
-                                                                          *m_selected_features.second.feature);
-        const double unit = m_use_inches ? GizmoObjectManipulation::mm_to_in : 1.0;
-        if (live.has_parallel_distance) {
-            m_imgui->text(_u8L("Parallel distance:"));
-            ImGui::SameLine(parallel_distance_size + m_space_size);
-            ImGui::PushItemWidth(m_input_size_max);
-            if (!m_ultra_para_editing) m_ultra_para_buf = double(live.parallel_distance) * unit;
-            ImGui::BBLInputDouble("##parallel_distance_z", &m_ultra_para_buf, 0.0f, 0.0f, "%.2f");
-            m_ultra_para_editing = ImGui::IsItemActive();
-            const bool committed = ImGui::IsItemDeactivatedAfterEdit();
-            ImGui::PopItemWidth();
-            ImGui::SameLine();
-            m_imgui->text(m_units);
-            if (committed) {
-                const double target_mm = m_ultra_para_buf / unit;
-                const double delta_mm  = target_mm - double(live.parallel_distance);
-                if (std::abs(delta_mm) > 1e-4) {
-                    if (m_same_model_object) set_parallel_distance(true, float(target_mm));
-                    else                     ultra_adjust_offset(delta_mm, true); // keeps the assembly pose in step
-                    m_ultra_adjust_off = 0.f; // sliders restart from the new position
-                    m_ultra_adjust_rot = 0.f;
-                }
-            }
-        }
-        if (live.can_around_center_of_faces) {
-            m_imgui->text(_u8L("Rotate around center:"));
-            ImGui::SameLine(rotate_around_center_size + m_space_size);
-            ImGui::PushItemWidth(m_input_size_max);
-            ImGui::BBLInputDouble("##rotate_around_center", &m_buffered_around_center, 0.0f, 0.0f, "%.2f");
-            const bool committed = ImGui::IsItemDeactivatedAfterEdit();
-            ImGui::PopItemWidth();
-            ImGui::SameLine();
-            m_imgui->text("°");
-            if (committed && std::abs(m_buffered_around_center) > EPSILON) {
-                ultra_adjust_rotate(m_buffered_around_center, true);
-                m_buffered_around_center = 0;
-                m_ultra_adjust_rot       = 0.f;
-                m_ultra_adjust_off       = 0.f;
-            }
         }
     }
 }
@@ -3428,20 +3380,104 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     if (!ultra_feature_dir_point(*m_selected_features.first.feature, d, p)) return; // points have no axis
     ImGui::Separator();
     m_imgui->text(_u8L("Adjust part 2 (live)"));
-    ImGui::PushItemWidth(std::max(180.0f, ImGui::CalcTextSize("Offset -20.00 mm").x * 2.2f));
+
+    const bool   inches = wxGetApp().app_config->get_bool("use_inches");
+    const double unit   = inches ? GizmoObjectManipulation::mm_to_in : 1.0; // display units per mm
+    const std::string mm_units = inches ? _u8L("in") : _u8L("mm");
+
+    // One column layout for every row: label | (slider) | box | unit.
+    const std::string l_rot = _u8L("Rotate"), l_off = _u8L("Offset"), l_par = _u8L("Parallel distance"),
+                      l_cen = _u8L("Rotate around center");
+    float label_w = 0.f;
+    for (const std::string* l : {&l_rot, &l_off, &l_par, &l_cen}) label_w = std::max(label_w, ImGui::CalcTextSize(l->c_str()).x);
+    label_w += m_space_size;
+    const float slider_w = std::max(140.0f, ImGui::CalcTextSize("-100.00").x * 4.0f);
+    const float box_x    = label_w + slider_w + ImGui::GetStyle().ItemSpacing.x;
+    const float box_w    = m_input_size_max;
+
+    // A numeric box that keeps the typed text while active and refreshes from `value` otherwise.
+    // Returns true once, when an edit is committed.
+    auto number_box = [&](const char* id, double& buf, bool& editing, double value, const std::string& unit_text) {
+        ImGui::PushItemWidth(box_w);
+        if (!editing) buf = value;
+        ImGui::BBLInputDouble(id, &buf, 0.0f, 0.0f, "%.2f");
+        editing = ImGui::IsItemActive();
+        const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        m_imgui->text(unit_text);
+        return committed;
+    };
+    auto row_label = [&](const std::string& t) { m_imgui->text(t); ImGui::SameLine(label_w); };
+
+    // Rotate: slider + box (cumulative degrees since the last mate / pick).
+    row_label(l_rot);
+    ImGui::PushItemWidth(slider_w);
     float rot = m_ultra_adjust_rot;
-    if (ImGui::SliderFloat("##ultra_adjust_rot", &rot, -180.0f, 180.0f, "Rotate %.1f deg")) {
+    if (ImGui::SliderFloat("##ultra_adjust_rot", &rot, -180.0f, 180.0f, "")) {
         const bool shot = ImGui::IsItemActivated();
         ultra_adjust_rotate(double(rot - m_ultra_adjust_rot), shot);
         m_ultra_adjust_rot = rot;
     }
+    ImGui::PopItemWidth();
+    ImGui::SameLine(box_x);
+    if (number_box("##ultra_adjust_rot_box", m_ultra_rot_buf, m_ultra_rot_editing, double(m_ultra_adjust_rot), "Â°")) {
+        const double delta = m_ultra_rot_buf - double(m_ultra_adjust_rot);
+        if (std::abs(delta) > 1e-4) {
+            ultra_adjust_rotate(delta, true); // one undo snapshot
+            m_ultra_adjust_rot = float(m_ultra_rot_buf);
+        }
+    }
+
+    // Offset: slider (mm, cumulative) + box (display units).
+    row_label(l_off);
+    ImGui::PushItemWidth(slider_w);
     float off = m_ultra_adjust_off;
-    if (ImGui::SliderFloat("##ultra_adjust_off", &off, -20.0f, 20.0f, "Offset %.2f mm")) {
+    if (ImGui::SliderFloat("##ultra_adjust_off", &off, -20.0f, 20.0f, "")) {
         const bool shot = ImGui::IsItemActivated();
         ultra_adjust_offset(double(off - m_ultra_adjust_off), shot);
         m_ultra_adjust_off = off;
     }
     ImGui::PopItemWidth();
+    ImGui::SameLine(box_x);
+    if (number_box("##ultra_adjust_off_box", m_ultra_off_buf, m_ultra_off_editing, double(m_ultra_adjust_off) * unit, mm_units)) {
+        const double target_mm = m_ultra_off_buf / unit;
+        const double delta_mm  = target_mm - double(m_ultra_adjust_off);
+        if (std::abs(delta_mm) > 1e-5) {
+            ultra_adjust_offset(delta_mm, true);
+            m_ultra_adjust_off = float(target_mm);
+        }
+    }
+
+    // Absolute inputs for two flat faces (restored from OrcaSlicer's Assembly tool).
+    const Measure::AssemblyAction live = Measure::get_assembly_action(*m_selected_features.first.feature,
+                                                                      *m_selected_features.second.feature);
+    if (live.has_parallel_distance) {
+        row_label(l_par);
+        ImGui::SameLine(box_x);
+        if (number_box("##parallel_distance_z", m_ultra_para_buf, m_ultra_para_editing, double(live.parallel_distance) * unit, mm_units)) {
+            const double target_mm = m_ultra_para_buf / unit;
+            const double delta_mm  = target_mm - double(live.parallel_distance);
+            if (std::abs(delta_mm) > 1e-4) {
+                if (m_same_model_object) set_parallel_distance(true, float(target_mm));
+                else                     ultra_adjust_offset(delta_mm, true); // keeps the assembly pose in step
+                m_ultra_adjust_off = 0.f; // sliders restart from the new position
+                m_ultra_adjust_rot = 0.f;
+            }
+        }
+    }
+    if (live.can_around_center_of_faces) {
+        row_label(l_cen);
+        ImGui::SameLine(box_x);
+        if (number_box("##rotate_around_center", m_buffered_around_center, m_ultra_cen_editing, 0.0, "Â°")) {
+            if (std::abs(m_buffered_around_center) > EPSILON) {
+                ultra_adjust_rotate(m_buffered_around_center, true);
+                m_ultra_adjust_rot = 0.f;
+                m_ultra_adjust_off = 0.f;
+            }
+            m_buffered_around_center = 0;
+        }
+    }
 }
 
 void GLGizmoMeasure::set_parallel_distance(bool same_model_object, float dist)

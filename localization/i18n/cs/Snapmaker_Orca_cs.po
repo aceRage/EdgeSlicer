@@ -1461,11 +1461,11 @@ msgstr "Prvek 1"
 msgid "Reverse rotation"
 msgstr "Obrátit rotaci"
 
-msgid "Rotate around center:"
-msgstr "Otáčet kolem středu:"
+msgid "Rotate around center"
+msgstr "Otáčet kolem středu"
 
-msgid "Parallel distance:"
-msgstr "Rovnoběžná vzdálenost:"
+msgid "Parallel distance"
+msgstr "Rovnoběžná vzdálenost"
 
 msgid "Flip by Face 2"
 msgstr "Překlopit podle plochy 2"
