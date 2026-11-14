@@ -47,18 +47,15 @@ elseif (APPLE)
   )
   set(_sentry_cmake_generator -G "Unix Makefiles")
   
-  # Sentry/crashpad requires macOS 12.0+ due to kIOMainPortDefault API usage
-  # Force minimum deployment target to 12.0 for Sentry build
-  set(_sentry_osx_deployment_target "12.0")
-  if (CMAKE_OSX_DEPLOYMENT_TARGET AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER "12.0")
-    set(_sentry_osx_deployment_target ${CMAKE_OSX_DEPLOYMENT_TARGET})
-  endif()
-  
-  # Add macOS architecture and deployment target for sentry build
+  # Sentry gets the same deployment target as every other dep (DEP_CMAKE_OPTS passes -t, along
+  # with -Werror=unguarded-availability-new, so any API newer than the target fails the build).
+  # It used to be forced to 12.0 because crashpad names kIOMainPortDefault, which only exists
+  # from macOS 12; crashpad_macos11.cmake below swaps that one use for MACH_PORT_NULL. Built
+  # for 12.0, libsentry.dylib imported _kIOMainPortDefault as a strong symbol, so on macOS 11
+  # dyld could not load it and the app, which links it, could not start.
   if (CMAKE_OSX_ARCHITECTURES)
     set(_sentry_platform_flags ${_sentry_platform_flags} -DCMAKE_OSX_ARCHITECTURES:STRING=${CMAKE_OSX_ARCHITECTURES})
   endif()
-  set(_sentry_platform_flags ${_sentry_platform_flags} -DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=${_sentry_osx_deployment_target})
   if (CMAKE_OSX_SYSROOT)
     set(_sentry_platform_flags ${_sentry_platform_flags} -DCMAKE_OSX_SYSROOT:STRING=${CMAKE_OSX_SYSROOT})
   endif()
@@ -78,8 +75,9 @@ if(WIN32)
      ${GIT_EXECUTABLE} submodule update --init --recursive && ${CMAKE_COMMAND} -S external/crashpad -B external/crashpad/build ${_sentry_cmake_generator} -DCMAKE_BUILD_TYPE=Release && ${CMAKE_COMMAND} --build external/crashpad/build --config Release
   )
 elseif(APPLE)
-  set(SENTRY_PATCH_COMMAND 
+  set(SENTRY_PATCH_COMMAND
      ${GIT_EXECUTABLE} submodule update --init --recursive
+     && ${CMAKE_COMMAND} -DCRASHPAD_DIR=<SOURCE_DIR>/external/crashpad -P ${CMAKE_CURRENT_LIST_DIR}/crashpad_macos11.cmake
   )
 else()
   set(SENTRY_PATCH_COMMAND 
