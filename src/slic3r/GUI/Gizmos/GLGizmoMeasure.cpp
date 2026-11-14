@@ -2506,7 +2506,7 @@ void GLGizmoMeasure::register_single_mesh_pick()
      m_hit_different_volumes.clear();
      m_hit_order_volumes.clear();
      m_last_hit_volume = nullptr;
-     m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f; // Ultra: sliders start fresh with a new pick
+     m_ultra_adjust_rot = 0.f; m_ultra_cen_rot = 0.f; m_ultra_adjust_off = 0.f; // Ultra: sliders start fresh with a new pick
  }
 
 void GLGizmoMeasure::reset_feature1_render()
@@ -3021,7 +3021,7 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
         // anti-parallel mate, so negate to express the roll about n1.
         if (rolled) set_to_around_center_of_faces(true, (float) (-roll_deg));
         // Keep the picks alive (the Adjust sliders need them); only the slider accumulators restart.
-        m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f;
+        m_ultra_adjust_rot = 0.f; m_ultra_cen_rot = 0.f; m_ultra_adjust_off = 0.f;
         notify(rolled ? (boost::format(_u8L("Fit for Print: parts mated, roll %.2f deg.")) % roll_deg).str()
                       : _u8L("Fit for Print: parts mated for assembly."));
         return;
@@ -3070,7 +3070,7 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
         if (amo_sph->instances.empty()) return;
         wxGetApp().plater()->take_snapshot("Auto-fit");
         ultra_apply_attachment_print_pose(Msph * amo_sph->instances[0]->get_transformation().get_matrix());
-        m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f;
+        m_ultra_adjust_rot = 0.f; m_ultra_cen_rot = 0.f; m_ultra_adjust_off = 0.f;
         notify((boost::format(_u8L("Auto-fit (sphere): centres aligned, moved %.1fmm. Radii %.2f / %.2f mm (mismatch %.2f mm)."))
                 % Msph.translation().norm() % fit1.radius % fit2.radius % std::abs(dr)).str());
         return;
@@ -3148,7 +3148,7 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
     (void) tmo;
     wxGetApp().plater()->take_snapshot("Auto-fit");
     ultra_apply_attachment_print_pose(M * amo->instances[0]->get_transformation().get_matrix());
-    m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f;
+    m_ultra_adjust_rot = 0.f; m_ultra_cen_rot = 0.f; m_ultra_adjust_off = 0.f;
     notify((boost::format(_u8L("Auto-fit: moved %.1fmm; outline roll %.1f deg (protrusion %.3f, clearance %.2fmm); collision roll %.1f deg (penetration %.3f). Nudge with the sliders, then Merge parts."))
             % mv.norm() % roll_deg % roll_res % roll_clear % coll_deg % coll_pen).str());
 }
@@ -3410,73 +3410,67 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     };
     auto row_label = [&](const std::string& t) { m_imgui->text(t); ImGui::SameLine(label_w); };
 
-    // Rotate: slider + box (cumulative degrees since the last mate / pick).
-    row_label(l_rot);
-    ImGui::PushItemWidth(slider_w);
-    float rot = m_ultra_adjust_rot;
-    if (ImGui::SliderFloat("##ultra_adjust_rot", &rot, -180.0f, 180.0f, "")) {
-        const bool shot = ImGui::IsItemActivated();
-        ultra_adjust_rotate(double(rot - m_ultra_adjust_rot), shot);
-        m_ultra_adjust_rot = rot;
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine(box_x);
-    if (number_box("##ultra_adjust_rot_box", m_ultra_rot_buf, m_ultra_rot_editing, double(m_ultra_adjust_rot), "Â°")) {
-        const double delta = m_ultra_rot_buf - double(m_ultra_adjust_rot);
-        if (std::abs(delta) > 1e-4) {
-            ultra_adjust_rotate(delta, true); // one undo snapshot
-            m_ultra_adjust_rot = float(m_ultra_rot_buf);
-        }
-    }
+    const std::string deg = "°";
+    // One row: label | slider | box | unit. `slider_val` is what the slider shows (its own range), the box
+    // shows `box_val` in display units; slider drags call on_slide(new, shot), a committed box calls on_type.
+    auto slider_row = [&](const std::string& label, const char* sid, float slider_val, float lo, float hi,
+                          const char* bid, double& buf, bool& editing, double box_val, const std::string& unit_text,
+                          auto on_slide, auto on_type) {
+        row_label(label);
+        ImGui::PushItemWidth(slider_w);
+        float v = slider_val;
+        if (ImGui::SliderFloat(sid, &v, lo, hi, "")) on_slide(v, ImGui::IsItemActivated());
+        ImGui::PopItemWidth();
+        ImGui::SameLine(box_x);
+        if (number_box(bid, buf, editing, box_val, unit_text)) on_type(buf);
+    };
 
-    // Offset: slider (mm, cumulative) + box (display units).
-    row_label(l_off);
-    ImGui::PushItemWidth(slider_w);
-    float off = m_ultra_adjust_off;
-    if (ImGui::SliderFloat("##ultra_adjust_off", &off, -20.0f, 20.0f, "")) {
-        const bool shot = ImGui::IsItemActivated();
-        ultra_adjust_offset(double(off - m_ultra_adjust_off), shot);
-        m_ultra_adjust_off = off;
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine(box_x);
-    if (number_box("##ultra_adjust_off_box", m_ultra_off_buf, m_ultra_off_editing, double(m_ultra_adjust_off) * unit, mm_units)) {
-        const double target_mm = m_ultra_off_buf / unit;
-        const double delta_mm  = target_mm - double(m_ultra_adjust_off);
-        if (std::abs(delta_mm) > 1e-5) {
-            ultra_adjust_offset(delta_mm, true);
-            m_ultra_adjust_off = float(target_mm);
-        }
-    }
+    // Rotate (cumulative degrees since the last mate / pick).
+    slider_row(l_rot, "##ultra_adjust_rot", m_ultra_adjust_rot, -180.f, 180.f, "##ultra_adjust_rot_box", m_ultra_rot_buf,
+               m_ultra_rot_editing, double(m_ultra_adjust_rot), deg,
+        [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_adjust_rot), shot); m_ultra_adjust_rot = v; },
+        [&](double typed) {
+            const double delta = typed - double(m_ultra_adjust_rot);
+            if (std::abs(delta) > 1e-4) { ultra_adjust_rotate(delta, true); m_ultra_adjust_rot = float(typed); }
+        });
+
+    // Offset (mm, cumulative; the box is in display units).
+    slider_row(l_off, "##ultra_adjust_off", m_ultra_adjust_off, -20.f, 20.f, "##ultra_adjust_off_box", m_ultra_off_buf,
+               m_ultra_off_editing, double(m_ultra_adjust_off) * unit, mm_units,
+        [&](float v, bool shot) { ultra_adjust_offset(double(v - m_ultra_adjust_off), shot); m_ultra_adjust_off = v; },
+        [&](double typed) {
+            const double target_mm = typed / unit, delta_mm = target_mm - double(m_ultra_adjust_off);
+            if (std::abs(delta_mm) > 1e-5) { ultra_adjust_offset(delta_mm, true); m_ultra_adjust_off = float(target_mm); }
+        });
 
     // Absolute inputs for two flat faces (restored from OrcaSlicer's Assembly tool).
     const Measure::AssemblyAction live = Measure::get_assembly_action(*m_selected_features.first.feature,
                                                                       *m_selected_features.second.feature);
     if (live.has_parallel_distance) {
-        row_label(l_par);
-        ImGui::SameLine(box_x);
-        if (number_box("##parallel_distance_z", m_ultra_para_buf, m_ultra_para_editing, double(live.parallel_distance) * unit, mm_units)) {
-            const double target_mm = m_ultra_para_buf / unit;
-            const double delta_mm  = target_mm - double(live.parallel_distance);
-            if (std::abs(delta_mm) > 1e-4) {
-                if (m_same_model_object) set_parallel_distance(true, float(target_mm));
-                else                     ultra_adjust_offset(delta_mm, true); // keeps the assembly pose in step
-                m_ultra_adjust_off = 0.f; // sliders restart from the new position
-                m_ultra_adjust_rot = 0.f;
-            }
-        }
+        // Slider: absolute gap, -50..50 mm (follows the live value; the box accepts any value).
+        slider_row(l_par, "##ultra_parallel_slider", live.parallel_distance, -50.f, 50.f, "##parallel_distance_z", m_ultra_para_buf,
+                   m_ultra_para_editing, double(live.parallel_distance) * unit, mm_units,
+            [&](float v, bool shot) {
+                const double delta = double(v) - double(live.parallel_distance);
+                if (std::abs(delta) > 1e-6) { ultra_adjust_offset(delta, shot); m_ultra_adjust_off = 0.f; }
+            },
+            [&](double typed) {
+                const double target_mm = typed / unit, delta_mm = target_mm - double(live.parallel_distance);
+                if (std::abs(delta_mm) > 1e-4) {
+                    if (m_same_model_object) set_parallel_distance(true, float(target_mm));
+                    else                     ultra_adjust_offset(delta_mm, true); // keeps the assembly pose in step
+                    m_ultra_adjust_off = 0.f; // sliders restart from the new position
+                }
+            });
     }
     if (live.can_around_center_of_faces) {
-        row_label(l_cen);
-        ImGui::SameLine(box_x);
-        if (number_box("##rotate_around_center", m_buffered_around_center, m_ultra_cen_editing, 0.0, "Â°")) {
-            if (std::abs(m_buffered_around_center) > EPSILON) {
-                ultra_adjust_rotate(m_buffered_around_center, true);
-                m_ultra_adjust_rot = 0.f;
-                m_ultra_adjust_off = 0.f;
-            }
-            m_buffered_around_center = 0;
-        }
+        slider_row(l_cen, "##ultra_center_slider", m_ultra_cen_rot, -180.f, 180.f, "##rotate_around_center", m_ultra_cen_buf,
+                   m_ultra_cen_editing, double(m_ultra_cen_rot), deg,
+            [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_cen_rot), shot); m_ultra_cen_rot = v; },
+            [&](double typed) {
+                const double delta = typed - double(m_ultra_cen_rot);
+                if (std::abs(delta) > 1e-4) { ultra_adjust_rotate(delta, true); m_ultra_cen_rot = float(typed); }
+            });
     }
 }
 
@@ -3774,7 +3768,7 @@ bool GLGizmoMeasure::ultra_exact_fit()
         wxGetApp().plater()->take_snapshot("Auto-fit");
         ultra_apply_attachment_print_pose(W1 * fp.mate * W2.inverse() * amo->instances[0]->get_transformation().get_matrix());
     }
-    m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f;
+    m_ultra_adjust_rot = 0.f; m_ultra_cen_rot = 0.f; m_ultra_adjust_off = 0.f;
     BOOST_LOG_TRIVIAL(warning) << "[UltraFit] exact footprint: move=" << move.norm() << " roll=" << fp.roll * 180.0 / M_PI
                                << " contact_shift=" << fp.contact_shift << " draped=" << fp.draped << " missed=" << fp.missed;
     std::string msg = (boost::format(_u8L("Auto-fit (exact): the highlighted footprint landed on the target face (moved %.1fmm, edge roll %.1f deg, contact shift %.2fmm)."))

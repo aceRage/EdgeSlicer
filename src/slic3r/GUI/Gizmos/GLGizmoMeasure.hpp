@@ -385,7 +385,8 @@ protected:
     void ultra_restore_kept_picks();
     double                   m_ultra_para_buf{0.0};   // Ultra: typed Parallel distance (display units)
     bool                     m_ultra_para_editing{false};
-    double                   m_ultra_rot_buf{0.0}, m_ultra_off_buf{0.0};
+    double                   m_ultra_rot_buf{0.0}, m_ultra_off_buf{0.0}, m_ultra_cen_buf{0.0};
+    float                    m_ultra_cen_rot{0.f}; // Ultra: cumulative Rotate-around-center slider (deg)
     bool                     m_ultra_rot_editing{false}, m_ultra_off_editing{false}, m_ultra_cen_editing{false};
     // Ultra (Curve mode): total normal spread a Curve pick may grow across, and the "no total cap, stop
     // only at sharp edges" mode. Loaded from app config on first use, saved on every change.
