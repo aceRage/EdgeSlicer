@@ -1071,9 +1071,11 @@ private:
         if(items_.empty() ||
                 config_.alignment == Config::Alignment::DONT_ALIGN) return;
 
+        // The pile is what was arranged: fixed items stay where they are, so they neither count in its
+        // box nor move with it.
         Box bb;
         for (Item& item : items_)
-            if (!item.is_virt_object)
+            if (!item.is_virt_object && !item.isFixed())
                 bb = sl::boundingBox(item.boundingBox(), bb);
 
         Vertex ci, cb;
@@ -1168,7 +1170,7 @@ private:
             }
         }
         for(Item& item : items_)
-            if (!item.is_virt_object)
+            if (!item.is_virt_object && !item.isFixed())
                 item.translate(d);
     }
 
