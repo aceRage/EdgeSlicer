@@ -440,8 +440,10 @@ void GLGizmoMeasure::data_changed(bool is_serializing)
         reset_all_pick();
         update_if_needed();
         register_single_mesh_pick();
+        const float s_rot = m_ultra_adjust_rot, s_off = m_ultra_adjust_off, s_cen = m_ultra_cen_rot;
         reset_all_feature();
-        ultra_restore_kept_picks(); // Auto-fit just moved a part: keep its two picks
+        // Auto-fit / an Adjust drag just moved a part: keep its two picks and the sliders' values
+        if (ultra_restore_kept_picks()) { m_ultra_adjust_rot = s_rot; m_ultra_adjust_off = s_off; m_ultra_cen_rot = s_cen; }
     }
     m_last_inv_zoom  = 0.0f;
     m_last_plane_idx = -1;
@@ -2443,10 +2445,11 @@ bool GLGizmoMeasure::repair_stale_volume_refs()
     if (!volume_refs_are_stale())
         return false;
     BOOST_LOG_TRIVIAL(warning) << "GLGizmoMeasure: cached volumes were deleted or replaced under the gizmo, rebuilding its picks";
+    const float s_rot = m_ultra_adjust_rot, s_off = m_ultra_adjust_off, s_cen = m_ultra_cen_rot;
     drop_volume_refs();
     if (m_state == On) {
         register_single_mesh_pick();
-        ultra_restore_kept_picks(); // Auto-fit's picks survive the rebuilt volumes
+        if (ultra_restore_kept_picks()) { m_ultra_adjust_rot = s_rot; m_ultra_adjust_off = s_off; m_ultra_cen_rot = s_cen; } // picks + sliders survive the rebuilt volumes
     }
     return true;
 }
@@ -2944,19 +2947,19 @@ void GLGizmoMeasure::ultra_arm_kept_picks()
 }
 
 // Re-resolve the remembered picks on the (possibly rebuilt) volumes. Only within a few seconds of Auto-fit.
-void GLGizmoMeasure::ultra_restore_kept_picks()
+bool GLGizmoMeasure::ultra_restore_kept_picks()
 {
-    if (!m_ultra_kept_armed) return;
-    if (std::chrono::steady_clock::now() - m_ultra_kept_time > std::chrono::seconds(5)) { m_ultra_kept_armed = false; return; }
+    if (!m_ultra_kept_armed) return false;
+    if (std::chrono::steady_clock::now() - m_ultra_kept_time > std::chrono::seconds(5)) { m_ultra_kept_armed = false; return false; }
     GLVolume* vols[2] = {nullptr, nullptr};
     for (int i = 0; i < 2; ++i) {
         for (GLVolume* v : m_parent.get_volumes().volumes)
             if (v && v->object_idx() == m_ultra_kept[i].obj && v->volume_idx() == m_ultra_kept[i].vol &&
                 v->instance_idx() == m_ultra_kept[i].inst) { vols[i] = v; break; }
         if (!vols[i] || m_mesh_raycaster_map.find(vols[i]) == m_mesh_raycaster_map.end() ||
-            !m_ultra_kept[i].item.feature->origin_surface_feature) return; // volume gone or not pickable: give up
+            !m_ultra_kept[i].item.feature->origin_surface_feature) return false; // volume gone or not pickable: give up
     }
-    if (vols[0] == vols[1]) return;
+    if (vols[0] == vols[1]) return false;
     m_hit_different_volumes = {vols[0], vols[1]};
     m_hit_order_volumes     = {vols[0], vols[1]};
     m_last_hit_volume       = vols[1];
@@ -2972,6 +2975,7 @@ void GLGizmoMeasure::ultra_restore_kept_picks()
     update_measurement_result();
     m_parent.set_as_dirty();
     BOOST_LOG_TRIVIAL(info) << "GLGizmoMeasure: Auto-fit picks re-resolved after the scene reload";
+    return true;
 }
 
 void GLGizmoMeasure::ultra_fit_for_print_and_merge()
@@ -3241,6 +3245,7 @@ void GLGizmoMeasure::ultra_adjust_rotate(double deg_delta, bool take_shot)
 {
     if (m_hit_different_volumes.size() != 2 || std::abs(deg_delta) < 1e-6) return;
     if (!m_selected_features.first.feature.has_value() || !m_selected_features.second.feature.has_value()) return;
+    ultra_arm_kept_picks();
     if (m_same_model_object) { set_to_around_center_of_faces(true, (float) deg_delta, take_shot); return; } // stock volume path
     Vec3d d1, p1;
     if (!ultra_feature_dir_point(*m_selected_features.first.feature, d1, p1)) return;
@@ -3254,6 +3259,47 @@ void GLGizmoMeasure::ultra_adjust_rotate(double deg_delta, bool take_shot)
     ultra_apply_attachment_print_pose(delta * amo->instances[0]->get_transformation().get_matrix());
 }
 
+// Ultra: Orbit -- carry part 2 round the OTHER part: rotate about the axis through part 1's centre, along the
+// mating normal. (OrcaSlicer's "Rotate around center" only spun part 2 about its own face centre; that is
+// Rotate (Part) here.)
+void GLGizmoMeasure::ultra_adjust_orbit(double deg_delta, bool take_shot)
+{
+    if (m_hit_different_volumes.size() != 2 || std::abs(deg_delta) < 1e-6) return;
+    if (!m_selected_features.first.feature.has_value() || !m_selected_features.second.feature.has_value()) return;
+    Vec3d d1, p1;
+    if (!ultra_feature_dir_point(*m_selected_features.first.feature, d1, p1)) return;
+    GLVolume* vt = m_hit_different_volumes[0];
+    GLVolume* va = m_hit_different_volumes[1];
+    if (!vt || !va) return;
+    ultra_arm_kept_picks();
+    const Vec3d pivot_view = vt->transformed_bounding_box().center();
+    const double rad = Geometry::deg2rad(deg_delta);
+    if (m_same_model_object) {
+        auto selection = const_cast<Selection*>(&m_parent.get_selection());
+        selection->setup_cache();
+        if (take_shot) wxGetApp().plater()->take_snapshot("Orbit", UndoRedo::SnapshotType::GizmoAction);
+        selection->set_mode(Selection::Volume);
+        m_pending_scale = 1;
+        Geometry::Transformation inMat(va->world_matrix());
+        Geometry::Transformation outMat = Geometry::mat_around_a_point_rotate(inMat, pivot_view, d1.normalized(), rad);
+        const Transform3d volume_tran = va->get_instance_transformation().get_matrix().inverse() * outMat.get_matrix();
+        selection->rotate(va->object_idx(), va->instance_idx(), va->volume_idx(), volume_tran);
+        wxGetApp().plater()->canvas3D()->do_rotate("");
+        register_single_mesh_pick();
+        update_feature_by_tran(*m_selected_features.first.feature);
+        update_feature_by_tran(*m_selected_features.second.feature);
+        return;
+    }
+    Transform3d W1;
+    if (!ultra_w2p(vt, *m_selected_features.first.feature, W1)) return;
+    const Vec3d dp = (W1.linear() * d1).normalized(), pp = W1 * pivot_view;
+    Model& model = wxGetApp().plater()->model();
+    ModelObject* amo = model.objects[va->object_idx()];
+    if (take_shot) wxGetApp().plater()->take_snapshot("Orbit", UndoRedo::SnapshotType::GizmoAction);
+    const Transform3d delta = Eigen::Translation3d(pp) * Eigen::AngleAxisd(rad, dp) * Eigen::Translation3d(-pp);
+    ultra_apply_attachment_print_pose(delta * amo->instances[0]->get_transformation().get_matrix());
+}
+
 // Ultra: slide part 2 along the mating axis.
 void GLGizmoMeasure::ultra_adjust_offset(double mm_delta, bool take_shot)
 {
@@ -3261,6 +3307,7 @@ void GLGizmoMeasure::ultra_adjust_offset(double mm_delta, bool take_shot)
     if (!m_selected_features.first.feature.has_value() || !m_selected_features.second.feature.has_value()) return;
     Vec3d d1, p1;
     if (!ultra_feature_dir_point(*m_selected_features.first.feature, d1, p1)) return;
+    ultra_arm_kept_picks();
     if (m_same_model_object) { set_distance(true, d1.normalized() * mm_delta, take_shot); return; } // stock volume path
     Transform3d W1;
     if (!ultra_w2p(m_hit_different_volumes[0], *m_selected_features.first.feature, W1)) return;
@@ -3389,8 +3436,8 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     const std::string l_rot = _u8L("Rotate (Part)"), l_off = _u8L("Offset"), l_par = _u8L("Parallel distance"),
                       l_cen = _u8L("Orbit");
     float label_w = 0.f;
-    for (const std::string* l : {&l_rot, &l_off, &l_par, &l_cen}) label_w = std::max(label_w, ImGui::CalcTextSize(l->c_str()).x);
-    label_w += m_space_size;
+    for (const std::string* l : {&l_rot, &l_off, &l_par, &l_cen}) label_w = std::max(label_w, m_imgui->calc_text_size(wxString::FromUTF8(l->c_str())).x);
+    label_w += 2.0f * m_space_size + ImGui::GetStyle().ItemSpacing.x;
     const float slider_w = std::max(140.0f, ImGui::CalcTextSize("-100.00").x * 4.0f);
     const float box_x    = label_w + slider_w + ImGui::GetStyle().ItemSpacing.x;
     const float box_w    = m_input_size_max;
@@ -3415,12 +3462,14 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // shows `box_val` in display units; slider drags call on_slide(new, shot), a committed box calls on_type.
     auto slider_row = [&](const std::string& label, const char* sid, float slider_val, float lo, float hi,
                           const char* bid, double& buf, bool& editing, double box_val, const std::string& unit_text,
-                          const wxString& tip, auto on_slide, auto on_type) {
+                          const wxString& tip, bool* active_out, auto on_slide, auto on_type) {
         row_label(label);
         if (ImGui::IsItemHovered()) m_imgui->tooltip(tip, ULTRA_CURVE_TOOLTIP_WIDTH);
         ImGui::PushItemWidth(slider_w);
         float v = slider_val;
-        if (ImGui::SliderFloat(sid, &v, lo, hi, "")) on_slide(v, ImGui::IsItemActivated());
+        const bool moved = ImGui::SliderFloat(sid, &v, lo, hi, "");
+        if (moved) on_slide(v, ImGui::IsItemActivated());
+        if (active_out) *active_out = ImGui::IsItemActive();
         if (ImGui::IsItemHovered()) m_imgui->tooltip(tip, ULTRA_CURVE_TOOLTIP_WIDTH);
         ImGui::PopItemWidth();
         ImGui::SameLine(box_x);
@@ -3430,7 +3479,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // Rotate (cumulative degrees since the last mate / pick).
     slider_row(l_rot, "##ultra_adjust_rot", m_ultra_adjust_rot, -180.f, 180.f, "##ultra_adjust_rot_box", m_ultra_rot_buf,
                m_ultra_rot_editing, double(m_ultra_adjust_rot), deg,
-               _L("Rotate (Part): spins part 2 about the mating axis (the normal of the picked faces)."),
+               _L("Rotate (Part): spins part 2 about the mating axis (the normal of the picked faces)."), nullptr,
         [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_adjust_rot), shot); m_ultra_adjust_rot = v; },
         [&](double typed) {
             const double delta = typed - double(m_ultra_adjust_rot);
@@ -3440,7 +3489,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // Offset (mm, cumulative; the box is in display units).
     slider_row(l_off, "##ultra_adjust_off", m_ultra_adjust_off, -20.f, 20.f, "##ultra_adjust_off_box", m_ultra_off_buf,
                m_ultra_off_editing, double(m_ultra_adjust_off) * unit, mm_units,
-               _L("Offset: slides part 2 along the mating axis, relative to where it is now."),
+               _L("Offset: slides part 2 along the mating axis, relative to where it is now."), nullptr,
         [&](float v, bool shot) { ultra_adjust_offset(double(v - m_ultra_adjust_off), shot); m_ultra_adjust_off = v; },
         [&](double typed) {
             const double target_mm = typed / unit, delta_mm = target_mm - double(m_ultra_adjust_off);
@@ -3451,12 +3500,16 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     const Measure::AssemblyAction live = Measure::get_assembly_action(*m_selected_features.first.feature,
                                                                       *m_selected_features.second.feature);
     if (live.has_parallel_distance) {
+        if (!m_ultra_para_sliding) m_ultra_para_sval = live.parallel_distance;
         // Slider: absolute gap, -50..50 mm (follows the live value; the box accepts any value).
-        slider_row(l_par, "##ultra_parallel_slider", live.parallel_distance, -50.f, 50.f, "##parallel_distance_z", m_ultra_para_buf,
+        slider_row(l_par, "##ultra_parallel_slider", m_ultra_para_sliding ? m_ultra_para_sval : live.parallel_distance, -50.f, 50.f, "##parallel_distance_z", m_ultra_para_buf,
                    m_ultra_para_editing, double(live.parallel_distance) * unit, mm_units,
-               _L("Parallel distance: the exact gap between the two parallel faces. The box accepts any value."),
+               _L("Parallel distance: the exact gap between the two parallel faces. The box accepts any value."), &m_ultra_para_sliding,
             [&](float v, bool shot) {
-                const double delta = double(v) - double(live.parallel_distance);
+                // While dragging, the slider owns its value: the measured gap lags a frame behind the move.
+                const double from  = m_ultra_para_sliding ? double(m_ultra_para_sval) : double(live.parallel_distance);
+                const double delta = double(v) - from;
+                m_ultra_para_sval = v;
                 if (std::abs(delta) > 1e-6) { ultra_adjust_offset(delta, shot); m_ultra_adjust_off = 0.f; }
             },
             [&](double typed) {
@@ -3469,13 +3522,14 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
             });
     }
     if (live.can_around_center_of_faces) {
+        bool orbit_active = false;
         slider_row(l_cen, "##ultra_center_slider", m_ultra_cen_rot, -180.f, 180.f, "##rotate_around_center", m_ultra_cen_buf,
                    m_ultra_cen_editing, double(m_ultra_cen_rot), deg,
-               _L("Orbit: rotates part 2 around the assembly centre (the centre of the mated faces)."),
-            [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_cen_rot), shot); m_ultra_cen_rot = v; },
+               _L("Orbit: moves part 2 in a circle around the other part (about its centre, along the mating axis)."), &orbit_active,
+            [&](float v, bool shot) { ultra_adjust_orbit(double(v - m_ultra_cen_rot), shot); m_ultra_cen_rot = v; },
             [&](double typed) {
                 const double delta = typed - double(m_ultra_cen_rot);
-                if (std::abs(delta) > 1e-4) { ultra_adjust_rotate(delta, true); m_ultra_cen_rot = float(typed); }
+                if (std::abs(delta) > 1e-4) { ultra_adjust_orbit(delta, true); m_ultra_cen_rot = float(typed); }
             });
     }
 }

@@ -382,9 +382,12 @@ protected:
     bool                     m_ultra_kept_armed{false};
     std::chrono::steady_clock::time_point m_ultra_kept_time;
     void ultra_arm_kept_picks();
-    void ultra_restore_kept_picks();
+    bool ultra_restore_kept_picks();
+    void ultra_adjust_orbit(double deg_delta, bool take_shot); // carry part 2 round part 1 about the mating axis
     double                   m_ultra_para_buf{0.0};   // Ultra: typed Parallel distance (display units)
     bool                     m_ultra_para_editing{false};
+    bool                     m_ultra_para_sliding{false};
+    float                    m_ultra_para_sval{0.f};
     double                   m_ultra_rot_buf{0.0}, m_ultra_off_buf{0.0}, m_ultra_cen_buf{0.0};
     float                    m_ultra_cen_rot{0.f}; // Ultra: cumulative Rotate-around-center slider (deg)
     bool                     m_ultra_rot_editing{false}, m_ultra_off_editing{false}, m_ultra_cen_editing{false};
