@@ -345,24 +345,34 @@ std::string nozzle_process_missing_error(const ConfigBase &config, size_t extrud
 std::string nozzle_size_group_id(size_t extruder, double diameter);
 // The 0-based extruder and the size of a "T<n>:<size>" id; false for any other id (a "T<n>" id included).
 bool        parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double &diameter);
+// H3C slot process groups (owner 2026-11-14): "T1.9", rack slot 9 of extruder 1 as a tool of its own (split_rack_slots,
+// ToolSlots.hpp: a slot a filament is pinned to, or of another nozzle type). Stored like a size tool's id.
+std::string nozzle_rack_slot_tool_id(size_t extruder, int slot);
+// The 0-based extruder and the 1-based slot of a "T<n>.<slot>" id; false for any other id.
+bool        parse_nozzle_rack_slot_tool_id(const std::string &id, size_t &extruder, int &slot);
+// Whether `id` names a rack tool: a size tool ("T2:0.6") or a slot tool ("T1.9").
+bool        is_nozzle_rack_tool_id(const std::string &id);
 
-// One entry of the Process tab's selector: an extruder (slot 0, its mounted size) or another nozzle size of its rack.
+// One entry of the Process tab's selector: an extruder (slot 0, its mounted size), another nozzle size of its rack, or (H3C) one
+// rack slot split off its size group.
 struct NozzleToolEntry
 {
     size_t extruder{ 0 };
-    int    slot{ 0 };      // 1-based index of the rack size, 0 = the extruder itself
+    int    slot{ 0 };      // 1-based index of the extruder's rack tools, 0 = the extruder itself
     double diameter{ 0. }; // the nozzle size (the project's)
+    int    rack_slot{ 0 }; // H3C: the 1-based rack slot of a slot tool ("T1.9"), 0 = a size group or the extruder
 };
-// The selector's entries in order: per extruder the extruder, then its rack's other sizes when it shows its rack.
+// The selector's entries in order: per extruder the extruder, then its rack's other sizes when it shows its rack, then (H3C) its
+// split rack slots. The extruder and the size groups cover the slots that are not split off.
 std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config);
 // The rack size entries only (in nozzle_tool_entries order).
 std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config);
-// "T1" or "T2:0.6".
+// "T1", "T2:0.6" or "T1.9".
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry);
-// "Left (T1)", "Right 0.6", "T2 0.6", "T3".
+// "Left (T1)", "Right 0.6", "T2 0.6", "T3", "T1 slot 9".
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry);
-// The size tool 1-based `filament_id` prints with ("T2:0.6"), "" when it prints with its extruder's process (no rack shown, or the
-// extruder's mounted size).
+// The rack tool 1-based `filament_id` prints with ("T2:0.6", "T1.9"), "" when it prints with its extruder's process (no rack
+// shown, or the extruder's mounted size and no split slot).
 std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int filament_id);
 // The tool a filament prints with, as messages name it and as jump ids carry it.
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id);
