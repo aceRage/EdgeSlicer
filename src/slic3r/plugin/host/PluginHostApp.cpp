@@ -1,5 +1,7 @@
 #include "PluginHostBindings.hpp"
 #include "PluginHostUiMarshal.hpp"
+#include <slic3r/plugin/ipc/PluginIpcProtocol.hpp>
+#include <slic3r/plugin/ipc/PluginHostRpc.hpp>
 
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
@@ -196,6 +198,49 @@ void host_bindings::set_live_preset_bundle_for_testing(PresetBundle* bundle)
     g_live_bundle_for_testing = bundle;
 }
 
+nlohmann::json host_bindings::snapshot_model_json()
+{
+    std::unique_ptr<Model> model = snapshot_model();
+    nlohmann::json         out;
+    out["objects"] = nlohmann::json::array();
+    if (!model)
+        return out;
+    for (ModelObject* object : model->objects) {
+        if (object == nullptr)
+            continue;
+        nlohmann::json obj;
+        obj["name"] = object->name;
+        const BoundingBoxf3 bb = object->bounding_box_exact();
+        obj["bbox_min"]        = nlohmann::json::array({bb.min.x(), bb.min.y(), bb.min.z()});
+        obj["bbox_max"]        = nlohmann::json::array({bb.max.x(), bb.max.y(), bb.max.z()});
+        out["objects"].push_back(std::move(obj));
+    }
+    if (!model->objects.empty()) {
+        const BoundingBoxf3 model_bb = model->bounding_box_approx();
+        out["bbox_min"]              = nlohmann::json::array({model_bb.min.x(), model_bb.min.y(), model_bb.min.z()});
+        out["bbox_max"]              = nlohmann::json::array({model_bb.max.x(), model_bb.max.y(), model_bb.max.z()});
+    }
+    return out;
+}
+
+nlohmann::json host_bindings::snapshot_app_info_json()
+{
+    const AppInfoSnapshot snap = snapshot_app_info();
+    nlohmann::json        out;
+    out["version"]                = snap.version;
+    out["build"]                  = std::string();
+    out["mode"]                   = snap.mode;
+    out["language"]               = snap.language;
+    out["app_config_version"]     = std::string();
+    out["stealth_mode"]           = snap.stealth_mode;
+    out["is_signed_in"]           = false;
+    out["is_bambu_signed_in"]     = false;
+    out["network_plugin_version"] = std::string();
+    out["network_plugin_error"]   = std::string();
+    out["orca_api_version"]       = k_orca_api_version;
+    return out;
+}
+
 void host_bindings::register_app(py::module_& host)
 {
     py::class_<PlaterHandle>(host, "Plater")
@@ -223,9 +268,28 @@ void host_bindings::register_app(py::module_& host)
         plugin_host::run_on_ui_blocking([] { (void) current_plater(); });
         return PlaterHandle{};
     });
-    host.def("model", &snapshot_model);
+    host.def("model", []() -> std::unique_ptr<Model> {
+        if (plugin_ipc::in_child_process())
+            return plugin_ipc::model_from_snapshot_json(plugin_ipc::call_host("host.model"));
+        return snapshot_model();
+    });
     host.def("preset_bundle", &snapshot_preset_bundle);
-    host.def("app_info", &app_info,
+    host.def("app_info", []() -> py::dict {
+        if (plugin_ipc::in_child_process()) {
+            const nlohmann::json info = plugin_ipc::call_host("host.app_info");
+            py::dict             out;
+            for (auto it = info.begin(); it != info.end(); ++it) {
+                if (it.value().is_boolean())
+                    out[it.key().c_str()] = it.value().get<bool>();
+                else if (it.value().is_string())
+                    out[it.key().c_str()] = it.value().get<std::string>();
+                else
+                    out[it.key().c_str()] = it.value().dump();
+            }
+            return out;
+        }
+        return app_info();
+    },
              "The running app: version, build, mode, language, stealth_mode, orca_api_version. "
              "Cloud sign-in and network-plugin fields are empty on Edge.");
     host.def("gl_info", &gl_info,

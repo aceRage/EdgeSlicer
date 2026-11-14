@@ -128,7 +128,10 @@ class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
                 results[name] = "ok"
             except Exception as e:
                 results[name] = type(e).__name__ + ":" + str(e)
-        orca._write_probe = json.dumps(results, sort_keys=True)
+        results_json = json.dumps(results, sort_keys=True)
+        orca._write_probe = results_json
+        with open(os.path.join(os.path.dirname(ctx.gcode_path), "probe_results.json"), "w", encoding="utf-8") as out:
+            out.write(results_json)
         return orca.ExecutionResult.success("probed")
 
 @orca.plugin
@@ -462,7 +465,10 @@ TEST_CASE("psGCodePostProcess write root is the G-code folder and not UltraNet p
     CHECK_FALSE(fs::exists(outside));
 
     std::string observed;
-    {
+    const fs::path results_file = gcode_dir.path() / "probe_results.json";
+    if (fs::exists(results_file))
+        observed = read_file(results_file);
+    else {
         PythonGILState gil;
         REQUIRE(static_cast<bool>(gil));
         pybind11::module_ orca = pybind11::module_::import("orca");

@@ -384,6 +384,13 @@ endif ()
 
 if (EDGE_PYTHON_PLUGINS)
     set(_edge_python_bin_dir "$<TARGET_FILE_DIR:Snapmaker_Orca>")
+    add_dependencies(Snapmaker_Orca edge-plugin-host)
+    add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host next to EdgeSlicer"
+        VERBATIM)
     add_custom_command(TARGET Snapmaker_Orca POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${_edge_python_bin_dir}/python"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${_edge_python_bin_dir}/python"

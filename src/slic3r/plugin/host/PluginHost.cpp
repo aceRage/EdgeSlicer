@@ -2,9 +2,11 @@
 #include "PluginHostBindings.hpp"
 #include "PluginHostUi.hpp"
 
+#include <nlohmann/json.hpp>
 #include <pybind11/pybind11.h>
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/ipc/PluginIpcProtocol.hpp>
 
 #include <stdexcept>
 #include <string>
@@ -23,6 +25,11 @@ void register_plugin(pybind11::module_& host)
             if (plugin_key.empty())
                 throw std::runtime_error("plugin.storage() must be called from a plugin callback");
 
+            if (plugin_ipc::in_child_process()) {
+                const nlohmann::json result = plugin_ipc::call_host("host.plugin.storage",
+                                                                    nlohmann::json{{"plugin_key", plugin_key}});
+                return result.at("path").get<std::string>();
+            }
             return PluginManager::instance().get_storage_dir(plugin_key);
         },
         "Return the per-plugin storage folder under orca_plugins/plugin_data.");

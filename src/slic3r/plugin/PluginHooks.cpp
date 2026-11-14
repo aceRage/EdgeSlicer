@@ -6,6 +6,7 @@
 #include "PythonPluginInterface.hpp"
 #include "pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp"
 #include "OrcaApiVersion.hpp"
+#include "ipc/PluginHostClient.hpp"
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
@@ -70,12 +71,20 @@ void run_post_process_plugins(const std::string& gcode_path,
 
         ExecutionResult exec_result;
         try {
-            PythonGILState gil;
-            if (!gil)
-                throw std::runtime_error("Python interpreter is shutting down");
             if (canceled && canceled())
                 throw CanceledException();
-            exec_result = cap->execute(ctx);
+            if (plugin_ipc::PluginHostClient::should_use_host()) {
+                std::string host_error;
+                exec_result = plugin_ipc::PluginHostClient::instance().execute_post_process(
+                    cap->audit_plugin_key(), ref.capability_name, ctx, host_error);
+                if (!host_error.empty() && exec_result.status == PluginResult::Success)
+                    exec_result = ExecutionResult::failure(PluginResult::FatalError, host_error);
+            } else {
+                PythonGILState gil;
+                if (!gil)
+                    throw std::runtime_error("Python interpreter is shutting down");
+                exec_result = cap->execute(ctx);
+            }
         } catch (const CanceledException&) {
             throw;
         } catch (const std::exception& ex) {

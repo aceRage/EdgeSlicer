@@ -28,6 +28,7 @@
 #include <slic3r/GUI/MsgDialog.hpp>
 #include <slic3r/plugin/PluginFsUtils.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
+#include <slic3r/plugin/ipc/PluginIpcProtocol.hpp>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -2060,6 +2061,18 @@ int audit_plugin_event(PluginAuditManager& mgr, const std::string& event_name, A
 {
     const bool                      fs_category = is_fs_category(event_type);
     const std::vector<std::string>  targets      = audit_targets(event_name, event_type, args);
+
+    // Phase 7: write-shaped filesystem events in the child are decided on the Edge side so
+    // write-root and UltraNet denies cannot be skipped by a modified child. Reads stay local so
+    // CPython can still import the bundled stdlib (the child's python/ tree is not an Edge
+    // allowed root).
+    if (fs_category && plugin_ipc::in_child_process() && event_type != AuditEventCategory::FsRead) {
+        const AuditDecision decision = plugin_ipc::rpc_audit_check(event_name, targets, true,
+                                                                   std::to_string(static_cast<int>(event_type)));
+        if (!decision.allowed)
+            return report_denied(mgr, event_name, decision, targets.empty() ? std::string() : targets.front());
+        return 0;
+    }
 
     // A denied path (secrets, certificates, config files -- see is_denied_path) is an
     // unconditional block: checked before the running-operation check below, so no granted

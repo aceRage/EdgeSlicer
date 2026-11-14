@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pybind11/pybind11.h>
+#include <nlohmann/json.hpp>
 
 namespace Slic3r {
 class Model;
@@ -22,6 +23,10 @@ void register_plugin(pybind11::module_& host);   // PluginHost.cpp
 // Test seam: host.model() / host.preset_bundle() copy this pointer instead of the live Plater.
 void set_live_model_for_testing(Model* model);
 void set_live_preset_bundle_for_testing(PresetBundle* bundle);
+
+// JSON snapshots for the out-of-process host. No raw pointers leave the Edge process.
+nlohmann::json snapshot_model_json();
+nlohmann::json snapshot_app_info_json();
 
 } // namespace Slic3r::host_bindings
 
