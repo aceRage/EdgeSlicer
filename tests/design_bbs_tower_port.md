@@ -208,3 +208,42 @@ filament's band still gets its prime purge (idle travel moves over that band, as
 **This port and blocks.** Nothing here blocks the block package: `NozzleChangePlan`,
 `NozzleChangeResult`, the keys, `ramming()` / `heater_off` / `idle_travel` and the append_tcr emission
 are the same objects BBS's block planner uses; only the Y origin of the ramming box changes.
+
+## 9. OrcaSlicer already has the newer planner (coordinator note 2026-11-14)
+
+OrcaSlicer main's Type1 `WipeTower.cpp` (5564 lines) is the Bambu block planner: `generate_new()`,
+`plan_tower_new()`, `WipeTowerBlock` / `get_block_by_category()` (keyed by `filament_adhesiveness_category`
+only), `tool_change_new()`, `ramming()`, `finish_layer_new()`, `finish_block(_solid)()`, used for **every**
+Type1 tower (Print.cpp calls `generate_new()`; `generate()` is WipeTower2 there). Source PRs (gh, file history):
+
+| Orca PR | merged | what it brought to the Type1 tower |
+|---|---|---|
+| #10780 H2D/H2S support | 2025-10-24 | the BBS 2.x tower: blocks per adhesiveness category, nozzle change / ramming, contact & solid layers, TPU reverse travel, skip points (BBS commits 955bb4dea8 "wipe tower support nozzle change", 257fc86ca9 "filaments that do not adhere", bca7f73f7f ...). Our port plan filed it as a profile resync only, so the planner never came over. |
+| #14685 Add Bambu H2C and A2L machine support | 2026-07-13 | multi-nozzle engine: per-layer nozzle grouping into the tower |
+| #14800 H2C carousel (NozzleStatusRecorder) | 2026-07-22 | ramming depth, M632 barriers, precool / ramming speed / reverse travel parity, per_cooling_max_speed clamp |
+| #15035 rib wall and skip points on all printers | 2026-07-31 | "Sync WipeTower from BambuStudio (through ca1881761)" |
+| #15485 Port wipe tower BBS improvements | 2026-09-17 | later BBS fixes (we ported the WipeTower2 side as #51) |
+| #15183, #16717 + e1d613096d, #15441, #17199, #17246 | 10-24 .. 11-06 | bounds checks, decimal points in F / flow tags, no sparse layers during a toolchange, filament statistics on non-Bambu printers, Klipper M400 stalls (several already ported to our planner: #15133, #15146, #15841) |
+
+**Orca vs BBS 2.9.1 for the ramming itself:** same lineage. Orca's `ramming()` uses one tower-wide
+ramming width (`m_nozzle_change_perimeter_width`), its own `Nozzle_Change_Start_Tag`, `M104` without the
+2.9.1 `N0 C` form; it has no `handle_hotend_as_extruder`, `heater_off_nozzle_change()`,
+`idle_travel_cooling()`, PVA rule, per-filament ramming width, merged slabs or lanes. So for H3C the
+BBS 2.9.1 code stays the source either way.
+
+**Does this change the plan or size?**
+- **This PR stays as is** (built and gated as a self-contained step): it delivers the owner's target
+  (H3C / H2 change blocks with BBS's ramming + post-extrusion cooling) and changes only nozzle-change
+  printers. Its keys, `NozzleChangePlan` / `NozzleChangeResult`, append_tcr emission, H3C modes and tests are
+  the same objects Orca's planner uses, so they carry over.
+- **The block / category stage becomes "port Orca's Type1 planner"** (edge-port-package, `Port OrcaSlicer #N`
+  commits): the tower part of #10780, then #14685 / #14800 / #15035 / #15485 tower hunks and the later
+  fixes, then BBS 2.9.1 only for the gaps (H3C modes, per-filament widths, `N0 C`, `filament_prime_volume_nc`).
+  Bigger than estimated in section 8 when it was BBS-sourced? No - smaller in adaptation work (Orca's config
+  and GCode layer are ours), but it replaces our 2963-line planner with ~5.5k lines and must re-apply Edge's
+  own tower work on top: Local-Z / mixed sub-layer start tool (#937), per-nozzle widths (P2), tower interface
+  (#119 vs Orca #12266), rib walls (#109 vs Orca #15035), sparse layer combination (#15841, Orca has it),
+  `filament_adhesiveness_category` key. Size: XL (several agent days, every Bambu tower changes, owner
+  prints on X1C + H2D/H2C + H3C). In that package this PR's `ramming()` graft is replaced by Orca's block
+  version (about 300 lines dropped), everything else stays.
+
