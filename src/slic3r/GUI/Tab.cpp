@@ -4192,7 +4192,9 @@ std::vector<wxString> TabPrint::tool_selector_labels() const
         const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
         if (!ref.valid)
             continue;
-        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter);
+        // H3C slot process groups: a slot tool's chip shows its own tile, a size group's the tiles not split off it.
+        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter, ref.rack_slot,
+                                                m_preset_bundle->nozzle_split_rack_slots(ref.extruder));
         labels.push_back(from_u8(chip.size + " " + chip.flow) + "\t" + from_u8(chip.tiles));
     }
     return labels;
@@ -4366,8 +4368,15 @@ bool TabPrint::tool_sizes_mixed() const
     if (m_preset_bundle == nullptr)
         return false;
     // Different nozzle sizes on the extruders, or a rack with other sizes (size tools).
-    return has_mixed_nozzle_diameters(m_preset_bundle->effective_nozzle_diameters()) ||
-           m_preset_bundle->nozzle_tool_count() > m_preset_bundle->effective_nozzle_diameters().size();
+    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
+    if (has_mixed_nozzle_diameters(nozzles))
+        return true;
+    // H3C slot process groups: a slot split off for its pin or its nozzle type has the extruder's size; only another size counts.
+    for (size_t tool = nozzles.size(); tool < m_preset_bundle->nozzle_tool_count(); ++tool)
+        if (const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
+            ref.valid && ref.extruder < nozzles.size() && !same_nozzle_diameter(ref.diameter, nozzles[ref.extruder]))
+            return true;
+    return false;
 }
 
 std::string TabPrint::shown_tool_id() const

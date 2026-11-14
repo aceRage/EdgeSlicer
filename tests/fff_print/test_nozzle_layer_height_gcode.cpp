@@ -299,3 +299,37 @@ TEST_CASE("H3C-like rack of one size: T1 following the plate keeps the G-code, a
     CHECK(has_f1380(after));
     CHECK_FALSE(has_f1380(before));
 }
+
+// Owner 2026-11-14 (H3C slot process groups): a filament pinned to rack slot 9 prints with slot 9's own process; the filament left
+// in the size group keeps the plate's.
+TEST_CASE("H3C-like rack: a filament pinned to slot 9 prints with slot 9's process, the other with the plate's", "[NozzleProcess][H3C][GCode][SlotGroups]")
+{
+    DynamicPrintConfig plate = h3c_rack("0.2");
+    plate.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "" }; // the default rack: nine of 0.4
+    plate.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0. };
+    plate.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values        = { 0, 9 };
+    REQUIRE(split_rack_slots(plate, 0) == std::vector<int>{ 9 });
+    REQUIRE(nozzle_filament_group_id(plate, 1).empty());
+    REQUIRE(nozzle_filament_group_id(plate, 2) == "T1.9");
+
+    DynamicPrintConfig own = plate;
+    own.option<ConfigOptionFloats>("outer_wall_speed")->values = { 23. };
+    const DynamicPrintConfig                      slot9 = nozzle_tool_process(plate, own, nullptr);
+    const std::vector<const DynamicPrintConfig *> filament_sources{ nullptr, &slot9 };
+    DynamicPrintConfig                            config = plate;
+    REQUIRE(fill_nozzle_process_slots(config, { nullptr }, &filament_sources));
+    const auto *slots = config.option<ConfigOptionInts>("nozzle_filament_process_slot");
+    REQUIRE(slots->values.size() == 2);
+    CHECK(slots->values[0] == -1);
+    CHECK(slots->values[1] >= 0);
+
+    Model model;
+    add_cubes(model);
+    Print print;
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    CHECK(gcode.find("F1380") != std::string::npos); // slot 9's outer walls (filament 2)
+    CHECK(gcode.find("F3600") != std::string::npos); // the plate's 60 mm/s (filament 1)
+}

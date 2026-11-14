@@ -1414,6 +1414,35 @@ bool parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double 
     return true;
 }
 
+std::string nozzle_rack_slot_tool_id(size_t extruder, int slot) { return nozzle_tool_id(extruder) + "." + std::to_string(slot); }
+
+bool parse_nozzle_rack_slot_tool_id(const std::string &id, size_t &extruder, int &slot)
+{
+    const size_t dot = id.find('.');
+    if (dot == std::string::npos || dot + 1 >= id.size() || id.find(':') != std::string::npos)
+        return false;
+    const int e = nozzle_tool_id_extruder(id.substr(0, dot));
+    if (e < 0)
+        return false;
+    const std::string word = id.substr(dot + 1);
+    if (word.size() > 3 || !std::all_of(word.begin(), word.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        return false;
+    const int k = std::atoi(word.c_str());
+    if (k < 1)
+        return false;
+    extruder = size_t(e);
+    slot     = k;
+    return true;
+}
+
+bool is_nozzle_rack_tool_id(const std::string &id)
+{
+    size_t e = 0;
+    double d = 0.;
+    int    k = 0;
+    return parse_nozzle_size_group_id(id, e, d) || parse_nozzle_rack_slot_tool_id(id, e, k);
+}
+
 std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config)
 {
     std::vector<NozzleToolEntry> out;
@@ -1423,14 +1452,23 @@ std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_confi
         out.push_back({ e, 0, nozzles[e] });
         if (rack_slot_count(printer_config, e) == 0)
             continue;
-        // The rack's other sizes, in rack order, each once.
+        // H3C: slots split off their size group (pinned, or of another nozzle type). Empty elsewhere.
+        const std::vector<int> split = split_rack_slots(printer_config, e);
+        // The rack's other sizes, in rack order, each once (sizes held only by split slots have no group of their own).
         std::vector<double> sizes;
-        for (const RackNozzle &nozzle : racks[e])
+        for (size_t k = 0; k < racks[e].size(); ++k) {
+            const RackNozzle &nozzle = racks[e][k];
+            if (std::find(split.begin(), split.end(), int(k) + 1) != split.end())
+                continue;
             if (!same_nozzle_diameter(nozzle.diameter, nozzles[e]) &&
                 std::none_of(sizes.begin(), sizes.end(), [&nozzle](double d) { return same_nozzle_diameter(d, nozzle.diameter); }))
                 sizes.push_back(nozzle.diameter);
-        for (size_t k = 0; k < sizes.size(); ++k)
-            out.push_back({ e, int(k) + 1, sizes[k] });
+        }
+        int next = 1;
+        for (double d : sizes)
+            out.push_back({ e, next++, d, 0 });
+        for (int k : split)
+            out.push_back({ e, next++, racks[e][size_t(k - 1)].diameter, k });
     }
     return out;
 }
@@ -1446,11 +1484,15 @@ std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config)
 
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry)
 {
+    if (entry.rack_slot > 0)
+        return nozzle_rack_slot_tool_id(entry.extruder, entry.rack_slot);
     return entry.slot > 0 ? nozzle_size_group_id(entry.extruder, entry.diameter) : nozzle_tool_id(entry.extruder);
 }
 
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry)
 {
+    if (entry.rack_slot > 0)
+        return rack_slot_name(config, entry.extruder, entry.rack_slot);
     return entry.slot > 0 ? rack_size_name(config, entry.extruder, entry.diameter) : nozzle_tool_name(config, entry.extruder);
 }
 
@@ -1460,6 +1502,10 @@ std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int fila
     const size_t       e = nozzle_for_filament(config, f);
     if (rack_slot_count(config, e) == 0)
         return std::string();
+    // H3C slot process groups: a filament on a split slot (its pin, or the TPU285 slot for a 2.85 mm filament) prints with that
+    // slot's tool.
+    if (const int k = filament_split_rack_slot(config, f); k > 0)
+        return nozzle_rack_slot_tool_id(e, k);
     const std::vector<double> nozzles = effective_nozzle_diameters(config);
     const double              d       = nozzle_diameter_for_filament(config, f);
     if (e >= nozzles.size() || same_nozzle_diameter(d, nozzles[e]))
@@ -1469,8 +1515,13 @@ std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int fila
 
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id)
 {
-    const size_t e = nozzle_for_filament(config, std::max(filament_id, 1u));
-    if (!nozzle_filament_group_id(config, filament_id).empty())
+    const size_t      e  = nozzle_for_filament(config, std::max(filament_id, 1u));
+    const std::string id = nozzle_filament_group_id(config, filament_id);
+    size_t            se = 0;
+    int               sk = 0;
+    if (parse_nozzle_rack_slot_tool_id(id, se, sk))
+        return rack_slot_name(config, se, sk);
+    if (!id.empty())
         return rack_size_name(config, e, nozzle_diameter_for_filament(config, std::max(filament_id, 1u)));
     return nozzle_tool_name(config, e);
 }
@@ -1494,9 +1545,7 @@ std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &c
             std::string name = entry.substr(nl + 1);
             boost::algorithm::trim(id);
             boost::algorithm::trim_right(name);
-            size_t e = 0;
-            double d = 0.;
-            if (!name.empty() && parse_nozzle_size_group_id(id, e, d))
+            if (!name.empty() && is_nozzle_rack_tool_id(id))
                 out[id] = name;
         }
     return out;
