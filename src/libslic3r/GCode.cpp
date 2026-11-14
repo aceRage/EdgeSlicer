@@ -1253,7 +1253,59 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // BBS: a Bambu two-extruder printer that pre-heats (H2D, H2D Pro, X2D) gets the same markers around a
     // change onto the other extruder: Bambu Studio writes them from WipeTower::ramming for every
     // extruder change, and the idle-nozzle pre-cooling times the idle hotend from them.
-    if ((has_nozzle_rack(gcodegen.m_config) || gcodegen.m_pre_cooling_markers) && new_extruder_id >= 0) {
+    // Bambu Studio 2.9.1 (GCode.cpp append_tcr 851-944): the tower planned the nozzle change itself
+    // (WipeTower::ramming / heater_off_nozzle_change / idle_travel_cooling). The ramming is laid by the outgoing
+    // filament: retract at the model (short; the long toolchange retraction when the hotend only cools), travel
+    // to the ramming start, unretract, ram, then wipe back along the last line with the toolchange retraction.
+    // The pre-cooling pass then finds extrusion between the markers ("pre cooling in post extrusion").
+    const int  nc_old_filament   = gcodegen.writer().extruder() ? (int) gcodegen.writer().extruder()->id() : -1;
+    const bool tower_nozzle_change = tcr.nozzle_change_result.has_action() && !tcr.priming && new_extruder_id >= 0 &&
+                                     nc_old_filament >= 0 && nc_old_filament == tcr.initial_tool;
+    if (tower_nozzle_change) {
+        const WipeTower::NozzleChangeResult &ncr = tcr.nozzle_change_result;
+        const bool  cools_only = ncr.zero_flush_idle_cooling || ncr.heater_off_only;
+        std::string nozzle_change_str = gcodegen.retract(cools_only, false);
+        check_add_eol(nozzle_change_str);
+        if (cools_only)
+            nozzle_change_str += "M106 S255\n";
+        if (!ncr.heater_off_only) {
+            std::string start_str = gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(ncr.start_pos) + plate_origin_2d),
+                                                       erMixed, "Move to nozzle change start pos");
+            check_add_eol(start_str);
+            nozzle_change_str += start_str;
+            // travel_to may have lifted to clear the object; the ramming G-code carries no Z of its own, so a
+            // tower compacted below the object needs the nozzle back down on it first.
+            if (compacted_below_object) {
+                std::string z_str = gcodegen.writer().travel_to_z(z, "Descend to compacted wipe tower z");
+                check_add_eol(z_str);
+                nozzle_change_str += z_str;
+            }
+            if (!ncr.zero_flush_idle_cooling) {
+                nozzle_change_str += gcodegen.unretract();
+                check_add_eol(nozzle_change_str);
+            }
+        }
+        WipeTower::ToolChangeResult nc_moves;
+        nc_moves.gcode        = ncr.gcode;
+        nc_moves.start_pos    = ncr.start_pos;
+        nc_moves.end_pos      = ncr.end_pos;
+        nc_moves.priming      = false;
+        nc_moves.initial_tool = tcr.initial_tool;
+        nc_moves.new_tool     = tcr.initial_tool;
+        nozzle_change_str += post_process_wipe_tower_moves(nc_moves, wipe_tower_offset, wipe_tower_rotation);
+        check_add_eol(nozzle_change_str);
+        if (!ncr.heater_off_only) {
+            gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(ncr.end_pos) + plate_origin_2d));
+            gcodegen.m_wipe.reset_path();
+            for (const Vec2f &wipe_pt : ncr.wipe_path)
+                gcodegen.m_wipe.path.points.emplace_back(wipe_tower_point_to_object_point(gcodegen, transform_wt_pt(wipe_pt) + plate_origin_2d));
+            if (!ncr.zero_flush_idle_cooling) {
+                nozzle_change_str += gcodegen.retract(true, false);
+                check_add_eol(nozzle_change_str);
+            }
+        }
+        end_filament_gcode_str = nozzle_change_str + end_filament_gcode_str;
+    } else if ((has_nozzle_rack(gcodegen.m_config) || gcodegen.m_pre_cooling_markers) && new_extruder_id >= 0) {
         auto group_result = gcodegen.m_curr_print ? gcodegen.m_curr_print->get_layered_nozzle_group_result() : nullptr;
         int old_filament_id = gcodegen.writer().extruder() ? (int) gcodegen.writer().extruder()->id() : -1;
         if (group_result && old_filament_id >= 0 && old_filament_id != (int) new_extruder_id) {
