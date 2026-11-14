@@ -160,6 +160,13 @@ public:
 			return e_length;
 		}
 		bool force_travel = false;
+
+        // Edge: with wall gaps on (WipeTower2), a point in the tower level with the gap the wall leaves
+        // for this tool change, on the gap's side; in the frame of start_pos. The gap is cut at the
+        // staggered purge start (or the ramming end), not at start_pos, so the entry travel goes in
+        // through the gap to here before it goes on to start_pos.
+        bool  has_gap_entry = false;
+        Vec2f gap_entry     = Vec2f::Zero();
 	};
 
     struct box_coordinates

@@ -192,7 +192,7 @@ private:
     Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx,
                                             const Vec2f &outward) const;
     BoundingBox printer_travel_bounds(GCode &gcodegen) const;
-    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
+    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos, const Point &gap_entry_pos) const;
     // The current tower layer's z in the G-code frame, where a joined layer prints its purges.
     double joined_tower_z() const { return m_tool_changes[m_layer_idx].front().print_z + m_z_offset; }
 
