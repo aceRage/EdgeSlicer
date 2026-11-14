@@ -141,6 +141,18 @@ struct PluginHostClient::Impl
             {"type", k_type_load},
             {"plugin_key", plugin_key},
         };
+        PluginDescriptor descriptor;
+        if (PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+            msg["entry_path"]         = descriptor.entry_path;
+            msg["plugin_root"]        = descriptor.plugin_root;
+            msg["entry_package"]      = descriptor.entry_package;
+            msg["name"]               = descriptor.name;
+            msg["version"]            = descriptor.version;
+            msg["installed_version"]  = descriptor.installed_version;
+            msg["required_orca_api"]  = descriptor.required_orca_api;
+            msg["author"]             = descriptor.author;
+            msg["description"]        = descriptor.description;
+        }
         if (!host.channel.write_json(msg, g_execute_timeout_ms.load(), error))
             return false;
         nlohmann::json reply;
@@ -174,8 +186,19 @@ struct PluginHostClient::Impl
                 wait_ms = static_cast<int>(std::min<std::int64_t>(left.count(), 1'000'000'000));
             }
             nlohmann::json msg;
-            if (!host.channel.read_json(msg, wait_ms, error))
+            if (!host.channel.read_json(msg, wait_ms, error)) {
+                // poll() can return a few milliseconds before the deadline, which
+                // surfaces as "truncated IPC message" rather than a wall-clock hit.
+                if (timeout_ms >= 0) {
+                    const bool deadline_hit = std::chrono::steady_clock::now() >= deadline;
+                    const bool wait_expired = error == "truncated IPC message" ||
+                                              error == "IPC write timed out" ||
+                                              error.find("timed out") != std::string::npos;
+                    if (deadline_hit || wait_expired)
+                        error = "plugin host timed out";
+                }
                 return false;
+            }
             const std::string type = msg.value("type", std::string());
             if (type == k_type_host_call) {
                 HostCall call;
@@ -208,8 +231,15 @@ struct PluginHostClient::Impl
                 }
                 bool allowed = true;
                 std::string reason;
-                {
-                    ScopedPluginAuditContext audit(plugin_key, capability);
+                // Use the caller's TLS audit context (and its scoped write root). A nested
+                // ScopedPluginAuditContext would clear those roots and deny the G-code folder.
+                if (PluginAuditManager::instance().current_plugin() != plugin_key) {
+                    allowed = false;
+                    reason  = "audit_check plugin_key does not match the active Edge audit context";
+                } else if (targets.empty()) {
+                    allowed = false;
+                    reason  = "audit_check missing targets";
+                } else {
                     for (const std::string& target : targets) {
                         const AuditDecision d =
                             PluginAuditManager::instance().check_path_access(boost::filesystem::path(target), is_write);
@@ -219,9 +249,8 @@ struct PluginHostClient::Impl
                             break;
                         }
                     }
-                    if (allowed && targets.empty())
-                        allowed = false, reason = "audit_check missing targets";
                 }
+                (void) event_name;
                 nlohmann::json reply = {
                     {"type", k_type_audit_result},
                     {"id", msg.value("id", 0)},
@@ -374,7 +403,7 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
                                                        std::string& error)
 {
     Impl& i = impl();
-    std::lock_guard<std::mutex> lock(i.mutex);
+    std::unique_lock<std::mutex> lock(i.mutex);
     i.active.insert(plugin_key);
     const int timeout_ms = g_execute_timeout_ms.load(std::memory_order_acquire);
     ExecutionResult result;
@@ -408,7 +437,10 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
         return ExecutionResult::failure(PluginResult::FatalError, error);
     }
     nlohmann::json reply;
-    if (!i.pump_until_result(plugin_key, capability_name, timeout_ms, reply, error)) {
+    lock.unlock();
+    const bool ok = i.pump_until_result(plugin_key, capability_name, timeout_ms, reply, error);
+    lock.lock();
+    if (!ok) {
         i.reset_child_locked();
         i.active.erase(plugin_key);
         return ExecutionResult::failure(PluginResult::FatalError, error);
@@ -418,6 +450,28 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
     result.message = reply.value("message", std::string());
     result.data    = reply.value("data", std::string());
     return result;
+}
+
+void PluginHostClient::unload(const std::string& plugin_key)
+{
+    Impl& i = impl();
+    std::lock_guard<std::mutex> lock(i.mutex);
+    i.loaded.erase(plugin_key);
+    if (!i.host.valid() || plugin_key.empty())
+        return;
+    // The child main loop is blocked inside execute, so an unload frame would sit until the
+    // script returns. Parent wait_bound already abandoned the run; do not wait on the child.
+    if (i.active.count(plugin_key))
+        return;
+    std::string error;
+    nlohmann::json msg = {{"type", k_type_unload}, {"plugin_key", plugin_key}};
+    if (!i.host.channel.write_json(msg, 5000, error)) {
+        i.reset_child_locked();
+        return;
+    }
+    nlohmann::json reply;
+    if (!i.host.channel.read_json(reply, 5000, error))
+        i.reset_child_locked();
 }
 
 void PluginHostClient::cancel(const std::string& plugin_key)

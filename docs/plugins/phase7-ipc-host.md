@@ -37,9 +37,9 @@ Versioned, length-prefixed JSON:
 Every `orca.host.*` call in the child is an RPC back into Edge. Edge applies Phase 4
 permission grants and Phase 5 trust on the Edge side before performing it. The child never
 receives raw `Print*` / `PrintObject*` pointers, UltraNet `{data_dir}/plugins` paths, or
-secrets. Filesystem events in the child (`open` and the other FS audit categories) are also
-decided on the Edge side so the Phase 6 write root (the exported G-code's folder only) cannot
-be skipped by a modified child.
+secrets. Write-shaped filesystem events in the child are decided on the Edge side so the
+Phase 6 write root (the exported G-code's folder only) cannot be skipped by a modified
+child. Reads stay local so CPython can still import the bundled stdlib.
 
 ## Crash isolation
 

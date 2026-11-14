@@ -125,7 +125,7 @@ const char* const KILL_MARKER_SOURCE_PREFIX = R"PY(# /// script
 # type = "script"
 # ///
 import time, os, orca
-MARKER = r'''MARK'''
+MARKER = r'''__MARKER_PATH__'''
 class Hold(orca.script.ScriptPluginCapabilityBase):
     def get_name(self):
         return "Hold"
@@ -383,9 +383,9 @@ TEST_CASE("Killing the host mid-execute fails the run and a later run respawns",
     PluginAuditManager::instance().add_global_allowed_root(data_dir());
     const fs::path marker = data_dir_guard.plugins_dir() / "Ipc_Kill" / "running";
     std::string    source = KILL_MARKER_SOURCE_PREFIX;
-    const auto     pos    = source.find("MARK");
+    const auto     pos    = source.find("__MARKER_PATH__");
     REQUIRE(pos != std::string::npos);
-    source.replace(pos, 4, marker.string());
+    source.replace(pos, 15, marker.string());
     write_plugin(data_dir_guard, "Ipc_Kill", source);
 
     PluginManager& manager = PluginManager::instance();
@@ -470,6 +470,7 @@ TEST_CASE("A hung child is killed by the execute timeout", "[PluginIpc][Python][
     REQUIRE(load_and_wait(manager, "Ipc_Hang", error));
     const ScriptCompletion hung = wait_for_script(manager, "Ipc_Hang", "Hang", std::chrono::seconds(20));
     CHECK_FALSE(hung.error.empty());
+    INFO("hang error: " << hung.error);
     CHECK(hung.error.find("timed out") != std::string::npos);
 
     write_plugin(data_dir_guard, "Ipc_Echo", SYNC_PLUGIN_SOURCE);

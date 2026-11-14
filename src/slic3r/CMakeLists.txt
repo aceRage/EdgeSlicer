@@ -1520,6 +1520,13 @@ if (EDGE_PYTHON_PLUGINS)
     target_compile_definitions(libslic3r_gui PUBLIC EDGE_PYTHON_PLUGINS)
 
     add_executable(edge-plugin-host plugin/ipc/PluginHostMain.cpp)
+    # libslic3r_gui pulls GUI_App, which calls crash-reporter and version wrappers that live
+    # in the app executable rather than the library. Match Snapmaker_Orca / slic3rutils_tests.
+    target_sources(edge-plugin-host PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sentry_wrapper/SentryWrapper.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sentry_wrapper/SentryScrub.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../bury_cfg/bury_point.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common_func/common_func.cpp)
     target_include_directories(edge-plugin-host PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -1528,8 +1535,15 @@ if (EDGE_PYTHON_PLUGINS)
     target_link_libraries(edge-plugin-host libslic3r_gui libslic3r pybind11::embed)
     if (APPLE)
         target_link_options(edge-plugin-host PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+        target_link_libraries(edge-plugin-host "-framework IOKit" "-framework CoreFoundation")
     elseif (UNIX AND NOT WIN32)
         set_property(TARGET edge-plugin-host APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+    endif ()
+    if (WIN32)
+        target_sources(edge-plugin-host PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../dev-utils/BaseException.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../dev-utils/StackWalker.cpp)
+        target_compile_definitions(edge-plugin-host PRIVATE BURY_EXPORTS)
     endif ()
     if (MSVC)
         target_link_libraries(edge-plugin-host Setupapi.lib)

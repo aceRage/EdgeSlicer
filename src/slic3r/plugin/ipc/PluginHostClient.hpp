@@ -44,6 +44,7 @@ public:
                                          std::string& error);
 
     void cancel(const std::string& plugin_key);
+    void unload(const std::string& plugin_key);
     bool has_active_run(const std::string& plugin_key) const;
 
     // SIGKILL / TerminateProcess the child. The next execute respawns.

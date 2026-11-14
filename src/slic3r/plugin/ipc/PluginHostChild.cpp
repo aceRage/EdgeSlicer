@@ -61,10 +61,28 @@ nlohmann::json execution_result_json(const ExecutionResult& result, bool cancell
     };
 }
 
-bool load_plugin(const std::string& plugin_key, std::string& error)
+bool load_plugin(const nlohmann::json& msg, std::string& error)
 {
-    PluginManager& manager = PluginManager::instance();
-    manager.discover_plugins(/*async=*/false, /*clear=*/false);
+    const std::string plugin_key = msg.value("plugin_key", std::string());
+    PluginManager&    manager    = PluginManager::instance();
+    if (msg.contains("entry_path") && msg["entry_path"].is_string() && !msg["entry_path"].get<std::string>().empty()) {
+        PluginDescriptor descriptor;
+        descriptor.plugin_key        = plugin_key;
+        descriptor.entry_path        = msg.value("entry_path", std::string());
+        descriptor.plugin_root       = msg.value("plugin_root", std::string());
+        descriptor.entry_package     = msg.value("entry_package", std::string());
+        descriptor.name              = msg.value("name", plugin_key);
+        descriptor.version           = msg.value("version", std::string());
+        descriptor.installed_version = msg.value("installed_version", std::string());
+        descriptor.required_orca_api = msg.value("required_orca_api", std::string());
+        descriptor.author            = msg.value("author", std::string());
+        descriptor.description       = msg.value("description", std::string());
+        descriptor.metadata_valid    = true;
+        descriptor.enabled           = true;
+        manager.adopt_descriptor_if_missing(std::move(descriptor));
+    } else {
+        manager.discover_plugins(/*async=*/false, /*clear=*/false);
+    }
     PluginDescriptor descriptor;
     if (!manager.try_get_plugin_descriptor(plugin_key, descriptor)) {
         error = "plugin not discovered: " + plugin_key;
@@ -239,10 +257,17 @@ int run_child(Channel& channel)
         if (type == k_type_load) {
             std::string load_error;
             nlohmann::json reply;
-            if (load_plugin(msg.value("plugin_key", std::string()), load_error))
+            if (load_plugin(msg, load_error))
                 reply = {{"type", k_type_load_ok}};
             else
                 reply = {{"type", k_type_error}, {"message", load_error}};
+            if (!channel.write_json(reply, k_default_timeout_ms, error))
+                break;
+            continue;
+        }
+        if (type == k_type_unload) {
+            PluginManager::instance().unload_plugin(msg.value("plugin_key", std::string()));
+            nlohmann::json reply = {{"type", k_type_unload_ok}};
             if (!channel.write_json(reply, k_default_timeout_ms, error))
                 break;
             continue;
@@ -252,15 +277,19 @@ int run_child(Channel& channel)
             const std::string plugin_key = msg.value("plugin_key", std::string());
             std::string       load_error;
             nlohmann::json    reply;
-            if (!load_plugin(plugin_key, load_error)) {
+            if (!load_plugin(msg, load_error)) {
                 reply = {{"type", k_type_error}, {"message", load_error}};
             } else if (kind == k_kind_post_process) {
-                std::string exec_error;
-                const ExecutionResult result = run_post_process(msg, exec_error);
-                if (!exec_error.empty() && result.status == PluginResult::Success)
-                    reply = {{"type", k_type_error}, {"message", exec_error}};
-                else
-                    reply = execution_result_json(result, false);
+                try {
+                    std::string exec_error;
+                    const ExecutionResult result = run_post_process(msg, exec_error);
+                    if (!exec_error.empty() && result.status == PluginResult::Success)
+                        reply = {{"type", k_type_error}, {"message", exec_error}};
+                    else
+                        reply = execution_result_json(result, false);
+                } catch (const std::exception& ex) {
+                    reply = {{"type", k_type_error}, {"message", ex.what()}};
+                }
             } else {
                 const ScriptCompletion completion =
                     run_script(plugin_key, msg.value("capability_name", std::string()));

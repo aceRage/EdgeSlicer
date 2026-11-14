@@ -95,5 +95,8 @@ int main(int argc, char** argv)
         return 1;
     Channel channel = Channel::from_posix_fd(ipc_fd);
 #endif
-    return run_child(channel);
+    const int rc = run_child(channel);
+    // Skip C++ static destructors (Boost.Log TLS) — they abort with "Failed to set TLS value"
+    // after the parent has already torn the process down.
+    std::_Exit(rc);
 }

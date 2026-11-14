@@ -539,6 +539,18 @@ bool PluginManager::try_get_plugin_descriptor(const std::string& plugin_key, Plu
     return true;
 }
 
+void PluginManager::adopt_descriptor_if_missing(PluginDescriptor descriptor)
+{
+    if (descriptor.plugin_key.empty())
+        return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (find_plugin_locked(descriptor.plugin_key) != nullptr)
+        return;
+    Plugin plugin;
+    plugin.descriptor = std::move(descriptor);
+    m_plugins.push_back(std::move(plugin));
+}
+
 bool PluginManager::try_get_valid_plugin_descriptor(const std::string& plugin_key, PluginDescriptor& out) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -1178,6 +1190,9 @@ bool PluginManager::unload_plugin(const std::string& plugin_key)
     }
 
     notify_unload_complete();
+
+    if (plugin_ipc::PluginHostClient::should_use_host())
+        plugin_ipc::PluginHostClient::instance().unload(plugin_key);
 
     PluginHostUi::close_windows_for_plugin(plugin_key);
 
