@@ -2170,6 +2170,16 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    // BBS 2.9.1: the tower's nozzle-change ramming (WipeTower::ramming): length rammed by the outgoing filament
+    // on an extruder change / a hotend change, the reverse travel after it, its volumetric speed (-1 = the
+    // filament's maximum), and the idle-travel cooling that replaces a zero-length ramming on hotend_as_extruder.
+    ((ConfigOptionFloats,              filament_change_length))
+    ((ConfigOptionFloats,              filament_change_length_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed_nc))
+    ((ConfigOptionBools,               filament_idle_travel_cooling_enabled))
     ((ConfigOptionBools,               filament_pre_heating_enabled))  // BBS 2.9.1 H3C: pre-heat this filament's hotend
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
     // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.

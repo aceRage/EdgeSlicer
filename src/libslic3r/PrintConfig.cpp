@@ -3049,6 +3049,71 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 0 });
 
+    // BBS 2.9.1 (PrintConfig.cpp 3094-3112, 3424-3444, 3640-3658): the prime tower's nozzle-change ramming
+    // (WipeTower::ramming). On a nozzle change the outgoing filament extrudes this length on the tower before
+    // the swap; the _nc twins are a hotend change on one extruder (H2C rack), the others an extruder change.
+    def           = this->add("filament_change_length", coFloats);
+    def->label    = L("Extruder change");
+    def->tooltip  = L("When changing the extruder, it is recommended to extrude a certain length of filament from the original extruder. This helps minimize nozzle oozing.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 10. });
+
+    def           = this->add("filament_change_length_nc", coFloats);
+    def->label    = L("Hotend change");
+    def->tooltip  = L("When changing the hotend, it is recommended to extrude a certain length of filament from the original nozzle. This helps minimize nozzle oozing.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{ 10. });
+
+    def           = this->add("filament_ramming_travel_time", coFloats);
+    def->label    = L("Extruder change");
+    def->tooltip  = L("To prevent oozing, the nozzle will perform a reverse travel movement for a certain period after "
+                      "the ramming is complete. The setting define the travel time.");
+    def->sidetext = L("s");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0. });
+
+    def           = this->add("filament_ramming_travel_time_nc", coFloats);
+    def->label    = L("Hotend change");
+    def->tooltip  = L("To prevent oozing, the nozzle will perform a reverse travel movement for a certain period after "
+                      "the ramming is complete. The setting define the travel time.");
+    def->sidetext = L("s");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 0. });
+
+    def           = this->add("filament_ramming_volumetric_speed", coFloats);
+    def->label    = L("Extruder change");
+    def->tooltip  = L("The maximum volumetric speed for ramming before extruder change, where -1 means using the maximum volumetric speed.");
+    def->sidetext = L("mm³/s");
+    def->min      = -1;
+    def->max      = 200;
+    def->mode     = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ -1. });
+
+    def           = this->add("filament_ramming_volumetric_speed_nc", coFloats);
+    def->label    = L("Hotend change");
+    def->tooltip  = L("The maximum volumetric speed for ramming before a hotend change, where -1 means using the maximum volumetric speed.");
+    def->sidetext = L("mm³/s");
+    def->min      = -1;
+    def->max      = 200;
+    def->mode     = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ -1. });
+
+    def          = this->add("filament_idle_travel_cooling_enabled", coBools);
+    def->label   = L("Idle travel cooling");
+    def->tooltip = L("When filament change length is zero, perform idle travel cooling to help the nozzle cool down. Disabling this will turn off the heater directly without idle travel, which saves print time but may cause stringing for some materials.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBools{ true });
+
     // BBS 2.9.1 (H3C): whether the idle-nozzle pass pre-heats a rack hotend before this filament's next use.
     def = this->add("filament_pre_heating_enabled", coBools);
     def->label   = L("Pre-heating when extruder change");
@@ -11005,6 +11070,11 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_flush_temp",
         "filament_flush_temp_fast",
         "filament_cooling_before_tower",
+        // BBS 2.9.1: the nozzle-change ramming speed and reverse travel are per extruder variant too.
+        "filament_ramming_travel_time",
+        "filament_ramming_travel_time_nc",
+        "filament_ramming_volumetric_speed",
+        "filament_ramming_volumetric_speed_nc",
     };
     return options;
 }

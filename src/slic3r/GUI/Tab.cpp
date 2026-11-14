@@ -6357,6 +6357,27 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_flush_volumetric_speed");
         optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
         optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
+        // BBS 2.9.1 (Tab.cpp 4829-4844, 4933-4936): the prime tower's nozzle-change ramming of the outgoing
+        // filament (two-nozzle and rack printers), extruder change and hotend change side by side.
+        {
+            Line ramming_line = { L("Filament ramming length"), L("Filament length used in ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_change_length"));
+            ramming_line.append_option(optgroup->get_option("filament_change_length_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Travel time after ramming"), L("A reverse travel movement after ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Ramming volumetric speed"), L("The maximum volumetric speed for ramming, where -1 means using the maximum volumetric speed.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Precooling target temperature"), L("Precooling target temperature during ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature"));
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature_nc"));
+            optgroup->append_line(ramming_line);
+            optgroup->append_single_option_line("filament_idle_travel_cooling_enabled");
+        }
 
     page = add_options_page(L("Dependencies"), "advanced");
         optgroup = page->new_optgroup(L("Compatible printers"), "param_dependencies_printers");

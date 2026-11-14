@@ -93,6 +93,39 @@ public:
 		unsigned int    tool;
 	};
 
+    // Bambu Studio 2.9.1 (WipeTower.hpp NozzleChangeResult): what the outgoing filament does on the tower
+    // when the change moves to another nozzle - the ramming lines (ramming()), the heater-off markers or the
+    // idle-travel cooling (H3C) - written by GCode::append_tcr into the [filament_end_gcode] slot, before the
+    // change_filament template. Coordinates are tower-local like ToolChangeResult's.
+    struct NozzleChangeResult
+    {
+        std::string        gcode;
+        Vec2f              start_pos        = Vec2f::Zero();
+        Vec2f              origin_start_pos = Vec2f::Zero();
+        Vec2f              end_pos          = Vec2f::Zero();
+        std::vector<Vec2f> wipe_path;
+        bool               is_extruder_change      = false;
+        bool               heater_off_only         = false; // markers only; the toolchange retract stays at the model
+        bool               zero_flush_idle_cooling = false; // travel-only cooling; no unretract / retract around it
+        int                precool_target_temp     = 0;
+        int                precool_filament_id     = -1;
+        bool               has_action() const { return !gcode.empty() || heater_off_only || zero_flush_idle_cooling; }
+    };
+
+    // What Print knows about a planned change's nozzles (the plate's nozzle grouping); WipeTower has no
+    // grouping of its own. need_ramming: the two filaments sit on different nozzles of a Bambu printer
+    // (Bambu Studio is_need_ramming()).
+    struct NozzleChangePlan
+    {
+        bool need_ramming       = false;
+        bool extruder_change    = false; // different extruders (or hotend_as_extruder): filament_change_length, else _nc
+        bool dynamic_nozzle_map = false; // M632 names the nozzle (H<n>)
+        int  old_nozzle         = -1;
+        int  new_nozzle         = -1;
+        int  old_extruder       = -1;    // logical extruder of the outgoing filament (hotend_cooling_rate index)
+        int  old_physical_extruder = -1; // T of the pre-cool M104
+    };
+
 	struct ToolChangeResult
 	{
 		// Print heigh of this tool change.
@@ -146,6 +179,9 @@ public:
         // wrote "Wipe tower reheat before wipe" back to the print temperature when the new filament
         // cools at all. GCode publishes 0 cooling for every other toolchange.
         bool reheats_after_cooling = false;
+
+        // Bambu Studio 2.9.1: the nozzle change before this toolchange (empty when the nozzle stays).
+        NozzleChangeResult nozzle_change_result;
 
 		// Sum the total length of the extrusion.
 		float total_extrusion_length_in_plane() {
@@ -219,7 +255,15 @@ public:
 
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f);
+	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f,
+	                     const NozzleChangePlan &nozzle_change = NozzleChangePlan());
+    // Bambu Studio 2.9.1 (set_toolchange): path length of the ramming lines old_tool lays before a nozzle change
+    // (filament_change_length(_nc) over a ramming line's extrusion per mm), and the depth whole lines of it take
+    // in a tower of this width. Public for the tests.
+    float nozzle_change_length(size_t old_tool, bool extruder_change, float layer_height) const;
+    float nozzle_change_depth(size_t old_tool, float length) const;
+    // The ramming line width of a filament's nozzle (Bambu Studio's nozzle_change_width_for_diameter table).
+    float nozzle_change_width(size_t tool) const;
 	// The last planned layer starts with `tool` loaded: its Local-Z passes changed filament directly
 	// (GCode::process_layer phase b) from `prev_tool` before the tower's planned changes.
 	// Only before the layer's first planned change: a later object layer joined to this tower layer
@@ -287,6 +331,7 @@ public:
 		m_z_pos 				= print_z;
 		m_layer_height			= layer_height;
 		m_depth_traversed  = 0.f;
+        m_ramming_traversed = 0.f;
         m_current_layer_finished = false;
 		//m_current_shape = (! is_first_layer && m_current_shape == SHAPE_NORMAL) ? SHAPE_REVERSED : SHAPE_NORMAL;
 		m_current_shape = SHAPE_NORMAL;
@@ -407,6 +452,15 @@ public:
         int                 reheat_extruder       = 0;
         // Orca #15841: tallest layer this filament's nozzle can lay down; caps the sparse layer combination.
         float               max_layer_height      = 0.f;
+        // Bambu Studio 2.9.1 nozzle-change ramming; .first an extruder change, .second a hotend change.
+        std::pair<float, float> change_length        { 0.f, 0.f }; // filament_change_length(_nc), mm of filament
+        std::pair<float, float> max_e_ramming_speed  { 0.f, 0.f }; // mm/s of filament
+        std::pair<float, float> ramming_travel_time  { 0.f, 0.f }; // s
+        std::pair<int, int>     precool_target_temp  { 0, 0 };     // 0 = no pre-cooling
+        // Seconds the nozzle needs to cool to the pre-cool target, per logical extruder (hotend_cooling_rate).
+        std::pair<std::vector<float>, std::vector<float>> precool_t;
+        std::pair<std::vector<float>, std::vector<float>> precool_t_first_layer;
+        bool                idle_travel_cooling_enabled = true;
     };
 
 private:
@@ -524,6 +578,9 @@ private:
 	const float		m_wipe_volume;
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
+    // Edge (review S1): the layer's ramming rows sit behind all of its purges, in their own band, so the purge rows
+    // keep one grid from layer to layer whether or not a layer rams; this is how far into that band the layer is.
+    float           m_ramming_traversed = 0.f;
     bool            m_current_layer_finished = false;
 	bool 			m_left_to_right   = true;
 	float			m_extra_spacing   = 1.f;
@@ -583,6 +640,10 @@ private:
             bool  is_interface = false;
             bool  run_in    = false;
             Vec2f run_in_cross = Vec2f::Zero();
+            // Bambu Studio 2.9.1: the ramming before a nozzle change, part of required_depth.
+            NozzleChangePlan nozzle_change;
+            float nozzle_change_length = 0.f; // mm of ramming path
+            float nozzle_change_depth  = 0.f;
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, float wl = 0, float pv = 0)
 				: old_tool{ old }, new_tool{ newtool }, required_depth{ depth }, ramming_depth{ ramming_depth }, first_wipe_line{ fwl }, wipe_volume{ wv }, wipe_length{ wl }, purge_volume{ pv } {}
 		};
@@ -644,6 +705,18 @@ private:
 		WipeTowerWriter &writer,
 		const box_coordinates  &cleaning_box,
 		float wipe_volume);
+
+    // Bambu Studio 2.9.1 nozzle-change modes (WipeTower.cpp 3727-4054), picked by tool_change() like
+    // tool_change_new() does. They write at m_depth_traversed; ramming() advances it by the ramming depth.
+    NozzleChangeResult ramming(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned);
+    NozzleChangeResult heater_off_nozzle_change(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned) const;
+    NozzleChangeResult idle_travel_cooling(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned);
+    std::string        nozzle_change_marker(bool start, size_t old_tool, size_t new_tool, const NozzleChangePlan &plan) const;
+    // Bambu Studio WipeTowerWriter::format_line_M104: "[M400] M104 T<physical>|I<filament> S<t> N0 C|W ;comment".
+    std::string        format_line_M104(int target_temp, size_t tool, const NozzleChangePlan &plan, bool is_heating, const std::string &comment) const;
+
+    bool               m_handle_hotend_as_extruder = false;
+    std::vector<float> m_hotend_cooling_rate;
 };
 
 
