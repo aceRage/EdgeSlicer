@@ -72,8 +72,9 @@ DynamicPrintConfig machine_config(const Machine &m, const char *filament_map = "
     DynamicPrintConfig cfg = b.full_config_secure();
     cfg.set_deserialize_strict({
         { "enable_prime_tower", "1" },
-        { "wipe_tower_x", 200. },
-        { "wipe_tower_y", 240. },
+        // Inside every bed of these printers (the X1C's is 256 x 256).
+        { "wipe_tower_x", 160. },
+        { "wipe_tower_y", 180. },
         { "wipe_tower_rotation_angle", 0 },
         { "gcode_comments", 0 },
     });
@@ -144,6 +145,12 @@ std::vector<Window> nozzle_change_windows(const std::vector<std::string> &lines)
             out.emplace_back();
             open             = &out.back();
             open->start_line = i;
+            // The ramming writer announces its width just before the START marker, as Bambu Studio's does.
+            for (size_t j = i; j > 0 && j + 4 > i; --j) {
+                std::smatch m;
+                if (std::regex_search(lines[j - 1], m, w_re))
+                    open->widths.push_back(std::stod(m[1].str()));
+            }
             continue;
         }
         if (open == nullptr)
@@ -198,7 +205,8 @@ std::unique_ptr<DirectTower> direct_tower(const DynamicPrintConfig &cfg, const W
     for (int layer = 0; layer < layers; ++layer) {
         const float z = 0.2f * (layer + 1);
         t->tower->plan_toolchange(z, 0.2f, layer % 2, layer % 2);
-        t->tower->plan_toolchange(z, 0.2f, layer % 2, 1 - layer % 2, 30.f, 0.f, plan);
+        // 600 mm3: deeper than the tower's 20 mm stability minimum, which would hide the ramming depth.
+        t->tower->plan_toolchange(z, 0.2f, layer % 2, 1 - layer % 2, 600.f, 0.f, plan);
     }
     t->tower->generate(t->result);
     return t;
