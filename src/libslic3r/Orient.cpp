@@ -529,7 +529,7 @@ void orient(ModelObject* obj)
 
 void orient(ModelInstance* instance)
 {
-    auto m = instance->get_object()->mesh();
+    auto m = instance_mesh(*instance);
     AutoOrienter orienter(&m);
     Vec3d orientation = orienter.process();
     Vec3d axis;
@@ -537,6 +537,48 @@ void orient(ModelInstance* instance)
     Matrix3d rotation_matrix;
     Geometry::rotation_from_two_vectors(orientation, { 0,0,1 }, axis, angle, &rotation_matrix);
     instance->rotate(rotation_matrix);
+}
+
+TriangleMesh instance_mesh(const ModelInstance &instance)
+{
+    TriangleMesh mesh = instance.get_object()->raw_mesh();
+    instance.transform_mesh(&mesh);
+    return mesh;
+}
+
+std::vector<std::vector<bool>> instances_to_orient(const std::vector<std::vector<bool>> &asked,
+                                                   const std::vector<std::vector<bool>> &on_locked_plate,
+                                                   const std::vector<bool>              &printable,
+                                                   bool                                  only_one_plate,
+                                                   bool                                 *asked_locked)
+{
+    auto locked = [&](size_t o, size_t i) {
+        return !only_one_plate && o < on_locked_plate.size() && i < on_locked_plate[o].size() && on_locked_plate[o][i];
+    };
+    auto can_turn = [&](size_t o, size_t i) { return printable[o] && !locked(o, i); };
+
+    std::vector<std::vector<bool>> turn(asked.size());
+    bool any = false, any_asked_locked = false;
+    for (size_t o = 0; o < asked.size(); ++o) {
+        turn[o].assign(asked[o].size(), false);
+        for (size_t i = 0; i < asked[o].size(); ++i) {
+            if (!asked[o][i])
+                continue;
+            if (locked(o, i))
+                any_asked_locked = true;
+            else if (can_turn(o, i))
+                turn[o][i] = any = true;
+        }
+    }
+    // Nothing selected orients everything, but only when orienting the selection: on one plate
+    // it would turn the instances on every other plate.
+    if (!any && !any_asked_locked && !only_one_plate)
+        for (size_t o = 0; o < asked.size(); ++o)
+            for (size_t i = 0; i < asked[o].size(); ++i)
+                turn[o][i] = can_turn(o, i);
+    if (asked_locked)
+        *asked_locked = any_asked_locked;
+    return turn;
 }
 
 

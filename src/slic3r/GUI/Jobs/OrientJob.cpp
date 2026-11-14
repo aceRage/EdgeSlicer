@@ -29,55 +29,43 @@ void OrientJob::clear_input()
 }
 
 //BBS: add only one plate mode and lock logic
-void OrientJob::prepare_selection(std::vector<bool> obj_sel, bool only_one_plate)
+// asked[o][i]: instance i of object o was asked for. Which of them are turned is decided by
+// orientation::instances_to_orient (libslic3r/Orient.cpp).
+void OrientJob::prepare_selection(const std::vector<std::vector<bool>> &asked, bool only_one_plate)
 {
     Model& model = m_plater->model();
     PartPlateList& plate_list = m_plater->get_partplate_list();
-    //OrientMeshs selected_in_lock, unselect_in_lock;
-    bool selected_is_locked = false;
 
-    // Go through the objects and check if inside the selection
-    for (size_t oidx = 0; oidx < obj_sel.size(); ++oidx) {
-        bool selected = obj_sel[oidx];
+    std::vector<std::vector<bool>> on_locked_plate(asked.size());
+    std::vector<bool>              printable(asked.size(), false);
+    for (size_t oidx = 0; oidx < asked.size(); ++oidx) {
         ModelObject* mo = model.objects[oidx];
-
-        for (size_t inst_idx = 0; inst_idx < mo->instances.size(); ++inst_idx)
-        {
-            ModelInstance* mi = mo->instances[inst_idx];
-            OrientMesh&& om = get_orient_mesh(mi);
-
-            bool locked = false;
-            if (!only_one_plate) {
-                int plate_index = plate_list.find_instance(oidx, inst_idx);
-                if ((plate_index >= 0)&&(plate_index < plate_list.get_plate_count())) {
-                    if (plate_list.is_locked(plate_index)) {
-                        if (selected) {
-                            //selected_in_lock.emplace_back(std::move(om));
-                            selected_is_locked = true;
-                        }
-                        //else
-                        //    unselect_in_lock.emplace_back(std::move(om));
-                        continue;
-                    }
-                }
-            }
-            auto& cont = mo->printable ? (selected ? m_selected : m_unselected) : m_unprintable;
-
-            cont.emplace_back(std::move(om));
+        printable[oidx] = mo->printable;
+        on_locked_plate[oidx].assign(mo->instances.size(), false);
+        if (only_one_plate)
+            continue;
+        for (size_t inst_idx = 0; inst_idx < mo->instances.size(); ++inst_idx) {
+            int plate_index = plate_list.find_instance(oidx, inst_idx);
+            on_locked_plate[oidx][inst_idx] = plate_index >= 0 && plate_index < plate_list.get_plate_count() && plate_list.is_locked(plate_index);
         }
     }
 
-    // If the selection was empty orient everything
-    if (m_selected.empty()) {
-        if (!selected_is_locked) {
-            m_selected.swap(m_unselected);
-            //m_unselected.insert(m_unselected.begin(), unselect_in_lock.begin(), unselect_in_lock.end());
-        }
-        else {
-            m_plater->get_notification_manager()->push_notification(NotificationType::BBLPlateInfo,
-                NotificationManager::NotificationLevel::WarningNotificationLevel, into_u8(_L("All the selected objects are on a locked plate.\nCannot auto-orient these objects.")));
+    bool asked_locked = false;
+    const std::vector<std::vector<bool>> turn = orientation::instances_to_orient(asked, on_locked_plate, printable, only_one_plate, &asked_locked);
+
+    for (size_t oidx = 0; oidx < asked.size(); ++oidx) {
+        ModelObject* mo = model.objects[oidx];
+        for (size_t inst_idx = 0; inst_idx < mo->instances.size(); ++inst_idx) {
+            if (on_locked_plate[oidx][inst_idx])
+                continue;
+            auto& cont = turn[oidx][inst_idx] ? m_selected : (mo->printable ? m_unselected : m_unprintable);
+            cont.emplace_back(get_orient_mesh(mo->instances[inst_idx]));
         }
     }
+
+    if (m_selected.empty() && asked_locked)
+        m_plater->get_notification_manager()->push_notification(NotificationType::BBLPlateInfo,
+            NotificationManager::NotificationLevel::WarningNotificationLevel, into_u8(_L("All the selected objects are on a locked plate.\nCannot auto-orient these objects.")));
 }
 
 void OrientJob::prepare_selected() {
@@ -85,14 +73,17 @@ void OrientJob::prepare_selected() {
 
     Model &model = m_plater->model();
 
-    std::vector<bool> obj_sel(model.objects.size(), false);
+    std::vector<std::vector<bool>> asked(model.objects.size());
+    for (size_t oidx = 0; oidx < model.objects.size(); ++oidx)
+        asked[oidx].assign(model.objects[oidx]->instances.size(), false);
 
+    // A selected object is asked for with all of its instances.
     for (auto &s : m_plater->get_selection().get_content())
-        if (s.first < int(obj_sel.size()))
-            obj_sel[size_t(s.first)] = !s.second.empty();
+        if (s.first < int(asked.size()) && !s.second.empty())
+            asked[size_t(s.first)].assign(asked[size_t(s.first)].size(), true);
 
    //BBS: add only one plate mode
-    prepare_selection(obj_sel, false);
+    prepare_selection(asked, false);
 }
 
 //BBS: prepare current part plate for orienting
@@ -119,19 +110,18 @@ void OrientJob::prepare_partplate() {
 
     Model& model = m_plater->model();
 
-    std::vector<bool> obj_sel(model.objects.size(), false);
-
-    // Go through the objects and check if inside the selection
+    // Each instance on this plate, and no other: an object with copies on other plates
+    // has only its copies here turned.
+    std::vector<std::vector<bool>> asked(model.objects.size());
     for (size_t oidx = 0; oidx < model.objects.size(); ++oidx)
     {
         ModelObject* mo = model.objects[oidx];
+        asked[oidx].assign(mo->instances.size(), false);
         for (size_t inst_idx = 0; inst_idx < mo->instances.size(); ++inst_idx)
-        {
-            obj_sel[oidx] = plate->contain_instance(oidx, inst_idx);
-        }
+            asked[oidx][inst_idx] = plate->contain_instance(oidx, inst_idx);
     }
 
-    prepare_selection(obj_sel, true);
+    prepare_selection(asked, true);
 }
 
 //BBS: add partplate logic
@@ -228,7 +218,8 @@ orientation::OrientMesh OrientJob::get_orient_mesh(ModelInstance* instance)
     OrientMesh om;
     auto obj = instance->get_object();
     om.name = obj->name;
-    om.mesh = obj->mesh(); // don't know the difference to obj->raw_mesh(). Both seem OK
+    // This instance alone: obj->mesh() would place and merge every instance of the object.
+    om.mesh = orientation::instance_mesh(*instance);
     if (obj->config.has("support_threshold_angle"))
         om.overhang_angle = obj->config.opt_int("support_threshold_angle");
     else {

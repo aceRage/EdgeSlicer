@@ -154,6 +154,27 @@ void orient(ModelObject* obj);
 
 void orient(ModelInstance* instance);
 
-}} // namespace Slic3r::orientment
+// The mesh one instance is oriented by: its object's parts placed by this instance alone.
+// (ModelObject::mesh() places every instance and merges them, so an object with several
+// copies would be measured as all of its copies together.)
+TriangleMesh instance_mesh(const ModelInstance &instance);
+
+// Which instances the application's auto orient (GUI OrientJob) turns, per object and instance.
+// asked[o][i]: instance i of object o was asked for (its object is selected, or it stands on
+// the current plate); on_locked_plate[o][i]: it stands on a locked plate; printable[o]: the
+// object is printable.
+// - only_one_plate (orient the current plate): the printable instances asked for, and no
+//   others; the plate itself was checked for a lock before.
+// - otherwise (orient the selection): the printable instances asked for that are not on a
+//   locked plate. If that leaves none and none of those asked for stands on a locked plate,
+//   every printable instance not on a locked plate (nothing selected orients everything).
+// asked_locked, when given, is set when an instance asked for stands on a locked plate.
+std::vector<std::vector<bool>> instances_to_orient(const std::vector<std::vector<bool>> &asked,
+                                                   const std::vector<std::vector<bool>> &on_locked_plate,
+                                                   const std::vector<bool>              &printable,
+                                                   bool                                  only_one_plate,
+                                                   bool                                 *asked_locked = nullptr);
+
+}}// namespace Slic3r::orientment
 
 #endif // MODELORIENT_HPP
