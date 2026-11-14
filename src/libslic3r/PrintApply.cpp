@@ -2557,6 +2557,19 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         }
     }
 
+    // EdgeSlicer: support interface temperatures (support_interface_nozzle_temperature). They depend on the
+    // objects' support settings and on which filaments print model parts, all final here. The tower and the
+    // G-code read them; a change re-runs both (the object option alone only invalidates psGCodeExport).
+    {
+        SupportInterfaceTemperatures resolved = this->resolve_support_interface_temperatures();
+        if (resolved != m_support_interface_temperatures) {
+            // Only the ignored list (warnings, read by validate()) changing needs no step re-run.
+            if (resolved.temperatures != m_support_interface_temperatures.temperatures)
+                update_apply_status(this->invalidate_steps({psWipeTower, psGCodeExport}));
+            m_support_interface_temperatures = std::move(resolved);
+        }
+    }
+
     // Update SlicingParameters for each object where the SlicingParameters is not valid.
     // If it is not valid, then it is ensured that PrintObject.m_slicing_params is not in use
     // (posSlicing and posSupportMaterial was invalidated).

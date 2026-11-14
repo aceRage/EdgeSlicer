@@ -3808,6 +3808,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Support filament"), L"param_support_filament");
         optgroup->append_single_option_line("support_filament", "support_settings_filament#base");
         optgroup->append_single_option_line("support_interface_filament", "support_settings_filament#interface");
+        // EdgeSlicer: the interface filament's temperature (design_support_upgrades_2026-11-14 1B).
+        optgroup->append_single_option_line("support_interface_nozzle_temperature");
         // I3 fix: wire support_filament_matching into the GUI, mirroring Part
         // 1's brim_filament_source wiring at Tab.cpp:2650 (same pattern: no wiki
         // fragment yet, comAdvanced). Without this the setting was invisible/unsettable
