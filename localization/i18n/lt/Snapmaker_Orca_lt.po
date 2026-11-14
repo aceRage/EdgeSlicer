@@ -1466,7 +1466,7 @@ msgstr "Funkcija 1"
 msgid "Reverse rotation"
 msgstr "Apsukti sukimąsi"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Pasukti aplink centrą"
 
 msgid "Parallel distance"

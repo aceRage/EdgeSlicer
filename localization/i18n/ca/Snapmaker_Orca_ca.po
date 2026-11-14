@@ -1472,7 +1472,7 @@ msgstr "Característica 1"
 msgid "Reverse rotation"
 msgstr "Rotació inversa"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Gira al voltant del centre"
 
 msgid "Parallel distance"

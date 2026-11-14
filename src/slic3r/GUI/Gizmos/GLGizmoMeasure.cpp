@@ -3386,8 +3386,8 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     const std::string mm_units = inches ? _u8L("in") : _u8L("mm");
 
     // One column layout for every row: label | (slider) | box | unit.
-    const std::string l_rot = _u8L("Rotate"), l_off = _u8L("Offset"), l_par = _u8L("Parallel distance"),
-                      l_cen = _u8L("Rotate around center");
+    const std::string l_rot = _u8L("Rotate (Part)"), l_off = _u8L("Offset"), l_par = _u8L("Parallel distance"),
+                      l_cen = _u8L("Orbit");
     float label_w = 0.f;
     for (const std::string* l : {&l_rot, &l_off, &l_par, &l_cen}) label_w = std::max(label_w, ImGui::CalcTextSize(l->c_str()).x);
     label_w += m_space_size;
@@ -3415,11 +3415,13 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // shows `box_val` in display units; slider drags call on_slide(new, shot), a committed box calls on_type.
     auto slider_row = [&](const std::string& label, const char* sid, float slider_val, float lo, float hi,
                           const char* bid, double& buf, bool& editing, double box_val, const std::string& unit_text,
-                          auto on_slide, auto on_type) {
+                          const wxString& tip, auto on_slide, auto on_type) {
         row_label(label);
+        if (ImGui::IsItemHovered()) m_imgui->tooltip(tip, ULTRA_CURVE_TOOLTIP_WIDTH);
         ImGui::PushItemWidth(slider_w);
         float v = slider_val;
         if (ImGui::SliderFloat(sid, &v, lo, hi, "")) on_slide(v, ImGui::IsItemActivated());
+        if (ImGui::IsItemHovered()) m_imgui->tooltip(tip, ULTRA_CURVE_TOOLTIP_WIDTH);
         ImGui::PopItemWidth();
         ImGui::SameLine(box_x);
         if (number_box(bid, buf, editing, box_val, unit_text)) on_type(buf);
@@ -3428,6 +3430,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // Rotate (cumulative degrees since the last mate / pick).
     slider_row(l_rot, "##ultra_adjust_rot", m_ultra_adjust_rot, -180.f, 180.f, "##ultra_adjust_rot_box", m_ultra_rot_buf,
                m_ultra_rot_editing, double(m_ultra_adjust_rot), deg,
+               _L("Rotate (Part): spins part 2 about the mating axis (the normal of the picked faces)."),
         [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_adjust_rot), shot); m_ultra_adjust_rot = v; },
         [&](double typed) {
             const double delta = typed - double(m_ultra_adjust_rot);
@@ -3437,6 +3440,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     // Offset (mm, cumulative; the box is in display units).
     slider_row(l_off, "##ultra_adjust_off", m_ultra_adjust_off, -20.f, 20.f, "##ultra_adjust_off_box", m_ultra_off_buf,
                m_ultra_off_editing, double(m_ultra_adjust_off) * unit, mm_units,
+               _L("Offset: slides part 2 along the mating axis, relative to where it is now."),
         [&](float v, bool shot) { ultra_adjust_offset(double(v - m_ultra_adjust_off), shot); m_ultra_adjust_off = v; },
         [&](double typed) {
             const double target_mm = typed / unit, delta_mm = target_mm - double(m_ultra_adjust_off);
@@ -3450,6 +3454,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
         // Slider: absolute gap, -50..50 mm (follows the live value; the box accepts any value).
         slider_row(l_par, "##ultra_parallel_slider", live.parallel_distance, -50.f, 50.f, "##parallel_distance_z", m_ultra_para_buf,
                    m_ultra_para_editing, double(live.parallel_distance) * unit, mm_units,
+               _L("Parallel distance: the exact gap between the two parallel faces. The box accepts any value."),
             [&](float v, bool shot) {
                 const double delta = double(v) - double(live.parallel_distance);
                 if (std::abs(delta) > 1e-6) { ultra_adjust_offset(delta, shot); m_ultra_adjust_off = 0.f; }
@@ -3466,6 +3471,7 @@ void GLGizmoMeasure::ultra_show_adjust_ui()
     if (live.can_around_center_of_faces) {
         slider_row(l_cen, "##ultra_center_slider", m_ultra_cen_rot, -180.f, 180.f, "##rotate_around_center", m_ultra_cen_buf,
                    m_ultra_cen_editing, double(m_ultra_cen_rot), deg,
+               _L("Orbit: rotates part 2 around the assembly centre (the centre of the mated faces)."),
             [&](float v, bool shot) { ultra_adjust_rotate(double(v - m_ultra_cen_rot), shot); m_ultra_cen_rot = v; },
             [&](double typed) {
                 const double delta = typed - double(m_ultra_cen_rot);

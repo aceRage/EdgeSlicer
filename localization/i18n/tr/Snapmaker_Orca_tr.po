@@ -1465,7 +1465,7 @@ msgstr "Özellik 1"
 msgid "Reverse rotation"
 msgstr "Ters dönüş"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Merkezin etrafında döndürün"
 
 msgid "Parallel distance"

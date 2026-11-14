@@ -1489,7 +1489,7 @@ msgstr "Fonction 1"
 msgid "Reverse rotation"
 msgstr "Inverser la rotation"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Rotation autour du centre "
 
 msgid "Parallel distance"

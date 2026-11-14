@@ -1482,7 +1482,7 @@ msgstr "Элемент 1"
 msgid "Reverse rotation"
 msgstr "Обратное вращение"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Вращение вокруг центра"
 
 msgid "Parallel distance"

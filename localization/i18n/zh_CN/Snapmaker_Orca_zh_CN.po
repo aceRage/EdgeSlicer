@@ -1431,7 +1431,7 @@ msgstr "特征1"
 msgid "Reverse rotation"
 msgstr "反转方向"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "绕中心旋转"
 
 msgid "Parallel distance"

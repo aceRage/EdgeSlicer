@@ -1454,7 +1454,7 @@ msgstr "특징 1"
 msgid "Reverse rotation"
 msgstr "역회전"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "중심을 중심으로 회전"
 
 msgid "Parallel distance"

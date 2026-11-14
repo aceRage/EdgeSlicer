@@ -1461,7 +1461,7 @@ msgstr "Prvek 1"
 msgid "Reverse rotation"
 msgstr "Obrátit rotaci"
 
-msgid "Rotate around center"
+msgid "Orbit"
 msgstr "Otáčet kolem středu"
 
 msgid "Parallel distance"
