@@ -1331,6 +1331,24 @@ bool has_flexi_joint(const ModelObject* mo)
     return false;
 }
 
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors)
+{
+    if (flexi_joints == 0 || (flexi_joints == 1 && other_connectors == 0))
+        return {};
+    return L("Only one Flexi joint can be made in a cut, with no other connectors. Remove the others to cut.");
+}
+
+std::string flexi_connectors_error(const CutConnectors& connectors)
+{
+    size_t flexi = 0, other = 0;
+    for (const CutConnector& c : connectors)
+        if (is_flexi_connector_type(c.attribs.type))
+            ++ flexi;
+        else if (!is_tac_joint_connector_type(c.attribs.type))
+            ++ other;
+    return flexi_connectors_error(flexi, other);
+}
+
 ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
 {
     using namespace Geometry;
@@ -1410,6 +1428,21 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 
     ModelObject* mo = m_model.objects.front();
 
+    // One Flexi joint per cut and nothing beside it: the cut below makes one joint and has no
+    // place for any other connector. Refused before anything is changed, as the gizmo refuses it
+    // before the click.
+    {
+        size_t flexi = 0, other = 0;
+        for (const ModelVolume* v : mo->volumes)
+            if (is_unprocessed_flexi_volume(v))
+                ++ flexi;
+            else if (v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_tac_joint())
+                ++ other;
+        const std::string error = flexi_connectors_error(flexi, other);
+        if (!error.empty())
+            throw std::invalid_argument(error);
+    }
+
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
 
     const SavedPaintings saved_paintings = save_paintings(mo);
@@ -1424,23 +1457,18 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // Phase 1: exactly one joint per cut. Extra joints are ignored with a warning.
+    // Exactly one joint per cut, checked above.
     FlexiJointParams params;
     Transform3d      joint_matrix = Transform3d::Identity();
     ModelVolume*     first_solid  = nullptr;
-    int              joints       = 0;
     for (ModelVolume* v : mo->volumes) {
         if (is_unprocessed_flexi_volume(v)) {
-            if (++ joints == 1) {
-                params       = v->cut_info.flexi;
-                joint_matrix = inverse_cut_matrix * v->get_matrix();
-            }
+            params       = v->cut_info.flexi;
+            joint_matrix = inverse_cut_matrix * v->get_matrix();
             v->cut_info.set_processed();
         } else if (v->is_model_part() && !v->mesh().empty() && first_solid == nullptr)
             first_solid = v;
     }
-    if (joints > 1)
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
 
     // PHASE 3: the kerf ADDS to the joint's own gap, in the params, BEFORE anything
     // is generated. flexi_effective_gap() sets where the two flat faces go, and
@@ -1495,7 +1523,13 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     TriangleMesh lower_mesh(std::move(lower_its));
     TriangleMesh upper_mesh(std::move(upper_its));
 
-    bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
+    // A joint needs material on both sides of it. `out` is handed to m_model before a refusal so
+    // it is freed with the rest.
+    if (lower_mesh.empty() || upper_mesh.empty()) {
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: the cut leaves nothing on one side of it."));
+    }
+    bool boolean_ok = true;
 
     // Union each segment's own joint body into it, then subtract the OTHER side's body
     // inflated by the clearance. For the revolved kinds the lower relief list is empty and
@@ -1526,8 +1560,14 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
             if (!flexi_boolean(upper_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
         }
 
-    if (!boolean_ok)
-        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut falls back to two plain halves";
+    // A failed boolean refuses the cut. Going on would give halves with the joint partly made (a
+    // body joined to one half with no room cut for it in the other) or not made at all, and the
+    // person would not know.
+    if (!boolean_ok) {
+        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut is refused";
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: joining it to the halves failed. Try another size or position."));
+    }
 
     add_cut_volume(upper_mesh, out, first_solid, m_cut_matrix, "_A");
     if (!lower_mesh.empty()) {

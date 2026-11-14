@@ -9301,6 +9301,10 @@ void GLGizmoCut3D::render_input_window_warning_lines() const
 {
     if (const auto* si = m_c ? m_c->selection_info() : nullptr)
         if (const ModelObject* mo = si->model_object())
+            if (const std::string flexi_error = flexi_connectors_error(mo->cut_connectors); !flexi_error.empty())
+                m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(flexi_error));
+    if (const auto* si = m_c ? m_c->selection_info() : nullptr)
+        if (const ModelObject* mo = si->model_object())
             for (const CutConnector& c : mo->cut_connectors)
                 if (c.attribs.type == CutConnectorType::TacJoint) {
                     if (std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
@@ -9838,9 +9842,12 @@ bool GLGizmoCut3D::can_perform_cut() const
     if (! m_invalid_connectors_idxs.empty() || (!m_keep_upper && !m_keep_lower) || m_connectors_editing)
         return false;
 
-    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why).
+    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why), and
+    // so does a Flexi joint with another Flexi joint or connector beside it.
     if (m_c->selection_info() != nullptr)
-        if (const ModelObject* mo = m_c->selection_info()->model_object())
+        if (const ModelObject* mo = m_c->selection_info()->model_object()) {
+            if (!flexi_connectors_error(mo->cut_connectors).empty())
+                return false;
             for (const CutConnector& c : mo->cut_connectors) {
                 if (c.attribs.type == CutConnectorType::PushFit && !pushfit_validate(c.pushfit, double(flexi_nozzle_diameter())).empty())
                     return false;
@@ -9854,6 +9861,7 @@ bool GLGizmoCut3D::can_perform_cut() const
                         return false;
                 }
             }
+        }
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         return has_valid_groove();

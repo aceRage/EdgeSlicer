@@ -151,6 +151,14 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
 
+// Why a cut with these connectors cannot be made, as far as Flexi joints go: a cut makes one
+// Flexi joint and no other connector beside it. Empty when there is no Flexi joint, or one on
+// its own. `other_connectors` leaves out TAC Joints, which are refused with a Flexi joint by a
+// message of their own. The message is marked for translation (L()) but not translated.
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors);
+// The same for the connectors placed in the Cut gizmo.
+std::string flexi_connectors_error(const CutConnectors& connectors);
+
 // Append the NEGATIVE_VOLUME that carries a push-fit Pin into `mo` before the cut runs. Its mesh
 // is the pin itself in mm (pushfit_preview_body), its transform the connector frame (pos,
 // rotation_m, z_angle; no scale). The cut builds the pin object and both holes from
