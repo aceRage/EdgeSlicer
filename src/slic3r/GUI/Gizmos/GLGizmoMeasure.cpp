@@ -441,6 +441,7 @@ void GLGizmoMeasure::data_changed(bool is_serializing)
         update_if_needed();
         register_single_mesh_pick();
         reset_all_feature();
+        ultra_restore_kept_picks(); // Auto-fit just moved a part: keep its two picks
     }
     m_last_inv_zoom  = 0.0f;
     m_last_plane_idx = -1;
@@ -2491,8 +2492,10 @@ bool GLGizmoMeasure::repair_stale_volume_refs()
         return false;
     BOOST_LOG_TRIVIAL(warning) << "GLGizmoMeasure: cached volumes were deleted or replaced under the gizmo, rebuilding its picks";
     drop_volume_refs();
-    if (m_state == On)
+    if (m_state == On) {
         register_single_mesh_pick();
+        ultra_restore_kept_picks(); // Auto-fit's picks survive the rebuilt volumes
+    }
     return true;
 }
 
@@ -2969,6 +2972,56 @@ bool GLGizmoMeasure::ultra_plane_axis_world(GLVolume* v, const Measure::SurfaceF
 // mate them on the PRINT transform (converting each feature from its bake-time view world into its
 // object's print world, so it is correct even when picking happened in the exploded assembly view),
 // then merge the two objects into one multi-part object that reassembles for printing.
+// Remember the two picks by index. Auto-fit moves a part, and the canvas then sometimes rebuilds its
+// GLVolumes (a second data_changed once the background process / scene reload lands). data_changed() cannot
+// tell that from a real selection change, did a full refresh and dropped both picks -- only sometimes,
+// depending on whether the reload landed within the one "pending" refresh the gizmo's own move allows.
+void GLGizmoMeasure::ultra_arm_kept_picks()
+{
+    m_ultra_kept_armed = false;
+    if (m_hit_different_volumes.size() != 2) return;
+    for (int i = 0; i < 2; ++i) {
+        const GLVolume* v = m_hit_different_volumes[i];
+        const SelectedFeatures::Item& it = i == 0 ? m_selected_features.first : m_selected_features.second;
+        if (!v || !it.feature.has_value() || it.is_center) return;
+        m_ultra_kept[i].obj = v->object_idx(); m_ultra_kept[i].vol = v->volume_idx(); m_ultra_kept[i].inst = v->instance_idx();
+        m_ultra_kept[i].item = it;
+    }
+    m_ultra_kept_armed = true;
+    m_ultra_kept_time  = std::chrono::steady_clock::now();
+}
+
+// Re-resolve the remembered picks on the (possibly rebuilt) volumes. Only within a few seconds of Auto-fit.
+void GLGizmoMeasure::ultra_restore_kept_picks()
+{
+    if (!m_ultra_kept_armed) return;
+    if (std::chrono::steady_clock::now() - m_ultra_kept_time > std::chrono::seconds(5)) { m_ultra_kept_armed = false; return; }
+    GLVolume* vols[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++i) {
+        for (GLVolume* v : m_parent.get_volumes().volumes)
+            if (v && v->object_idx() == m_ultra_kept[i].obj && v->volume_idx() == m_ultra_kept[i].vol &&
+                v->instance_idx() == m_ultra_kept[i].inst) { vols[i] = v; break; }
+        if (!vols[i] || m_mesh_raycaster_map.find(vols[i]) == m_mesh_raycaster_map.end() ||
+            !m_ultra_kept[i].item.feature->origin_surface_feature) return; // volume gone or not pickable: give up
+    }
+    if (vols[0] == vols[1]) return;
+    m_hit_different_volumes = {vols[0], vols[1]};
+    m_hit_order_volumes     = {vols[0], vols[1]};
+    m_last_hit_volume       = vols[1];
+    for (int i = 0; i < 2; ++i) {
+        SelectedFeatures::Item it = m_ultra_kept[i].item;
+        it.feature->volume     = vols[i];
+        it.feature->world_tran = m_mesh_raycaster_map[vols[i]]->get_transform();
+        if (it.source.has_value()) { it.source->volume = vols[i]; it.source->world_tran = it.feature->world_tran; }
+        (i == 0 ? m_selected_features.first : m_selected_features.second) = it;
+        update_feature_by_tran(*(i == 0 ? m_selected_features.first : m_selected_features.second).feature);
+    }
+    m_same_model_object = is_two_volume_in_same_model_object();
+    update_measurement_result();
+    m_parent.set_as_dirty();
+    BOOST_LOG_TRIVIAL(info) << "GLGizmoMeasure: Auto-fit picks re-resolved after the scene reload";
+}
+
 void GLGizmoMeasure::ultra_fit_for_print_and_merge()
 {
     auto notify = [](const std::string& t) {
@@ -2980,6 +3033,7 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
     GLVolume* vt = m_hit_different_volumes[0]; // target -- stays fixed
     GLVolume* va = m_hit_different_volumes[1]; // attachment -- moves onto target
     if (!vt || !va) return;
+    ultra_arm_kept_picks();
     // Ultra (Exact highlight): land the clicked footprint on the target; falls through when it cannot.
     if (ultra_exact_fit()) return;
     if (vt->object_idx() == va->object_idx()) {

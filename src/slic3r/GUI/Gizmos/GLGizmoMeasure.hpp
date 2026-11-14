@@ -375,6 +375,14 @@ protected:
     bool                     m_only_select_plane{false};
     float                    m_ultra_adjust_rot{0.f}; // Ultra: cumulative slider spin (deg) since the last mate / pick
     float                    m_ultra_adjust_off{0.f}; // Ultra: cumulative slider offset (mm) since the last mate / pick
+    // Ultra: Auto-fit keeps both picks even when the canvas rebuilds the GLVolumes afterwards (see
+    // ultra_restore_kept_picks): the picks are remembered by (object, volume, instance) index.
+    struct UltraKeptPick { int obj{-1}, vol{-1}, inst{-1}; SelectedFeatures::Item item; };
+    UltraKeptPick            m_ultra_kept[2];
+    bool                     m_ultra_kept_armed{false};
+    std::chrono::steady_clock::time_point m_ultra_kept_time;
+    void ultra_arm_kept_picks();
+    void ultra_restore_kept_picks();
     double                   m_ultra_para_buf{0.0};   // Ultra: typed Parallel distance (display units)
     bool                     m_ultra_para_editing{false};
     // Ultra (Curve mode): total normal spread a Curve pick may grow across, and the "no total cap, stop
