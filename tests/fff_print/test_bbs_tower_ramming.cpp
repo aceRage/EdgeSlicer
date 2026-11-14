@@ -532,6 +532,7 @@ TEST_CASE("The ramming rows go into the outgoing filament's block, ahead of the 
     ram.new_nozzle      = 1;
     ram.old_extruder    = 0;
     static const std::regex y_re(R"(^G1 .*Y([-\d.]+))");
+    static const std::regex e_re(R"( E[0-9.]+)");
     auto y_range = [](const std::string &gcode, bool wipe_only) {
         float lo = 1e9f, hi = -1e9f;
         bool  in_wipe = !wipe_only;
@@ -541,7 +542,8 @@ TEST_CASE("The ramming rows go into the outgoing filament's block, ahead of the 
             else if (wipe_only && line.find("; CP TOOLCHANGE END") != std::string::npos)
                 in_wipe = false;
             std::smatch m;
-            if (in_wipe && std::regex_search(line, m, y_re)) {
+            // Extrusions only: the flat ironing at the purge start travels around it.
+            if (in_wipe && std::regex_search(line, m, y_re) && std::regex_search(line, e_re)) {
                 lo = std::min(lo, std::stof(m[1].str()));
                 hi = std::max(hi, std::stof(m[1].str()));
             }
@@ -765,7 +767,7 @@ TEST_CASE("X1C G-code: a PLA and PETG plate slices through the block planner", "
             ++templates;
     }
     CHECK(changes >= 10);
-    // The start G-code has one more.
+    // The start and end G-code have their own.
     CHECK(templates >= changes);
-    CHECK(templates <= changes + 1);
+    CHECK(templates <= changes + 2);
 }
