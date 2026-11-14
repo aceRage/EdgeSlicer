@@ -25,10 +25,14 @@ class DynamicPrintConfig;
 std::vector<std::string> nozzle_process_preset_names(const ConfigBase &config);
 bool has_nozzle_process_presets(const ConfigBase &config);
 
+// One extruder with a declared nozzle rack of two or more positions (extruder_max_nozzle_count > 1): the H3C, Bambu Studio
+// 2.9.1's is_single_ext_multi_nozzle(). Its rack hotends are its tools.
+bool single_extruder_nozzle_rack(const ConfigBase &printer_config);
 // Whether the printer can take a process per nozzle: two or more physical extruders and not a single
-// nozzle fed by several filaments (single_extruder_multi_material), or (H3C, 2026-11-06) one extruder whose
-// nozzle rack holds nozzles of two or more sizes (each other size is a P9 size tool, "T1:0.8"). Pass a config
-// with the project's rack (extruder_rack_nozzle_override) when there is one.
+// nozzle fed by several filaments (single_extruder_multi_material), or (H3C) one extruder with a nozzle rack
+// (single_extruder_nozzle_rack, 2026-11-14 also a rack of one size): the extruder is tool T1, each other size of
+// its rack a P9 size tool ("T1:0.8"). Pass a config with the project's rack (extruder_rack_nozzle_override)
+// when there is one.
 bool supports_nozzle_processes(const ConfigBase &printer_config);
 
 // Per-nozzle process P2: whether filaments can be put on a nozzle of the user's choosing
