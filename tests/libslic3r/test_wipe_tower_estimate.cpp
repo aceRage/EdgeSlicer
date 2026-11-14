@@ -109,6 +109,8 @@ TEST_CASE("Type1 sizes the tower from each filament's own prime volume", "[WipeT
     config.set_key_value("filament_prime_volume", new ConfigOptionFloats({30., 45.}));
     config.set_key_value("handle_hotend_as_extruder", new ConfigOptionBool(false));
     config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({100, 0}));
+    // No ramming here (Bambu Studio 2.9.1 rams filament_change_length on every H3C hotend change; its own case below).
+    config.set_key_value("filament_change_length", new ConfigOptionFloats({0., 0.}));
     const double flat = estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth;
     // make_config()'s prime_volume is 100 for both filaments.
     const double flat_blocks = WipeTower::estimate_tower_blocks_depth({{100.f, 100}, {100.f, 0}}, 35.f, 0.21f, 0.4f, 1.5f);
@@ -121,6 +123,12 @@ TEST_CASE("Type1 sizes the tower from each filament's own prime volume", "[WipeT
     CHECK_THAT(estimate_wipe_tower_footprint(config, WipeTowerType::Type1, {1, 0}, 0.21, 5.).depth,
                WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, blocks), 1e-4));
     CHECK_THAT(estimate(config, 1, 0.21, 5., WipeTowerType::Type1).depth, WithinAbs(0., 1e-9));
+    {
+        // Every filament leaving its H3C hotend rams filament_change_length on the tower: the estimate grows.
+        DynamicPrintConfig rammed = config;
+        rammed.set_key_value("filament_change_length", new ConfigOptionFloats({50., 50.}));
+        CHECK(estimate(rammed, 2, 0.21, 5., WipeTowerType::Type1).depth > estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth + 1.);
+    }
     config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({0, 0}));
     CHECK_THAT(estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth,
                WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, 11.), 0.01));
