@@ -8328,6 +8328,25 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionInt(2));
 
+    // EdgeSlicer: support interface temperature (tests/design_support_upgrades_2026-11-14.md 1B,
+    // owner decisions D2-D4 of 2026-11-14).
+    def = this->add("support_interface_nozzle_temperature", coInt);
+    def->label    = L("Interface temperature");
+    def->category = L("Support");
+    def->tooltip  = L("Nozzle temperature of the support interface filament, for every layer including the first. "
+                      "0 prints the interface at the filament's own temperatures.\n"
+                      "Use it to print an interface hotter or colder than its filament profile (for example a cooler "
+                      "PETG interface under PLA, so it peels more easily) without making a copy of the filament.\n"
+                      "The temperature belongs to the filament, so it applies only when the interface filament prints "
+                      "nothing but support on this plate; support body printed with that filament uses it too. "
+                      "When the filament also prints part of a model, its own temperatures are kept and a warning is shown. "
+                      "A temperature outside the filament's recommended range is also warned about.");
+    def->sidetext = u8"℃" /* °C */; // degrees Celsius, don't need translation
+    def->min      = 0;
+    def->max      = max_temp;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("support_line_width", coFloatOrPercent);
     def->label = L("Support");
     def->category = L("Quality");

@@ -1676,6 +1676,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 support_interface_interlock_beam_lines))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
+    // EdgeSlicer: the support interface filament's nozzle temperature, 0 = its own temperatures
+    // (Print::support_interface_temperatures()).
+    ((ConfigOptionInt,                 support_interface_nozzle_temperature))
     // Chameleon: when enabled, support material matches the filament of the model
     // geometry it touches or stands beside (interfaces/ironing/walls), instead of
     // always using the configured support filament.

@@ -3703,8 +3703,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                           PrintStateBase::SlicingInvalidPrintSpeed);
         });
 
+    // EdgeSlicer: print.config() with the support interface temperatures written in (print.config() itself
+    // when none is set). The processor, m_config and the placeholders read filament temperatures from it.
+    PrintConfig        temperature_config_storage;
+    const PrintConfig &temperature_config = print.config_with_interface_temperatures(temperature_config_storage);
     // modifies m_silent_time_estimator_enabled
-    DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
+    DoExport::init_gcode_processor(temperature_config, m_processor, m_silent_time_estimator_enabled);
     set_mass_locator(m_processor, print);
     const bool is_bbl_printers = print.is_BBL_printer();
     // Orca #12781: the tower generator, which decides priming and the start-up extruder. Bambu
@@ -3843,7 +3847,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     print.throw_if_canceled();
 
     m_enable_cooling_markers = true;
-    this->apply_print_config(print.config());
+    // EdgeSlicer: support interface temperatures written into m_config (taken afresh: the grouping above may
+    // have changed the filament maps the flow-variant slots depend on). Every temperature reader of the
+    // export goes through m_config from here on.
+    this->apply_print_config(print.config_with_interface_temperatures(temperature_config_storage));
     // Orca a2a9f95b6b: m_config is a FullPrintConfig, but only the print config was applied so far, so its
     // object and region options still held the hard-coded defaults. Region options read below (small area
     // infill flow compensation) never saw the process preset's value.
@@ -4019,7 +4026,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (!is_bbl_printers) {
         compat_first_layer_bed_temp = get_bed_temperature_max(print, true);
         compat_first_layer_nozzle_temp =
-            get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+            get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                          ConfigFlowDomain::Filament, initial_extruder_id);
     }
 
@@ -4087,10 +4094,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Flow-variant keys stay packed on the full config. Placeholders are indexed by
         // filament / tool id (U1 M109 S{first_layer_temperature|temperature[next_extruder]}).
         const auto &cfg = print.config();
-        this->placeholder_parser().set("temperature", new ConfigOptionInts(unpack_filament_values(cfg, cfg.nozzle_temperature)));
-        this->placeholder_parser().set("nozzle_temperature", new ConfigOptionInts(unpack_filament_values(cfg, cfg.nozzle_temperature)));
+        this->placeholder_parser().set("temperature", new ConfigOptionInts(unpack_filament_values(m_config, m_config.nozzle_temperature)));
+        this->placeholder_parser().set("nozzle_temperature", new ConfigOptionInts(unpack_filament_values(m_config, m_config.nozzle_temperature)));
         this->placeholder_parser().set("nozzle_temperature_initial_layer",
-                                       new ConfigOptionInts(unpack_filament_values(cfg, cfg.nozzle_temperature_initial_layer)));
+                                       new ConfigOptionInts(unpack_filament_values(m_config, m_config.nozzle_temperature_initial_layer)));
         {
             const size_t n = flow_variant_filament_count(cfg);
             std::vector<unsigned char> ram(n, 0);
@@ -4763,7 +4770,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 bbl_first_filament = used.front();
             file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
             file.write_format("; first_layer_temperature = %d\n",
-                              get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                              get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                                            ConfigFlowDomain::Filament, bbl_first_filament));
             file.write("; CONFIG_BLOCK_END\n\n");
         } else if (thumbnail_cb != nullptr) {
@@ -6348,7 +6355,7 @@ void GCode::_print_first_layer_extruder_temperatures(
     bool include_g10   = print.config().gcode_flavor == gcfRepRapFirmware;
     if (custom_gcode_sets_temperature(gcode, 104, 109, include_g10, temp_by_gcode)) {
         // Set the extruder temperature at m_writer, but throw away the generated G-code as it will be written with the custom G-code.
-        int temp = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
+        int temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
                                 first_printing_extruder_id);
         if (temp_by_gcode >= 0 && temp_by_gcode < 1000)
             temp = temp_by_gcode;
@@ -6357,7 +6364,7 @@ void GCode::_print_first_layer_extruder_temperatures(
         // Custom G-code does not set the extruder temperature. Do it now.
         if (print.config().single_extruder_multi_material.value) {
             // Set temperature of the first printing extruder only.
-            int temp = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
+            int temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
                                     first_printing_extruder_id);
             if (temp > 0)
                 file.write(m_writer.set_temperature(temp, wait, first_printing_extruder_id));
@@ -6371,7 +6378,7 @@ void GCode::_print_first_layer_extruder_temperatures(
             // 2026-09-24). It is heated again by its own tool change ("M620.10 A1 ... P<temp>") or,
             // with pre-cooling, by the pre-heat timed for its next use.
             const int active_tool = temperature_tool_for_filament(int(first_printing_extruder_id));
-            const int active_temp = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+            const int active_temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                                                  ConfigFlowDomain::Filament, first_printing_extruder_id);
             if (active_temp > 0)
                 file.write(m_writer.set_temperature(active_temp, wait, active_tool));
@@ -6382,7 +6389,7 @@ void GCode::_print_first_layer_extruder_temperatures(
             int  target_tool = -1;
             for (unsigned int tool_id : print.extruders()) {
                 is_active = true;
-                int temp  = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                int temp  = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                                          ConfigFlowDomain::Filament, tool_id);
                 if (print.config().ooze_prevention.value && tool_id != first_printing_extruder_id) {
                     is_active = false;
@@ -7984,10 +7991,10 @@ LayerResult GCode::process_layer(const Print& print,
             // print-by-object plate, at the 2nd layer of every object).
             if (m_writer.extruder() != nullptr) {
                 const int filament    = int(m_writer.extruder()->id());
-                const int temperature = get_value_at(print.config(), print.config().nozzle_temperature, ConfigFlowDomain::Filament,
+                const int temperature = get_value_at(m_config, m_config.nozzle_temperature, ConfigFlowDomain::Filament,
                                                      (unsigned int) filament);
                 if (temperature > 0 &&
-                    temperature != get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                    temperature != get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                                                 ConfigFlowDomain::Filament, (unsigned int) filament))
                     gcode += m_writer.set_temperature(temperature, false, temperature_tool_for_filament(filament));
             }
@@ -7997,10 +8004,10 @@ LayerResult GCode::process_layer(const Print& print,
                 extruder.id() != m_writer.extruder()->id())
                 // In single extruder multi material mode, set the temperature for the current extruder only.
                 continue;
-            int temperature = get_value_at(print.config(), print.config().nozzle_temperature, ConfigFlowDomain::Filament,
+            int temperature = get_value_at(m_config, m_config.nozzle_temperature, ConfigFlowDomain::Filament,
                                            extruder.id());
             if (temperature > 0 &&
-                temperature != get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                temperature != get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
                                             ConfigFlowDomain::Filament, extruder.id()))
                 gcode += m_writer.set_temperature(temperature, false, extruder.id());
         }
