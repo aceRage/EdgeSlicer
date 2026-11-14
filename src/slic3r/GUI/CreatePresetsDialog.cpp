@@ -352,24 +352,10 @@ static wxArrayString get_exist_vendor_choices(VendorMap& vendors)
     return choices;
 }
 
-static std::string get_machine_name(const std::string &preset_name)
-{
-    size_t index_at = preset_name.find_last_of("@");
-    if (std::string::npos == index_at) {
-        return "";
-    } else {
-        return preset_name.substr(index_at + 1);
-    }
-}
-
 static std::string get_filament_name(std::string &preset_name)
 {
-    size_t index_at = preset_name.find_last_of("@");
-    if (std::string::npos == index_at) {
-        return preset_name;
-    } else {
-        return preset_name.substr(0, index_at - 1);
-    }
+    // The same name the export table groups by (FilamentPresetExport.cpp).
+    return filament_group_name(preset_name);
 }
 
 static wxBoxSizer *create_preset_tree(wxWindow *parent, std::pair<std::string, std::vector<std::shared_ptr<Preset>>> printer_and_preset)
@@ -394,19 +380,6 @@ static wxBoxSizer *create_preset_tree(wxWindow *parent, std::pair<std::string, s
     sizer->Add(treeCtrl, 0, wxEXPAND | wxALL, 0);
 
     return sizer;
-}
-
-static std::string get_vendor_name(std::string& preset_name)
-{
-    if (preset_name.empty()) return "";
-    std::string vendor_name = preset_name.substr(preset_name.find_first_not_of(' ')); //remove the name prefix space
-    size_t index_at = vendor_name.find(" ");
-    if (std::string::npos == index_at) {
-        return vendor_name;
-    } else {
-        vendor_name = vendor_name.substr(0, index_at);
-        return vendor_name;
-    }
 }
 
 static wxString get_curr_radio_type(std::vector<std::pair<RadioBox *, wxString>> &radio_btns)
@@ -3701,7 +3674,7 @@ std::string ExportConfigsDialog::initial_file_name(const wxString &path, const s
             export_path = printer_export_path.string();
         } else if (wxID_NO == res) {
             export_path = printer_export_path.string();
-            export_path = export_path.substr(0, export_path.find(".zip"));
+            export_path = export_path.substr(0, export_path.rfind(".zip"));
             std::string              export_path_with_time;
             boost::filesystem::path *printer_export_path_with_time = nullptr;
             do {
@@ -3954,18 +3927,20 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_preset_bundle_to_fi
             json filament_configs = json::array();
             json process_configs  = json::array();
 
-            mz_zip_archive zip_archive;
-            mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + printer_preset->name + ".orca_printer");
-            if (MZ_FALSE == status) {
-                BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
-                return ExportCase::INITIALIZE_FAIL;
-            }
-            
+            // Checked before the archive is opened: skipping after it left the writer open and a broken
+            // .orca_printer behind, and the export said it succeeded.
             boost::filesystem::path printer_file_path      = boost::filesystem::path(printer_preset->file);
             std::string             preset_path       = printer_file_path.make_preferred().string();
             if (preset_path.empty()) {
                 BOOST_LOG_TRIVIAL(info) << "Export printer preset: " << printer_preset->name << " skip because of the preset file path is empty.";
                 continue;
+            }
+
+            mz_zip_archive zip_archive;
+            mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + printer_preset->name + ".orca_printer");
+            if (MZ_FALSE == status) {
+                BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
+                return ExportCase::INITIALIZE_FAIL;
             }
 
             // Add a file to the ZIP file
@@ -4071,17 +4046,18 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_filament_bundle_to_
             bundle_structure["filament_name"] = filament_name;
             std::unordered_map<std::string, json> vendor_structure;
 
+            // Checked before the archive is opened, as for the printer bundle above.
+            std::unordered_map<std::string, std::vector<std::pair<std::string, Preset *>>>::iterator iter = m_filament_name_to_presets.find(filament_name);
+            if (m_filament_name_to_presets.end() == iter) {
+                BOOST_LOG_TRIVIAL(info) << "Filament name do not find, filament name:" << filament_name;
+                continue;
+            }
+
             mz_zip_archive zip_archive;
             mz_bool        status = initial_zip_archive(zip_archive, export_path + "/" + filament_name + ".orca_filament");
             if (MZ_FALSE == status) {
                 BOOST_LOG_TRIVIAL(info) << "Failed to initialize ZIP archive";
                 return ExportCase::INITIALIZE_FAIL;
-            }
-
-            std::unordered_map<std::string, std::vector<std::pair<std::string, Preset *>>>::iterator iter = m_filament_name_to_presets.find(filament_name);
-            if (m_filament_name_to_presets.end() == iter) {
-                BOOST_LOG_TRIVIAL(info) << "Filament name do not find, filament name:" << filament_name;
-                continue;
             }
             std::set<std::pair<std::string, std::string>> vendor_to_filament_name;
             for (std::pair<std::string, Preset *> printer_name_to_preset : iter->second) {
@@ -4559,8 +4535,7 @@ void ExportConfigsDialog::data_init()
             continue;
         }
         std::string filament_preset_name = base_filament_preset->name;
-        std::string machine_name         = get_machine_name(filament_preset_name);
-        m_filament_name_to_presets[get_filament_name(filament_preset_name)].push_back(std::make_pair(get_vendor_name(machine_name), new_filament_preset));
+        m_filament_name_to_presets[get_filament_name(filament_preset_name)].push_back(std::make_pair(filament_bundle_vendor(filament_preset_name), new_filament_preset));
     }
 }
 

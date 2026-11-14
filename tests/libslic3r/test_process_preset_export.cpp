@@ -683,3 +683,21 @@ TEST_CASE("filament export: the zip imports back exactly", "[FilamentPresetExpor
         CHECK(fs::exists(dest.path() / PRESET_USER_DIR / "default" / "filament" / "ET fil A1.json"));
     }
 }
+
+TEST_CASE("A filament bundle groups and files a preset by its whole name", "[PresetExport][Filament][Regression]")
+{
+    // The group name cut one character before the '@', meant for the space of " @": "PLA@U1" became "PL".
+    CHECK(filament_group_name("PLA@U1") == "PLA");
+    CHECK(filament_group_name("Generic PLA @U1") == "Generic PLA");
+    CHECK(filament_group_name("Generic PLA   @U1") == "Generic PLA");
+    CHECK(filament_group_name("Bambu PLA Basic @BBL X1C") == "Bambu PLA Basic");
+    CHECK(filament_group_name("No printer tail") == "No printer tail");
+
+    // The vendor folder of the .orca_filament: the printer's first word; a name with no printer used to get
+    // none and the preset was left out of the bundle.
+    CHECK(filament_bundle_vendor("Generic PLA @Snapmaker U1") == "Snapmaker");
+    CHECK(filament_bundle_vendor("Generic PLA @U1") == "U1");
+    CHECK(filament_bundle_vendor("PLA@BBL X1C") == "BBL");
+    CHECK(filament_bundle_vendor("My PLA") == "Custom");
+    CHECK(filament_bundle_vendor("My PLA @") == "Custom");
+}
