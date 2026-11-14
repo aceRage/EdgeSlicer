@@ -1088,8 +1088,8 @@ static CircleBed to_circle(const Point &center, const Points& points) {
     return ret;
 }
 
-// Create Item from Arrangeable
-static void process_arrangeable(const ArrangePolygon &arrpoly,
+// Create Item from Arrangeable. Returns false, and adds nothing, for an outline with fewer than three corners.
+static bool process_arrangeable(const ArrangePolygon &arrpoly,
                                 std::vector<Item> &   outp)
 {
     Polygon        p        = arrpoly.poly.contour;
@@ -1099,7 +1099,7 @@ static void process_arrangeable(const ArrangePolygon &arrpoly,
     if (p.is_counter_clockwise()) p.reverse();
 
     if (p.size() < 3)
-        return;
+        return false;
 
     outp.emplace_back(std::move(p));
     Item& item = outp.back();
@@ -1119,6 +1119,7 @@ static void process_arrangeable(const ArrangePolygon &arrpoly,
     item.vitrify_temp = arrpoly.vitrify_temp;
     item.inflation(arrpoly.inflation);
     item.filament_temp_type = arrpoly.filament_temp_type;
+    return true;
 }
 
 template<class Fn> auto call_with_bed(const Points &bed, Fn &&fn)
@@ -1163,8 +1164,15 @@ void arrange(ArrangePolygons &      arrangables,
     std::vector<Item> items, fixeditems;
     items.reserve(arrangables.size());
 
-    for (ArrangePolygon &arrangeable : arrangables)
-        process_arrangeable(arrangeable, items);
+    // The arrangeable each item was made from: an outline with fewer than three corners makes none,
+    // so the two lists do not line up by position.
+    std::vector<size_t> source;
+    source.reserve(arrangables.size());
+    for (size_t i = 0; i < arrangables.size(); ++i)
+        if (process_arrangeable(arrangables[i], items))
+            source.push_back(i);
+        else
+            arrangables[i].bed_idx = UNARRANGED;
 
     for (const ArrangePolygon &fixed: excludes)
         process_arrangeable(fixed, fixeditems);
@@ -1174,11 +1182,12 @@ void arrange(ArrangePolygons &      arrangables,
     _arrange(items, fixeditems, to_nestbin(bed), params, params.progressind, params.stopcondition);
 
     for(size_t i = 0; i < items.size(); ++i) {
+        ArrangePolygon &arrangeable = arrangables[source[i]];
         Point tr = items[i].translation();
-        arrangables[i].translation = {coord_t(tr.x()), coord_t(tr.y())};
-        arrangables[i].rotation    = items[i].rotation();
-        arrangables[i].bed_idx     = items[i].binId();
-        arrangables[i].itemid      = items[i].itemId();  // arrange order is useful for sequential printing
+        arrangeable.translation = {coord_t(tr.x()), coord_t(tr.y())};
+        arrangeable.rotation    = items[i].rotation();
+        arrangeable.bed_idx     = items[i].binId();
+        arrangeable.itemid      = items[i].itemId();  // arrange order is useful for sequential printing
     }
 }
 

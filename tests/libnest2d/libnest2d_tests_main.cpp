@@ -1225,3 +1225,36 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
     REQUIRE(pile.size() == N);
     REQUIRE(bb.area() == double(N) * N * W * W);
 }
+
+// An item that fits an empty bed but not beside a fixed item (a prime tower) that sits on every
+// bed was put on a bed past the plate limit (the first bed without a fixed item), however many
+// beds that took: the MAX_NUM_PLATES test in firstfit could never be true. It is now reported as
+// unplaced once every bed up to the limit has been tried.
+TEST_CASE("Item that fits only an empty bed is unplaced when every bed holds a fixed item", "[Nesting]")
+{
+    const Box bin({0, 0}, {250000000, 210000000});
+
+    std::vector<Item> items;
+    const int fixed_beds = MAX_NUM_PLATES + 4;
+    items.reserve(fixed_beds + 1);
+    for (int b = 0; b < fixed_beds; ++b) {
+        items.emplace_back(RectangleItem{20000000, 20000000});
+        items.back().translate(bin.center() - items.back().boundingBox().center());
+        items.back().markAsFixedInBin(b);
+        items.back().is_wipe_tower = true;
+    }
+    items.emplace_back(RectangleItem{240000000, 200000000});
+    Item &big = items.back();
+
+    NestConfig<> cfg;
+    cfg.placer_config.alignment = NestConfig<>::Placement::Alignment::DONT_ALIGN;
+
+    // Guard: the selection asks the stop condition on every pass, so a run that keeps opening beds
+    // stops here instead of hanging the suite.
+    int passes = 0;
+    const int max_passes = 100000;
+    libnest2d::nest(items, bin, 0, cfg, NestControl{[&passes, max_passes] { return ++passes > max_passes; }});
+
+    REQUIRE(passes <= max_passes);
+    CHECK(big.binId() == BIN_ID_UNSET);
+}
