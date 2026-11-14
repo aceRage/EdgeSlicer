@@ -814,3 +814,88 @@ TEST_CASE("H3C: a change into a hotend that holds the next filament costs the ho
         REQUIRE_THAT(change_time(rack_config(1, false), own_hotends), WithinAbs(15.0 + 3 * 43.0, 1e-2));
     }
 }
+
+// ---- Bambu Studio "M73 E": remaining filament changes ----
+
+TEST_CASE("Remaining filament change counters follow Bambu Studio", "[GCodeTiming][M73E]")
+{
+    // <line id, filament> of each selection; a selection of the filament already in use is not a change.
+    const std::vector<std::pair<unsigned int, int>> selections = {{10, 2}, {12, 2}, {20, 7}, {30, 2}, {35, 2}, {40, 1}};
+    const std::map<unsigned int, std::string> lines = GCodeProcessor::remaining_filament_change_lines(selections);
+    REQUIRE(lines.size() == 3);
+    CHECK(lines.at(20) == "M73 E2\n");
+    CHECK(lines.at(30) == "M73 E1\n");
+    CHECK(lines.at(40) == "M73 E0\n");
+    CHECK(GCodeProcessor::remaining_filament_change_lines({}).empty());
+    CHECK(GCodeProcessor::remaining_filament_change_lines({{5, 0}, {9, 0}}).empty());
+}
+
+TEST_CASE("The post-process writes M73 E after each filament change between start and end G-code", "[GCodeTiming][M73E]")
+{
+    FullPrintConfig config = make_config(0.0, 0.0, 0.0);
+    const std::string start_gcode =
+        "M83\n"
+        "T1\n"              // start G-code selections are not counted
+        "G1 X10 Y0 E1 F6000\n"
+        "T0\n";
+    const std::string body =
+        ";VT0 H-1\n"        // the first block's filament
+        "G1 X20 Y0 E1\n"
+        "T0\n"              // same filament: no change
+        "T1\n"
+        "G1 X30 Y0 E1\n"
+        "M1020 S0\n"
+        "G1 X40 Y0 E1\n"
+        "T1 H3\n"
+        "G1 X50 Y0 E1\n";
+    const std::string end_gcode =
+        "T0\n"              // end G-code selections are not counted
+        "G1 X60 Y0\n";
+
+    auto run = [&](bool bambu) {
+        GCodeProcessor::s_IsBBLPrinter = true;
+        const boost::filesystem::path path = boost::filesystem::temp_directory_path() /
+            boost::filesystem::unique_path("edge_m73e_%%%%%%%%.gcode");
+        {
+            boost::nowide::ofstream os(path.string(), std::ios::binary);
+            os << start_gcode << body << end_gcode;
+        }
+        GCodeProcessor proc;
+        proc.apply_config(config);
+        proc.initialize(path.string());
+        proc.process_buffer(start_gcode);
+        if (bambu)
+            proc.end_machine_start_gcode();
+        proc.process_buffer(body);
+        if (bambu)
+            proc.start_machine_end_gcode();
+        proc.process_buffer(end_gcode);
+        proc.finalize(true);
+        std::vector<std::string> out;
+        {
+            boost::nowide::ifstream is(path.string());
+            std::string line;
+            while (std::getline(is, line))
+                out.push_back(line);
+        }
+        boost::filesystem::remove(path);
+        return out;
+    };
+
+    SECTION("Bambu printer") {
+        const std::vector<std::string> out = run(true);
+        std::vector<std::string> m73e;
+        for (size_t i = 0; i < out.size(); ++i)
+            if (out[i].rfind("M73 E", 0) == 0) {
+                m73e.push_back(out[i - 1] + " | " + out[i]);
+            }
+        REQUIRE(m73e.size() == 3);
+        CHECK(m73e[0] == "T1 | M73 E2");
+        CHECK(m73e[1] == "M1020 S0 | M73 E1");
+        CHECK(m73e[2] == "T1 H3 | M73 E0");
+    }
+    SECTION("other printers get no counter") {
+        for (const std::string &l : run(false))
+            CHECK(l.rfind("M73 E", 0) != 0);
+    }
+}
