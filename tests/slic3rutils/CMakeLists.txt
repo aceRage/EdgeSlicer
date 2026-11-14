@@ -164,6 +164,7 @@ add_executable(${_TEST_NAME}_tests
     slice_v1_tests.cpp
     paint_v1_tests.cpp
     mixed_sublayer_ui_tests.cpp
+    flushing_volumes_dialog_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
