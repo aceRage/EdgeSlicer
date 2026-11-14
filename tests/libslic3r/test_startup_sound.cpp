@@ -384,3 +384,45 @@ TEST_CASE("Startup sound: write the Ode to Joy demo files", "[.][startup_sound_d
       << steps_to_gcode(r.steps, "Ode to Joy")
       << "M400\n";
 }
+
+TEST_CASE("Ending sound: the tune block of an end G-code is replaced, the rest kept", "[StartupSound]")
+{
+    // The H3C end G-code's tail (stock profile, 2026-10-28), with the purge block before it.
+    const std::string h3c_end =
+        "M622 J2\nM1002 gcode_claim_action : 66\nM145 P0\nM400 S180\nM623\n"
+        ";=====printer finish air purification=========\n\n;=====printer finish  sound=========\n"
+        "M17\nM400 S1\nM1006 S1\n"
+        "M1006 A53 B10 L99 C53 D10 M99 E53 F10 N99 \nM1006 A57 B10 L99 C57 D10 M99 E57 F10 N99 \n"
+        "M1006 A0 B15 L0 C0 D15 M0 E0 F15 N0 \nM1006 A60 B10 L99 C60 D10 M99 E60 F10 N99\n"
+        "M1006 W\n;=====printer finish  sound=========\nM400\nM18\n";
+    REQUIRE(has_tune_block(h3c_end));
+    Step s;
+    s.note[0] = s.note[1] = s.note[2] = 72;
+    s.volume[0] = s.volume[1] = s.volume[2] = 99;
+    s.units = 20;
+    const std::string block = steps_to_gcode({s}, "fanfare");
+    std::string g = h3c_end;
+    REQUIRE(replace_tune_block(g, block));
+    const std::string before = h3c_end.substr(0, h3c_end.find("M1006 S1"));
+    const std::string after  = h3c_end.substr(h3c_end.find("M1006 W\n") + 8);
+    CHECK(g == before + block + after);
+    CHECK(g.find("M400\nM18\n") == g.size() - 9); // the final motor release stays last
+    // Replacing again swaps our block (label included) instead of adding a second tune.
+    REQUIRE(replace_tune_block(g, steps_to_gcode({s}, "second")));
+    CHECK(g.find("fanfare") == std::string::npos);
+    CHECK(g.find("M1006 S1") == g.rfind("M1006 S1"));
+
+    // A1 style: the motor-current comment, M400 and M18 X Y Z follow the block.
+    std::string a1 = ";=====printer finish  sound=========\nM17\nM400 S1\nM1006 S1\n"
+                     "M1006 A0 B20 L100 C37 D20 M40 E42 F20 N60\nM1006 W\n;=====printer finish  sound=========\n\n"
+                     ";M17 X0.8 Y0.8 Z0.5 ; lower motor current to 45% power\nM400\nM18 X Y Z\n\n";
+    REQUIRE(replace_tune_block(a1, block));
+    CHECK(a1 == ";=====printer finish  sound=========\nM17\nM400 S1\n" + block +
+                ";=====printer finish  sound=========\n\n;M17 X0.8 Y0.8 Z0.5 ; lower motor current to 45% power\nM400\nM18 X Y Z\n\n");
+
+    // End G-code without a tune (P1P/P1S style): nothing is inserted.
+    std::string p1 = "M400 ; wait for buffer to clear\nM104 S0 ; turn off hotend\nM17 S\nM18\n";
+    CHECK_FALSE(has_tune_block(p1));
+    CHECK_FALSE(replace_tune_block(p1, block));
+    CHECK(p1 == "M400 ; wait for buffer to clear\nM104 S0 ; turn off hotend\nM17 S\nM18\n");
+}
