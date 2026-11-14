@@ -6,6 +6,7 @@
 #include "PluginIpcProtocol.hpp"
 
 #include <libslic3r/PrintConfig.hpp>
+#include <libslic3r/UntrustedInput.hpp>
 #include <libslic3r/Utils.hpp>
 #include <slic3r/GUI/GUI.hpp>
 #include <slic3r/GUI/GUI_App.hpp>
@@ -13,6 +14,7 @@
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp>
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdlib.hpp>
@@ -20,7 +22,10 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
+#include <future>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <wx/app.h>
@@ -29,23 +34,33 @@
 namespace Slic3r::plugin_ipc {
 namespace {
 
-std::atomic<bool>        g_force_in_process{false};
-std::atomic<int>         g_execute_timeout_ms{k_default_timeout_ms};
+std::atomic<bool>          g_force_in_process{false};
+std::atomic<int>           g_execute_timeout_ms{k_default_timeout_ms};
 std::atomic<std::uint64_t> g_spawn_count{0};
+std::atomic<bool>          g_logged_fallback{false};
 
-nlohmann::json config_snapshot(const DynamicPrintConfig* config)
+bool is_config_snapshot_banned(const std::string& key)
 {
-    nlohmann::json out = nlohmann::json::object();
-    if (config == nullptr)
-        return out;
-    for (const std::string& key : config->keys()) {
-        try {
-            out[key] = config->opt_serialize(key);
-        } catch (...) {
-            // Skip options that cannot be serialized; the child treats missing keys as unset.
-        }
+    if (is_visual_only_option(key))
+        return true;
+    static const std::unordered_set<std::string_view> extra{"compatible_printers", "compatible_prints",
+                                                            "filament_colour_type"};
+    if (extra.count(key) != 0)
+        return true;
+    for (const std::string& banned : untrusted::network_endpoint_keys()) {
+        if (banned == key)
+            return true;
     }
-    return out;
+    return false;
+}
+
+void log_host_fallback_once(const char* reason)
+{
+    bool expected = false;
+    if (!g_logged_fallback.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        return;
+    BOOST_LOG_TRIVIAL(warning) << "Plugin host fallback: " << reason
+                               << "; scripts and post-process run in-process";
 }
 
 void deliver_completion(std::function<void(const ScriptCompletion&)> on_done, const ScriptCompletion& completion)
@@ -75,18 +90,113 @@ void attach_plugin_identity(nlohmann::json& msg, const std::string& plugin_key)
     msg["description"]       = descriptor.description;
 }
 
+struct Job
+{
+    enum class Kind { Script, PostProcess };
+    Kind                                         kind{Kind::Script};
+    std::string                                  plugin_key;
+    std::string                                  capability_name;
+    std::string                                  write_root;
+    nlohmann::json                               msg;
+    int                                          timeout_ms{k_default_timeout_ms};
+    std::uint64_t                                request_id{0};
+    std::function<void(const ScriptCompletion&)> on_done;
+    std::shared_ptr<std::promise<std::pair<ExecutionResult, std::string>>> post_promise;
+};
+
 } // namespace
+
+nlohmann::json PluginHostClient::config_snapshot(const DynamicPrintConfig* config)
+{
+    nlohmann::json out = nlohmann::json::object();
+    if (config == nullptr)
+        return out;
+    for (const std::string& key : config->keys()) {
+        if (is_config_snapshot_banned(key))
+            continue;
+        try {
+            out[key] = config->opt_serialize(key);
+        } catch (...) {}
+    }
+    return out;
+}
+
+int PluginHostClient::execute_timeout_ms(bool post_process, const std::string& gcode_path)
+{
+    const int configured = g_execute_timeout_ms.load(std::memory_order_acquire);
+    if (!post_process || configured != k_default_timeout_ms || gcode_path.empty())
+        return configured;
+    boost::system::error_code ec;
+    const auto                sz = boost::filesystem::file_size(gcode_path, ec);
+    if (ec)
+        return configured;
+    const std::uint64_t mb    = (sz + 1024ull * 1024ull - 1ull) / (1024ull * 1024ull);
+    const std::uint64_t extra = mb * 2000ull;
+    const std::uint64_t total = static_cast<std::uint64_t>(configured) + extra;
+    return static_cast<int>(std::min<std::uint64_t>(total, k_max_timeout_ms));
+}
 
 struct PluginHostClient::Impl
 {
-    mutable std::mutex mutex;
-    SpawnedHost        host;
-    std::string        data_dir;
-    std::string        resources_dir;
+    // state_mutex: queue, active, loaded, worker, cancel flags. Never held across pump.
+    // io_mutex: spawn, channel, reset. Held from writing a request through the matching reply.
+    std::mutex              state_mutex;
+    std::mutex              io_mutex;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Job>> queue;
+    std::thread             worker;
+    SpawnedHost             host;
+    std::string             data_dir;
+    std::string             resources_dir;
     std::unordered_set<std::string> loaded;
     std::unordered_set<std::string> active;
-    std::atomic<bool>  stopping{false};
-    std::uint64_t      next_id{1};
+    std::atomic<bool>       stopping{false};
+    std::atomic<bool>       cancel_requested{false};
+    std::atomic<std::int64_t> live_pid{0};
+    std::string             cancel_plugin_key;
+    std::string             running_plugin_key;
+    std::atomic<std::uint64_t> next_id{1};
+
+    bool is_cancelled_locked(const std::string& plugin_key) const
+    {
+        return cancel_requested.load(std::memory_order_acquire) &&
+               (cancel_plugin_key.empty() || cancel_plugin_key == plugin_key);
+    }
+
+    void consume_cancel_locked(const std::string& plugin_key)
+    {
+        if (cancel_plugin_key == plugin_key || cancel_plugin_key.empty()) {
+            cancel_requested.store(false, std::memory_order_release);
+            cancel_plugin_key.clear();
+        }
+    }
+
+    void ensure_worker_locked()
+    {
+        if (worker.joinable())
+            return;
+        worker = std::thread([this] { worker_loop(); });
+    }
+
+    void fail_job(Job& job, const std::string& error, bool cancelled)
+    {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            active.erase(job.plugin_key);
+            if (running_plugin_key == job.plugin_key)
+                running_plugin_key.clear();
+            if (cancelled)
+                consume_cancel_locked(job.plugin_key);
+        }
+        if (job.kind == Job::Kind::Script) {
+            ScriptCompletion completion;
+            completion.error     = error;
+            completion.cancelled = cancelled;
+            deliver_completion(job.on_done, completion);
+        } else if (job.post_promise) {
+            job.post_promise->set_value({ExecutionResult::failure(PluginResult::FatalError, error), error});
+        }
+    }
 
     bool ensure_started_locked(std::string& error)
     {
@@ -99,6 +209,7 @@ struct PluginHostClient::Impl
         if (host.valid() && (current_data != data_dir || current_res != resources_dir)) {
             kill_host(host);
             close_host(host);
+            live_pid.store(0, std::memory_order_release);
             loaded.clear();
         }
         if (host.valid())
@@ -106,6 +217,7 @@ struct PluginHostClient::Impl
         if (!spawn_host(host, error))
             return false;
         g_spawn_count.fetch_add(1, std::memory_order_relaxed);
+        live_pid.store(host.pid, std::memory_order_release);
         data_dir      = current_data;
         resources_dir = current_res;
 
@@ -116,26 +228,22 @@ struct PluginHostClient::Impl
             {"resources_dir", resources_dir},
         };
         if (!host.channel.write_json(hello, k_handshake_timeout_ms, error)) {
-            kill_host(host);
-            close_host(host);
+            reset_child_locked();
             return false;
         }
         nlohmann::json reply;
         if (!host.channel.read_json(reply, k_handshake_timeout_ms, error)) {
-            kill_host(host);
-            close_host(host);
+            reset_child_locked();
             return false;
         }
         if (reply.value("type", std::string()) != k_type_hello_ok) {
             error = "plugin host handshake failed";
-            kill_host(host);
-            close_host(host);
+            reset_child_locked();
             return false;
         }
         int remote = reply.value("protocol_version", 0);
         if (!handshake_versions_compatible(remote, error)) {
-            kill_host(host);
-            close_host(host);
+            reset_child_locked();
             return false;
         }
         return true;
@@ -147,6 +255,7 @@ struct PluginHostClient::Impl
             kill_host(host);
             close_host(host);
         }
+        live_pid.store(0, std::memory_order_release);
         loaded.clear();
     }
 
@@ -156,23 +265,37 @@ struct PluginHostClient::Impl
             return true;
         nlohmann::json msg = {
             {"type", k_type_load},
+            {"id", next_id.fetch_add(1, std::memory_order_relaxed)},
         };
         attach_plugin_identity(msg, plugin_key);
-        if (!host.channel.write_json(msg, g_execute_timeout_ms.load(), error))
+        const std::uint64_t id = msg["id"].get<std::uint64_t>();
+        if (!host.channel.write_json(msg, g_execute_timeout_ms.load(), error)) {
+            reset_child_locked();
             return false;
+        }
         nlohmann::json reply;
-        if (!host.channel.read_json(reply, g_execute_timeout_ms.load(), error))
+        if (!host.channel.read_json(reply, g_execute_timeout_ms.load(), error)) {
+            reset_child_locked();
             return false;
+        }
+        const auto got = reply.value("id", static_cast<std::uint64_t>(0));
+        if (got != 0 && got != id) {
+            error = "plugin host request id mismatch";
+            reset_child_locked();
+            return false;
+        }
         if (reply.value("type", std::string()) == k_type_load_ok) {
             loaded.insert(plugin_key);
             return true;
         }
         error = reply.value("message", std::string("plugin host load failed"));
+        reset_child_locked();
         return false;
     }
 
     bool pump_until_result(const std::string& plugin_key,
                            const std::string& capability,
+                           std::uint64_t expected_id,
                            int timeout_ms,
                            nlohmann::json& result,
                            std::string& error)
@@ -181,6 +304,13 @@ struct PluginHostClient::Impl
                                   ? std::chrono::steady_clock::time_point::max()
                                   : std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                if (is_cancelled_locked(plugin_key)) {
+                    error = "cancelled";
+                    return false;
+                }
+            }
             int wait_ms = -1;
             if (timeout_ms >= 0) {
                 const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
@@ -188,17 +318,28 @@ struct PluginHostClient::Impl
                     error = "plugin host timed out";
                     return false;
                 }
-                wait_ms = static_cast<int>(std::min<std::int64_t>(left.count(), 1'000'000'000));
+                wait_ms = static_cast<int>(std::min<std::int64_t>(left.count(), k_pump_poll_ms));
+            } else {
+                wait_ms = k_pump_poll_ms;
             }
             nlohmann::json msg;
             if (!host.channel.read_json(msg, wait_ms, error)) {
-                // poll() can return a few milliseconds before the deadline, which
-                // surfaces as "truncated IPC message" rather than a wall-clock hit.
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex);
+                    if (is_cancelled_locked(plugin_key)) {
+                        error = "cancelled";
+                        return false;
+                    }
+                }
+                const bool wait_expired = error == "truncated IPC message" ||
+                                          error == "IPC write timed out" ||
+                                          error.find("timed out") != std::string::npos;
+                if (wait_expired && timeout_ms >= 0 && std::chrono::steady_clock::now() < deadline) {
+                    error.clear();
+                    continue;
+                }
                 if (timeout_ms >= 0) {
                     const bool deadline_hit = std::chrono::steady_clock::now() >= deadline;
-                    const bool wait_expired = error == "truncated IPC message" ||
-                                              error == "IPC write timed out" ||
-                                              error.find("timed out") != std::string::npos;
                     if (deadline_hit || wait_expired)
                         error = "plugin host timed out";
                 }
@@ -234,10 +375,8 @@ struct PluginHostClient::Impl
                         if (t.is_string())
                             targets.push_back(t.get<std::string>());
                 }
-                bool allowed = true;
+                bool        allowed = true;
                 std::string reason;
-                // Use the caller's TLS audit context (and its scoped write root). A nested
-                // ScopedPluginAuditContext would clear those roots and deny the G-code folder.
                 if (PluginAuditManager::instance().current_plugin() != plugin_key) {
                     allowed = false;
                     reason  = "audit_check plugin_key does not match the active Edge audit context";
@@ -266,16 +405,128 @@ struct PluginHostClient::Impl
                     return false;
                 continue;
             }
-            if (type == k_type_result) {
-                result = std::move(msg);
-                return true;
-            }
-            if (type == k_type_error) {
+            if (type == k_type_result || type == k_type_error) {
+                const auto got = msg.value("id", static_cast<std::uint64_t>(0));
+                if (expected_id != 0 && got != expected_id) {
+                    error = "plugin host request id mismatch";
+                    return false;
+                }
+                if (type == k_type_result) {
+                    result = std::move(msg);
+                    return true;
+                }
                 error = msg.value("message", std::string("plugin host error"));
                 return false;
             }
             error = "unexpected plugin host message: " + type;
             return false;
+        }
+    }
+
+    void run_job(Job& job)
+    {
+        std::string error;
+        bool        cancelled_before_io = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            running_plugin_key  = job.plugin_key;
+            cancelled_before_io = is_cancelled_locked(job.plugin_key);
+        }
+        if (cancelled_before_io) {
+            fail_job(job, "cancelled", true);
+            return;
+        }
+        std::unique_lock<std::mutex> io(io_mutex);
+        if (!ensure_started_locked(error) || !load_plugin_locked(job.plugin_key, error)) {
+            io.unlock();
+            fail_job(job, error, false);
+            return;
+        }
+        bool cancelled_after_load = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            cancelled_after_load = is_cancelled_locked(job.plugin_key);
+        }
+        if (cancelled_after_load) {
+            io.unlock();
+            fail_job(job, "cancelled", true);
+            return;
+        }
+
+        ScopedPluginAuditContext audit(job.plugin_key, job.capability_name);
+        if (!job.write_root.empty())
+            PluginAuditManager::instance().add_scoped_allowed_root(boost::filesystem::path(job.write_root));
+
+        if (!host.channel.write_json(job.msg, job.timeout_ms, error)) {
+            reset_child_locked();
+            io.unlock();
+            fail_job(job, error, false);
+            return;
+        }
+
+        nlohmann::json reply;
+        const bool     ok = pump_until_result(job.plugin_key, job.capability_name, job.request_id, job.timeout_ms,
+                                              reply, error);
+        bool           cancelled = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            cancelled = is_cancelled_locked(job.plugin_key);
+        }
+        if (!ok) {
+            reset_child_locked();
+            if (cancelled && (error == "closed pipe" || error.find("timed out") != std::string::npos ||
+                              error.find("cancelled") != std::string::npos))
+                error = "cancelled";
+            io.unlock();
+            fail_job(job, error, cancelled);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            active.erase(job.plugin_key);
+            if (running_plugin_key == job.plugin_key)
+                running_plugin_key.clear();
+        }
+        if (job.kind == Job::Kind::Script) {
+            ScriptCompletion completion;
+            completion.result.status  = static_cast<PluginResult>(reply.value("status", 0));
+            completion.result.message = reply.value("message", std::string());
+            completion.result.data    = reply.value("data", std::string());
+            completion.cancelled      = reply.value("cancelled", false) || cancelled;
+            io.unlock();
+            deliver_completion(job.on_done, completion);
+        } else {
+            ExecutionResult result;
+            result.status  = static_cast<PluginResult>(reply.value("status", 0));
+            result.message = reply.value("message", std::string());
+            result.data    = reply.value("data", std::string());
+            io.unlock();
+            if (job.post_promise)
+                job.post_promise->set_value({result, std::string()});
+        }
+    }
+
+    void worker_loop()
+    {
+        for (;;) {
+            std::shared_ptr<Job> job;
+            {
+                std::unique_lock<std::mutex> lock(state_mutex);
+                cv.wait(lock, [&] { return stopping.load(std::memory_order_acquire) || !queue.empty(); });
+                if (stopping.load(std::memory_order_acquire) && queue.empty())
+                    break;
+                if (queue.empty())
+                    continue;
+                job = std::move(queue.front());
+                queue.pop_front();
+                if (stopping.load(std::memory_order_acquire)) {
+                    lock.unlock();
+                    fail_job(*job, "plugin host is shutting down", false);
+                    continue;
+                }
+            }
+            run_job(*job);
         }
     }
 };
@@ -289,7 +540,7 @@ PluginHostClient& PluginHostClient::instance()
 PluginHostClient::Impl& PluginHostClient::impl()
 {
     if (!m_impl)
-        m_impl = std::make_unique<Impl>();
+        m_impl = std::make_shared<Impl>();
     return *m_impl;
 }
 
@@ -310,6 +561,11 @@ void PluginHostClient::set_execute_timeout_for_testing(int timeout_ms)
     g_execute_timeout_ms.store(timeout_ms > 0 ? timeout_ms : k_default_timeout_ms, std::memory_order_release);
 }
 
+void PluginHostClient::set_allow_env_overrides_for_testing(bool allow)
+{
+    set_allow_helper_env_overrides_for_testing(allow);
+}
+
 void PluginHostClient::reset_spawn_count_for_testing()
 {
     g_spawn_count.store(0, std::memory_order_release);
@@ -323,81 +579,62 @@ bool PluginHostClient::should_use_host()
         return false;
     if (g_force_in_process.load(std::memory_order_acquire))
         return false;
-    if (const char* env = boost::nowide::getenv("EDGE_PLUGIN_HOST_IN_PROCESS")) {
-        if (env[0] != '\0' && env[0] != '0')
-            return false;
+    if (helper_env_overrides_allowed()) {
+        if (const char* env = boost::nowide::getenv("EDGE_PLUGIN_HOST_IN_PROCESS")) {
+            if (env[0] != '\0' && env[0] != '0') {
+                log_host_fallback_once("EDGE_PLUGIN_HOST_IN_PROCESS is set");
+                return false;
+            }
+        }
     }
-    return helper_exists();
+    if (!helper_exists()) {
+        log_host_fallback_once("edge-plugin-host is missing");
+        return false;
+    }
+    return true;
+}
+
+bool PluginHostClient::host_fallback_active()
+{
+    if (in_child_process() || g_force_in_process.load(std::memory_order_acquire))
+        return false;
+    if (helper_env_overrides_allowed()) {
+        if (const char* env = boost::nowide::getenv("EDGE_PLUGIN_HOST_IN_PROCESS")) {
+            if (env[0] != '\0' && env[0] != '0')
+                return true;
+        }
+    }
+    return !helper_exists();
 }
 
 bool PluginHostClient::start_script(const std::string& plugin_key,
                                     const std::string& capability_name,
                                     std::function<void(const ScriptCompletion&)> on_done)
 {
-    Impl& i = impl();
-    if (i.stopping.load(std::memory_order_acquire))
-        return false;
-
+    Impl& i   = impl();
+    auto  job = std::make_shared<Job>();
+    job->kind              = Job::Kind::Script;
+    job->plugin_key        = plugin_key;
+    job->capability_name   = capability_name;
+    job->timeout_ms        = execute_timeout_ms(false, {});
+    job->on_done           = std::move(on_done);
+    job->request_id        = i.next_id.fetch_add(1, std::memory_order_relaxed);
+    job->msg               = {
+        {"type", k_type_execute},
+        {"id", job->request_id},
+        {"kind", k_kind_script},
+        {"capability_name", capability_name},
+        {"timeout_ms", job->timeout_ms},
+    };
+    attach_plugin_identity(job->msg, plugin_key);
     {
-        std::lock_guard<std::mutex> lock(i.mutex);
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (i.stopping.load(std::memory_order_acquire))
+            return false;
         i.active.insert(plugin_key);
-    }
-
-    try {
-        std::thread([&i, plugin_key, capability_name, on_done]() {
-            ScriptCompletion completion;
-            std::string      error;
-            const int        timeout_ms = g_execute_timeout_ms.load(std::memory_order_acquire);
-            bool             ok         = false;
-            {
-                std::unique_lock<std::mutex> lock(i.mutex);
-                if (!i.ensure_started_locked(error) || !i.load_plugin_locked(plugin_key, error)) {
-                    completion.error = error;
-                    i.active.erase(plugin_key);
-                    lock.unlock();
-                    deliver_completion(on_done, completion);
-                    return;
-                }
-                ScopedPluginAuditContext audit(plugin_key, capability_name);
-                nlohmann::json msg = {
-                    {"type", k_type_execute},
-                    {"id", i.next_id++},
-                    {"kind", k_kind_script},
-                    {"capability_name", capability_name},
-                    {"timeout_ms", timeout_ms},
-                };
-                attach_plugin_identity(msg, plugin_key);
-                if (!i.host.channel.write_json(msg, timeout_ms, error)) {
-                    completion.error = error;
-                } else {
-                    nlohmann::json result;
-                    lock.unlock();
-                    ok = i.pump_until_result(plugin_key, capability_name, timeout_ms, result, error);
-                    lock.lock();
-                    if (!ok)
-                        completion.error = error;
-                    else {
-                        completion.result.status  = static_cast<PluginResult>(result.value("status", 0));
-                        completion.result.message = result.value("message", std::string());
-                        completion.result.data    = result.value("data", std::string());
-                        completion.cancelled      = result.value("cancelled", false);
-                    }
-                }
-                if (!ok && (error == "plugin host timed out" || error == "closed pipe" ||
-                            error.find("truncated") != std::string::npos ||
-                            error.find("plugin host timed out") != std::string::npos)) {
-                    i.reset_child_locked();
-                    if (completion.error.empty())
-                        completion.error = error.empty() ? "plugin host failed" : error;
-                }
-                i.active.erase(plugin_key);
-            }
-            deliver_completion(on_done, completion);
-        }).detach();
-    } catch (...) {
-        std::lock_guard<std::mutex> lock(i.mutex);
-        i.active.erase(plugin_key);
-        return false;
+        i.queue.push_back(job);
+        i.ensure_worker_locked();
+        i.cv.notify_one();
     }
     return true;
 }
@@ -407,69 +644,70 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
                                                        const SlicingPipelineContext& ctx,
                                                        std::string& error)
 {
-    Impl& i = impl();
-    std::unique_lock<std::mutex> lock(i.mutex);
-    i.active.insert(plugin_key);
-    const int timeout_ms = g_execute_timeout_ms.load(std::memory_order_acquire);
-    ExecutionResult result;
-    if (!i.ensure_started_locked(error) || !i.load_plugin_locked(plugin_key, error)) {
-        i.active.erase(plugin_key);
-        return ExecutionResult::failure(PluginResult::FatalError, error);
-    }
-
-    ScopedPluginAuditContext audit(plugin_key, capability_name);
+    Impl& i   = impl();
+    auto  job = std::make_shared<Job>();
+    job->kind              = Job::Kind::PostProcess;
+    job->plugin_key        = plugin_key;
+    job->capability_name   = capability_name;
+    job->timeout_ms        = execute_timeout_ms(true, ctx.gcode_path);
     if (!ctx.gcode_path.empty())
-        PluginAuditManager::instance().add_scoped_allowed_root(boost::filesystem::path(ctx.gcode_path).parent_path());
-
-    nlohmann::json msg = {
+        job->write_root = boost::filesystem::path(ctx.gcode_path).parent_path().string();
+    job->post_promise = std::make_shared<std::promise<std::pair<ExecutionResult, std::string>>>();
+    job->request_id   = i.next_id.fetch_add(1, std::memory_order_relaxed);
+    job->msg          = {
         {"type", k_type_execute},
-        {"id", i.next_id++},
+        {"id", job->request_id},
         {"kind", k_kind_post_process},
         {"capability_name", capability_name},
-        {"timeout_ms", timeout_ms},
+        {"timeout_ms", job->timeout_ms},
         {"gcode_path", ctx.gcode_path},
         {"host", ctx.host},
         {"output_name", ctx.output_name},
-        {"write_root", ctx.gcode_path.empty() ? std::string()
-                                              : boost::filesystem::path(ctx.gcode_path).parent_path().string()},
+        {"write_root", job->write_root},
         {"config", config_snapshot(ctx.full_config)},
         {"orca_version", ctx.orca_version},
     };
-    attach_plugin_identity(msg, plugin_key);
-    if (!i.host.channel.write_json(msg, timeout_ms, error)) {
-        i.reset_child_locked();
-        i.active.erase(plugin_key);
+    attach_plugin_identity(job->msg, plugin_key);
+    auto future = job->post_promise->get_future();
+    {
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (i.stopping.load(std::memory_order_acquire)) {
+            error = "plugin host is shutting down";
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        i.active.insert(plugin_key);
+        i.queue.push_back(job);
+        i.ensure_worker_locked();
+        i.cv.notify_one();
+    }
+    try {
+        auto [result, err] = future.get();
+        error              = err;
+        return result;
+    } catch (const std::exception& ex) {
+        error = ex.what();
         return ExecutionResult::failure(PluginResult::FatalError, error);
     }
-    nlohmann::json reply;
-    lock.unlock();
-    const bool ok = i.pump_until_result(plugin_key, capability_name, timeout_ms, reply, error);
-    lock.lock();
-    if (!ok) {
-        i.reset_child_locked();
-        i.active.erase(plugin_key);
-        return ExecutionResult::failure(PluginResult::FatalError, error);
-    }
-    i.active.erase(plugin_key);
-    result.status  = static_cast<PluginResult>(reply.value("status", 0));
-    result.message = reply.value("message", std::string());
-    result.data    = reply.value("data", std::string());
-    return result;
 }
 
 void PluginHostClient::unload(const std::string& plugin_key)
 {
     Impl& i = impl();
-    std::lock_guard<std::mutex> lock(i.mutex);
+    {
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (plugin_key.empty() || i.active.count(plugin_key))
+            return;
+    }
+    std::lock_guard<std::mutex> io(i.io_mutex);
     i.loaded.erase(plugin_key);
-    if (!i.host.valid() || plugin_key.empty())
+    if (!i.host.valid())
         return;
-    // The child main loop is blocked inside execute, so an unload frame would sit until the
-    // script returns. Parent wait_bound already abandoned the run; do not wait on the child.
-    if (i.active.count(plugin_key))
-        return;
-    std::string error;
-    nlohmann::json msg = {{"type", k_type_unload}, {"plugin_key", plugin_key}};
+    std::string    error;
+    nlohmann::json msg = {
+        {"type", k_type_unload},
+        {"id", i.next_id.fetch_add(1, std::memory_order_relaxed)},
+        {"plugin_key", plugin_key},
+    };
     if (!i.host.channel.write_json(msg, 5000, error)) {
         i.reset_child_locked();
         return;
@@ -481,27 +719,59 @@ void PluginHostClient::unload(const std::string& plugin_key)
 
 void PluginHostClient::cancel(const std::string& plugin_key)
 {
-    (void) plugin_key;
-    // Sync execute in the child is not interruptible over the data channel (nested host_call
-    // replies share it). Hung children are killed by the execute timeout; unload abandons the
-    // wait bound the same way ScriptAsyncRuntime does.
+    Impl& i = impl();
+    {
+        std::lock_guard<std::mutex> lock(i.state_mutex);
+        if (!i.active.count(plugin_key))
+            return;
+        i.cancel_requested.store(true, std::memory_order_release);
+        i.cancel_plugin_key = plugin_key;
+    }
+    {
+        std::unique_lock<std::mutex> io(i.io_mutex, std::try_to_lock);
+        if (io.owns_lock() && i.host.valid()) {
+            std::string    error;
+            nlohmann::json msg = {{"type", k_type_cancel}, {"plugin_key", plugin_key}};
+            (void) i.host.channel.write_json(msg, 100, error);
+        }
+    }
+    // live_pid can still be 0 if the job is only queued. Re-read it after the grace
+    // period, and only kill the host that is running this plugin.
+    std::thread([plugin_key, impl = m_impl]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(k_cancel_grace_ms));
+        if (!impl)
+            return;
+        std::int64_t pid = 0;
+        {
+            std::lock_guard<std::mutex> lock(impl->state_mutex);
+            if (!impl->cancel_requested.load(std::memory_order_acquire))
+                return;
+            if (!impl->active.count(plugin_key))
+                return;
+            if (impl->running_plugin_key != plugin_key)
+                return;
+            pid = impl->live_pid.load(std::memory_order_acquire);
+        }
+        if (pid > 0)
+            kill_host_pid(pid);
+    }).detach();
 }
 
 bool PluginHostClient::has_active_run(const std::string& plugin_key) const
 {
     if (!m_impl)
         return false;
-    std::lock_guard<std::mutex> lock(m_impl->mutex);
+    std::lock_guard<std::mutex> lock(m_impl->state_mutex);
     return m_impl->active.count(plugin_key) != 0;
 }
 
 bool PluginHostClient::kill_child_for_testing()
 {
-    Impl& i = impl();
-    std::lock_guard<std::mutex> lock(i.mutex);
-    if (!i.host.valid())
+    Impl&              i   = impl();
+    const std::int64_t pid = i.live_pid.load(std::memory_order_acquire);
+    if (pid <= 0)
         return false;
-    kill_host(i.host);
+    kill_host_pid(pid);
     return true;
 }
 
@@ -509,8 +779,7 @@ std::int64_t PluginHostClient::child_pid_for_testing() const
 {
     if (!m_impl)
         return 0;
-    std::lock_guard<std::mutex> lock(m_impl->mutex);
-    return m_impl->host.pid;
+    return m_impl->live_pid.load(std::memory_order_acquire);
 }
 
 void PluginHostClient::shutdown()
@@ -518,17 +787,37 @@ void PluginHostClient::shutdown()
     if (!m_impl)
         return;
     m_impl->stopping.store(true, std::memory_order_release);
-    std::lock_guard<std::mutex> lock(m_impl->mutex);
-    if (m_impl->host.valid()) {
-        std::string error;
-        nlohmann::json msg = {{"type", k_type_shutdown}};
-        (void) m_impl->host.channel.write_json(msg, 1000, error);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        kill_host(m_impl->host);
-        close_host(m_impl->host);
+    m_impl->cv.notify_all();
+    // Never wait on io_mutex here: the worker holds it for the whole pump. Kill by
+    // pid so a hung execute unblocks, then join, then close leftovers.
+    const std::int64_t pid = m_impl->live_pid.load(std::memory_order_acquire);
+    if (pid > 0)
+        kill_host_pid(pid);
+    if (m_impl->worker.joinable())
+        m_impl->worker.join();
+    std::deque<std::shared_ptr<Job>> leftover;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->state_mutex);
+        leftover.swap(m_impl->queue);
+        m_impl->active.clear();
+        m_impl->running_plugin_key.clear();
+        m_impl->cancel_requested.store(false, std::memory_order_release);
+        m_impl->cancel_plugin_key.clear();
     }
-    m_impl->loaded.clear();
-    m_impl->active.clear();
+    {
+        std::lock_guard<std::mutex> io(m_impl->io_mutex);
+        if (m_impl->host.valid()) {
+            std::string    error;
+            nlohmann::json msg = {{"type", k_type_shutdown}};
+            (void) m_impl->host.channel.write_json(msg, 200, error);
+            kill_host(m_impl->host);
+            close_host(m_impl->host);
+            m_impl->live_pid.store(0, std::memory_order_release);
+        }
+        m_impl->loaded.clear();
+    }
+    for (auto& job : leftover)
+        m_impl->fail_job(*job, "plugin host is shutting down", false);
     m_impl->stopping.store(false, std::memory_order_release);
 }
 

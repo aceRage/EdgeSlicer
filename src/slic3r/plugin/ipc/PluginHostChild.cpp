@@ -50,15 +50,23 @@ nlohmann::json rpc_roundtrip(nlohmann::json request)
     return reply;
 }
 
-nlohmann::json execution_result_json(const ExecutionResult& result, bool cancelled)
+void stamp_request_id(nlohmann::json& reply, const nlohmann::json& request)
 {
-    return nlohmann::json{
+    if (request.contains("id"))
+        reply["id"] = request["id"];
+}
+
+nlohmann::json execution_result_json(const ExecutionResult& result, bool cancelled, const nlohmann::json& request)
+{
+    nlohmann::json reply{
         {"type", k_type_result},
         {"status", static_cast<int>(result.status)},
         {"message", result.message},
         {"data", result.data},
         {"cancelled", cancelled},
     };
+    stamp_request_id(reply, request);
+    return reply;
 }
 
 bool load_plugin(const nlohmann::json& msg, std::string& error)
@@ -256,8 +264,16 @@ int run_child(Channel& channel)
         const std::string type = msg.value("type", std::string());
         if (type == k_type_shutdown) {
             nlohmann::json ok = {{"type", k_type_shutdown_ok}};
+            stamp_request_id(ok, msg);
             (void) channel.write_json(ok, 1000, error);
             break;
+        }
+        if (type == k_type_cancel) {
+            nlohmann::json reply = {{"type", k_type_error}, {"message", "cancelled"}, {"cancelled", true}};
+            stamp_request_id(reply, msg);
+            if (!channel.write_json(reply, k_default_timeout_ms, error))
+                break;
+            continue;
         }
         if (type == k_type_load) {
             std::string load_error;
@@ -266,6 +282,7 @@ int run_child(Channel& channel)
                 reply = {{"type", k_type_load_ok}};
             else
                 reply = {{"type", k_type_error}, {"message", load_error}};
+            stamp_request_id(reply, msg);
             if (!channel.write_json(reply, k_default_timeout_ms, error))
                 break;
             continue;
@@ -273,6 +290,7 @@ int run_child(Channel& channel)
         if (type == k_type_unload) {
             PluginManager::instance().unload_plugin(msg.value("plugin_key", std::string()));
             nlohmann::json reply = {{"type", k_type_unload_ok}};
+            stamp_request_id(reply, msg);
             if (!channel.write_json(reply, k_default_timeout_ms, error))
                 break;
             continue;
@@ -291,7 +309,7 @@ int run_child(Channel& channel)
                     if (!exec_error.empty() && result.status == PluginResult::Success)
                         reply = {{"type", k_type_error}, {"message", exec_error}};
                     else
-                        reply = execution_result_json(result, false);
+                        reply = execution_result_json(result, false, msg);
                 } catch (const std::exception& ex) {
                     reply = {{"type", k_type_error}, {"message", ex.what()}};
                 }
@@ -301,13 +319,15 @@ int run_child(Channel& channel)
                 if (!completion.error.empty() && !completion.cancelled)
                     reply = {{"type", k_type_error}, {"message", completion.error}};
                 else
-                    reply = execution_result_json(completion.result, completion.cancelled);
+                    reply = execution_result_json(completion.result, completion.cancelled, msg);
             }
+            stamp_request_id(reply, msg);
             if (!channel.write_json(reply, k_default_timeout_ms, error))
                 break;
             continue;
         }
         nlohmann::json unknown = {{"type", k_type_error}, {"message", "unknown message type: " + type}};
+        stamp_request_id(unknown, msg);
         if (!channel.write_json(unknown, k_default_timeout_ms, error))
             break;
     }

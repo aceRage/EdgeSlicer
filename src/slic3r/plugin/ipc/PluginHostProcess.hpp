@@ -18,9 +18,7 @@ struct SpawnedHost
     void* job     = nullptr; // HANDLE, owned
 #endif
 #ifndef _WIN32
-#ifdef __APPLE__
     int watchdog_write_fd = -1;
-#endif
 #endif
 
     bool valid() const { return channel.valid() && pid > 0; }
@@ -29,13 +27,21 @@ struct SpawnedHost
 boost::filesystem::path helper_path();
 bool                    helper_exists();
 
-// Spawn edge-plugin-host. POSIX: socketpair + fork/exec, keep the IPC fd, own process group.
-// Linux child installs PR_SET_PDEATHSIG. macOS keeps an extra parent-pipe for EOF watchdog.
+// EDGE_PLUGIN_HOST / EDGE_PLUGIN_HOST_IN_PROCESS are ignored unless this is true.
+// Production never enables it; slic3rutils tests may.
+void set_allow_helper_env_overrides_for_testing(bool allow);
+bool helper_env_overrides_allowed();
+
+// Spawn edge-plugin-host. POSIX: socketpair + fork/exec (Linux: posix_spawn when
+// POSIX_SPAWN_CLOEXEC_DEFAULT is available), keep the IPC fd, own process group.
+// Linux child installs PR_SET_PDEATHSIG. Every POSIX spawn also keeps a parent-pipe
+// EOF watchdog so the helper dies if the spawning thread exits while Edge lives.
 // Windows: named pipe + Job object (KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=1, no breakaway),
-// create suspended, assign, resume.
+// create suspended, assign, resume. The pipe client pid must match the child.
 bool spawn_host(SpawnedHost& out, std::string& error);
 
 void kill_host(SpawnedHost& host);
+void kill_host_pid(std::int64_t pid);
 void close_host(SpawnedHost& host);
 
 } // namespace Slic3r::plugin_ipc

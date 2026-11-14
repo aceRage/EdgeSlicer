@@ -13,6 +13,7 @@
 #else
 #include <cerrno>
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -206,6 +207,12 @@ Channel Channel::from_posix_fd(int fd)
 {
     Channel ch;
     ch.m_fd = fd;
+#ifdef SO_NOSIGPIPE
+    if (fd >= 0) {
+        int one = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    }
+#endif
     return ch;
 }
 
@@ -218,6 +225,8 @@ void Channel::close()
         m_fd = -1;
     }
 }
+
+namespace {
 
 bool wait_fd(int fd, short events, int timeout_ms, std::string& error)
 {
@@ -236,12 +245,19 @@ bool wait_fd(int fd, short events, int timeout_ms, std::string& error)
         error = "IPC poll failed";
         return false;
     }
-    if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+    if (p.revents & (POLLERR | POLLNVAL)) {
+        error = "closed pipe";
+        return false;
+    }
+    // POLLHUP with POLLIN still pending must deliver the last frame.
+    if ((p.revents & POLLHUP) && !(p.revents & events)) {
         error = "closed pipe";
         return false;
     }
     return true;
 }
+
+} // namespace
 
 bool Channel::write_all(const uint8_t* data, size_t size, int timeout_ms, std::string& error)
 {
@@ -262,7 +278,11 @@ bool Channel::write_all(const uint8_t* data, size_t size, int timeout_ms, std::s
                 m_peer_closed = true;
             return false;
         }
+#ifdef MSG_NOSIGNAL
+        const ssize_t n = ::send(m_fd, data + offset, size - offset, MSG_NOSIGNAL);
+#else
         const ssize_t n = ::write(m_fd, data + offset, size - offset);
+#endif
         if (n < 0) {
             if (errno == EINTR)
                 continue;

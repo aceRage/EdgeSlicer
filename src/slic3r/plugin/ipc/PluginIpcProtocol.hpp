@@ -16,7 +16,10 @@ inline constexpr int         k_protocol_version     = 1;
 inline constexpr uint32_t    k_max_payload_bytes    = 16u * 1024u * 1024u;
 inline constexpr const char* k_helper_name          = "edge-plugin-host";
 inline constexpr int         k_default_timeout_ms   = 120000;
+inline constexpr int         k_max_timeout_ms       = 30 * 60 * 1000;
 inline constexpr int         k_handshake_timeout_ms = 15000;
+inline constexpr int         k_cancel_grace_ms      = 300;
+inline constexpr int         k_pump_poll_ms         = 200;
 
 inline constexpr const char* k_type_hello         = "hello";
 inline constexpr const char* k_type_hello_ok      = "hello_ok";
