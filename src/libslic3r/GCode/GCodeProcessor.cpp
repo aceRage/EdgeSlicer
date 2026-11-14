@@ -1372,6 +1372,8 @@ void GCodeProcessor::reset()
     m_current_hotend_id = -1;
     m_hotend_filament.clear();
     m_skip_end_gcode_delays = false;
+    m_filament_change_window = false;
+    m_filament_selections.clear();
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
     m_e_local_positioning_type = EPositioningType::Absolute;
@@ -1827,6 +1829,9 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
 
     ++m_line_id;
 
+    if (m_filament_change_window)
+        record_filament_selection(line);
+
     // update start position
     m_start_position = m_end_position;
 
@@ -2262,6 +2267,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // GCode.cpp writes the marker for the printers that have a pre-cooling plan (H2D and the like).
     if (comment == PreCooling::MachineEndGCodeStartMarker) {
         m_skip_end_gcode_delays = true;
+        m_filament_change_window = false;
         return;
     }
 
@@ -4374,6 +4380,57 @@ private:
 };
 } // namespace
 
+// EDGE (Bambu Studio "M73 E"): the filament selections Bambu Studio's TimeProcessor::post_process() reads
+// (GCodeProcessor.cpp:1036-1091): "T<n>" (an "H<nozzle>" may follow), ";VT<n>" and "M1020 S<n>", 0 <= n < 255.
+void GCodeProcessor::record_filament_selection(const GCodeReader::GCodeLine &line)
+{
+    const std::string &raw   = line.raw();
+    const char        *begin = GCodeReader::skip_whitespaces(raw.c_str());
+    const char        *end   = raw.c_str() + raw.size();
+    const char        *num   = nullptr;
+    if (*begin == 'T')
+        num = begin + 1;
+    else if (boost::starts_with(begin, ";VT"))
+        num = begin + 3;
+    else if (boost::starts_with(begin, "M1020") && (begin[5] == ' ' || begin[5] == '\t')) {
+        // Bambu Studio takes the first 'S' on the line.
+        const char *s = std::strchr(begin + 5, 'S');
+        if (s != nullptr)
+            num = s + 1;
+    }
+    if (num == nullptr)
+        return;
+    num = GCodeReader::skip_whitespaces(num);
+    int        filament = -1;
+    const auto res      = std::from_chars(num, end, filament);
+    if (res.ec != std::errc() || filament < 0 || filament >= 255)
+        return;
+    m_filament_selections.emplace_back(m_line_id, filament);
+}
+
+std::map<unsigned int, std::string> GCodeProcessor::remaining_filament_change_lines(
+    const std::vector<std::pair<unsigned int, int>> &filament_selections)
+{
+    std::map<unsigned int, std::string> out;
+    int total = 0;
+    int curr  = -1;
+    for (const auto &[line_id, filament] : filament_selections) {
+        if (curr != -1 && curr != filament)
+            ++total;
+        curr = filament;
+    }
+    curr        = -1;
+    int changes = 0;
+    for (const auto &[line_id, filament] : filament_selections) {
+        if (curr != -1 && curr != filament) {
+            ++changes;
+            out[line_id] = "M73 E" + std::to_string(total - changes) + "\n";
+        }
+        curr = filament;
+    }
+    return out;
+}
+
 void GCodeProcessor::run_post_process()
 {
     FilePtr in{ boost::nowide::fopen(m_result.filename.c_str(), "rb") };
@@ -5066,8 +5123,21 @@ void GCodeProcessor::run_post_process()
         if (PreCooling::make_plan(*m_print, plan))
             pre_cooling_lines = plan_pre_cooling(plan);
     }
+    // EDGE (Bambu Studio "M73 E"): the printer screen's remaining filament change counter, one line after
+    // every filament change between the machine start and end G-code. Bambu Studio writes it for every print
+    // (TimeProcessor::post_process()); here only Bambu printers record selections (end_machine_start_gcode()).
+    // Bambu Studio adds these lines before its pre-cooling lines on the same line.
+    const std::map<unsigned int, std::string> filament_change_lines = remaining_filament_change_lines(m_filament_selections);
+    auto filament_change_it = filament_change_lines.cbegin();
     auto pre_cooling_it = pre_cooling_lines.cbegin();
-    auto append_pre_cooling_lines = [&pre_cooling_lines, &pre_cooling_it, &export_lines](unsigned int id) {
+    auto append_pre_cooling_lines = [&pre_cooling_lines, &pre_cooling_it, &export_lines, &filament_change_lines,
+                                     &filament_change_it](unsigned int id) {
+        while (filament_change_it != filament_change_lines.cend() && filament_change_it->first < id)
+            ++filament_change_it;
+        if (filament_change_it != filament_change_lines.cend() && filament_change_it->first == id) {
+            export_lines.append_line(filament_change_it->second, true);
+            ++filament_change_it;
+        }
         while (pre_cooling_it != pre_cooling_lines.cend() && pre_cooling_it->first < id)
             ++pre_cooling_it;
         if (pre_cooling_it == pre_cooling_lines.cend() || pre_cooling_it->first != id)

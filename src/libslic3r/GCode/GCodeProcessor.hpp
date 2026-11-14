@@ -922,6 +922,11 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // sound) are post-print operations, not part of the print time. Set when the
         // MACHINE_END_GCODE_START marker is parsed; process_M400() then skips the S / P delays.
         bool                    m_skip_end_gcode_delays{ false };
+        // EDGE (Bambu Studio "M73 E"): between the machine start and end G-code of a Bambu printer's export,
+        // and the <line id, filament> of every filament selection seen there (see end_machine_start_gcode()).
+        bool                    m_filament_change_window{ false };
+        std::vector<std::pair<unsigned int, int>> m_filament_selections;
+        void record_filament_selection(const GCodeReader::GCodeLine &line);
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
@@ -1037,7 +1042,16 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // EDGE: what the MACHINE_END_GCODE_START marker does, without writing it: the machine end G-code starts
         // here and its timed M400 waits are post-print (m_skip_end_gcode_delays). For the streaming export of a
         // Bambu printer that gets no marker (GCode.cpp writes it only with a pre-cooling plan).
-        void start_machine_end_gcode() { m_skip_end_gcode_delays = true; }
+        void start_machine_end_gcode() { m_skip_end_gcode_delays = true; m_filament_change_window = false; }
+        // EDGE (Bambu Studio "M73 E"): the machine start G-code ends here. GCode.cpp calls it for Bambu printers
+        // only; from here to the machine end G-code every filament selection (T<n>, ";VT<n>", M1020 S<n>) is
+        // recorded, and run_post_process() writes "M73 E<remaining filament changes>" after each change.
+        void end_machine_start_gcode() { m_filament_change_window = true; }
+        // The "M73 E<n>" line run_post_process() writes after each recorded line, keyed on its line id: the
+        // filament changes still to come after that one (Bambu Studio TimeProcessor::post_process(),
+        // GCodeProcessor.cpp:1151-1169). A selection of the filament already in use is not a change.
+        static std::map<unsigned int, std::string> remaining_filament_change_lines(
+            const std::vector<std::pair<unsigned int, int>> &filament_selections);
         void reset();
 
         const GCodeProcessorResult& get_result() const { return m_result; }
