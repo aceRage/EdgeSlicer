@@ -87,7 +87,7 @@ struct TempCheck
 };
 
 // Follows the G-code: tool changes (T<n>), M104/M109 S<t> [T<n>] targets per heater (one heater when
-// `semm`), and every extrusion move made with filament 2 (T1) loaded.
+// `semm`), and every extrusion move made with filament 2 (T1) loaded, outside the prime tower.
 TempCheck follow(const std::string &gcode, bool semm)
 {
     TempCheck out;
@@ -96,6 +96,10 @@ TempCheck follow(const std::string &gcode, bool semm)
     bool   relative = false;
     double last_e   = 0.;
     double z        = 0.;
+    // The prime tower rams and unloads the outgoing filament after it has set the incoming filament's
+    // temperature (the change heats while it rams, as without this setting); only object and support
+    // extrusions are followed.
+    bool   in_tower = false;
     std::istringstream in(gcode);
     std::string line;
     while (std::getline(in, line)) {
@@ -103,6 +107,8 @@ TempCheck follow(const std::string &gcode, bool semm)
             line.pop_back();
         if (line.rfind(";TYPE:Support interface", 0) == 0)
             ++out.interface_lines;
+        if (line.rfind(";TYPE:", 0) == 0)
+            in_tower = line.find("tower") != std::string::npos;
         const std::string code = line.substr(0, line.find(';'));
         std::istringstream words(code);
         std::string        cmd;
@@ -139,7 +145,7 @@ TempCheck follow(const std::string &gcode, bool semm)
             const bool   extrudes = relative ? e > 0. : e > last_e;
             if (!relative)
                 last_e = e;
-            if (extrudes && (args.count('X') || args.count('Y')) && tool == 1) {
+            if (extrudes && (args.count('X') || args.count('Y')) && tool == 1 && !in_tower) {
                 const int heater = semm ? 0 : 1;
                 out.filament2_temps[z].push_back(target.count(heater) ? target[heater] : -1);
             }
