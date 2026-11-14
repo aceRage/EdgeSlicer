@@ -453,6 +453,10 @@ else ()
             install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/EdgeSlicer.app/Contents/MacOS")
         else ()
             install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+            # Isolated component so CTest can `cmake --install --component plugin-host`
+            # without copying the rest of the package. Same bindir as the default install.
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+                    COMPONENT plugin-host)
         endif ()
     endif ()
 endif ()

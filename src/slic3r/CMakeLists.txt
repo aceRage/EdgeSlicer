@@ -1537,7 +1537,16 @@ if (EDGE_PYTHON_PLUGINS)
         target_link_options(edge-plugin-host PRIVATE "LINKER:-rpath,@executable_path/python/lib")
         target_link_libraries(edge-plugin-host "-framework IOKit" "-framework CoreFoundation")
     elseif (UNIX AND NOT WIN32)
-        set_property(TARGET edge-plugin-host APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+        # BUILD_RPATH: next to the binary in the build tree / AppImage.
+        # INSTALL_RPATH: FHS/Flatpak helper in bindir with libpython at $prefix/libpython,
+        # and the non-FHS layout that install() places at $prefix/python.
+        set_target_properties(edge-plugin-host PROPERTIES
+            BUILD_RPATH "$ORIGIN/python/lib;$ORIGIN/../lib/python/lib"
+            INSTALL_RPATH "$ORIGIN/../libpython/lib;$ORIGIN/../python/lib")
+        get_property(_edge_plugin_host_install_rpath TARGET edge-plugin-host PROPERTY INSTALL_RPATH)
+        if (NOT _edge_plugin_host_install_rpath MATCHES "libpython")
+            message(FATAL_ERROR "edge-plugin-host INSTALL_RPATH must include $ORIGIN/../libpython/lib")
+        endif ()
     endif ()
     if (WIN32)
         target_sources(edge-plugin-host PRIVATE

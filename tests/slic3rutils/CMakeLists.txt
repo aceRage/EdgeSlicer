@@ -274,3 +274,19 @@ endif()
 
 catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
 # add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "${CATCH_EXTRA_ARGS} exclude:[NotWorking]")
+
+# ASan helpers are multi-gigabyte; skip the install copy on those builds.
+if (EDGE_PYTHON_PLUGINS AND UNIX AND NOT APPLE AND NOT SLIC3R_ASAN)
+    if (NOT CMAKE_INSTALL_BINDIR)
+        set(CMAKE_INSTALL_BINDIR bin)
+    endif ()
+    add_test(NAME plugin_host_install_rpath
+        COMMAND ${CMAKE_COMMAND}
+            -DCMAKE_COMMAND=${CMAKE_COMMAND}
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DBINDIR=${CMAKE_INSTALL_BINDIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_plugin_host_install.cmake)
+    set_tests_properties(plugin_host_install_rpath PROPERTIES
+        TIMEOUT 180
+        LABELS "PluginIpc")
+endif ()

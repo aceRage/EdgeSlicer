@@ -2,12 +2,14 @@
 #include "PluginIpcChannel.hpp"
 #include "PluginIpcProtocol.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
 #ifndef _WIN32
 #include <cerrno>
+#include <fcntl.h>
 #endif
 
 #ifdef _WIN32
@@ -61,15 +63,33 @@ void install_parent_death()
 
 } // namespace
 
+#ifndef _WIN32
+void set_cloexec_fd(int fd)
+{
+    if (fd < 0)
+        return;
+    const int fl = ::fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        ::fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+}
+#endif
+
 int main(int argc, char** argv)
 {
     using namespace Slic3r::plugin_ipc;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
+            std::fputs("edge-plugin-host\n", stdout);
+            return 0;
+        }
+    }
     set_in_child_process();
     install_parent_death();
 
 #ifndef _WIN32
     const int watchdog_fd = parse_fd_arg(argc, argv, "--parent-watchdog-fd");
     if (watchdog_fd >= 0) {
+        set_cloexec_fd(watchdog_fd);
         std::thread([watchdog_fd]() {
             char buf;
             while (::read(watchdog_fd, &buf, 1) < 0 && errno == EINTR) {}
@@ -93,6 +113,7 @@ int main(int argc, char** argv)
     const int ipc_fd = parse_fd_arg(argc, argv, "--ipc-fd");
     if (ipc_fd < 0)
         return 1;
+    set_cloexec_fd(ipc_fd);
     Channel channel = Channel::from_posix_fd(ipc_fd);
 #endif
     const int rc = run_child(channel);
