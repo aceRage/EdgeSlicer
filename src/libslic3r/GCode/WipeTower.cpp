@@ -691,13 +691,14 @@ public:
 
     // Orca #15035 (Bambu Studio generate_path()): a wall cut open at its gaps, from the piece nearest the
     // current position on, retracting over every gap.
-    WipeTowerWriter &gap_wall(const Polylines &pieces, float f, float retract_length, float retract_speed)
+    // allow_arcs: rib walls only; a rectangle wall stays straight lines (arc fitting rounds its corners).
+    WipeTowerWriter &gap_wall(const Polylines &pieces, float f, float retract_length, float retract_speed, bool allow_arcs)
     {
         std::vector<WallSegment> segments;
         for (Polyline pl : pieces) {
             if (pl.points.size() < 2)
                 continue;
-            if (m_enable_arc_fitting) {
+            if (m_enable_arc_fitting && allow_arcs) {
                 pl.simplify_by_fitting_arc(SCALED_WIPE_TOWER_RESOLUTION);
                 for (const PathFittingData &fit : pl.fitting_result) {
                     if (fit.path_type == EMovePathType::Linear_move) {
@@ -2502,6 +2503,10 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
         }
 
+        // Edge: the reheat goes before the first extrusion of the purge, the start ironing included (Bambu Studio
+        // writes it after the ironing, which then prints at the cooled temperature).
+        if (i == 0)
+            reheat_before_wipe();
         if (i == 0 && m_use_gap_wall) {
             // BBS: iron the start blob into the wall gap, then purge.
             float ironing_length = 3.f;
@@ -2524,11 +2529,8 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
                     writer.travel(writer.x() + sign * 1.5f * ironing_length, writer.y(), 240.f);
                 writer.retract(-retract_length, retract_speed);
             }
-            reheat_before_wipe();
             writer.extrude(edge, writer.y(), wipe_speed);
         } else {
-            if (i == 0)
-                reheat_before_wipe();
             if (m_left_to_right)
                 writer.extrude(xr + wipe_tower_wall_infill_overlap * m_perimeter_width, writer.y(), wipe_speed);
             else
@@ -3996,7 +3998,7 @@ Polygon WipeTower::print_outer_wall(WipeTowerWriter &writer, const box_coordinat
     } else {
         Polygon inserted;
         writer.gap_wall(TowerInterface::cut_wall_gaps(wall, gaps, 2.5f * m_perimeter_width, inserted), feedrate,
-                        m_filpar[m_current_tool].retract_length, m_filpar[m_current_tool].retract_speed * 60.f);
+                        m_filpar[m_current_tool].retract_length, m_filpar[m_current_tool].retract_speed * 60.f, m_use_rib_wall);
         if (m_use_rib_wall)
             record_outer_wall(wall);
     }

@@ -129,7 +129,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const double nozzle_diameter  = (nozzle_opt != nullptr && !nozzle_opt->values.empty()) ? nozzle_opt->values.front() : 0.4;
     const bool   dual_nozzle      = nozzle_opt != nullptr && nozzle_opt->values.size() == 2;
     // filament_prime_volume (Bambu Studio 2.9.1, Orca #10780) is read on Bambu Lab printers, as the planner does
-    // (Print::_make_wipe_tower); other printers prime the process prime_volume.
+    // (Print::_make_wipe_tower; the H3C is one); other printers prime the process prime_volume.
     const auto  *printer_model    = dynamic_cast<const ConfigOptionString *>(config.option("printer_model"));
     const bool   bbl_printer      = printer_model != nullptr && printer_model->value.compare(0, 9, "Bambu Lab") == 0;
     const auto  *rack_counts      = dynamic_cast<const ConfigOptionInts *>(option_of(config, "extruder_max_nozzle_count"));
@@ -179,7 +179,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         for (size_t i = 0; i < filaments_cnt; ++i) {
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
-            purge.prime_volume      = saving_mode ? 15.f : bbl_printer ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
+            purge.prime_volume      = saving_mode ? 15.f : (bbl_printer || hotend_rack) ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
             purge.category          = int_at("filament_adhesiveness_category", id, 0);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);
