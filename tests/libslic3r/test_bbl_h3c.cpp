@@ -448,4 +448,47 @@ TEST_CASE("H3C: a change into a hotend that already holds the filament flushes n
     REQUIRE(changes > 5); // both cubes on every layer
     CHECK(flushes == 0);
     CHECK(gcode.find("\nSYNC T5") == std::string::npos);
+
+    // Bambu Studio 2.9.1 pre-heats each rack hotend before its next use and cools it while it idles
+    // ("M632 S<f> N R W" / "M104 I<f> S<t> N0 W ;Multi extruder pre heating" / "M633", "M104 I<f> S<t> N0 C ;...pre cooling"),
+    // never inside the change_filament_gcode span, and the tower's nozzle change carries no M632 / M633 of its own.
+    CHECK(cfg.option<ConfigOptionFloats>("filament_prime_volume")->get_at(0) == Approx(30.)); // Bambu PLA Basic @base H3C
+    std::vector<std::string> lines;
+    for (size_t start = 0; start < gcode.size();) {
+        const size_t end = gcode.find('\n', start);
+        lines.emplace_back(gcode.substr(start, (end == std::string::npos ? gcode.size() : end) - start));
+        start = end == std::string::npos ? gcode.size() : end + 1;
+    }
+    size_t pre_heats = 0, pre_cools = 0, inline_m632 = 0, change_spans = 0, inside_span = 0, bad_preheat = 0;
+    bool   in_span = false;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &l = lines[i];
+        if (l == "; FilamentChangeGCodeStart") {
+            in_span = true;
+            ++change_spans;
+        } else if (l == "; FilamentChangeGCodeEnd")
+            in_span = false;
+        else if (l.rfind("M632 S", 0) == 0 && l.find(" M N") != std::string::npos)
+            ++inline_m632;
+        else if (l.rfind("M104 I", 0) == 0 && l.find(" N0 W ;Multi extruder pre heating") != std::string::npos) {
+            ++pre_heats;
+            if (in_span)
+                ++inside_span;
+            if (i == 0 || lines[i - 1].rfind("M632 S", 0) != 0 || lines[i - 1].find(" N R W") == std::string::npos ||
+                i + 1 >= lines.size() || lines[i + 1] != "M633")
+                ++bad_preheat;
+        } else if (l.rfind("M104 I", 0) == 0 && l.find(" N0 C ;Multi extruder pre cooling") != std::string::npos) {
+            ++pre_cools;
+            if (in_span)
+                ++inside_span;
+        }
+    }
+    INFO("pre-heats " << pre_heats << ", pre-cools " << pre_cools << ", change spans " << change_spans);
+    CHECK(gcode.find("\n; MACHINE_START_GCODE_END") != std::string::npos);
+    CHECK(change_spans >= changes);
+    CHECK(pre_heats > 0);
+    CHECK(pre_cools > 0);
+    CHECK(bad_preheat == 0);
+    CHECK(inside_span == 0);
+    CHECK(inline_m632 == 0);
 }

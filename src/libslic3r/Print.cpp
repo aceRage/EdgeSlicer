@@ -702,6 +702,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "enable_pre_heating",
         "filament_pre_cooling_temperature",
         "filament_preheat_temperature_delta",
+        "filament_pre_heating_enabled",
+        "hotend_cooling_rate_on_rack",
         "post_process",
         "extruder_clearance_height_to_rod",
         "extruder_clearance_height_to_lid",
@@ -7435,8 +7437,15 @@ void Print::_make_wipe_tower()
                         // volume_to_purge += (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
                         // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
+                        // Bambu Studio 2.9.1 primes each filament's own filament_prime_volume (15 mm3 in saving mode);
+                        // Edge does so on hotend_as_extruder printers (H3C) and keeps prime_volume elsewhere.
+                        float prime_volume = float(m_config.prime_volume);
+                        if (hotends.active())
+                            prime_volume = m_config.prime_volume_mode == PrimeVolumeMode::pvmSaving ?
+                                               15.f :
+                                               float(m_config.filament_prime_volume.get_at(extruder_id));
                         wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
-                                                   current_extruder_id, extruder_id, m_config.prime_volume, volume_to_purge);
+                                                   current_extruder_id, extruder_id, prime_volume, volume_to_purge);
                         current_extruder_id = extruder_id;
                     }
                 }

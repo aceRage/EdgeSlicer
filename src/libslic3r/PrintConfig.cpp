@@ -3049,6 +3049,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 0 });
 
+    // BBS 2.9.1 (H3C): whether the idle-nozzle pass pre-heats a rack hotend before this filament's next use.
+    def = this->add("filament_pre_heating_enabled", coBools);
+    def->label   = L("Pre-heating when extruder change");
+    def->tooltip = L("Heat the hotend of this filament back up before its next use.");
+    def->mode    = comDevelop;
+    def->set_default_value(new ConfigOptionBools{ true });
+
     // BBS: BambuStudio PrintConfig.cpp:2940. How far below its printing temperature the idle-nozzle
     // pre-heating brings a nozzle back before it prints again (the tower wipe finishes the heat-up).
     // Read only when the printer sets enable_pre_heating.
@@ -3401,6 +3408,17 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 350;
     def->set_default_value(new ConfigOptionInts{ 0 });
+
+    // BBS 2.9.1: the volume primed on the tower after a change to this filament. Bambu Studio uses it on every
+    // printer; Edge reads it on hotend_as_extruder printers (H3C) only and keeps the process prime_volume elsewhere.
+    def = this->add("filament_prime_volume", coFloats);
+    def->label = L("Prime volume on filament change");
+    def->tooltip = L("The volume of material required to prime the extruder on the tower, excluding a hotend change. "
+                     "Used on printers whose rack hotends keep their own filament (Bambu Lab H3C).");
+    def->sidetext = L("mm³");
+    def->min = 1.0;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{ 45. });
 
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
@@ -4908,6 +4926,12 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatsNullable{ 2 });
 
     def = this->add("hotend_heating_rate", coFloats);
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ 2 });
+
+    // BBS 2.9.1 (H3C): how fast an idle hotend parked in the rack cools (degrees per second); the
+    // pre-cooling pass falls back to hotend_cooling_rate without it.
+    def = this->add("hotend_cooling_rate_on_rack", coFloats);
     def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{ 2 });
 

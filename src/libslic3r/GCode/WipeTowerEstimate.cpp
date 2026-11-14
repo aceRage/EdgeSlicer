@@ -129,6 +129,12 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const auto  *nozzle_opt       = floats_of("nozzle_diameter");
     const double nozzle_diameter  = (nozzle_opt != nullptr && !nozzle_opt->values.empty()) ? nozzle_opt->values.front() : 0.4;
     const bool   dual_nozzle      = nozzle_opt != nullptr && nozzle_opt->values.size() == 2;
+    // filament_prime_volume (Bambu Studio 2.9.1) is read on hotend_as_extruder printers (H3C) only, as the
+    // planner does (Print::_make_wipe_tower); other printers prime the process prime_volume.
+    const auto  *rack_counts      = dynamic_cast<const ConfigOptionInts *>(option_of(config, "extruder_max_nozzle_count"));
+    const bool   hotend_rack      = opt_bool("handle_hotend_as_extruder") ||
+                                 (nozzle_opt != nullptr && nozzle_opt->values.size() == 1 && rack_counts != nullptr &&
+                                  rack_counts->values.size() == 1 && rack_counts->values.front() > 1);
     const bool   rib_wall         = opt_enum("wipe_tower_wall_type", int(WipeTowerWallType::wtwRectangle)) == int(WipeTowerWallType::wtwRib);
     const bool   smooth_timelapse = opt_enum("timelapse_type", int(TimelapseType::tlTraditional)) == int(TimelapseType::tlSmooth);
     const bool   wrapping         = opt_bool("enable_wrapping_detection");
@@ -172,7 +178,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         for (size_t i = 0; i < filaments_cnt; ++i) {
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
-            purge.prime_volume      = saving_mode ? 15.f : float(float_at("filament_prime_volume", id, prime_volume));
+            purge.prime_volume      = saving_mode ? 15.f : hotend_rack ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
             purge.category          = int_at("filament_adhesiveness_category", id, 0);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);

@@ -212,6 +212,14 @@ std::string GCode::nozzle_change_gcode(int old_filament_id, int new_filament_id,
     if (!group_result)
         return std::string();
 
+    // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): a hotend swap is an "extruder" change, so the tower
+    // writes the markers only (no M632/M633 interlock, no tower pre-cool) after turning the part fan to full
+    // for the idle cool-down of the outgoing hotend (BBS zero_flush_idle_cooling). The hotends' pre-heat and
+    // pre-cool come from the PreCoolingInjector pass instead.
+    if (hotend_as_extruder(m_config))
+        return "M106 S255\n" + format_nozzle_change_block(old_filament_id, new_filament_id, old_nozzle_id, new_nozzle_id, true,
+                                                          group_result->is_support_dynamic_nozzle_map(), 0, -1);
+
     const int precool = m_config.filament_pre_cooling_temperature_nc.values.empty() ?
                             0 :
                             m_config.filament_pre_cooling_temperature_nc.get_at(old_filament_id);
@@ -1490,6 +1498,11 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // Same markers as GCode::set_extruder (Edge #170). Unconditional: Edge does not gate on
         // FanMover (D-05a). Keep toolchange_retract_str, ;_FORCE_RESUME_FAN_SPEED, the Z read-back
         // and the #15441 Z-restore outside this span.
+        // Bambu Studio 2.9.1 (H3C): the change_filament_gcode span is marked for the pre-cooling pass, which keeps
+        // its pre-heat / pre-cool lines out of it (they would bind to the wrong current / next hotend pair).
+        if (!toolchange_gcode_str.empty() && hotend_as_extruder(gcodegen.m_config))
+            toolchange_gcode_str = std::string(";") + PreCooling::FilamentChangeGCodeStartMarker + "\n" + toolchange_gcode_str +
+                                   ";" + PreCooling::FilamentChangeGCodeEndMarker + "\n";
         if (!toolchange_gcode_str.empty())
             toolchange_gcode_str = "; custom gcode start\n" + toolchange_gcode_str + "; custom gcode end\n";
 
@@ -13665,9 +13678,15 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // change_filament_gcode and splice a phantom waypoint into a hand-routed toolchange.
         if (!toolchange_gcode_parsed.empty()) {
             gcode += "; custom gcode start\n";
+            // Bambu Studio 2.9.1 (H3C): the pre-cooling pass keeps its lines out of the change_filament_gcode span.
+            const bool mark_change_span = hotend_as_extruder(m_config);
+            if (mark_change_span)
+                gcode += std::string(";") + PreCooling::FilamentChangeGCodeStartMarker + "\n";
             gcode += toolchange_gcode_parsed;
             if (gcode.back() != '\n')
                 gcode += '\n';
+            if (mark_change_span)
+                gcode += std::string(";") + PreCooling::FilamentChangeGCodeEndMarker + "\n";
             gcode += "; custom gcode end\n";
         }
 

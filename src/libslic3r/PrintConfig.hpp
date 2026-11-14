@@ -2156,6 +2156,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
+    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (read on H3C only)
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2166,6 +2167,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    ((ConfigOptionBools,               filament_pre_heating_enabled))  // BBS 2.9.1 H3C: pre-heat this filament's hotend
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
     // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.
     ((ConfigOptionFloatsNullable,      filament_retract_length_nc))
@@ -2383,6 +2385,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              grab_length))
     ((ConfigOptionFloats,              hotend_cooling_rate))
     ((ConfigOptionFloats,              hotend_heating_rate))
+    ((ConfigOptionFloats,              hotend_cooling_rate_on_rack)) // BBS 2.9.1 H3C: idle hotend in the rack
     ((ConfigOptionBool,                enable_pre_heating))  // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     ((ConfigOptionInts,                nozzle_flush_dataset))
     ((ConfigOptionStrings,             filament_extruder_variant))

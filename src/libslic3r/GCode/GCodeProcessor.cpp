@@ -5234,7 +5234,7 @@ std::map<unsigned int, std::vector<std::string>> GCodeProcessor::plan_pre_coolin
         return ret;
     };
 
-    PreCooling::UsageBlockBuilder         builder(*plan.group, reserved_tag(ETags::Layer_Change));
+    PreCooling::UsageBlockBuilder         builder(*plan.group, reserved_tag(ETags::Layer_Change), plan.params.handle_hotend_as_extruder);
     std::vector<PreCooling::TimedMove>    moves;
     std::vector<unsigned int>             move_g1_ids;   // the g1 time cache entry each move's time came from
     // Bambu Studio books a filament change on the T line itself, as the extruder switch time plus
@@ -5269,8 +5269,10 @@ std::map<unsigned int, std::vector<std::string>> GCodeProcessor::plan_pre_coolin
         if (!nozzle)
             return;
         float      time             = 0.f;
-        const bool extruder_change  = nozzle->extruder_id != current_extruder;
-        auto       it_mounted       = nozzle_in_extruder.find(nozzle->extruder_id);
+        // handle_hotend_as_extruder (H3C): every rack hotend is an extruder of its own (Bambu Studio 2.9.1).
+        const int  extruder_key     = plan.params.handle_hotend_as_extruder ? nozzle->group_id : nozzle->extruder_id;
+        const bool extruder_change  = extruder_key != current_extruder;
+        auto       it_mounted       = nozzle_in_extruder.find(extruder_key);
         const int  mounted_nozzle   = it_mounted == nozzle_in_extruder.end() ? -1 : it_mounted->second;
         auto       it_in_nozzle     = filament_in_nozzle.find(nozzle->group_id);
         const int  old_in_nozzle    = it_in_nozzle == filament_in_nozzle.end() ? -1 : it_in_nozzle->second;
@@ -5285,8 +5287,8 @@ std::map<unsigned int, std::vector<std::string>> GCodeProcessor::plan_pre_coolin
             time += plan.params.filament_load_time;
         }
         current_filament = filament;
-        current_extruder = nozzle->extruder_id;
-        nozzle_in_extruder[nozzle->extruder_id] = nozzle->group_id;
+        current_extruder = extruder_key;
+        nozzle_in_extruder[extruder_key] = nozzle->group_id;
         filament_in_nozzle[nozzle->group_id]    = filament;
         if (time > 0.f)
             bambu_tool_change_times.emplace_back(line_id, time);
