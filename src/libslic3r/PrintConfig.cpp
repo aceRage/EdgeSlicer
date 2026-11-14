@@ -3474,16 +3474,36 @@ void PrintConfigDef::init_fff_params()
     def->max = 350;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
-    // BBS 2.9.1: the volume primed on the tower after a change to this filament. Bambu Studio uses it on every
-    // printer; Edge reads it on hotend_as_extruder printers (H3C) only and keeps the process prime_volume elsewhere.
+    // BBS 2.9.1: the volume primed on the tower after a change to this filament. Bambu Studio and Orca use it on
+    // every Type 1 tower; Edge reads it on Bambu Lab printers and keeps the process prime_volume elsewhere.
     def = this->add("filament_prime_volume", coFloats);
     def->label = L("Prime volume on filament change");
     def->tooltip = L("The volume of material required to prime the extruder on the tower, excluding a hotend change. "
-                     "Used on printers whose rack hotends keep their own filament (Bambu Lab H3C).");
+                     "Used by the prime tower of Bambu Lab printers.");
     def->sidetext = L("mm³");
     def->min = 1.0;
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloats{ 45. });
+
+    // Orca #14800 (Bambu Studio): the prime after a hotend change on one extruder (H2C rack).
+    def = this->add("filament_prime_volume_nc", coFloats);
+    def->label = L("Prime volume on hotend change");
+    def->tooltip = L("The volume of material required to prime the extruder for a hotend change on the tower. "
+                     "Used by the prime tower of Bambu Lab printers with a hotend rack.");
+    def->sidetext = L("mm³");
+    def->min = 1.0;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{ 60. });
+
+    // Orca #10780 (Bambu Studio): filaments of one category bond to each other. The Type 1 prime tower purges
+    // every category into its own block, so PLA is never purged onto PETG, TPU or a support material.
+    def = this->add("filament_adhesiveness_category", coInts);
+    def->label = L("Adhesiveness category");
+    def->tooltip = L("Filament category. The prime tower of Bambu Lab printers purges filaments of different categories "
+                     "into separate blocks, so materials that do not bond are not purged onto each other.");
+    def->min = 0;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts{ 0 });
 
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
@@ -9594,6 +9614,30 @@ void PrintConfigDef::init_fff_params()
     def->max      = 5;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
+
+    // Orca #10780 / #15035 (Bambu Studio): Type 1 tower block planner options.
+    def           = this->add("prime_tower_infill_gap", coPercent);
+    def->label    = L("Infill gap");
+    def->tooltip  = L("Spacing of the purge lines in the prime tower, as a percentage of the line width. "
+                      "Bambu Lab printers (Type 1 tower) only.");
+    def->sidetext = "%";
+    def->min      = 100;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(150));
+
+    def          = this->add("prime_tower_enable_framework", coBool);
+    def->label   = L("Internal ribs");
+    def->tooltip = L("Enable internal ribs to increase the stability of the prime tower: every layer keeps the purge "
+                     "blocks of the first layer. Bambu Lab printers (Type 1 tower) only.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def          = this->add("prime_tower_flat_ironing", coBool);
+    def->label   = L("Flat ironing");
+    def->tooltip = L("Iron the start of each purge flat with a small spiral travel after the wall gap. "
+                     "Needs the wall gap. Bambu Lab printers (Type 1 tower) only.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def           = this->add("prime_tower_wipe_speed", coFloat);
     def->label    = L("Tool change wipe speed");

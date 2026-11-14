@@ -1298,6 +1298,7 @@ static std::vector<std::string> s_Preset_print_options {
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "prime_tower_acceleration", "prime_tower_line_width", "prime_tower_wipe_speed", "prime_tower_wipe_distance",
+     "prime_tower_infill_gap", "prime_tower_enable_framework", "prime_tower_flat_ironing",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      "toolchange_ordering",
@@ -1334,7 +1335,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_prime_volume_nc", "filament_adhesiveness_category", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",

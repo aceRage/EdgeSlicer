@@ -1207,8 +1207,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && supports_wipe_tower_2);
     // Bambu Studio 2.9.1 options only the Type 1 tower honours; the tool change wipe applies to both.
-    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width"})
+    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width", "prime_tower_infill_gap", "prime_tower_enable_framework",
+                    "prime_tower_flat_ironing"})
       toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    // Flat ironing irons the start of a purge behind its wall gap.
+    toggle_field("prime_tower_flat_ironing", have_prime_tower && config->opt_bool("wipe_tower_wall_gap"));
     for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
       toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab

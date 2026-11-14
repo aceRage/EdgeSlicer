@@ -3923,6 +3923,10 @@ void TabPrint::build()
         // Bambu Studio 2.9.1 (Tab.cpp:3415-3419).
         optgroup->append_single_option_line("prime_tower_acceleration", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_line_width", "multimaterial_settings_prime_tower");
+        // Orca #10780 / #15035: Type 1 tower block planner.
+        optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower#infill-gap");
+        optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower#internal-ribs");
+        optgroup->append_single_option_line("prime_tower_flat_ironing", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
@@ -5992,6 +5996,8 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_soluble");
         // BBS
         optgroup->append_single_option_line("filament_is_support");
+        // Orca #10780 (Bambu Studio Tab.cpp): developer mode only.
+        optgroup->append_single_option_line("filament_adhesiveness_category");
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
