@@ -690,4 +690,13 @@ std::string cut_target_label(const ModelObject* object, size_t max_parts)
     label += ")";
     return label;
 }
+Transform3d cut_recipe_stand_in_matrix(const CutRecipe& recipe, const Transform3d& half_instance_matrix)
+{
+    if (!recipe.instance_linear_set)
+        return half_instance_matrix;
+    Transform3d out   = recipe.instance_linear;
+    out.translation() = half_instance_matrix.translation();
+    return out;
+}
+
 } // namespace Slic3r

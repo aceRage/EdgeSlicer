@@ -2607,5 +2607,74 @@ float Cut::calculate_groove_width(const Cut::Groove& groove, const float plane_r
     return float(2.0 * slot_outer_x_max);
 }
 
+
+// ---------------------------------------------------------------------------
+// Decisions of the Cut gizmo, kept here so they can be tested without the GUI.
+// ---------------------------------------------------------------------------
+
+ModelVolume* add_cut_connector_volume(ModelObject& mo, indexed_triangle_set unit_mesh, const CutConnector& connector)
+{
+    // Centre the height only. Letting add_volume() centre the mesh on its bounding box moved a
+    // triangle a quarter of its radius off the point placed, the box being off its axis.
+    if (!unit_mesh.vertices.empty())
+        its_translate(unit_mesh, Vec3f(0.f, 0.f, -float(bounding_box(unit_mesh).center().z())));
+    ModelVolume* volume = mo.add_volume(TriangleMesh(std::move(unit_mesh)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    // Transform the new modifier to be aligned inside the instance
+    volume->set_transformation(Geometry::translation_transform(connector.pos) * connector.rotation_m *
+                               Geometry::rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
+                               Geometry::scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+    return volume;
+}
+
+std::vector<Vec3f> cut_connector_outline(const CutConnector& connector)
+{
+    const CutConnectorShape shape        = CutConnectorShape(connector.attribs.shape);
+    const int               sector_count = shape == CutConnectorShape::Triangle ? 3 :
+                                           shape == CutConnectorShape::Square   ? 4 :
+                                           shape == CutConnectorShape::Circle   ? 60 : // supposably, 60 points are enough for conflict detection
+                                           shape == CutConnectorShape::Hexagon  ? 6 : 1;
+    std::vector<Vec3f> vertices;
+    vertices.reserve(sector_count + 1);
+    // Turned by the connector's Rotation, as render_connectors() draws it.
+    const Eigen::Rotation2Df turn(-connector.z_angle);
+    const float              fa  = 2 * PI / sector_count;
+    const Vec2f              vec = Eigen::Vector2f(0, connector.radius);
+    for (int i = 0; i < sector_count; ++i) {
+        const Vec2f p = turn * (Eigen::Rotation2Df(fa * i) * vec);
+        vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
+    }
+    return vertices;
+}
+
+float cut_groove_default_depth(const BoundingBoxf3& bb)
+{
+    return std::max(1.f, float((bb.size().x() + bb.size().y() + bb.size().z()) / 60.));
+}
+
+std::vector<size_t> edit_cut_objects(const ModelObjectPtrs& objects, size_t selected)
+{
+    if (selected >= objects.size())
+        return {};
+    std::vector<size_t> out;
+    const ModelObject* src = objects[selected];
+    if (src->is_cut()) {
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (objects[i] == src || (objects[i]->is_cut() && objects[i]->cut_id.id() == src->cut_id.id()))
+                out.push_back(i);
+        return out;
+    }
+    // A plain cut: its halves are linked by nothing but the recipe they both carry.
+    std::vector<size_t> others;
+    if (src->has_cut_recipe())
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (i != selected && !objects[i]->is_cut() && objects[i]->has_cut_recipe() && *objects[i]->cut_recipe == *src->cut_recipe)
+                others.push_back(i);
+    out.push_back(selected);
+    if (others.size() == 1)
+        out.push_back(others.front());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 } // namespace Slic3r
 

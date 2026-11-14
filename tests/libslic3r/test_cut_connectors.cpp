@@ -297,3 +297,105 @@ TEST_CASE("Plug hole breaks through the cut face and keeps its full depth (Orca 
     CHECK(peg.min.z() == Approx(0.).margin(1e-3));
     CHECK(peg.max.z() == Approx(depth).margin(1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// The Cut gizmo's connector decisions (GLGizmoCut3D::apply_cut_connectors(),
+// has_connector_conflict(), the dovetail's first depth), tested without the GUI.
+// ---------------------------------------------------------------------------
+namespace {
+
+// The gizmo's unit shape for a Plug / Dowel prism with `sectors` sides (get_connector_mesh()).
+indexed_triangle_set unit_prism(int sectors) { return its_make_cylinder(1.0, 1.0, 2. * PI / sectors); }
+
+CutConnector shaped_connector(CutConnectorShape shape, float z_angle_deg)
+{
+    CutConnector c;
+    c.pos     = Vec3d(3., 4., 0.);
+    c.radius  = 5.f;
+    c.height  = 6.f;
+    c.z_angle = float(Geometry::deg2rad(double(z_angle_deg)));
+    c.attribs = CutConnectorAttributes(CutConnectorType::Plug, CutConnectorStyle::Prism, shape);
+    return c;
+}
+
+// The corners of the shape the gizmo DRAWS for `c` (render_connectors(): translation, the frame, the
+// Rotation, radius x radius x height applied to the unit shape), seen from above.
+std::vector<Vec2d> drawn_corners(const CutConnector& c, int sectors)
+{
+    const Transform3d m = Geometry::translation_transform(c.pos) * c.rotation_m *
+                          Geometry::rotation_transform(-double(c.z_angle) * Vec3d::UnitZ()) *
+                          Geometry::scale_transform(Vec3d(c.radius, c.radius, c.height));
+    std::vector<Vec2d> out;
+    for (const Vec3f& v : unit_prism(sectors).vertices)
+        if (v.head<2>().norm() > 0.5f && std::abs(v.z()) < 1e-6f) // the rim at the bottom, not the axis
+            out.push_back((m * v.cast<double>()).head<2>());
+    return out;
+}
+
+bool near_one_of(const Vec2d& p, const std::vector<Vec2d>& pts, double eps = 1e-4)
+{
+    return std::any_of(pts.begin(), pts.end(), [&](const Vec2d& q) { return (p - q).norm() < eps; });
+}
+
+} // namespace
+
+TEST_CASE("Cut connector volume: a triangle lands where it is drawn", "[CutConnectors][Regression]")
+{
+    // A triangle's box is not centred on its axis (its corners reach 1 one way, 0.5 the other).
+    // Centring the volume's mesh on that box moved the connector a quarter of its radius off the
+    // point placed.
+    for (const float z_angle : { 0.f, 30.f }) {
+        CAPTURE(z_angle);
+        const CutConnector c = shaped_connector(CutConnectorShape::Triangle, z_angle);
+        Model        model;
+        ModelObject* mo = model.add_object();
+        mo->add_volume(make_cube(40., 40., 40.));
+        mo->add_instance();
+        ModelVolume* v = add_cut_connector_volume(*mo, unit_prism(3), c);
+        REQUIRE(v->type() == ModelVolumeType::NEGATIVE_VOLUME);
+
+        TriangleMesh m = v->mesh();
+        m.transform(v->get_matrix());
+        const std::vector<Vec2d> drawn = drawn_corners(c, 3);
+        REQUIRE(drawn.size() == 3);
+        for (const Vec3f& p : m.its.vertices)
+            if ((p.head<2>().cast<double>() - c.pos.head<2>()).norm() > 0.5 * c.radius)
+                CHECK(near_one_of(p.head<2>().cast<double>(), drawn));
+        // The height is centred on the connector's position, as apply_connectors_in_model() expects.
+        const BoundingBoxf3 bb = m.bounding_box();
+        CHECK(bb.min.z() == Approx(c.pos.z() - 0.5 * c.height));
+        CHECK(bb.max.z() == Approx(c.pos.z() + 0.5 * c.height));
+    }
+}
+
+TEST_CASE("Cut connector outline: tested turned by its Rotation", "[CutConnectors][Regression]")
+{
+    // The outline tested against the cut contour ignored the Rotation: a turned triangle or square
+    // that pokes out of the part was tested in its unturned place, and passed.
+    for (const auto& [shape, sectors] : { std::pair{ CutConnectorShape::Square, 4 }, std::pair{ CutConnectorShape::Triangle, 3 } })
+        for (const float z_angle : { 0.f, 45.f, 100.f }) {
+            CAPTURE(sectors, z_angle);
+            CutConnector c = shaped_connector(shape, z_angle);
+            c.pos          = Vec3d::Zero(); // the outline is in the connector's own frame
+            const std::vector<Vec3f> outline = cut_connector_outline(c);
+            REQUIRE(outline.size() == size_t(sectors));
+            const std::vector<Vec2d> drawn = drawn_corners(c, sectors);
+            for (const Vec3f& p : outline)
+                CHECK(near_one_of(p.head<2>().cast<double>(), drawn));
+        }
+    // A circle is still 60 points at its radius.
+    const std::vector<Vec3f> circle = cut_connector_outline(shaped_connector(CutConnectorShape::Circle, 20.f));
+    CHECK(circle.size() == 60);
+    for (const Vec3f& p : circle)
+        CHECK(p.norm() == Approx(5.f));
+}
+
+TEST_CASE("Cut dovetail: the first depth comes from the object", "[CutConnectors][Regression]")
+{
+    // It came from the grabber size, which is fixed on screen (32 px / zoom): the groove first
+    // offered depended on how far the camera was zoomed out when the tool opened.
+    CHECK(cut_groove_default_depth(BoundingBoxf3(Vec3d::Zero(), Vec3d(40., 40., 40.))) == Approx(2.f));
+    CHECK(cut_groove_default_depth(BoundingBoxf3(Vec3d(-100., -50., 0.), Vec3d(100., 50., 60.))) == Approx(6.f));
+    // Never under 1 mm.
+    CHECK(cut_groove_default_depth(BoundingBoxf3(Vec3d::Zero(), Vec3d(5., 5., 5.))) == Approx(1.f));
+}

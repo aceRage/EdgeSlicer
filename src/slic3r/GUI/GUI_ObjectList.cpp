@@ -3613,16 +3613,12 @@ void ObjectList::edit_cut()
     const ModelObject *src    = object(src_idx);
     const CutRecipe    recipe = *src->cut_recipe;
 
-    // Every object of the same cut. When only one is left the re-edit still runs;
+    // Every object of the same cut, the halves of a plain cut (which carry no cut_id)
+    // included: see edit_cut_objects(). When only one is left the re-edit still runs;
     // the gizmo notices and warns that cutting again brings back both halves.
     std::vector<ObjectID> ids;
-    for (size_t i = 0; i < m_objects->size(); ++i) {
-        const ModelObject *o = (*m_objects)[i];
-        // CutObjectBase::has_same_id() is not const-qualified, and these are const
-        // ModelObjects, so compare the ids directly - which is exactly what it does.
-        if (o == src || (o->is_cut() && src->is_cut() && o->cut_id.id() == src->cut_id.id()))
-            ids.push_back(o->id());
-    }
+    for (size_t i : edit_cut_objects(*m_objects, size_t(src_idx)))
+        ids.push_back((*m_objects)[i]->id());
     if (ids.empty())
         ids.push_back(src->id());
 
