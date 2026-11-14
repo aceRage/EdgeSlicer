@@ -12409,9 +12409,20 @@ std::map<std::string, std::string> DynamicPrintConfig::validate(bool under_cli)
     }
 }
 
+std::string DynamicPrintConfig::filament_string_at(const std::string &opt_key, int id, const std::string &fallback) const
+{
+    const auto *opt = dynamic_cast<const ConfigOptionStrings *>(this->option(opt_key));
+    if (opt == nullptr || opt->values.empty())
+        return fallback;
+    return opt->get_at(id < 0 ? 0 : size_t(id));
+}
+
 std::string DynamicPrintConfig::get_filament_type(std::string &displayed_filament_type, int id)
 {
     auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_ids"));
+    // A project that leaves filament_ids out (get_at() would read past the empty list).
+    if (filament_id && filament_id->values.empty())
+        filament_id = nullptr;
     auto* filament_type = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_type"));
     auto* filament_is_support = dynamic_cast<const ConfigOptionBools*>(this->option("filament_is_support"));
 

@@ -1310,6 +1310,11 @@ public:
 
     //BBS special case Support G/ Support W
     std::string get_filament_type(std::string &displayed_filament_type, int id = 0);
+    // Entry `id` of the per-filament text list `opt_key`, or `fallback` when the config has no such
+    // list or the list is empty: a project written by another tool may leave filament_ids out, and
+    // get_at() on an empty list reads past it. An index past the end reads the first entry, as
+    // get_at() does.
+    std::string filament_string_at(const std::string &opt_key, int id, const std::string &fallback) const;
 
     bool is_custom_defined();
 
