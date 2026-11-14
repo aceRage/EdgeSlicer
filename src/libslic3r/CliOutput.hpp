@@ -30,6 +30,11 @@ std::string cli_join_output_path(const std::string &outputdir, const std::string
 //  * One plate: the name is used as given.
 std::string cli_gcode_file_name(const std::string &name, int plate_number, int plates_written);
 
+// The file name of object `index` (1-based) of `--export-stl` / `--export-stls` and the other per-object
+// exports: "obj_<index>_<name>", with `ext` (".stl") added unless the name already ends in it
+// (ignoring case). `name` is the object's name, or its input file when it has none.
+std::string cli_object_file_name(const std::string &name, unsigned int index, const std::string &ext);
+
 // ---- Exit codes ----------------------------------------------------------------------------------
 
 struct CliExitCode

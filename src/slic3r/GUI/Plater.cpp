@@ -26316,12 +26316,20 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
     else
         mesh_to_export = mesh_to_export_sla;
 
-    auto get_save_file = [](std::string const & dir, std::string const & name) {
-        auto path = dir + name + ".stl";
-        int n = 1;
-        while (boost::filesystem::exists(path))
-            path = dir + name + "(" + std::to_string(n++) + ").stl";
-        return path;
+    // A file that could not be written (a name the file system refuses, a full disk) used to be
+    // reported as nothing at all; collect them and say so once.
+    std::vector<std::string> failed_files;
+    auto store = [&failed_files](const std::string &file, TriangleMesh &mesh) {
+        if (!Slic3r::store_stl(file.c_str(), &mesh, true))
+            failed_files.push_back(file);
+    };
+    auto report_failed = [this, &failed_files]() {
+        if (failed_files.empty())
+            return;
+        wxString files;
+        for (const std::string &file : failed_files)
+            files += "\n" + from_u8(file);
+        show_error(this, _L("The following STL files could not be written:") + files);
     };
 
     TriangleMesh mesh;
@@ -26353,8 +26361,9 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
                 auto mesh = mesh_to_export(*object, i.second);
                 mesh.translate(-object->origin_translation.cast<float>());
 
-                Slic3r::store_stl(get_save_file(path_u8, object->name).c_str(), &mesh, true);
+                store(stl_export_file_path(path_u8, object->name), mesh);
             }
+            report_failed();
             return;
         }
     }
@@ -26366,12 +26375,14 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
         for (const ModelObject* o : p->model.objects) {
             auto mesh = mesh_to_export(*o, -1);
             mesh.translate(-o->origin_translation.cast<float>());
-            Slic3r::store_stl(get_save_file(path_u8, o->name).c_str(), &mesh, true);
+            store(stl_export_file_path(path_u8, o->name), mesh);
         }
+        report_failed();
         return;
     }
 
-    Slic3r::store_stl(path_u8.c_str(), &mesh, true);
+    store(path_u8, mesh);
+    report_failed();
 }
 
 // Strip the characters no filesystem we ship on will take, so an object or part named
@@ -26462,7 +26473,8 @@ void Plater::export_stl_part()
     if (mesh.empty())
         return;
 
-    Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
+    if (!Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true))
+        show_error(this, _L("The following STL files could not be written:") + "\n" + out_path);
 }
 
 // "Export outline as DXF": the 2D shape an SVG or text part is embossed from, in the plane of the

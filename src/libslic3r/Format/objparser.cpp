@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <limits>
 
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdio.hpp>
@@ -239,6 +240,11 @@ static bool obj_parseline(const char *line, ObjData &data)
                 vertex.coordIdx += (int) data.coordinates.size() / OBJ_VERTEX_LENGTH;
             else
 				-- vertex.coordIdx;
+			// OBJ indices start at 1. Index 0, or a relative index reaching before the first vertex, came out
+			// as -1 here, which is the end-of-face marker (below), and the face was split at it instead of the
+			// file being refused. Keep it negative but not -1, so load_obj reports an invalid vertex index.
+			if (vertex.coordIdx < 0)
+				vertex.coordIdx = std::numeric_limits<int>::min();
 			if (vertex.normalIdx < 0)
                 vertex.normalIdx += (int)data.normals.size() / 3;
             else

@@ -1126,12 +1126,12 @@ void AppConfig::merge_shared_from_disk(const std::string& path)
         // list follows in its order; the whole thing is cut at the cap.
         if (j.contains("recent_projects") && j["recent_projects"].is_object()) {
             const std::vector<std::string>     mine = get_recent_projects();
-            std::map<std::string, std::string> disk; // ordered by the "01".."NN" keys
+            std::map<std::string, std::string> disk; // keyed "01".."NN"
             for (auto it = j["recent_projects"].begin(); it != j["recent_projects"].end(); ++it)
                 if (it.value().is_string()) disk[it.key()] = it.value().get<std::string>();
             std::vector<std::string> merged;
-            for (const auto& kv : disk)
-                if (std::find(mine.begin(), mine.end(), kv.second) == mine.end()) merged.push_back(kv.second);
+            for (const std::string& path : recent_projects_in_order(disk))
+                if (std::find(mine.begin(), mine.end(), path) == mine.end()) merged.push_back(path);
             merged.insert(merged.end(), mine.begin(), mine.end());
             size_t cap = 18;
             try {
@@ -1625,18 +1625,39 @@ std::string AppConfig::get_last_dir() const
     return std::string();
 }
 
+// The recent projects are stored under "01", "02", ... "99", "100", ... in a map ordered by string,
+// where "100" comes between "10" and "11". Order them by the number instead; a key that is not a
+// number (none is written) goes after the numbered ones, in string order.
+std::vector<std::string> recent_projects_in_order(const std::map<std::string, std::string> &by_key)
+{
+    std::vector<std::pair<const std::string*, const std::string*>> items;
+    items.reserve(by_key.size());
+    for (const auto &kv : by_key)
+        items.emplace_back(&kv.first, &kv.second);
+    auto number = [](const std::string &key) -> long long {
+        if (key.empty() || key.size() > 18 || key.find_first_not_of("0123456789") != std::string::npos)
+            return -1;
+        return std::stoll(key);
+    };
+    std::stable_sort(items.begin(), items.end(), [&number](const auto &a, const auto &b) {
+        const long long na = number(*a.first), nb = number(*b.first);
+        if ((na < 0) != (nb < 0))
+            return na >= 0;
+        return na >= 0 && na < nb;
+    });
+    std::vector<std::string> out;
+    out.reserve(items.size());
+    for (const auto &item : items)
+        out.push_back(*item.second);
+    return out;
+}
+
 std::vector<std::string> AppConfig::get_recent_projects() const
 {
-    std::vector<std::string> ret;
     const auto it = m_storage.find("recent_projects");
-    if (it != m_storage.end())
-    {
-        for (const std::map<std::string, std::string>::value_type& item : it->second)
-        {
-            ret.push_back(item.second);
-        }
-    }
-    return ret;
+    if (it == m_storage.end())
+        return {};
+    return recent_projects_in_order(it->second);
 }
 
 void AppConfig::set_recent_projects(const std::vector<std::string>& recent_projects)

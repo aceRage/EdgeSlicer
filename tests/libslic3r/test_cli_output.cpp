@@ -263,3 +263,18 @@ TEST_CASE("result.json totals add the plates up", "[CLI][Output]")
     CHECK(none["cost"] == 0.);
     CHECK(cli_result_totals(nlohmann::json())["plates"] == 0);
 }
+
+TEST_CASE("--export-stls names each object's file with one .stl", "[CLI][Output][Regression]")
+{
+    // find_last_of(".stl") took the extension as a set of characters: a name ending in s, t or l got none.
+    CHECK(cli_object_file_name("MC Arms", 1, ".stl") == "obj_1_MC Arms.stl");
+    CHECK(cli_object_file_name("Bolt", 2, ".stl") == "obj_2_Bolt.stl");
+    CHECK(cli_object_file_name("Wheel", 3, ".stl") == "obj_3_Wheel.stl");
+    CHECK(cli_object_file_name("Part.", 4, ".stl") == "obj_4_Part..stl");
+    CHECK(cli_object_file_name("Cube", 5, ".stl") == "obj_5_Cube.stl");
+    // A name that already ends in the extension keeps it once, whatever its case.
+    CHECK(cli_object_file_name("box.stl", 6, ".stl") == "obj_6_box.stl");
+    CHECK(cli_object_file_name("BOX.STL", 7, ".stl") == "obj_7_BOX.STL");
+    CHECK(cli_object_file_name("box.obj", 8, ".stl") == "obj_8_box.obj.stl");
+    CHECK(cli_object_file_name("Arms", 9, ".obj") == "obj_9_Arms.obj");
+}

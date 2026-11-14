@@ -4,6 +4,7 @@
 #include "GCode/GCodeProcessor.hpp"
 #include "Utils.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/path.hpp>
 
 #include <algorithm>
@@ -29,6 +30,16 @@ std::string cli_join_output_path(const std::string &outputdir, const std::string
     if (last == '/' || last == '\\')
         return outputdir + name;
     return outputdir + "/" + name;
+}
+
+std::string cli_object_file_name(const std::string &name, unsigned int index, const std::string &ext)
+{
+    // The test used to be name.find_last_of(ext) == the last position: find_last_of takes `ext` as a set
+    // of characters, so any name ending in '.', 's', 't' or 'l' ("MC Arms") was written with no extension.
+    std::string file_name = "obj_" + std::to_string(index) + "_" + name;
+    if (!boost::iends_with(file_name, ext))
+        file_name += ext;
+    return file_name;
 }
 
 std::string cli_gcode_file_name(const std::string &name, int plate_number, int plates_written)
