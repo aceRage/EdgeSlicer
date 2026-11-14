@@ -156,3 +156,55 @@ flattened system presets) slices a single-filament OBJ but segfaults on any two-
 (`h3ctime_bbs.gcode.3mf`) and the 2.8.2 H2C file (`tests/h2c_wrongextruder_bambu_manual.gcode.3mf`;
 ramming() is unchanged in structure from 2.8.2). Compared: block order, line count, widths, F,
 M632/M633 placement, retract/wipe around the block.
+
+## 8. Material blocks (owner question 2026-11-14): a separate stage
+
+**What it is.** In Bambu Studio 2.9.1 every tower layer is split into `WipeTowerBlock`s, one per block key
+(`get_block_key()` = `filament_adhesiveness_category` + nozzle diameter + lane, 59 hits in WipeTower.cpp).
+`generate_wipe_tower_blocks()` gives each block a fixed Y band for the whole print (its deepest layer),
+`tool_change_new()` purges a filament inside its own category's band, `ramming()` rams inside the
+**outgoing** filament's band, and `finish_block()` / `finish_block_solid()` fill each band's unused part
+with a filament of that same category (Contact / Solid layers under a wider band). So PLA never bonds
+onto PETG/TPU/support material inside the tower.
+
+**Why it is not in this port.** It is not an add-on to our planner; it *is* `generate_new()`:
+`plan_tower_new()`, `generate_wipe_tower_blocks()`, `finish_layer_new()`, `finish_block(_solid)()`,
+`get_block_fill_filament()` / `same_category_filler()`, the Contact / Solid layer types, the per-band
+infill gap (`calc_block_infill_gap`), plus the merged-slab / band-ladder / lane code those functions
+now carry (`plan_merged_slabs`, `plan_tower_ladder`, `m_lane_assignment`) - roughly 4-5k of the 8.6k
+lines. Porting it replaces our `generate()` / `finish_layer()` / Y-stack for **every** Bambu tower:
+X1/P1/A1 change too (two categories split into two bands; even one category gets `finish_layer_new()`'s
+layout), whereas this port changes only nozzle-change printers. It also needs a key we lack:
+`filament_adhesiveness_category` (BBL base profiles carry 100 PLA, 300, 400, 500, 704, 801, 902...;
+our loader drops it, and `WipeTowerEstimate` already models "one block per category" with it at 0 -
+the plate's tower estimate is the block layout, the generated tower is not).
+
+**Recommendation: its own package after this PR merges** ("BBS tower blocks"), staged:
+B1 the `filament_adhesiveness_category` key (CONFIG-ONLY); B2 `generate_wipe_tower_blocks()` +
+`tool_change` / `ramming()` writing into bands (`block->cur_depth` replaces `m_depth_traversed`;
+the ramming then moves from in front of the new purge to the old filament's band, as in BBS);
+B3 `finish_layer_new()` / `finish_block(_solid)()` with Contact / Solid layers and same-category fill;
+the merged-slab / lane code only where ALM needs it (we have our own AdaptiveLayerMerge slabs).
+Gate: every Bambu multi-material case changes; compare band order and fill filament with BBS files.
+
+**Interaction with #937 (Type1 mixed colour sub-layer / Local-Z replay).** The replay prints a layer's
+passes with direct filament changes (no tower result) and tells the tower which filament they leave
+loaded (`local_z_start_tool` / `local_z_prev_tool`). With blocks: (1) a pass filament has no planned
+tower change on that layer, so its band gets no purge there and must be filled by
+`get_block_fill_filament()` - if the filament left loaded is of another category, BBS would have to fill
+the band with a different-category filament or leave it floating, so the replay has to hand the block
+planner the per-layer set of loaded filaments, not just the last one; (2) a replayed direct change onto
+another nozzle gets no ramming (it never reaches the tower) - same as today, `format_nozzle_change_block`
+markers only; (3) BBS's own mixed sub-layer goes through `slab_height_for()` per band, which our replay
+does not use, so the band heights stay the tower layer height.
+
+**Interaction with #1042 (per-filament prime volume, H3C).** Unchanged by blocks in principle:
+`plan_toolchange()` already takes the per-filament `filament_prime_volume` (15 mm3 in saving mode) and
+the hotend tracker's flush; blocks only decide *where* that depth goes (the new filament's category
+band). Two follow-ups for the block package: BBS uses `filament_prime_volume_nc` for a hotend change
+on one extruder (not ported here either), and on H3C heater-off / idle-travel changes the new
+filament's band still gets its prime purge (idle travel moves over that band, as here).
+
+**This port and blocks.** Nothing here blocks the block package: `NozzleChangePlan`,
+`NozzleChangeResult`, the keys, `ramming()` / `heater_off` / `idle_travel` and the append_tcr emission
+are the same objects BBS's block planner uses; only the Y origin of the ramming box changes.
