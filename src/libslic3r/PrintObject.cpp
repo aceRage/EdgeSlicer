@@ -1908,6 +1908,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "spiral_finishing_flow_ratio"
             // Edge: read by GCode::process_layer only.
             || opt_key == "min_layer_time_pause"
+            // Edge: nothing sliced depends on it. Print::apply invalidates psWipeTower when the resolved
+            // interface temperatures (Print::support_interface_temperatures) change.
+            || opt_key == "support_interface_nozzle_temperature"
             // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
             || opt_key == "apply_scarf_seam_on_circles"
             || opt_key == "support_ironing_speed") {

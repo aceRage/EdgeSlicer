@@ -577,6 +577,90 @@ void Print::clear()
     m_shrinkage_compensation = Vec3d::Ones();
     // Ultra (dual-nozzle): drop any stale grouping result so a re-sliced job recomputes it.
     m_nozzle_group_result.reset();
+    m_support_interface_temperatures = {};
+}
+
+void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures)
+{
+    if (temperatures.empty())
+        return;
+    const size_t filaments = flow_variant_filament_count(config);
+    for (const char *key : {"nozzle_temperature", "nozzle_temperature_initial_layer"}) {
+        auto *opt = config.option<ConfigOptionInts>(key);
+        if (opt == nullptr || opt->values.empty())
+            continue;
+        // Slots first, then writes: a short vector (one value read by every filament through get_at's
+        // clamp) is widened so the other filaments keep reading what they read before.
+        std::vector<std::pair<size_t, int>> writes;
+        for (const auto &[filament, temperature] : temperatures)
+            if (filament < filaments)
+                writes.emplace_back(get_config_idx(config, ConfigFlowDomain::Filament, filament), temperature);
+        for (const auto &[slot, temperature] : writes) {
+            if (slot >= opt->values.size())
+                opt->values.resize(slot + 1, opt->values.front());
+            opt->values[slot] = temperature;
+        }
+    }
+}
+
+SupportInterfaceTemperatures Print::resolve_support_interface_temperatures() const
+{
+    SupportInterfaceTemperatures out;
+    const size_t filaments = m_config.filament_diameter.size();
+    // Filaments printing part of a model anywhere on the plate (walls, infill, painted, mixed components).
+    std::set<unsigned int> model_filaments;
+    bool any_set = false;
+    for (const PrintObject *object : m_objects)
+        any_set |= object->config().support_interface_nozzle_temperature.value > 0 && object->has_support_material();
+    if (!any_set)
+        return out;
+    for (const PrintObject *object : m_objects)
+        for (unsigned int f : object->object_extruders())
+            model_filaments.insert(f);
+    auto add_ignored = [&out](SupportInterfaceTemperatures::Ignored reason, int filament, int temperature, const std::string &object) {
+        SupportInterfaceTemperatures::IgnoredEntry e{reason, filament, temperature, object};
+        if (std::find(out.ignored.begin(), out.ignored.end(), e) == out.ignored.end())
+            out.ignored.push_back(std::move(e));
+    };
+    for (const PrintObject *object : m_objects) {
+        const PrintObjectConfig &cfg         = object->config();
+        const int                temperature = cfg.support_interface_nozzle_temperature.value;
+        if (temperature <= 0 || !object->has_support_material())
+            continue;
+        const std::string &name  = object->model_object()->name;
+        const int          iface = cfg.support_interface_filament.value;
+        if (iface <= 0 || size_t(iface) > filaments) {
+            // "Current filament" or a mixed (virtual) filament: no one filament to set.
+            add_ignored(SupportInterfaceTemperatures::Ignored::NoInterfaceFilament, -1, temperature, name);
+            continue;
+        }
+        const unsigned int filament = unsigned(iface - 1);
+        if (cfg.support_filament_matching.value) {
+            // Chameleon picks the interface filament per wall, from the model filaments.
+            add_ignored(SupportInterfaceTemperatures::Ignored::FilamentMatching, int(filament), temperature, name);
+            continue;
+        }
+        if (model_filaments.count(filament)) {
+            add_ignored(SupportInterfaceTemperatures::Ignored::PrintsModel, int(filament), temperature, name);
+            continue;
+        }
+        if (auto it = out.temperatures.find(filament); it != out.temperatures.end()) {
+            if (it->second != temperature)
+                add_ignored(SupportInterfaceTemperatures::Ignored::Conflict, int(filament), temperature, name);
+            continue;
+        }
+        out.temperatures.emplace(filament, temperature);
+    }
+    return out;
+}
+
+const PrintConfig &Print::config_with_interface_temperatures(PrintConfig &storage) const
+{
+    if (m_support_interface_temperatures.temperatures.empty())
+        return m_config;
+    storage = m_config;
+    apply_support_interface_temperatures(storage, m_support_interface_temperatures.temperatures);
+    return storage;
 }
 
 // Ultra (dual-nozzle): classify each filament as model-only / support-only / hybrid from object extruder
@@ -2820,6 +2904,50 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                          "extruder", mo);
                 }
             }
+        }
+    }
+
+    // EdgeSlicer: support interface temperature (owner decisions D2-D4, 2026-11-14). Warn when the set
+    // temperature is outside the interface filament's recommended range, and when it is not used.
+    {
+        const SupportInterfaceTemperatures &sit = m_support_interface_temperatures;
+        const std::string                   deg = u8"°C";
+        const auto *preset_ids = m_full_print_config.option<ConfigOptionStrings>("filament_settings_id");
+        auto filament_name = [&](int filament) {
+            std::string out = "filament " + std::to_string(filament + 1);
+            if (preset_ids != nullptr && size_t(filament) < preset_ids->values.size() && !preset_ids->values[size_t(filament)].empty())
+                out += " (" + preset_ids->values[size_t(filament)] + ")";
+            return out;
+        };
+        for (const auto &[filament, temperature] : sit.temperatures) {
+            const int low  = m_config.nozzle_temperature_range_low.values.empty() ? 0 : m_config.nozzle_temperature_range_low.get_at(filament);
+            const int high = m_config.nozzle_temperature_range_high.values.empty() ? 0 : m_config.nozzle_temperature_range_high.get_at(filament);
+            // A range of 0 / unset is skipped, as the filament tab's own check does.
+            if (low <= 0 || high <= 0 || low > high || (temperature >= low && temperature <= high))
+                continue;
+            warn(Slic3r::format(L("The support interface temperature %1%%2% is outside the recommended range of %3%: %4%-%5%%2%."),
+                                temperature, deg, filament_name(int(filament)), low, high),
+                 "support_interface_nozzle_temperature");
+        }
+        for (const SupportInterfaceTemperatures::IgnoredEntry &e : sit.ignored) {
+            std::string why;
+            switch (e.reason) {
+            case SupportInterfaceTemperatures::Ignored::NoInterfaceFilament:
+                why = L("no single support interface filament is set");
+                break;
+            case SupportInterfaceTemperatures::Ignored::FilamentMatching:
+                why = L("support filament matching picks the interface filament");
+                break;
+            case SupportInterfaceTemperatures::Ignored::PrintsModel:
+                why = Slic3r::format(L("%1% also prints part of a model, so it keeps its own temperatures"), filament_name(e.filament));
+                break;
+            case SupportInterfaceTemperatures::Ignored::Conflict:
+                why = Slic3r::format(L("another object already sets %1% to a different interface temperature"), filament_name(e.filament));
+                break;
+            }
+            warn(Slic3r::format(L("The support interface temperature %1%%2% of object \"%3%\" is not used: %4%."), e.temperature, deg,
+                                e.object, why),
+                 "support_interface_nozzle_temperature");
         }
     }
 
@@ -7254,6 +7382,10 @@ void Print::_make_wipe_tower()
 {
     // Use the printer's G-code tag format so the processor can classify wipe tower filament usage.
     GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
+    // EdgeSlicer: the tower heats each filament to its temperature; a support interface temperature
+    // (support_interface_temperatures) replaces the filament's own there too. The copy is taken where the
+    // tower reads it (m_config itself when none is set).
+    PrintConfig tower_temperature_storage;
 
     m_wipe_tower_data.clear();
 
@@ -7341,8 +7473,9 @@ void Print::_make_wipe_tower()
         // wipe_tower.set_zhop();
 
         // Set the extruder & material properties at the wipe tower object.
+        const PrintConfig &tower_temperature_config = this->config_with_interface_temperatures(tower_temperature_storage);
         for (size_t i = 0; i < number_of_extruders; ++i)
-            wipe_tower.set_extruder(i, m_config);
+            wipe_tower.set_extruder(i, tower_temperature_config);
 
         // BBS: remove priming logic
         // m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
@@ -7532,8 +7665,9 @@ void Print::_make_wipe_tower()
         // wipe_tower.set_zhop();
 
         // Set the extruder & material properties at the wipe tower object.
+        const PrintConfig &tower_temperature_config = this->config_with_interface_temperatures(tower_temperature_storage);
         for (size_t i = 0; i < number_of_extruders; ++i)
-            wipe_tower.set_extruder(i, m_config);
+            wipe_tower.set_extruder(i, tower_temperature_config);
 
         m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
             wipe_tower.prime((float)this->skirt_first_layer_height(), m_wipe_tower_data.tool_ordering.all_extruders(), false));

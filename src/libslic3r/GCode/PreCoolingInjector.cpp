@@ -170,6 +170,11 @@ bool make_plan(const Print &print, Plan &plan)
         if (!cfg.filament_preheat_temperature_delta.values.empty())
             p.filament_preheat_temperature_delta[f] = cfg.filament_preheat_temperature_delta.get_at(f);
     }
+    // EdgeSlicer: a support interface temperature is the filament's temperature (Print::support_interface_temperatures),
+    // so the idle nozzle is pre-heated to it, as its tool change heats to it.
+    for (const auto &[f, temperature] : print.support_interface_temperatures().temperatures)
+        if (f < filaments)
+            p.filament_nozzle_temps[f] = temperature;
 
     const size_t extruders = cfg.nozzle_diameter.values.size();
     for (size_t e = 0; e < extruders; ++e) {

@@ -1093,6 +1093,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_interface_loop_pattern", "support_bottom_interface_spacing" })
         toggle_field(el, have_support_material && have_support_interface);
 
+    // EdgeSlicer: the interface temperature needs one interface filament (not "current filament"); filament
+    // matching picks the interface filament per wall, so the temperature is not used then (Print::validate says so).
+    if (config->has("support_interface_nozzle_temperature")) {
+        toggle_line("support_interface_nozzle_temperature", config->opt_int("support_interface_filament") != 0);
+        toggle_field("support_interface_nozzle_temperature",
+                     have_support_material && have_support_interface &&
+                         !(config->has("support_filament_matching") && config->opt_bool("support_filament_matching")));
+    }
+
     // Ultra (over-support surfaces): only reachable with support on and a non-zero top Z distance -
     // at a zero gap the surface is already a plain bottom shell and there is nothing to reclassify.
     bool can_over_support = have_support_material && config->opt_float("support_top_z_distance") > 0;
