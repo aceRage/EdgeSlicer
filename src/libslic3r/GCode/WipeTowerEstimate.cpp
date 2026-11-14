@@ -118,8 +118,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const bool   type1            = tower_type == WipeTowerType::Type1;
     const double width            = opt_float("prime_tower_width");
     const double prime_volume     = opt_float("prime_volume");
-    // Type1 spaces its purge lines by prime_tower_infill_gap, Type2 by wipe_tower_extra_spacing.
-    // EdgeSlicer does not declare the Orca Type1 key: use it only when the caller set it.
+    // Type1 spaces its purge lines by prime_tower_infill_gap (Orca #10780), Type2 by wipe_tower_extra_spacing.
     const double extra_spacing    = opt_float((type1 && config.option("prime_tower_infill_gap") != nullptr) ?
                                                   "prime_tower_infill_gap" :
                                                   "wipe_tower_extra_spacing") /
@@ -129,8 +128,10 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const auto  *nozzle_opt       = floats_of("nozzle_diameter");
     const double nozzle_diameter  = (nozzle_opt != nullptr && !nozzle_opt->values.empty()) ? nozzle_opt->values.front() : 0.4;
     const bool   dual_nozzle      = nozzle_opt != nullptr && nozzle_opt->values.size() == 2;
-    // filament_prime_volume (Bambu Studio 2.9.1) is read on hotend_as_extruder printers (H3C) only, as the
-    // planner does (Print::_make_wipe_tower); other printers prime the process prime_volume.
+    // filament_prime_volume (Bambu Studio 2.9.1, Orca #10780) is read on Bambu Lab printers, as the planner does
+    // (Print::_make_wipe_tower); other printers prime the process prime_volume.
+    const auto  *printer_model    = dynamic_cast<const ConfigOptionString *>(config.option("printer_model"));
+    const bool   bbl_printer      = printer_model != nullptr && printer_model->value.compare(0, 9, "Bambu Lab") == 0;
     const auto  *rack_counts      = dynamic_cast<const ConfigOptionInts *>(option_of(config, "extruder_max_nozzle_count"));
     const bool   hotend_rack      = opt_bool("handle_hotend_as_extruder") ||
                                  (nozzle_opt != nullptr && nozzle_opt->values.size() == 1 && rack_counts != nullptr &&
@@ -178,7 +179,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         for (size_t i = 0; i < filaments_cnt; ++i) {
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
-            purge.prime_volume      = saving_mode ? 15.f : hotend_rack ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
+            purge.prime_volume      = saving_mode ? 15.f : bbl_printer ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
             purge.category          = int_at("filament_adhesiveness_category", id, 0);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);

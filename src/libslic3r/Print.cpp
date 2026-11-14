@@ -7592,14 +7592,6 @@ void Print::_make_wipe_tower()
                         // add back the minimal amount toforce on the wipe tower:
                         // volume_to_purge += (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
-                        // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                        // Bambu Studio 2.9.1 primes each filament's own filament_prime_volume (15 mm3 in saving mode);
-                        // Edge does so on hotend_as_extruder printers (H3C) and keeps prime_volume elsewhere.
-                        float prime_volume = float(m_config.prime_volume);
-                        if (hotends.active())
-                            prime_volume = m_config.prime_volume_mode == PrimeVolumeMode::pvmSaving ?
-                                               15.f :
-                                               float(m_config.filament_prime_volume.get_at(extruder_id));
                         // Bambu Studio 2.9.1 (is_need_ramming): a change onto another nozzle of a Bambu printer rams the
                         // outgoing filament on the tower first. The grouping says which nozzle and extruder each
                         // filament prints from on this layer; on hotend_as_extruder printers (H3C) every hotend
@@ -7620,6 +7612,25 @@ void Print::_make_wipe_tower()
                                 if (nozzle_change.old_extruder >= 0 && nozzle_change.old_extruder < int(m_config.physical_extruder_map.size()))
                                     nozzle_change.old_physical_extruder = m_config.physical_extruder_map.get_at(nozzle_change.old_extruder);
                             }
+                        }
+                        // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
+                        // Bambu Studio 2.9.1 / Orca #14800 prime each filament's own filament_prime_volume, or
+                        // filament_prime_volume_nc after a hotend change on one extruder (H2C rack); 15 mm3 in saving
+                        // mode. Edge: on Bambu Lab printers, whose filament presets carry them; others keep prime_volume.
+                        float prime_volume = float(m_config.prime_volume);
+                        if (is_BBL_printer()) {
+                            const bool hotend_change = nozzle_change.need_ramming && !nozzle_change.extruder_change;
+                            if (m_config.prime_volume_mode == PrimeVolumeMode::pvmSaving)
+                                prime_volume = 15.f;
+                            else if (hotend_change && !m_config.filament_prime_volume_nc.values.empty())
+                                prime_volume = float(m_config.filament_prime_volume_nc.get_at(extruder_id));
+                            else if (!m_config.filament_prime_volume.values.empty())
+                                prime_volume = float(m_config.filament_prime_volume.get_at(extruder_id));
+                            // Orca #14685 (Bambu Studio, A2L): the filament change extrudes grab_length for its detection,
+                            // which the flush can count.
+                            const int grab_extruder = extruder_id < m_config.filament_map.values.size() ? m_config.filament_map.values[extruder_id] - 1 : 0;
+                            if (grab_extruder >= 0 && size_t(grab_extruder) < m_config.grab_length.values.size())
+                                volume_to_purge = std::max(0.f, volume_to_purge - float(m_config.grab_length.get_at(grab_extruder)) * 2.4f); // (1.75 / 2)^2 * PI
                         }
                         wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
                                                    current_extruder_id, extruder_id, prime_volume, volume_to_purge, nozzle_change);
