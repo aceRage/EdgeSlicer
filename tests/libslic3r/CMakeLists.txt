@@ -81,6 +81,8 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_paint.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
+	test_cut_mesh_caps.cpp
+	test_cut_halves.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
