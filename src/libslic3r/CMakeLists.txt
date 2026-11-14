@@ -503,6 +503,8 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     MixedSublayer.cpp
     MixedSublayer.hpp
+    CliNamedPresets.cpp
+    CliNamedPresets.hpp
     CliPresetSlots.cpp
     CliPresetSlots.hpp
     CliOutput.cpp

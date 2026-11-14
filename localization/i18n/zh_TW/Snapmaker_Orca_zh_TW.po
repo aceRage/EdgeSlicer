@@ -8083,8 +8083,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "被其他預設繼承的預設無法刪除！"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "以下預設繼承了此預設。"
 
 #. TRN  Remove/Delete

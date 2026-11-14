@@ -138,6 +138,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_output.cpp
+	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp

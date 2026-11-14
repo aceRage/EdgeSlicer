@@ -8450,10 +8450,10 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "Diğer ön ayarlar tarafından devralınan ön ayarlar silinemez!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
-msgstr[0] "Aşağıdaki ön ayarlar bu ön ayarı devralır."
-msgstr[1] "Aşağıdaki ön ayar bu ön ayarı devralır."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
+msgstr[0] "Aşağıdaki ön ayar bu ön ayarı devralır."
+msgstr[1] "Aşağıdaki ön ayarlar bu ön ayarı devralır."
 
 #. TRN  Remove/Delete
 #, boost-format

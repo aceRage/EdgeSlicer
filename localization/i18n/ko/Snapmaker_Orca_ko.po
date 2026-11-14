@@ -8253,8 +8253,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "다른 프리셋에 상속된 프리셋은 삭제할 수 없습니다!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "다음 사전 설정은 이 사전 설정을 상속합니다."
 
 #. TRN  Remove/Delete

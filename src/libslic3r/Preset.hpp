@@ -182,10 +182,15 @@ class Preset;
 // Helper to hold a profile with its vendor definition, where the vendor definition may have been extracted from a parent system preset.
 // The parent preset is only accessible through PresetCollection, therefore to allow definition of the various is_compatible_with methods
 // outside of the PresetCollection, this composite is returned by PresetCollection::get_preset_with_vendor_profile() when needed.
+class PresetCollection;
+
 struct PresetWithVendorProfile {
-	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor) : preset(preset), vendor(vendor) {}
+	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor, const PresetCollection *collection = nullptr) :
+		preset(preset), vendor(vendor), collection(collection) {}
 	const Preset 		&preset;
 	const VendorProfile *vendor;
+	// The collection of `preset`, to follow its "inherits" past its parent (is_compatible_with_printer); may be null.
+	const PresetCollection *collection;
 };
 
 // Note: it is imporant that map is used here rather than unordered_map,
