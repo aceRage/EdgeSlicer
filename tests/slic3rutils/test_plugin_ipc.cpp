@@ -27,7 +27,6 @@
 #include <fstream>
 #include <mutex>
 #include <string>
-#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -691,8 +690,8 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
         // The exec-error pipe is moved to fd >= 11 and must not survive exec.
         // Inspect before hello so the helper is blocked in handshake read, not
         // yet in CPython (which opens its own pipes).
-        const fs::path    fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
-        std::error_code   ec;
+        const fs::path             fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
+        boost::system::error_code  ec;
         fs::directory_iterator it(fd_dir, ec);
         const fs::directory_iterator end;
         for (; !ec && it != end; it.increment(ec)) {
