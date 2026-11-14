@@ -2447,7 +2447,7 @@ void WipeTower::toolchange_Load(
 // at the block's gap, from the bottom on even layers and from the top on odd ones. With a wall gap the first row
 // irons the start blob (and spirals it flat with prime_tower_flat_ironing); a contact change purges solid and slow.
 void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length, bool solid_toolchange,
-                                    bool reheat, bool /*after_nozzle_change*/)
+                                    bool reheat, bool after_nozzle_change)
 {
     // Mixed nozzle diameters (Edge, per-nozzle P2): the purge is laid by the tool just loaded (m_current_tool), at
     // its own width and flow. The box edges and the wall overlap stay on the structure width.
@@ -2458,10 +2458,11 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
 
     writer.set_extrusion_flow(tool_flow * (first_layer ? m_first_layer_flow_ratio : 1.f))
           .append("; CP TOOLCHANGE WIPE\n");
-    // BBS: add the note for gcode-check, when the flow changed, the width should follow the change.
+    // BBS: add the note for gcode-check, when the flow changed, the width should follow the change. After a
+    // nozzle change the ramming's own width was the last one announced (its G-code lands in this change).
     if (first_layer)
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_first_layer_flow_ratio * tool_pw) + "\n");
-    else if (tool_width)
+    else if (tool_width || after_nozzle_change)
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(tool_pw) + "\n");
 
     const float retract_length      = m_filpar[m_current_tool].retract_length;
@@ -2562,7 +2563,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
 
     writer.set_extrusion_flow(m_extrusion_flow); // Reset the extrusion flow.
     // BBS: add the note for gcode-check when the flow changed
-    if (first_layer || tool_width)
+    if (first_layer || tool_width || after_nozzle_change)
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_perimeter_width) + "\n");
 }
 
@@ -3139,7 +3140,11 @@ bool WipeTower::is_valid_last_layer(size_t tool, int layer_id, double layer_z) c
     const int extruder = m_nozzle_group->get_extruder_id(int(tool), layer_id);
     if (extruder < 0 || extruder >= int(m_printable_height.size()) || extruder >= int(m_last_layer_id.size()))
         return true;
-    return !(m_last_layer_id[extruder] == layer_id && layer_z > m_printable_height[extruder]);
+    // Edge: extruder_printable_height defaults to 0 here (Bambu Studio leaves it empty): no limit.
+    const double height = m_printable_height[extruder];
+    if (!(height > 0.))
+        return true;
+    return !(m_last_layer_id[extruder] == layer_id && layer_z > height);
 }
 
 void WipeTower::set_nozzle_last_layer_id()
@@ -3366,9 +3371,10 @@ void WipeTower::update_all_layer_depth(float idle_depth)
         m_wipe_tower_depth += block.depth;
         for (float &layer_depth : block.layer_depths)
             layer_depth *= m_extra_spacing;
-        for (WipeTowerInfo &plan_info : m_plan)
-            plan_info.depth *= m_extra_spacing;
     }
+    // Edge: Orca stretches every layer's depth once per block; the layer depth is the sum of its blocks', stretched once.
+    for (WipeTowerInfo &plan_info : m_plan)
+        plan_info.depth *= m_extra_spacing;
     if (m_wipe_tower_depth > 0.f)
         m_wipe_tower_depth += start_offset;
 
