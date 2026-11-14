@@ -142,6 +142,7 @@ TEST_CASE("home plugins: host envelope shape", "[HomePlugins]")
     CHECK(msg["loading"] == false);
     CHECK(msg["error"] == "scan failed");
     CHECK(msg["catalog"] == false); // Phase 11 placeholder
+    CHECK(msg["host_fallback"] == false);
     REQUIRE(msg["items"].size() == 2);
     CHECK_FALSE(plugin_card_leaks_path(msg["items"][0]));
     CHECK_FALSE(plugin_card_leaks_path(msg["items"][1]));
@@ -165,6 +166,9 @@ TEST_CASE("home plugins: host envelope shape", "[HomePlugins]")
     CHECK(run["can_run"] == true);
     CHECK(run["trust"] == "");
     CHECK_FALSE(run.contains("catalog"));
+
+    const json fallback = plugins_message({}, false, "", true);
+    CHECK(fallback["host_fallback"] == true);
 }
 
 TEST_CASE("home plugins: the page may only name keys the host listed", "[HomePlugins]")

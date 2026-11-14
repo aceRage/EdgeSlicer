@@ -12,6 +12,7 @@
 #include <slic3r/plugin/PythonPluginBridge.hpp>
 #include <slic3r/plugin/PythonPluginInterface.hpp>
 #include <slic3r/plugin/host/PluginHostBindings.hpp>
+#include <slic3r/plugin/ipc/PluginHostClient.hpp>
 #include <slic3r/Utils/HomePluginsLogic.hpp>
 
 #include <libslic3r/Model.hpp>
@@ -550,11 +551,19 @@ TEST_CASE("Unload abandons a sleeping script after the wait bound", "[PluginScri
     CHECK(manager.unload_plugin("Sleep_Forever"));
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     CHECK(elapsed < std::chrono::seconds(3));
-    // Unload returned without waiting for the sleeper. Let it observe STOP so the worker
-    // can exit before the interpreter shuts down, otherwise a detached Python thread
-    // tears down Boost.Log TLS after main and aborts the process.
-    { std::ofstream out(stop.string()); out << "1"; }
-    CHECK(wait_for_file(done, std::chrono::seconds(5)));
+    if (plugin_ipc::PluginHostClient::should_use_host()) {
+        // Out of process, cancel kills the helper. There is no in-process worker left to
+        // handshake with STOP/DONE.
+        for (int i = 0; i < 40 && plugin_ipc::PluginHostClient::instance().has_active_run("Sleep_Forever"); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK_FALSE(plugin_ipc::PluginHostClient::instance().has_active_run("Sleep_Forever"));
+    } else {
+        // Unload returned without waiting for the sleeper. Let it observe STOP so the worker
+        // can exit before the interpreter shuts down, otherwise a detached Python thread
+        // tears down Boost.Log TLS after main and aborts the process.
+        { std::ofstream out(stop.string()); out << "1"; }
+        CHECK(wait_for_file(done, std::chrono::seconds(5)));
+    }
 }
 
 TEST_CASE("Event-loop socket permit does not unblock writes, subprocess, connect or bind", "[PluginScripts][Python]")

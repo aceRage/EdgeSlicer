@@ -320,6 +320,22 @@ TEST_CASE("IPC channel reports truncated and closed-pipe failures", "[PluginIpc]
     CHECK_FALSE(a.write_json(hello, 200, error));
     CHECK(error.find("closed") != std::string::npos);
 }
+
+TEST_CASE("IPC channel delivers the last frame when POLLHUP arrives with POLLIN", "[PluginIpc][protocol]")
+{
+    int sv[2] = {-1, -1};
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    auto a = plugin_ipc::Channel::from_posix_fd(sv[0]);
+    auto b = plugin_ipc::Channel::from_posix_fd(sv[1]);
+
+    std::string    error;
+    nlohmann::json hello = {{"type", "hello"}, {"protocol_version", 1}};
+    REQUIRE(b.write_json(hello, 200, error));
+    b.close();
+    nlohmann::json got;
+    REQUIRE(a.read_json(got, 200, error));
+    CHECK(got["type"] == "hello");
+}
 #endif
 
 TEST_CASE("The plugin host is not spawned when no plugin is enabled", "[PluginIpc][spawn]")
@@ -563,4 +579,203 @@ TEST_CASE("psGCodePostProcess through IPC matches the in-process stamp bytes", "
     const std::string in_proc = stamp_once(true);
     CHECK(host == in_proc);
     CHECK(host == original + STAMP_BLOCK);
+}
+
+TEST_CASE("config_snapshot omits print-host secrets", "[PluginIpc][snapshot]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_key_value("print_host", new ConfigOptionString("http://secret.example"));
+    cfg.set_key_value("printhost_apikey", new ConfigOptionString("api-key"));
+    cfg.set_key_value("printhost_user", new ConfigOptionString("user"));
+    cfg.set_key_value("printhost_password", new ConfigOptionString("password"));
+    const nlohmann::json snap = PluginHostClient::config_snapshot(&cfg);
+    CHECK_FALSE(snap.contains("print_host"));
+    CHECK_FALSE(snap.contains("print_host_webui"));
+    CHECK_FALSE(snap.contains("printhost_apikey"));
+    CHECK_FALSE(snap.contains("printhost_user"));
+    CHECK_FALSE(snap.contains("printhost_password"));
+    CHECK_FALSE(snap.contains("printhost_cafile"));
+    CHECK_FALSE(snap.contains("printhost_port"));
+}
+
+TEST_CASE("post-process execute timeout scales with G-code size unless tests override it", "[PluginIpc][timeout]")
+{
+    CHECK(PluginHostClient::execute_timeout_ms(false, "") == plugin_ipc::k_default_timeout_ms);
+    ScopedTemporaryDir dir("ipc-timeout-gcode");
+    const fs::path     gcode = dir.path() / "big.gcode";
+    {
+        std::ofstream out(gcode.string(), std::ios::binary);
+        std::string   chunk(1024 * 1024, 'G');
+        out << chunk << chunk;
+    }
+    CHECK(PluginHostClient::execute_timeout_ms(true, gcode.string()) > plugin_ipc::k_default_timeout_ms);
+    PluginHostClient::set_execute_timeout_for_testing(2000);
+    CHECK(PluginHostClient::execute_timeout_ms(true, gcode.string()) == 2000);
+    PluginHostClient::set_execute_timeout_for_testing(plugin_ipc::k_default_timeout_ms);
+}
+
+TEST_CASE("Two sequential script runs reuse the same host pid", "[PluginIpc][Python][spawn]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("plugin-ipc-seq-pid");
+    write_plugin(data_dir_guard, "Ipc_Echo", SYNC_PLUGIN_SOURCE);
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Ipc_Echo", error));
+
+    const ScriptCompletion first = wait_for_script(manager, "Ipc_Echo", "Echo");
+    CHECK(first.error.empty());
+    const std::int64_t pid1 = PluginHostClient::instance().child_pid_for_testing();
+    REQUIRE(pid1 > 0);
+
+    const ScriptCompletion second = wait_for_script(manager, "Ipc_Echo", "Echo");
+    CHECK(second.error.empty());
+    const std::int64_t pid2 = PluginHostClient::instance().child_pid_for_testing();
+    CHECK(pid2 == pid1);
+}
+
+TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[PluginIpc][Python][cancel]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    PluginHostClient::set_execute_timeout_for_testing(plugin_ipc::k_default_timeout_ms);
+    ScopedDataDir data_dir_guard("plugin-ipc-cancel");
+    PluginAuditManager::instance().add_global_allowed_root(data_dir());
+    const fs::path marker = data_dir_guard.plugins_dir() / "Ipc_Hang" / "running";
+    std::string    source = KILL_MARKER_SOURCE_PREFIX;
+    const auto     pos    = source.find("__MARKER_PATH__");
+    REQUIRE(pos != std::string::npos);
+    source.replace(pos, 15, marker.string());
+    write_plugin(data_dir_guard, "Ipc_Hang", source);
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Ipc_Hang", error));
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    done = false;
+    ScriptCompletion        completion;
+    auto launch = manager.launch_script_capability("Ipc_Hang", "Hold", [&](const ScriptCompletion& c) {
+        std::lock_guard<std::mutex> lock(mutex);
+        completion = c;
+        done       = true;
+        cv.notify_all();
+    });
+    REQUIRE(launch.launched_async);
+    REQUIRE(wait_for_file(marker, std::chrono::seconds(15)));
+    REQUIRE(PluginHostClient::instance().has_active_run("Ipc_Hang"));
+    REQUIRE(PluginHostClient::instance().child_pid_for_testing() > 0);
+    const auto start = std::chrono::steady_clock::now();
+    PluginHostClient::instance().cancel("Ipc_Hang");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(8), [&] { return done; }));
+    }
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    CHECK(elapsed_ms < 5000);
+    CHECK((completion.cancelled || !completion.error.empty()));
+}
+
+const char* const WRITE_PROBE_SOURCE_PREFIX = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "Ipc Write Probe"
+# description = "Attempts a write used to assert post-process write-root isolation"
+# author = "tests"
+# version = "1.0"
+# type = "script"
+# ///
+import orca
+
+PROBE_PATH = "__PROBE_PATH__"
+
+class Probe(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Probe"
+
+    def execute(self):
+        try:
+            with open(PROBE_PATH, "w", encoding="utf-8") as f:
+                f.write("from-script")
+            return orca.ExecutionResult.success("wrote")
+        except Exception:
+            return orca.ExecutionResult.success("denied")
+
+@orca.plugin
+class WriteProbePackage(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Probe)
+)PY";
+
+TEST_CASE("Concurrent script and post-process each get their own result; script cannot use the post-process write root",
+          "[PluginIpc][Python][concurrent]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("plugin-ipc-concurrent");
+    write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
+    ScopedTemporaryDir gcode_dir("ipc-concurrent-gcode");
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
+    const fs::path     probe = gcode_dir.path() / "from_script.txt";
+    write_file(gcode, "G1 X10 Y10 E0.1\n");
+    std::string       probe_src   = WRITE_PROBE_SOURCE_PREFIX;
+    const std::string placeholder = "__PROBE_PATH__";
+    const auto        pos         = probe_src.find(placeholder);
+    REQUIRE(pos != std::string::npos);
+    probe_src.replace(pos, placeholder.size(), probe.string());
+    write_plugin(data_dir_guard, "Ipc_Probe", probe_src);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "PipelineStamp", error));
+    if (!load_and_wait(manager, "Ipc_Probe", error))
+        FAIL("Ipc_Probe load failed: " + error);
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    done = false;
+    ScriptCompletion        script;
+    auto launch = manager.launch_script_capability("Ipc_Probe", "Probe", [&](const ScriptCompletion& c) {
+        std::lock_guard<std::mutex> lock(mutex);
+        script = c;
+        done   = true;
+        cv.notify_all();
+    });
+    REQUIRE(launch.launched_async);
+
+    DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
+    std::string        path   = gcode.string();
+    std::string        output = gcode.string();
+    REQUIRE(run_post_process_scripts(path, false, "File", output, config));
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(60), [&] { return done; }));
+    }
+    CHECK(script.error.empty());
+    CHECK(script.result.message == "denied");
+    CHECK_FALSE(fs::exists(probe));
+    CHECK(read_file(gcode).find("EDGE_PIPELINE_STAMP") != std::string::npos);
 }
