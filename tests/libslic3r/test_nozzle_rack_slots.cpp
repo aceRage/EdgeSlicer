@@ -953,11 +953,11 @@ TEST_CASE("A single extruder with a nozzle rack takes a process per size; one si
 TEST_CASE("single_extruder_nozzle_rack is the H3C class only: not the H2C, U1 or a single-nozzle printer", "[NozzleProcess][NozzleRackSlots][H3C]")
 {
     DynamicPrintConfig h2c = DynamicPrintConfig::full_print_config();
-    h2c.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" }, { "extruder_max_nozzle_count", "1,6" } });
+    h2c.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" }, { "extruder_max_nozzle_count", "1,6" }, { "single_extruder_multi_material", "0" } });
     CHECK_FALSE(single_extruder_nozzle_rack(h2c));
     CHECK(supports_nozzle_processes(h2c)); // as before: two extruders
     DynamicPrintConfig u1 = DynamicPrintConfig::full_print_config();
-    u1.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4,0.4,0.4" }, { "extruder_max_nozzle_count", "1,1,1,1" } });
+    u1.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4,0.4,0.4" }, { "extruder_max_nozzle_count", "1,1,1,1" }, { "single_extruder_multi_material", "0" } });
     CHECK_FALSE(single_extruder_nozzle_rack(u1));
     CHECK(supports_nozzle_processes(u1));
     DynamicPrintConfig x1c = DynamicPrintConfig::full_print_config();
