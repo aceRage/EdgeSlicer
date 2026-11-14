@@ -55,6 +55,18 @@ if (SLIC3R_GUI)
 
     find_package(JPEG QUIET)
 
+    if (WIN32 AND NOT wxWidgets_LIBRARIES MATCHES "scintilla")
+        # wx 3.1+ splits Scintilla into its own static lib that wxmsw*_stc depends on.
+        # FindwxWidgets does not add it, so link it after stc explicitly.
+        find_library(WX_SCINTILLA_LIBRARY NAMES wxscintilla wxscintillad
+                     HINTS ${wxWidgets_LIB_DIR} NO_DEFAULT_PATH)
+        if (WX_SCINTILLA_LIBRARY)
+            list(APPEND wxWidgets_LIBRARIES ${WX_SCINTILLA_LIBRARY})
+        else ()
+            message(WARNING "wxscintilla library not found in ${wxWidgets_LIB_DIR}")
+        endif ()
+    endif ()
+
     string(REGEX MATCH "wxpng" WX_PNG_BUILTIN ${wxWidgets_LIBRARIES})
     if (PNG_FOUND AND NOT WX_PNG_BUILTIN)
         list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX png)
