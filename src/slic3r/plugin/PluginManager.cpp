@@ -539,13 +539,17 @@ bool PluginManager::try_get_plugin_descriptor(const std::string& plugin_key, Plu
     return true;
 }
 
-void PluginManager::adopt_descriptor_if_missing(PluginDescriptor descriptor)
+void PluginManager::adopt_parent_descriptor(PluginDescriptor descriptor)
 {
     if (descriptor.plugin_key.empty())
         return;
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (find_plugin_locked(descriptor.plugin_key) != nullptr)
+    if (Plugin* existing = find_plugin_locked(descriptor.plugin_key)) {
+        if (existing->is_loaded())
+            return;
+        existing->descriptor = std::move(descriptor);
         return;
+    }
     Plugin plugin;
     plugin.descriptor = std::move(descriptor);
     m_plugins.push_back(std::move(plugin));

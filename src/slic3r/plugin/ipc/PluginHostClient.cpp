@@ -58,6 +58,23 @@ void deliver_completion(std::function<void(const ScriptCompletion&)> on_done, co
         GUI::wxGetApp().CallAfter([on_done, completion]() { on_done(completion); });
 }
 
+void attach_plugin_identity(nlohmann::json& msg, const std::string& plugin_key)
+{
+    msg["plugin_key"] = plugin_key;
+    PluginDescriptor descriptor;
+    if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor))
+        return;
+    msg["entry_path"]        = descriptor.entry_path;
+    msg["plugin_root"]       = descriptor.plugin_root;
+    msg["entry_package"]     = descriptor.entry_package;
+    msg["name"]              = descriptor.name;
+    msg["version"]           = descriptor.version;
+    msg["installed_version"] = descriptor.installed_version;
+    msg["required_orca_api"] = descriptor.required_orca_api;
+    msg["author"]            = descriptor.author;
+    msg["description"]       = descriptor.description;
+}
+
 } // namespace
 
 struct PluginHostClient::Impl
@@ -139,20 +156,8 @@ struct PluginHostClient::Impl
             return true;
         nlohmann::json msg = {
             {"type", k_type_load},
-            {"plugin_key", plugin_key},
         };
-        PluginDescriptor descriptor;
-        if (PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
-            msg["entry_path"]         = descriptor.entry_path;
-            msg["plugin_root"]        = descriptor.plugin_root;
-            msg["entry_package"]      = descriptor.entry_package;
-            msg["name"]               = descriptor.name;
-            msg["version"]            = descriptor.version;
-            msg["installed_version"]  = descriptor.installed_version;
-            msg["required_orca_api"]  = descriptor.required_orca_api;
-            msg["author"]             = descriptor.author;
-            msg["description"]        = descriptor.description;
-        }
+        attach_plugin_identity(msg, plugin_key);
         if (!host.channel.write_json(msg, g_execute_timeout_ms.load(), error))
             return false;
         nlohmann::json reply;
@@ -358,10 +363,10 @@ bool PluginHostClient::start_script(const std::string& plugin_key,
                     {"type", k_type_execute},
                     {"id", i.next_id++},
                     {"kind", k_kind_script},
-                    {"plugin_key", plugin_key},
                     {"capability_name", capability_name},
                     {"timeout_ms", timeout_ms},
                 };
+                attach_plugin_identity(msg, plugin_key);
                 if (!i.host.channel.write_json(msg, timeout_ms, error)) {
                     completion.error = error;
                 } else {
@@ -420,7 +425,6 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
         {"type", k_type_execute},
         {"id", i.next_id++},
         {"kind", k_kind_post_process},
-        {"plugin_key", plugin_key},
         {"capability_name", capability_name},
         {"timeout_ms", timeout_ms},
         {"gcode_path", ctx.gcode_path},
@@ -431,6 +435,7 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string& plugin
         {"config", config_snapshot(ctx.full_config)},
         {"orca_version", ctx.orca_version},
     };
+    attach_plugin_identity(msg, plugin_key);
     if (!i.host.channel.write_json(msg, timeout_ms, error)) {
         i.reset_child_locked();
         i.active.erase(plugin_key);

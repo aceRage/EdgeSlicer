@@ -181,9 +181,11 @@ public:
     // Packages that materialize at least one capability of this type. A package's capability types
     // are only known once it has been loaded, so a never-loaded package never matches.
     bool try_get_plugin_descriptor(const std::string& plugin_key, PluginDescriptor& out) const;
-    // Host child: install a descriptor the parent already resolved so the child does not
-    // re-scan the plugin directory (a helper .whl next to a .py would look like two entries).
-    void adopt_descriptor_if_missing(PluginDescriptor descriptor);
+    // Host child: apply the descriptor Edge already resolved. A helper .whl next to a .py is a
+    // dependency, not a second entry; the child must not re-scan the plugin directory.
+    // Replaces a not-yet-loaded row (including a stale discovery error) so reload uses the
+    // parent identity and imports from the verified wheel bytes.
+    void adopt_parent_descriptor(PluginDescriptor descriptor);
     // Same, but only for packages that are loadable (i.e. not an invalid package).
     bool try_get_valid_plugin_descriptor(const std::string& plugin_key, PluginDescriptor& out) const;
     // Packages that were present in the previous discovery pass but were not found on disk in the

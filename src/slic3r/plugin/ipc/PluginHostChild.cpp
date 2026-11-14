@@ -64,7 +64,14 @@ nlohmann::json execution_result_json(const ExecutionResult& result, bool cancell
 bool load_plugin(const nlohmann::json& msg, std::string& error)
 {
     const std::string plugin_key = msg.value("plugin_key", std::string());
-    PluginManager&    manager    = PluginManager::instance();
+    if (plugin_key.empty()) {
+        error = "plugin_key missing";
+        return false;
+    }
+    PluginManager& manager = PluginManager::instance();
+    // Edge already resolved the entry. Do not scan the plugin directory: a helper .whl sitting
+    // next to the .py entry is a hashed dependency, and find_installed_plugin_entry would treat
+    // it as a second plugin and mark the package invalid.
     if (msg.contains("entry_path") && msg["entry_path"].is_string() && !msg["entry_path"].get<std::string>().empty()) {
         PluginDescriptor descriptor;
         descriptor.plugin_key        = plugin_key;
@@ -79,9 +86,7 @@ bool load_plugin(const nlohmann::json& msg, std::string& error)
         descriptor.description       = msg.value("description", std::string());
         descriptor.metadata_valid    = true;
         descriptor.enabled           = true;
-        manager.adopt_descriptor_if_missing(std::move(descriptor));
-    } else {
-        manager.discover_plugins(/*async=*/false, /*clear=*/false);
+        manager.adopt_parent_descriptor(std::move(descriptor));
     }
     PluginDescriptor descriptor;
     if (!manager.try_get_plugin_descriptor(plugin_key, descriptor)) {
