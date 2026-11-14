@@ -90,3 +90,14 @@ including the calibrated ms-per-unit, are remembered in the app config section `
 - D3: unison fill on by default?
 - D4: also offer the end-of-print tune (same block format in Machine end G-code) in phase 2?
 - D5: ship a few built-in tunes (public domain) or only "bring your own MIDI"?
+
+## Ending sound (2026-11-13)
+
+Same converter and dialog (`StartupSoundDialog::Target::End`), button under Machine end G-code.
+End tunes in the stock profiles: X1/X1C (all nozzles inherit the 0.4 end G-code), A1, A1 mini, A2L,
+P2S, H2C, H2D, H2D Pro, H2S, H3C, X2D - the same printers as the start tune. P1P, P1S and X1E have
+no M1006 in either G-code, so they get neither button. No insertion where there is no tune: whether
+their firmware plays M1006 is unknown, and the stock end tunes sit between purge/air filtration and
+the final `M400` / `M18`, a point that is not the same across printers.
+Settings: the calibration (ms per unit) is shared; the other options are kept per tune (section
+`ending_sound`, falling back to the start tune's values until saved once).
