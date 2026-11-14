@@ -19,8 +19,9 @@ Windows named pipe.
 
 | Workload | Where it runs |
 |---|---|
-| Script | **Out of process** via the helper |
-| `psGCodePostProcess` | **Out of process** via the helper |
+| Import / `load_plugin` (capabilities, metadata) | **In-process** inside Edge. Only execute is out of process in this phase. |
+| Script execute | **Out of process** via the helper |
+| `psGCodePostProcess` execute | **Out of process** via the helper |
 | Early slicing steps (`posSlice` … `psSkirtBrim`) | **In-process**, unsandboxed, live `Print` / `PrintObject`. The Home card still says so. |
 
 ## Protocol
@@ -49,10 +50,11 @@ timeouts kill a hung child.
 
 The child dies with Edge:
 
-- Linux: `prctl(PR_SET_PDEATHSIG, SIGKILL)`
+- Linux: `prctl(PR_SET_PDEATHSIG, SIGKILL)` **and** a parent-pipe EOF watchdog. PDEATHSIG
+  tracks the spawning *thread*, so spawn always happens on a process-lifetime worker thread.
 - Windows: Job object with `KILL_ON_JOB_CLOSE` and `ACTIVE_PROCESS=1`, no breakaway; create
-  suspended, assign, resume
-- macOS: extra parent-pipe EOF watchdog (plus the inherited IPC fd closing)
+  suspended, assign, resume. The named-pipe client pid must match the child.
+- macOS / POSIX: extra parent-pipe EOF watchdog (plus the inherited IPC fd closing)
 
 There is no AppContainer, Seatbelt, Landlock, or seccomp in this phase.
 
@@ -63,6 +65,9 @@ execute worker, so they cannot pop a permission dialog off the UI thread.
 
 ## Known limitations
 
+- Plugin **import** (discovery, `load_plugin`, capability registration) still runs inside
+  Edge so the Home card and slicer can see capabilities. Only **execute** (script and
+  `psGCodePostProcess`) is out of process.
 - No OS sandbox until Phase 8. A malicious child that skips its own Python audit hook still
   has the process's ambient filesystem until then; Edge-side host RPC and FS `audit_check`
   cover the `orca.host` surface and audited `open()` events.
@@ -72,7 +77,16 @@ execute worker, so they cannot pop a permission dialog off the UI thread.
   need them.
 - Printer-agent hooks stay unwired. No catalog and no pages.
 
+## Missing helper
+
+If `edge-plugin-host` is not next to the EdgeSlicer binary, Edge logs a warning and falls
+back to in-process execute. The Home > Plugins card shows that fallback. The env overrides
+`EDGE_PLUGIN_HOST` and `EDGE_PLUGIN_HOST_IN_PROCESS` are ignored in production; tests may
+enable them through `PluginHostClient::set_allow_env_overrides_for_testing`.
+
 ## Smoke tests owed at merge
 
-Mac GUI (script runs via the host, kill the host mid-run), Windows, Linux pkg, Flatpak. U1
-prints are still required for pipeline plugins.
+Linux IPC sequential (same host pid) + concurrent (script + post-process). Mac GUI (script
+runs via the host, kill the host mid-run). Windows Job object with a non-ASCII install path.
+Linux pkg, Flatpak, macOS sign/notarize with the helper. U1 prints are still required for
+pipeline plugins.

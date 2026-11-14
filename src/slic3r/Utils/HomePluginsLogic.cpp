@@ -68,7 +68,7 @@ json plugin_card(const PluginView& view)
     return sanitize_plugin_card(std::move(card));
 }
 
-json plugins_message(const std::vector<PluginView>& items, bool loading, const std::string& error)
+json plugins_message(const std::vector<PluginView>& items, bool loading, const std::string& error, bool host_fallback)
 {
     json list = json::array();
     for (const PluginView& item : items)
@@ -78,7 +78,8 @@ json plugins_message(const std::vector<PluginView>& items, bool loading, const s
              { "items", std::move(list) },
              { "loading", loading },
              { "error", error },
-             { "catalog", false } }; // Phase 11 placeholder
+             { "catalog", false }, // Phase 11 placeholder
+             { "host_fallback", host_fallback } };
 }
 
 bool is_listed_plugin_key(const std::string& key, const std::vector<std::string>& listed)

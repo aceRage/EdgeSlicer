@@ -348,6 +348,11 @@ function build_slicer() {
         else
             echo "Warning: crashpad_handler not found at ${CRASHPAD_HANDLER}"
         fi
+
+        if [ -f "${APP_MACOS_DIR}/edge-plugin-host" ]; then
+            echo "Signing edge-plugin-host..."
+            codesign --force --sign - "${APP_MACOS_DIR}/edge-plugin-host" 2>/dev/null || true
+        fi
         
         if [ -f "${LIBSENTRY}" ]; then
             echo "Copying libsentry.dylib to Frameworks..."

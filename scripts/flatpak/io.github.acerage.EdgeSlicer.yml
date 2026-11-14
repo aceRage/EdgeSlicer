@@ -385,6 +385,8 @@ modules:
         rm -rf /app/lib/cmake /app/lib/pkgconfig /app/lib/debug
         rm -rf /app/lib64/cmake /app/lib64/pkgconfig
         rm -rf /app/share/doc /app/share/ECM /app/share/cmake /app/share/man /app/share/info
+        # cmake install places edge-plugin-host next to EdgeSlicer when EDGE_PYTHON_PLUGINS=ON.
+        # Keep it: a missing helper silently falls back to in-process plugin execute.
         for _tool in vdb_print qconvex qdelaunay qhalf qhull qvoronoi rbox openssl c_rehash curl-config env.sh wx-config wxrc wxrc-3.1; do
           rm -f "/app/bin/${_tool}"
         done

@@ -296,6 +296,10 @@ if [ -f "$APP_MACOS_DIR/crashpad_handler" ]; then
     echo "  - 签名: crashpad_handler"
     codesign --force --verbose --options runtime --timestamp --sign "$CERTIFICATE_ID" "$APP_MACOS_DIR/crashpad_handler"
 fi
+if [ -f "$APP_MACOS_DIR/edge-plugin-host" ]; then
+    echo "  - 签名: edge-plugin-host"
+    codesign --force --verbose --options runtime --timestamp --sign "$CERTIFICATE_ID" "$APP_MACOS_DIR/edge-plugin-host"
+fi
 
 # 2.4 签名整个 app bundle（应用 entitlements）
 echo "2.4 签名整个 app bundle（应用 entitlements）..."

@@ -1501,6 +1501,7 @@
       loading: !!msg.loading,
       error: String(msg.error || ''),
       catalog: !!msg.catalog,
+      host_fallback: !!msg.host_fallback,
     };
     $('plug-catalog').hidden = !state.plug.catalog;
     if (state.section === 'plugins') renderPlugins();
@@ -1577,11 +1578,19 @@
       empty.hidden = false;
       $('plug-empty-install').hidden = true;
       err.hidden = true;
+      if ($('plug-host-fallback')) $('plug-host-fallback').hidden = true;
       $('plug-status').textContent = '';
       return;
     }
     err.hidden = !plug.error;
     errText.textContent = plug.error || '';
+    const fallback = $('plug-host-fallback');
+    const fallbackText = $('plug-host-fallback-text');
+    if (fallback) {
+      fallback.hidden = !plug.host_fallback;
+      if (fallbackText)
+        fallbackText.textContent = t('host_fallback', 'Plugin host helper is missing; scripts and post-process run in-process.');
+    }
     if (plug.loading && !plug.items.length) {
       emptyText.textContent = t('loading', 'Loading...');
       empty.hidden = false;

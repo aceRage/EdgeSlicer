@@ -54,8 +54,11 @@ nlohmann::json plugin_card(const PluginView& view);
 // Drop keys the page must never see, even if a caller stuffed them onto a card object.
 nlohmann::json sanitize_plugin_card(nlohmann::json card);
 
-// Host → page envelope: {type:"plugins", items:[...], loading, error, catalog:false}.
-nlohmann::json plugins_message(const std::vector<PluginView>& items, bool loading, const std::string& error);
+// Host → page envelope: {type:"plugins", items:[...], loading, error, catalog:false, host_fallback}.
+nlohmann::json plugins_message(const std::vector<PluginView>& items,
+                               bool                          loading,
+                               const std::string&            error,
+                               bool                          host_fallback = false);
 
 // True when `key` is exactly one of `listed`. Empty keys and keys with a path separator are
 // refused even if they appear in `listed`: the page names opaque plugin_keys, not files.

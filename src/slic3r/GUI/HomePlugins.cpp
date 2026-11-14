@@ -14,6 +14,7 @@
 #include "slic3r/plugin/PluginManager.hpp"
 #include "slic3r/plugin/PluginTrust.hpp"
 #include "slic3r/plugin/PythonPluginInterface.hpp"
+#include "slic3r/plugin/ipc/PluginHostClient.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
@@ -133,8 +134,9 @@ void HomePlugins::send_state()
     m_keys.clear();
     m_listed_caps.clear();
     std::vector<HomeTab::PluginView> items;
+    const bool host_fallback = Slic3r::plugin_ipc::PluginHostClient::host_fallback_active();
     if (mgr.is_discovery_in_progress()) {
-        m_send(HomeTab::plugins_message({}, true, mgr.get_discovery_error()));
+        m_send(HomeTab::plugins_message({}, true, mgr.get_discovery_error(), host_fallback));
         return;
     }
     for (const PluginDescriptor& d : mgr.get_plugin_descriptors(true)) {
@@ -150,7 +152,7 @@ void HomePlugins::send_state()
         }
         items.push_back(std::move(view));
     }
-    m_send(HomeTab::plugins_message(items, false, mgr.get_discovery_error()));
+    m_send(HomeTab::plugins_message(items, false, mgr.get_discovery_error(), host_fallback));
 }
 
 bool HomePlugins::handle(const json& msg)

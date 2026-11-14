@@ -391,6 +391,12 @@ if (EDGE_PYTHON_PLUGINS)
             "${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
         COMMENT "Copying edge-plugin-host next to EdgeSlicer"
         VERBATIM)
+    if (APPLE)
+        add_custom_command(TARGET Snapmaker_Orca POST_BUILD
+            COMMAND sh -c "codesign --force --sign - '${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
+            COMMENT "Signing edge-plugin-host"
+            VERBATIM)
+    endif ()
     add_custom_command(TARGET Snapmaker_Orca POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${_edge_python_bin_dir}/python"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${_edge_python_bin_dir}/python"
@@ -437,6 +443,16 @@ if (WIN32)
         install(TARGETS Snapmaker_Orca_app_gui RUNTIME DESTINATION ".")
     endif ()
     install(FILES ${output_dlls_${build_type}} DESTINATION ".")
+    if (EDGE_PYTHON_PLUGINS)
+        install(TARGETS edge-plugin-host RUNTIME DESTINATION ".")
+    endif ()
 else ()
     install(TARGETS Snapmaker_Orca RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if (EDGE_PYTHON_PLUGINS)
+        if (APPLE)
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/EdgeSlicer.app/Contents/MacOS")
+        else ()
+            install(TARGETS edge-plugin-host RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+        endif ()
+    endif ()
 endif ()
