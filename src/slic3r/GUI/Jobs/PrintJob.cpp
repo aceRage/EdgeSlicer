@@ -354,7 +354,6 @@ void PrintJob::process(Ctl &ctl)
         params.origin_model_id = "";
     }
 
-    wxString error_text;
     std::string msg_text;
 
 
@@ -378,7 +377,6 @@ void PrintJob::process(Ctl &ctl)
         &msg, 
         &error_str, 
         &curr_percent, 
-        &error_text,
         &last_error_info,
         StagePercentPoint
     ](int stage, int code, std::string info) {
@@ -605,7 +603,6 @@ void PrintJob::process(Ctl &ctl)
         else if (!wxGetApp().app_config->get("lan_mode_only").empty() && wxGetApp().app_config->get("lan_mode_only") == "1") {
             diag.cloud_bound = false;
             if (params.password.empty() || params.dev_ip.empty()) {
-                error_text = wxString::Format(_L("Access code:%s IP address:%s"), params.password, params.dev_ip);
                 result = BAMBU_NETWORK_ERR_FTP_UPLOAD_FAILED;
                 diag.lan_skip     = bambu_lan_skip_reason(!params.dev_ip.empty(), false, true, !params.password.empty());
                 diag.skipped_code = result;
@@ -618,7 +615,6 @@ void PrintJob::process(Ctl &ctl)
                 is_try_lan_mode = true;
                 result = m_agent->start_local_print_with_record(params, update_fn, cancel_fn, wait_fn);
                 if (result < 0) {
-                    error_text = wxString::Format(_L("Access code:%s IP address:%s"), params.password, params.dev_ip);
                     // try to send with cloud
                     BOOST_LOG_TRIVIAL(warning) << "print_job: use ftp send print failed";
                     diag.lan_code        = result;
