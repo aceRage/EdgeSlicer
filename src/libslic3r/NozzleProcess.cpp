@@ -55,6 +55,15 @@ static bool has_several_process_extruders(const ConfigBase &printer_config)
     return semm == nullptr || !semm->value;
 }
 
+bool single_extruder_nozzle_rack(const ConfigBase &printer_config)
+{
+    // Bambu Studio 2.9.1 is_single_ext_multi_nozzle() (the H3C): one nozzle_diameter and a rack of two or more positions. The
+    // rack count must be declared (extruder_has_nozzle_rack() reads a config without the key as "any").
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
+    return nozzles != nullptr && nozzles->size() == 1 && printer_config.option("extruder_max_nozzle_count") != nullptr &&
+           extruder_has_nozzle_rack(printer_config, 0);
+}
+
 bool supports_nozzle_processes(const ConfigBase &printer_config)
 {
     if (has_several_process_extruders(printer_config))
@@ -62,9 +71,12 @@ bool supports_nozzle_processes(const ConfigBase &printer_config)
     // H3C (owner report 2026-11-06): one extruder whose nozzle rack holds nozzles of more than one size. Each other size of the
     // rack is a tool of its own (P9 size tools, "T1:0.8"), as the H2C's right rack sizes are, so filaments pinned to the 0.6 /
     // 0.8 rack nozzles print with a process made for that size. single_extruder_multi_material (set on the H3C: one nozzle at a
-    // time, fed from the AMS) does not rule it out, the rack still holds several nozzles. A rack of one size adds nothing.
-    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
-    return nozzles != nullptr && nozzles->size() == 1 && !nozzle_slot_tools(printer_config).empty();
+    // time, fed from the AMS) does not rule it out, the rack still holds several nozzles.
+    // Owner report 2026-11-14: a rack of one size (the stock nine 0.4) showed no per-nozzle process at all. The rack's hotends are
+    // the H3C's tools (handle_hotend_as_extruder), so the per-nozzle system is on for any single-extruder rack: the selector reads
+    // "Plate | 0.4 Std 1-9" (one tool per size of the rack) and grows a chip per size as soon as the rack mixes sizes. With
+    // every tool following the plate's process nothing reaches the slicing config (fill_nozzle_process_slots has no source).
+    return single_extruder_nozzle_rack(printer_config);
 }
 
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config)
