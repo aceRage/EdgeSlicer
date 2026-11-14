@@ -124,6 +124,7 @@ add_executable(${_TEST_NAME}_tests
     bambu_fans_tests.cpp
     bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
+    send_timelapse_gate_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp
     ams_dual_layout_tests.cpp

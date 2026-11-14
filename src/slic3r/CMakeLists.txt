@@ -812,6 +812,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Selection.hpp
     GUI/SelectMachine.cpp
     GUI/SelectMachine.hpp
+    GUI/SendTimelapseGate.cpp
+    GUI/SendTimelapseGate.hpp
     GUI/SelectMachinePop.cpp
     GUI/SelectMachinePop.hpp
     GUI/SendMultiMachinePage.cpp

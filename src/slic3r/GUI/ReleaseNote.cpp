@@ -2452,7 +2452,7 @@ void InputIpAddressDialog::on_text(wxCommandEvent &evt)
     for (char c : str_access_code) {
         if (!(('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'))) {
             invalid_access_code = false;
-            return;
+            break; // the button update below still runs: the buttons go off
         }
     }
 

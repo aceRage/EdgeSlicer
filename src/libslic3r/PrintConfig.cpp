@@ -1004,13 +1004,7 @@ void PrintConfigDef::init_common_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.0));
 
-    // Options used by physical printers
-
-    def = this->add("preset_names", coStrings);
-    def->label = L("Printer preset names");
-    //def->tooltip = L("Names of presets related to the physical printer.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionStrings());
+    // Options used by physical printers ("preset_names" is registered with them below)
 
     def = this->add("bbl_use_printhost", coBool);
     def->label = L("Use 3rd-party print host");
@@ -3763,14 +3757,6 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("1000 (unlimited)"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(20, false));
-
-    def = this->add("outer_wall_acceleration", coFloats);
-    def->label = L("Outer wall");
-    def->tooltip = L("Acceleration of outer walls.");
-    def->sidetext = u8"mm/s²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 10000 });
 
     def = this->add("inner_wall_acceleration", coFloats);
     def->label = L("Inner wall");
@@ -7202,22 +7188,6 @@ void PrintConfigDef::init_fff_params()
     def->max = 5;
     def->set_default_value(new ConfigOptionFloats { 0.4 });
 
-    def             = this->add("retract_lift_above", coFloats);
-    def->label      = L("Z-hop lower boundary");
-    def->tooltip    = L("Z-hop will only come into effect when Z is above this value and is below the parameter: \"Z-hop upper boundary\".");
-    def->sidetext   = "mm";	// milimeters, don't need translation
-    def->mode       = comAdvanced;
-    def->min        = 0;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
-    def             = this->add("retract_lift_below", coFloats);
-    def->label      = L("Z-hop upper boundary");
-    def->tooltip    = L("If this value is positive, Z-hop will only come into effect when Z is above the parameter: \"Z-hop lower boundary\" and is below this value.");
-    def->sidetext   = "mm";	// milimeters, don't need translation
-    def->mode       = comAdvanced;
-    def->min        = 0;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
     def = this->add("z_hop_types", coEnums);
     def->label = L("Z-hop type");
     def->tooltip = L("Type of Z-hop.");
@@ -7252,6 +7222,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("If you set this to a positive value, Z lift will only take place above the specified absolute Z.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
+    def->min = 0; // from the earlier, removed registration of this key, which this one overrode otherwise
     def->set_default_value(new ConfigOptionFloats{0.});
 
     def = this->add("retract_lift_below", coFloats);
@@ -7259,6 +7230,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("If you set this to a positive value, Z lift will only take place below the specified absolute Z.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
+    def->min = 0; // from the earlier, removed registration of this key, which this one overrode otherwise
     def->set_default_value(new ConfigOptionFloats{0.});
 
     def = this->add("retract_lift_enforce", coEnums);

@@ -599,6 +599,43 @@ TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option 
     CHECK(duplicates.empty());
 }
 
+// The same key registered twice in ONE ConfigDef: ConfigDef::add asserts on it, so a Debug build
+// stopped at startup ("preset_names", then "outer_wall_acceleration", "retract_lift_above" and
+// "retract_lift_below" were each added twice in PrintConfigDef). A Release build skips the assert;
+// there each add() takes a new serialization ordinal for the same map entry, so
+// by_serialization_key_ordinal holds one more entry than options per duplicate. The second
+// registration's values were the ones in force, and stay so.
+TEST_CASE("No ConfigDef registers the same option key twice in itself", "[Config][ConfigDefs]")
+{
+    struct Source { const char *name; const ConfigDef *def; };
+    const Source sources[] = {
+        { "print_config_def",         &print_config_def },
+        { "cli_actions_config_def",   &cli_actions_config_def },
+        { "cli_transform_config_def", &cli_transform_config_def },
+        { "cli_misc_config_def",      &cli_misc_config_def },
+    };
+    for (const Source &src : sources) {
+        INFO(src.name);
+        CHECK(src.def->by_serialization_key_ordinal.size() == src.def->options.size());
+    }
+    const ConfigOptionDef *def = print_config_def.get("preset_names");
+    REQUIRE(def != nullptr);
+    CHECK(def->mode == comAdvanced);
+    CHECK(def->tooltip == "Names of presets related to the physical printer.");
+
+    def = print_config_def.get("outer_wall_acceleration");
+    REQUIRE(def != nullptr);
+    CHECK(def->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{500.});
+    CHECK(def->min == 0.);
+    for (const char *key : {"retract_lift_above", "retract_lift_below"}) {
+        INFO(key);
+        def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->label.rfind("Only lift Z", 0) == 0);
+        CHECK(def->min == 0.);
+    }
+}
+
 // CLI --uptodate_settings / --downward_check (Snapmaker_Orca.cpp) call
 // ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits. opt_float()
 // then dereferences a null option<>() when printable_height lives only on the parent.
