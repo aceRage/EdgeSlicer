@@ -1027,13 +1027,13 @@ PresetBundle &h3c_bundle(const std::vector<std::string> &rack_override)
 TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chosen one sets the 0.8's layer height", "[NozzleProcess][NozzleRackSlots][H3C][PresetBundle]")
 {
     using Kind = PresetBundle::NozzleToolProcessKind;
-    SECTION("the stock rack (nine 0.4): one tool T1 that follows the plate, nothing reaches the slicing config")
+    SECTION("the stock rack (nine 0.4): T1 and the TPU285 slot follow the plate, nothing reaches the slicing config")
     {
         PresetBundle &b = h3c_bundle({});
-        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0 });
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1 }); // slot 8 (TPU285) is a tool of its own
         // Owner report 2026-11-14: the per-nozzle process system is on for the H3C whatever its rack holds.
         CHECK(supports_nozzle_processes(b.printer_config_with_project_sizes()));
-        CHECK(b.nozzle_tool_count() == 1);
+        CHECK(b.nozzle_tool_count() == 2);
         CHECK(b.nozzle_tool_ref(0).id == "T1");
         CHECK(b.nozzle_tool_process_info(0).kind == Kind::FollowsPlate);
         CHECK_FALSE(b.nozzle_process_choices_set());
