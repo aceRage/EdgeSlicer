@@ -136,6 +136,7 @@ add_executable(${_TEST_NAME}_tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
     theme_live_tests.cpp
     bambu_send_diagnosis_tests.cpp
+    ams_match_tests.cpp
     win_firewall_tests.cpp
     bambu_setup_notice_tests.cpp
     saved_printers_tests.cpp

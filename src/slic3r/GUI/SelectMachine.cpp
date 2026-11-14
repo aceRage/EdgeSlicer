@@ -2205,9 +2205,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2271,9 +2272,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 

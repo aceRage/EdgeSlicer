@@ -9,6 +9,7 @@
 #include "ChamberLights.hpp"
 #include "BambuSendDiagnosis.hpp"
 #include "BambuNetInfo.hpp"
+#include "AmsMatch.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -888,15 +889,6 @@ bool MachineObject::is_support_ams_mapping()
     return true;
 }
 
-static float calc_color_distance(wxColour c1, wxColour c2)
-{
-    float lab[2][3];
-    RGB2Lab(c1.Red(), c1.Green(), c1.Blue(), &lab[0][0], &lab[0][1], &lab[0][2]);
-    RGB2Lab(c2.Red(), c2.Green(), c2.Blue(), &lab[1][0], &lab[1][1], &lab[1][2]);
-
-    return DeltaE76(lab[0][0], lab[0][1], lab[0][2], lab[1][0], lab[1][1], lab[1][2]);
-}
-
 void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     ams_colors.clear();
     ams_colors.reserve(amsList.size());
@@ -978,10 +970,8 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
             if (ams->second->is_rack() && !rack_slot_bound(ams_id, tray_id))
                 continue; // no rack nozzle is fed from this slot now
             // skip exclude id
-            for (int i = 0; i < exclude_id.size(); i++) {
-                if (tray_index == exclude_id[i])
-                    continue;
-            }
+            if (GUI::AmsMatch::excluded(tray_index, exclude_id))
+                continue;
             // push
             if (tray->second->is_tray_info_ready()) {
                 FilamentInfo info;
@@ -1115,8 +1105,10 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         return 1;
     }
 
+    // The nearest-colour pass (AmsMatch.cpp): the distance of every filament to every tray, then
+    // the closest pairs of the same type, each tray once.
     char buffer[256];
-    std::vector<std::vector<DisValue>> distance_map;
+    const std::vector<std::vector<GUI::AmsMatch::Distance>> distance_map = GUI::AmsMatch::distances(filaments, tray_filaments);
 
     // print title
     ::sprintf(buffer, "F(id)");
@@ -1126,105 +1118,20 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
         line += std::string(buffer);
     }
     BOOST_LOG_TRIVIAL(info) << "ams_mapping_distance:" << line;
-
     for (int i = 0; i < filaments.size(); i++) {
-        std::vector<DisValue> rol;
         ::sprintf(buffer, "F(%02d)", filaments[i].id+1);
         line = std::string(buffer);
-        for (auto tray = tray_filaments.begin(); tray != tray_filaments.end(); tray++) {
-            DisValue val;
-            val.tray_id = tray->second.id;
-            wxColour c = wxColour(filaments[i].color);
-            wxColour tray_c = AmsTray::decode_color(tray->second.color);
-            val.distance = calc_color_distance(c, tray_c);
-            if (filaments[i].type != tray->second.type) {
-                val.distance = 999999;
-                val.is_type_match = false;
-            } else {
-                if (c.Alpha() != tray_c.Alpha())
-                    val.distance = 999999;
-                val.is_type_match = true;
-            }
+        for (const GUI::AmsMatch::Distance& val : distance_map[i]) {
             ::sprintf(buffer, "  %6.0f", val.distance);
             line += std::string(buffer);
-            rol.push_back(val);
         }
         BOOST_LOG_TRIVIAL(info) << "ams_mapping_distance:" << line;
-        distance_map.push_back(rol);
     }
 
-    // mapping algorithm
-    for (int i = 0; i < filaments.size(); i++) {
-        FilamentInfo info;
-        info.id = filaments[i].id;
-        info.tray_id = -1;
-        result.push_back(info);
-    }
-
-    std::set<int> picked_src;
-    std::set<int> picked_tar;
-    for (int k = 0; k < distance_map.size(); k++) {
-        float min_val = INT_MAX;
-        int picked_src_idx = -1;
-        int picked_tar_idx = -1;
-        for (int i = 0; i < distance_map.size(); i++) {
-            if (picked_src.find(i) != picked_src.end())
-                continue;
-            for (int j = 0; j < distance_map[i].size(); j++) {
-                if (picked_tar.find(j) != picked_tar.end()){
-                    if (distance_map[i][j].is_same_color
-                        && distance_map[i][j].is_type_match
-                        && distance_map[i][j].distance < (float)0.0001) {
-                        min_val = distance_map[i][j].distance;
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                    continue;
-                }
-
-                if (distance_map[i][j].is_same_color
-                    && distance_map[i][j].is_type_match) {
-                    if (min_val > distance_map[i][j].distance) {
-
-                        min_val = distance_map[i][j].distance;
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                    else if (min_val == distance_map[i][j].distance&& filaments[picked_src_idx].filament_id!= tray_filaments[picked_tar_idx].filament_id && filaments[i].filament_id == tray_filaments[j].filament_id) {
-
-                        picked_src_idx = i;
-                        picked_tar_idx = j;
-                    }
-                }
-            }
-        }
-        if (picked_src_idx >= 0 && picked_tar_idx >= 0) {
-            auto tray = tray_filaments.find(distance_map[k][picked_tar_idx].tray_id);
-            if (tray != tray_filaments.end()) {
-                result[picked_src_idx].tray_id  = tray->first;
-                result[picked_src_idx].color    = tray->second.color;
-                result[picked_src_idx].type     = tray->second.type;
-                result[picked_src_idx].distance = tray->second.distance;
-                result[picked_src_idx].filament_id = tray->second.filament_id;
-                result[picked_src_idx].ctype = tray->second.ctype;
-                result[picked_src_idx].colors = tray->second.colors;
-
-
-                /*for new ams mapping*/
-                result[picked_src_idx].ams_id = tray->second.ams_id;
-                result[picked_src_idx].slot_id = tray->second.slot_id;
-            }
-            else {
-                FilamentInfo info;
-                info.tray_id = -1;
-            }
-            ::sprintf(buffer, "ams_mapping, picked F(%02d) AMS(%02d), distance=%6.0f", picked_src_idx+1, picked_tar_idx+1,
-                distance_map[picked_src_idx][picked_tar_idx].distance);
-            BOOST_LOG_TRIVIAL(info) << std::string(buffer);
-            picked_src.insert(picked_src_idx);
-            picked_tar.insert(picked_tar_idx);
-        }
-    }
+    result = GUI::AmsMatch::nearest_colour(filaments, tray_filaments, distance_map);
+    for (const FilamentInfo& r : result)
+        if (r.tray_id >= 0)
+            BOOST_LOG_TRIVIAL(info) << "ams_mapping, picked F(" << r.id + 1 << ") tray " << r.tray_id << ", distance=" << r.distance;
 
     std::vector<FilamentInfo> cache_map_result = result;
 
@@ -1274,11 +1181,7 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
     // try to match some color
     reset_mapping_result(result);
     result = cache_map_result;
-    for (auto it = result.begin(); it != result.end(); it++) {
-        if (it->distance >= 6000) {
-            it->tray_id = -1;
-        }
-    }
+    GUI::AmsMatch::drop_far_picks(result);
 
     return 0;
 }
@@ -9008,59 +8911,13 @@ void DeviceManager::check_filaments_in_blacklist(std::string tag_vendor, std::st
         {"CF/GF: hard and brittle", _L("CF/GF filaments are hard and brittle, it's easy to break or get stuck in AMS, please use with caution.")}
     };
 
-    in_blacklist = false;
-
-    if (filaments_blacklist.contains("blacklist")) {
-        for (auto prohibited_filament : filaments_blacklist["blacklist"]) {
-
-            std::string vendor;
-            std::string type;
-            std::string action;
-            std::string description;
-
-            if (prohibited_filament.contains("vendor") &&
-                prohibited_filament.contains("type") &&
-                prohibited_filament.contains("action") &&
-                prohibited_filament.contains("description"))
-            {
-                vendor = prohibited_filament["vendor"].get<std::string>();
-                type = prohibited_filament["type"].get<std::string>();
-                if (GUI::wxGetApp().app_config->get("skip_ams_blacklist_check") == "true") {
-                    action = "warning";
-                } else {
-                    action = prohibited_filament["action"].get<std::string>();
-                }
-                description = prohibited_filament["description"].get<std::string>();
-
-                description = blacklist_prompt[description].ToUTF8().data();
-            }
-            else {
-                return;
-            }
-
-            std::transform(vendor.begin(), vendor.end(), vendor.begin(), ::tolower);
-            std::transform(tag_vendor.begin(), tag_vendor.end(), tag_vendor.begin(), ::tolower);
-            std::transform(tag_type.begin(), tag_type.end(), tag_type.begin(), ::tolower);
-            std::transform(type.begin(), type.end(), type.begin(), ::tolower);
-
-            //third party
-            if (vendor == "third party") {
-                if ("bambulab" != vendor && tag_type == type) {
-                    in_blacklist = true;
-                    ac = action;
-                    info = description;
-                    return;
-                }
-            }
-            else {
-                if (vendor == tag_vendor && tag_type == type) {
-                    in_blacklist = true;
-                    ac = action;
-                    info = description;
-                    return;
-                }
-            }
-        }
+    // The decision is AmsMatch::check_blacklist; here only its description is put in words.
+    const bool skip_check = GUI::wxGetApp().app_config->get("skip_ams_blacklist_check") == "true";
+    const GUI::AmsMatch::BlacklistHit hit = GUI::AmsMatch::check_blacklist(filaments_blacklist, tag_vendor, tag_type, skip_check);
+    in_blacklist = hit.in_blacklist;
+    if (hit.in_blacklist) {
+        ac   = hit.action;
+        info = blacklist_prompt[hit.description].ToUTF8().data();
     }
 }
 
