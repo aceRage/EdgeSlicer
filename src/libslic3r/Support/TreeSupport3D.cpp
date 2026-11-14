@@ -4175,8 +4175,10 @@ void organic_draw_branches(
                              // Only propagate until the rest area is smaller than this threshold.
                             //double                          support_area_min = 0.1 * support_area_min_radius;
                             for (LayerIndex layer_idx = layer_begin - 1; layer_idx >= layer_bottommost; -- layer_idx) {
-                                LayerIndex collision_layer = (layer_idx == layer_begin - 1) ? layer_begin : layer_idx;
-                                Polygons collision = volumes.getCollision(0, collision_layer, false);
+                                // Every carried layer is printed (the bottom contact seed is put below them, see
+                                // below), so each is cut by its own collision, which holds the part within the
+                                // bottom Z gap under it.
+                                Polygons collision = volumes.getCollision(0, layer_idx, false);
                                 rest_support = diff_clipped(rest_support.empty() ? slice_front_contact : rest_support, collision, ApplySafetyOffset::Yes);
                                 remove_small(rest_support, tiny_area);
                                 double rest_support_area = area(rest_support);
@@ -4237,6 +4239,15 @@ void organic_draw_branches(
                             auto it_dst = slices.begin();
                             for (auto it_src = bottom_extra_slices.rbegin(); it_src != bottom_extra_slices.rend(); ++ it_src)
                                 *it_dst ++ = std::move(it_src->polygons);
+                            // Organic bottom contacts are not printed: they seed the bottom interface layers above
+                            // them (generate_interface_layers(), generate_support_toolpaths()) and are taken out of
+                            // the base of their own layer. Put the seed in the gap, one layer below the foot, so the
+                            // foot is printed at the bottom Z gap, as the lowest bottom interface layer. On the bed
+                            // there is no layer below, the contact stays on the foot's layer.
+                            if (! bottom_contacts.empty() && layer_begin > 0) {
+                                -- layer_begin;
+                                slices.insert(slices.begin(), Polygons{});
+                            }
                         }
 
                         // ORCA: retain bottom contacts even when no placeable areas intersect.
