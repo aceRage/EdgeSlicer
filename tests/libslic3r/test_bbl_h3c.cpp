@@ -430,11 +430,8 @@ TEST_CASE("H3C: a change into a hotend that already holds the filament flushes n
     const std::string gcode = Test::gcode(print);
 
     size_t changes = 0, flushes = 0;
-    for (size_t pos = gcode.find("
-M620.10 A1 "); pos != std::string::npos; pos = gcode.find("
-M620.10 A1 ", pos + 1)) {
-        const std::string line = gcode.substr(pos + 1, gcode.find('
-', pos + 1) - pos - 1);
+    for (size_t pos = gcode.find("\nM620.10 A1 "); pos != std::string::npos; pos = gcode.find("\nM620.10 A1 ", pos + 1)) {
+        const std::string line = gcode.substr(pos + 1, gcode.find('\n', pos + 1) - pos - 1);
         ++changes;
         if (line.find(" L0 ") == std::string::npos) {
             ++flushes;
@@ -444,6 +441,5 @@ M620.10 A1 ", pos + 1)) {
     INFO("filament changes: " << changes);
     REQUIRE(changes > 5); // both cubes on every layer
     CHECK(flushes == 0);
-    CHECK(gcode.find("
-SYNC T5") == std::string::npos);
+    CHECK(gcode.find("\nSYNC T5") == std::string::npos);
 }
