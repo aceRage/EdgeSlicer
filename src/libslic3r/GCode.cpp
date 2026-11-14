@@ -4782,6 +4782,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_pre_cooling_markers = PreCooling::pre_cooling_active(print);
     if (m_pre_cooling_markers)
         file.write_format(";%s\n", PreCooling::MachineStartGCodeEndMarker);
+    // EDGE (Bambu Studio "M73 E"): from here to the machine end G-code the processor records the filament
+    // changes, and the post-process writes the remaining filament change count after each one (the printer
+    // screen's counter). Bambu printers only, so no other printer's G-code changes.
+    if (is_bbl_printers)
+        m_processor.end_machine_start_gcode();
 
     // BBS: gcode writer doesn't know where the real position of extruder is after inserting custom gcode
     m_writer.set_current_position_clear(false);
