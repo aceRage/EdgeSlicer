@@ -1280,6 +1280,18 @@ if (EDGE_PYTHON_PLUGINS)
         GUI/PluginSort.hpp
         plugin/pluginTypes/script/ScriptPluginCapability.cpp
         plugin/pluginTypes/script/ScriptPluginCapabilityTrampoline.hpp
+        plugin/ipc/PluginIpcProtocol.hpp
+        plugin/ipc/PluginIpcProtocol.cpp
+        plugin/ipc/PluginIpcChannel.hpp
+        plugin/ipc/PluginIpcChannel.cpp
+        plugin/ipc/PluginHostProcess.hpp
+        plugin/ipc/PluginHostProcess.cpp
+        plugin/ipc/PluginHostRpc.hpp
+        plugin/ipc/PluginHostRpc.cpp
+        plugin/ipc/PluginHostClient.hpp
+        plugin/ipc/PluginHostClient.cpp
+        plugin/ipc/PluginHostChild.hpp
+        plugin/ipc/PluginHostChild.cpp
         Utils/BoostProcessCompat.hpp
         GUI/HomePlugins.cpp
         GUI/HomePlugins.hpp
@@ -1359,6 +1371,12 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/host/PluginHostSlicing.cpp
     plugin/pluginTypes/script/ScriptPluginCapability.cpp
     plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.cpp
+    plugin/ipc/PluginIpcProtocol.cpp
+    plugin/ipc/PluginIpcChannel.cpp
+    plugin/ipc/PluginHostProcess.cpp
+    plugin/ipc/PluginHostRpc.cpp
+    plugin/ipc/PluginHostClient.cpp
+    plugin/ipc/PluginHostChild.cpp
     GUI/PluginWarnings.cpp
     GUI/PluginProgressDialog.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
@@ -1500,6 +1518,22 @@ target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo mini
 if (EDGE_PYTHON_PLUGINS)
     target_link_libraries(libslic3r_gui pybind11::embed)
     target_compile_definitions(libslic3r_gui PUBLIC EDGE_PYTHON_PLUGINS)
+
+    add_executable(edge-plugin-host plugin/ipc/PluginHostMain.cpp)
+    target_include_directories(edge-plugin-host PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+        ${wxWidgets_INCLUDE_DIRS})
+    target_compile_definitions(edge-plugin-host PRIVATE ${wxWidgets_DEFINITIONS} EDGE_PYTHON_PLUGINS)
+    target_link_libraries(edge-plugin-host libslic3r_gui libslic3r pybind11::embed)
+    if (APPLE)
+        target_link_options(edge-plugin-host PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_property(TARGET edge-plugin-host APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+    endif ()
+    if (MSVC)
+        target_link_libraries(edge-plugin-host Setupapi.lib)
+    endif ()
 endif ()
 
 if (MSVC)

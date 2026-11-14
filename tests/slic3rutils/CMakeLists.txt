@@ -27,6 +27,7 @@ add_executable(${_TEST_NAME}_tests
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_capabilities_in_use.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_config.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_slicing_pipeline_phase6.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ipc.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
@@ -207,6 +208,13 @@ if (EDGE_PYTHON_PLUGINS)
     elseif (UNIX AND NOT WIN32)
         set_property(TARGET ${_TEST_NAME}_tests APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
     endif ()
+    add_dependencies(${_TEST_NAME}_tests edge-plugin-host)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host for plugin tests"
+        VERBATIM)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"

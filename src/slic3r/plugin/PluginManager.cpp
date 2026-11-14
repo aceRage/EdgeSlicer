@@ -19,6 +19,7 @@
 #include "PyPluginTrampoline.hpp"
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
+#include "ipc/PluginHostClient.hpp"
 
 #include "libslic3r/Semver.hpp"
 #include "pybind11/pytypes.h"
@@ -94,13 +95,14 @@ PluginManager& PluginManager::instance()
     // next, so ~PluginManager can still drain it during its own shutdown().
     PythonInterpreter::instance();
     ScriptAsyncRuntime::instance();
+    plugin_ipc::PluginHostClient::instance();
     static PluginManager inst;
     return inst;
 }
 
 PluginManager::~PluginManager() { shutdown(); }
 
-bool PluginManager::initialize()
+bool PluginManager::initialize(bool install_hooks)
 {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -135,8 +137,12 @@ bool PluginManager::initialize()
     m_config.load();
 
     // Install the libslic3r hooks (lifecycle, capability resolver, slicing pipeline, G-code post-process).
-    // Uninstalled in shutdown() before the interpreter finalizes.
-    plugin_hooks::install();
+    // Uninstalled in shutdown() before the interpreter finalizes. The out-of-process helper
+    // skips them: it never slices.
+    if (install_hooks) {
+        plugin_hooks::install();
+        m_hooks_installed = true;
+    }
 
     // Persist auto-load / capability state to each plugin's .install_state.json sidecar.
     // On load: write enabled=true plus the current capability flags. On unload: flip enabled=false.
@@ -179,7 +185,12 @@ void PluginManager::shutdown()
     // Detach the libslic3r hooks first so nothing dispatches into Python while (or after) plugins
     // unload. The lifecycle-event hook also drains callbacks already in progress before returning;
     // the remaining hook seams retain their existing shutdown requirements.
-    plugin_hooks::uninstall();
+    if (m_hooks_installed) {
+        plugin_hooks::uninstall();
+        m_hooks_installed = false;
+    }
+
+    plugin_ipc::PluginHostClient::instance().shutdown();
 
     // Reject new plugin loads before we drain.
     set_shutting_down();
@@ -822,8 +833,10 @@ void PluginManager::cancel_and_wait_for_capabilities(
     }
 
     for (const auto& capability : capabilities) {
-        if (capability)
+        if (capability) {
             ScriptAsyncRuntime::instance().cancel_plugin(capability->audit_plugin_key());
+            plugin_ipc::PluginHostClient::instance().cancel(capability->audit_plugin_key());
+        }
     }
 
     // Script rows are bounded only by their own worker: a cancelled or stalled invocation of another
@@ -840,7 +853,10 @@ void PluginManager::cancel_and_wait_for_capabilities(
         // worker must also be gone: never unload the module while any Script thread is still live,
         // until the wait bound expires.
         const bool invocation_active = std::any_of(capabilities.begin(), capabilities.end(), [](const auto& capability) {
-            return capability != nullptr && ScriptAsyncRuntime::instance().has_active_run(capability.get());
+            if (capability == nullptr)
+                return false;
+            return ScriptAsyncRuntime::instance().has_active_run(capability.get()) ||
+                   plugin_ipc::PluginHostClient::instance().has_active_run(capability->audit_plugin_key());
         });
         if (all_released && !invocation_active)
             return;
@@ -2731,7 +2747,17 @@ PluginManager::ScriptLaunchResult PluginManager::launch_script_capability(const 
     // a synchronous `def execute` — is handed to the runtime, which runs it on its own worker and
     // reports the outcome through the completion callback. Nothing executes before returning here,
     // so the UI thread is never blocked by a Script invocation.
-    const bool started = ScriptAsyncRuntime::instance().start(
+    const bool use_host = plugin_ipc::PluginHostClient::should_use_host();
+    const bool started  = use_host
+        ? plugin_ipc::PluginHostClient::instance().start_script(
+              plugin_key, capability_name,
+              [this, plugin_key, on_done](const ScriptCompletion& completion) {
+                  if (!completion.cancelled && !completion.error.empty())
+                      set_plugin_error(plugin_key, completion.error);
+                  if (on_done)
+                      on_done(completion);
+              })
+        : ScriptAsyncRuntime::instance().start(
         plugin_key, capability_name, cap,
         [this, plugin_key, on_done](const ScriptCompletion& completion) {
             // A cancellation requested by cancel_plugin() (unload/shutdown) is expected termination:

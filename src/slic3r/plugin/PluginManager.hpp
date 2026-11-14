@@ -154,7 +154,8 @@ public:
     ~PluginManager();
 
     // Initialize the plugin system, eagerly starting the embedded Python interpreter on the main thread.
-    bool initialize();
+    // install_hooks is false inside edge-plugin-host: the child must not install live Print hooks.
+    bool initialize(bool install_hooks = true);
 
     // Stop discovery and unload Python plugin objects before Python finalizes.
     void shutdown();
@@ -394,6 +395,7 @@ private:
 
     std::string m_cloud_user_id;
     std::atomic<bool> m_shutting_down{false};
+    bool              m_hooks_installed{false};
 };
 
 // ── Async Script execution ──────────────────────────────────────────────────────────────────
