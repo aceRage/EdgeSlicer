@@ -4385,7 +4385,8 @@ private:
 void GCodeProcessor::record_filament_selection(const GCodeReader::GCodeLine &line)
 {
     const std::string &raw   = line.raw();
-    const char        *begin = GCodeReader::skip_whitespaces(raw.c_str());
+    auto skip_ws = [](const char *p) { while (*p == ' ' || *p == '\t') ++p; return p; };
+    const char        *begin = skip_ws(raw.c_str());
     const char        *end   = raw.c_str() + raw.size();
     const char        *num   = nullptr;
     if (*begin == 'T')
@@ -4400,7 +4401,7 @@ void GCodeProcessor::record_filament_selection(const GCodeReader::GCodeLine &lin
     }
     if (num == nullptr)
         return;
-    num = GCodeReader::skip_whitespaces(num);
+    num = skip_ws(num);
     int        filament = -1;
     const auto res      = std::from_chars(num, end, filament);
     if (res.ec != std::errc() || filament < 0 || filament >= 255)
