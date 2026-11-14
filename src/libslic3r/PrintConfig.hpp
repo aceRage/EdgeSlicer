@@ -2156,6 +2156,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
+    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (read on H3C only)
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2166,6 +2167,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    ((ConfigOptionBools,               filament_pre_heating_enabled))  // BBS 2.9.1 H3C: pre-heat this filament's hotend
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
     // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.
     ((ConfigOptionFloatsNullable,      filament_retract_length_nc))
@@ -2383,12 +2385,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              grab_length))
     ((ConfigOptionFloats,              hotend_cooling_rate))
     ((ConfigOptionFloats,              hotend_heating_rate))
+    ((ConfigOptionFloats,              hotend_cooling_rate_on_rack)) // BBS 2.9.1 H3C: idle hotend in the rack
     ((ConfigOptionBool,                enable_pre_heating))  // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     ((ConfigOptionInts,                nozzle_flush_dataset))
     ((ConfigOptionStrings,             filament_extruder_variant))
     ((ConfigOptionInts,                filament_self_index))
     ((ConfigOptionBool,                enable_filament_dynamic_map))
     ((ConfigOptionBool,                has_filament_switcher))
+    ((ConfigOptionBool,                handle_hotend_as_extruder)) // BBS 2.9.1 H3C: rack hotends keep their filament
     ((ConfigOptionEnum<PrimeVolumeMode>, prime_volume_mode))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
@@ -2883,6 +2887,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 // machine has a swappable nozzle rack (H2C: extruder_max_nozzle_count = 1,6). H2D is 1,1 and
 // P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
 bool has_nozzle_rack(const PrintConfig &config);
+
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament, so
+// a change to a hotend that already holds the next filament is a hotend swap, not an unload + load,
+// and needs no flush. True when the printer sets the key, or for a single extruder with a rack
+// (extruder_max_nozzle_count > 1), which also covers projects saved before the key was read.
+bool hotend_as_extruder(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 1): map a 1-based FILAMENT index to the 0-based PHYSICAL extruder
 // (nozzle) that filament prints through. nozzle_diameter, min_layer_height / max_layer_height and

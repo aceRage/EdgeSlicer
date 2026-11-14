@@ -1334,7 +1334,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "fins_extrude_safe_temp", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
@@ -1372,7 +1372,7 @@ static std::vector<std::string> s_Preset_filament_options {
     // BBS (H2C rack): hotend-change retraction (M620.11 O1 T<len>); same reason as above.
     "filament_retract_length_nc",
     // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
-    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
+    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta", "filament_pre_heating_enabled",
     // BBS: flush temperature / speed and the pre-tower cooling of the BBL change_filament templates
     // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
     // without them here the loader dropped them and the G-code always ran on the defaults.
@@ -1399,8 +1399,9 @@ static std::vector<std::string> s_Preset_printer_options {
     "extruder_ams_count", "extruder_nozzle_count", "extruder_max_nozzle_count", "printer_extruder_id",
     "extruder_nozzle_stats", "machine_switch_extruder_time", "group_algo_with_time", // Ultra (dual-nozzle) grouping inputs
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
-    "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
+    "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "hotend_cooling_rate_on_rack", "nozzle_flush_dataset",
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
+    "handle_hotend_as_extruder", // BBS 2.9.1 H3C: rack hotends keep their filament (estimate, flush)
     "tool_slot_model", "support_filament_nozzle_mapping", "extruder_rack_nozzle_diameter", // per-nozzle process P4
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",

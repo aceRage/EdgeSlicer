@@ -680,6 +680,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             float filament_unload_times;
             //Orca:  time for tool change
             float machine_tool_change_time;
+            // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): a change to a rack hotend that already
+            // holds the next filament costs machine_switch_extruder_time instead of unload + load.
+            bool  hotend_as_extruder { false };
+            float extruder_change_time { 0.f };
             // Ultra: fixed prepare seconds added to the total estimate
             float machine_prepare_time { 0.f };
 
@@ -909,6 +913,11 @@ inline bool is_bbl_special_tool_command(int tool_number)
         };
         std::vector<BookedTime> m_booked_times;
         bool                    m_booking_tool_change{ false };
+        // hotend_as_extruder: the hotend the next T line goes to (from "; NOZZLE_CHANGE_START ... NN<n>",
+        // -1 = none seen: the filament id is used) and the filament each hotend holds.
+        int                     m_next_hotend_id{ -1 };
+        int                     m_current_hotend_id{ -1 };
+        std::map<int, int>      m_hotend_filament;
         // Orca (403292cb63): the machine end G-code's timed M400 waits (air filtration, timelapse picture,
         // sound) are post-print operations, not part of the print time. Set when the
         // MACHINE_END_GCODE_START marker is parsed; process_M400() then skips the S / P delays.

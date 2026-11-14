@@ -389,3 +389,106 @@ TEST_CASE("H3C spiral lifts are G3 arcs with arc fitting off, as in Bambu Studio
     const std::string other = slice_cube(cfg, false);
     CHECK(count(other, "\nG3 Z") + count(other, "\nG2 Z") == 0);
 }
+
+// Owner 2026-11-13: an 8-filament H3C project estimated 5d6h against Bambu Studio 2.9.1's 2d12h52m. Every H3C rack
+// hotend keeps its own filament (Bambu Studio handle_hotend_as_extruder), so a change into the hotend that already
+// holds the next filament is a ~4 s hotend swap with no flush. Edge charged unload + load (43 s) per change and asked
+// the firmware for the full filament-to-filament flush (M620.10 L156 / SYNC T10) every time.
+TEST_CASE("H3C: a change into a hotend that already holds the filament flushes nothing", "[BblH3C][HotendAsExtruder]")
+{
+    PresetBundle &b = h3c_bundle();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H3C", true));
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1919E0" });
+    b.filament_presets = { "Bambu PLA Basic @BBL H3C", "Bambu PLA Basic @BBL H3C" };
+    DynamicPrintConfig cfg = b.full_config_secure();
+    REQUIRE(cfg.opt_bool("handle_hotend_as_extruder")); // read from the H3C machine preset
+    cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+    cfg.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({ 0., 300., 300., 0. }));
+    {
+        PrintConfig pc;
+        pc.apply(cfg, true);
+        CHECK(hotend_as_extruder(pc));
+    }
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(0.5f, 0.5f, 0.25f));
+        object->add_volume(std::move(cube));
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(150. + 30. * i, 160., 0.));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", i + 1);
+    }
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    // The change_filament template writes "M620.10 A1 ... L<flush_length> ..."; the start G-code's M620.10 A1 has no L.
+    size_t      changes = 0, flushes = 0;
+    std::string flushed;
+    for (size_t pos = gcode.find("\nM620.10 A1 "); pos != std::string::npos; pos = gcode.find("\nM620.10 A1 ", pos + 1)) {
+        const std::string line = gcode.substr(pos + 1, gcode.find('\n', pos + 1) - pos - 1);
+        if (line.find(" L") == std::string::npos)
+            continue;
+        ++changes;
+        if (line.find(" L0 ") == std::string::npos) {
+            ++flushes;
+            flushed = line;
+        }
+    }
+    INFO("filament changes: " << changes << ", a flushing one: " << flushed);
+    REQUIRE(changes > 5); // both cubes on every layer
+    CHECK(flushes == 0);
+    CHECK(gcode.find("\nSYNC T5") == std::string::npos);
+
+    // Bambu Studio 2.9.1 pre-heats each rack hotend before its next use and cools it while it idles
+    // ("M632 S<f> N R W" / "M104 I<f> S<t> N0 W ;Multi extruder pre heating" / "M633", "M104 I<f> S<t> N0 C ;...pre cooling"),
+    // never inside the change_filament_gcode span, and the tower's nozzle change carries no M632 / M633 of its own.
+    CHECK(cfg.option<ConfigOptionFloats>("filament_prime_volume")->get_at(0) == Approx(30.)); // Bambu PLA Basic @base H3C
+    std::vector<std::string> lines;
+    for (size_t start = 0; start < gcode.size();) {
+        const size_t end = gcode.find('\n', start);
+        lines.emplace_back(gcode.substr(start, (end == std::string::npos ? gcode.size() : end) - start));
+        start = end == std::string::npos ? gcode.size() : end + 1;
+    }
+    size_t pre_heats = 0, pre_cools = 0, inline_m632 = 0, change_spans = 0, inside_span = 0, bad_preheat = 0;
+    bool   in_span = false;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &l = lines[i];
+        if (l == "; FilamentChangeGCodeStart") {
+            in_span = true;
+            ++change_spans;
+        } else if (l == "; FilamentChangeGCodeEnd")
+            in_span = false;
+        else if (l.rfind("M632 S", 0) == 0 && l.find(" M N") != std::string::npos)
+            ++inline_m632;
+        else if (l.rfind("M104 I", 0) == 0 && l.find(" N0 W ;Multi extruder pre heating") != std::string::npos) {
+            ++pre_heats;
+            if (in_span)
+                ++inside_span;
+            if (i == 0 || lines[i - 1].rfind("M632 S", 0) != 0 || lines[i - 1].find(" N R W") == std::string::npos ||
+                i + 1 >= lines.size() || lines[i + 1] != "M633")
+                ++bad_preheat;
+        } else if (l.rfind("M104 I", 0) == 0 && l.find(" N0 C ;Multi extruder pre cooling") != std::string::npos) {
+            ++pre_cools;
+            if (in_span)
+                ++inside_span;
+        }
+    }
+    INFO("pre-heats " << pre_heats << ", pre-cools " << pre_cools << ", change spans " << change_spans);
+    CHECK(gcode.find("\n; MACHINE_START_GCODE_END") != std::string::npos);
+    CHECK(change_spans >= changes);
+    CHECK(pre_heats > 0);
+    CHECK(pre_cools > 0);
+    CHECK(bad_preheat == 0);
+    CHECK(inside_span == 0);
+    CHECK(inline_m632 == 0);
+}

@@ -746,3 +746,71 @@ TEST_CASE("The fixed 260 s G29 time is only for Bambu printers", "[GCodeTiming][
         REQUIRE_THAT(time_of(with_g29, false) - time_of(without_g29, false), WithinAbs(0.0, 1e-3));
     }
 }
+
+// ---- H3C rack: handle_hotend_as_extruder ----
+
+// Owner 2026-11-13: an 8-filament H3C project estimated 5d6h, Bambu Studio 2.9.1 2d12h52m. Every H3C rack hotend
+// keeps its own filament, so Bambu Studio (process_filament_change with handle_hotend_as_extruder) books a change
+// into a hotend that already holds the next filament as the hotend swap only (machine_switch_extruder_time),
+// and unload / load only when the hotend has to take another filament. Edge booked 15 + 28 s on every change.
+TEST_CASE("H3C: a change into a hotend that holds the next filament costs the hotend swap only", "[GCodeTiming][HotendAsExtruder]")
+{
+    auto rack_config = [](int rack_nozzles, bool flag) {
+        FullPrintConfig config = make_config(15.0, 28.0, 0.0);
+        config.nozzle_diameter.values           = {0.4};
+        config.extruder_max_nozzle_count.values = {rack_nozzles};
+        config.machine_switch_extruder_time.value = 4.0;
+        config.handle_hotend_as_extruder.value  = flag;
+        return config;
+    };
+    auto change_time = [](const FullPrintConfig &config, const char *gcode) {
+        GCodeProcessor proc;
+        run_processor(proc, config, gcode);
+        return sum_tool_change_time(proc.get_result());
+    };
+    // T1, T0, T1, T0 with the nozzle-change markers GCode.cpp writes (one hotend per filament).
+    const char *own_hotends =
+        "M83\n"
+        "; FEATURE: Outer wall\n"
+        "G1 X10 Y10 Z0.2 F600\n"
+        "G1 X0 Y0 F6000\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "T1\n"
+        "G1 X50 Y0 E5 F1800\n"
+        "G1 X50 Y50 E5\n"
+        "; NOZZLE_CHANGE_START OF1 NF0 ON1 NN0\n; NOZZLE_CHANGE_END OF1 NF0 ON1 NN0\n"
+        "T0\n"
+        "G1 X0 Y50 E5\n"
+        "G1 X0 Y0 E5\n"
+        "; NOZZLE_CHANGE_START OF0 NF1 ON0 NN1\n; NOZZLE_CHANGE_END OF0 NF1 ON0 NN1\n"
+        "T1\n"
+        "G1 X50 Y0 E5\n"
+        "G1 X50 Y50 E5\n"
+        "; NOZZLE_CHANGE_START OF1 NF0 ON1 NN0\n; NOZZLE_CHANGE_END OF1 NF0 ON1 NN0\n"
+        "T0\n"
+        "G1 X0 Y50 E5\n"
+        "G1 X0 Y0 E5\n";
+
+    SECTION("an H3C-like single extruder with a nine-hotend rack") {
+        // T1: first load of hotend 1 (15). T0: swap (4) + first load of hotend 0 (15). Then swaps only (4 + 4).
+        REQUIRE_THAT(change_time(rack_config(9, false), own_hotends), WithinAbs(15.0 + 19.0 + 4.0 + 4.0, 1e-2));
+        REQUIRE_THAT(change_time(rack_config(9, true), own_hotends), WithinAbs(42.0, 1e-2));
+    }
+    SECTION("without the markers a filament is taken to own its hotend") {
+        std::string plain = own_hotends;
+        for (size_t pos; (pos = plain.find("; NOZZLE_CHANGE_")) != std::string::npos;)
+            plain.erase(pos, plain.find('\n', pos) + 1 - pos);
+        REQUIRE_THAT(change_time(rack_config(9, false), plain.c_str()), WithinAbs(42.0, 1e-2));
+    }
+    SECTION("two filaments sharing one hotend unload and load there, with no swap") {
+        std::string shared = own_hotends;
+        for (const char *from : {"ON0 NN1", "ON1 NN0"})
+            for (size_t pos; (pos = shared.find(from)) != std::string::npos;)
+                shared.replace(pos, 7, "ON0 NN0");
+        // T1 loads (15); each later change unloads the other filament and loads (28 + 15).
+        REQUIRE_THAT(change_time(rack_config(9, false), shared.c_str()), WithinAbs(15.0 + 3 * 43.0, 1e-2));
+    }
+    SECTION("a printer without a rack keeps unload + load on every change") {
+        REQUIRE_THAT(change_time(rack_config(1, false), own_hotends), WithinAbs(15.0 + 3 * 43.0, 1e-2));
+    }
+}
