@@ -326,8 +326,12 @@ public:
         return *this;
     }
 
-	WipeTowerWriter&				 set_z(float z) 
+	WipeTowerWriter&				 set_z(float z)
 		{ m_current_z = z; return *this; }
+
+    // Bambu Studio 2.9.1 LimitFlow: the filament speed (mm/s) extrusions are capped at instead of the filament's
+    // max_e_speed; 0 restores the normal cap.
+    WipeTowerWriter&            set_e_speed_limit(float e_speed) { m_e_speed_limit = e_speed; return *this; }
 
 	WipeTowerWriter& 			 set_extrusion_flow(float flow)
 		{ m_extrusion_flow = flow; return *this; }
@@ -425,7 +429,9 @@ public:
 		if (f != 0.f && f != m_current_feedrate) {
             if (limit_volumetric_flow) {
                 float e_speed = e / (((len == 0.f) ? std::abs(e) : len) / f * 60.f);
-                f /= std::max(1.f, e_speed / m_filpar[m_current_tool].max_e_speed);
+                // Bambu Studio LimitFlow::LimitRammingFlow(NC): the ramming lines are capped by the ramming speed.
+                const float limit = m_e_speed_limit > 0.f ? m_e_speed_limit : m_filpar[m_current_tool].max_e_speed;
+                f /= std::max(1.f, e_speed / limit);
             }
 			m_gcode += set_format_F(f);
         }
@@ -911,6 +917,7 @@ private:
     unsigned int  m_print_accel       = 0;
     unsigned int  m_travel_accel      = 0;
     unsigned int  m_last_acceleration = 0;
+    float         m_e_speed_limit     = 0.f;
 
     // Bambu Studio set_acceleration_impl() (WipeTower.cpp:1532), M204 S for the flavours the Type 1 tower
     // serves; nothing while the prime tower acceleration is off.
@@ -1454,6 +1461,11 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_interface    = TowerInterface::Settings::from_config(config);
     m_use_gap_wall = config.wipe_tower_wall_gap.value;
     m_shared_bed   = TowerInterface::shared_printable_box(config);
+
+    // Bambu Studio 2.9.1 (WipeTower.cpp:1929-1935): the nozzle-change ramming mode and its cooling timing.
+    m_handle_hotend_as_extruder = Slic3r::hotend_as_extruder(config);
+    for (double rate : config.hotend_cooling_rate.values)
+        m_hotend_cooling_rate.push_back(std::isfinite(rate) ? float(rate) : 0.f);
 }
 
 
@@ -1518,6 +1530,57 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].cooling_before_tower = float(filament_cooling_before_tower_at(config, (unsigned int) idx, true));
     m_filpar[idx].reheat_extruder      = m_filpar[idx].physical_extruder >= 0 ? m_filpar[idx].physical_extruder :
                                          config.physical_extruder_map.values.empty() ? 0 : std::max(0, config.physical_extruder_map.values.front());
+
+    // Bambu Studio 2.9.1 (WipeTower.cpp:2078-2135): the nozzle-change ramming of this filament when it leaves its
+    // nozzle. .first is an extruder change, .second a hotend change on one extruder.
+    {
+        FilamentParameters &fp = m_filpar[idx];
+        auto at = [idx](const ConfigOptionFloats &opt) { return opt.values.empty() ? 0.f : float(opt.get_at(idx)); };
+        fp.change_length = { std::max(0.f, at(config.filament_change_length)), std::max(0.f, at(config.filament_change_length_nc)) };
+        // Nullable, per flow variant; nil or -1 means the filament's maximum volumetric speed.
+        auto variant = [&config, idx](const ConfigOptionFloatsNullable &opt, float nil_value) {
+            if (opt.values.empty())
+                return nil_value;
+            size_t i = get_config_idx(config, ConfigFlowDomain::Filament, (unsigned int) idx);
+            if (i >= opt.values.size())
+                i = 0;
+            return opt.is_nil(i) || std::isnan(opt.values[i]) ? nil_value : float(opt.values[i]);
+        };
+        const float area      = fp.filament_area;
+        auto        ram_speed = [&](const ConfigOptionFloatsNullable &opt) {
+            float vol = variant(opt, -1.f);
+            if (is_approx(vol, -1.f) || vol <= 0.f)
+                vol = max_vol_speed;
+            return vol > 0.f && area > 0.f ? vol / area : fp.max_e_speed;
+        };
+        fp.max_e_ramming_speed = { ram_speed(config.filament_ramming_volumetric_speed), ram_speed(config.filament_ramming_volumetric_speed_nc) };
+        fp.ramming_travel_time = { std::max(0.f, variant(config.filament_ramming_travel_time, 0.f)),
+                                   std::max(0.f, variant(config.filament_ramming_travel_time_nc, 0.f)) };
+        fp.idle_travel_cooling_enabled = config.filament_idle_travel_cooling_enabled.values.empty() ? true :
+                                                                                                     config.filament_idle_travel_cooling_enabled.get_at(idx);
+
+        // Pre-cooling during the ramming: only with enable_pre_heating and a target (0 = off).
+        const size_t extruders = std::max<size_t>(1, config.nozzle_diameter.values.size());
+        fp.precool_t             = { std::vector<float>(extruders, 0.f), std::vector<float>(extruders, 0.f) };
+        fp.precool_t_first_layer = fp.precool_t;
+        fp.precool_target_temp   = { 0, 0 };
+        auto int_at = [idx](const ConfigOptionInts &opt) { return opt.values.empty() ? 0 : opt.get_at(idx); };
+        const int targets[2] = { int_at(config.filament_pre_cooling_temperature), int_at(config.filament_pre_cooling_temperature_nc) };
+        for (int nc = 0; nc < 2; ++nc) {
+            if (!config.enable_pre_heating.value || targets[nc] == 0)
+                continue;
+            std::vector<float> &t       = nc == 0 ? fp.precool_t.first : fp.precool_t.second;
+            std::vector<float> &t_first = nc == 0 ? fp.precool_t_first_layer.first : fp.precool_t_first_layer.second;
+            for (size_t e = 0; e < extruders; ++e) {
+                const float rate = e < m_hotend_cooling_rate.size() ? m_hotend_cooling_rate[e] : 0.f;
+                if (rate <= 0.f)
+                    continue;
+                t[e]       = std::max(0.f, float(fp.nozzle_temperature - targets[nc])) / rate;
+                t_first[e] = std::max(0.f, float(fp.nozzle_temperature_initial_layer - targets[nc])) / rate;
+            }
+            (nc == 0 ? fp.precool_target_temp.first : fp.precool_target_temp.second) = targets[nc];
+        }
+    }
 
     // Structure width (Edge, per-nozzle P2): one width for the footprint, the wall, the brim and the sparse
     // fill, so the tower stays one rectangle whatever tool prints it. The forced wipe tower filament's
@@ -1587,6 +1650,24 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
 	else {
 		// Otherwise we are going to Unload only. And m_layer_info would be invalid.
 	}
+
+    // Bambu Studio 2.9.1 tool_change_new() (WipeTower.cpp:3545-3566): a change onto another nozzle starts with the
+    // outgoing filament's nozzle change. On a handle_hotend_as_extruder printer (H3C) a filament with no ramming
+    // length turns its heater off instead, or cools on an idle travel over the purge area, except on the first
+    // layer, which rams (zero lines when the length is zero). The ramming lines take the front of this change's
+    // depth; the purge follows them.
+    NozzleChangeResult nozzle_change_result;
+    if (planned != nullptr && planned->nozzle_change.need_ramming && m_current_tool < m_filpar.size()) {
+        const FilamentParameters &outgoing  = m_filpar[m_current_tool];
+        const float               fc_length = planned->nozzle_change.extruder_change ? outgoing.change_length.first : outgoing.change_length.second;
+        if (m_handle_hotend_as_extruder && fc_length <= EPSILON && !is_first_layer()) {
+            nozzle_change_result = outgoing.idle_travel_cooling_enabled ? idle_travel_cooling(m_current_tool, tool, *planned) :
+                                                                         heater_off_nozzle_change(m_current_tool, tool, *planned);
+        } else {
+            nozzle_change_result = ramming(m_current_tool, tool, *planned);
+            wipe_depth -= planned->nozzle_change_depth; // ramming() advanced m_depth_traversed by it
+        }
+    }
 
     box_coordinates cleaning_box(
 		Vec2f(m_perimeter_width, m_perimeter_width),
@@ -1710,6 +1791,292 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
 
     ToolChangeResult result = construct_tcr(writer, false, old_tool, false, purge_volume);
     result.reheats_after_cooling = reheats_after_cooling;
+    result.nozzle_change_result  = std::move(nozzle_change_result);
+    return result;
+}
+
+std::string WipeTower::nozzle_change_marker(bool start, size_t old_tool, size_t new_tool, const NozzleChangePlan &plan) const
+{
+    // The same line GCode::format_nozzle_change_block() and Bambu Studio write; the pre-cooling injector and the
+    // G-code processor read it.
+    char buf[128];
+    snprintf(buf, sizeof(buf), "; NOZZLE_CHANGE_%s OF%d NF%d ON%d NN%d\n", start ? "START" : "END", int(old_tool), int(new_tool),
+             plan.old_nozzle, plan.new_nozzle);
+    return buf;
+}
+
+std::string WipeTower::format_line_M104(int target_temp, size_t tool, const NozzleChangePlan &plan, bool is_heating, const std::string &comment) const
+{
+    // Bambu Studio 2.9.1 WipeTowerWriter::format_line_M104 (WipeTower.cpp:1459): cooling waits for the moves
+    // (G1 is non-blocking); N0 marks a slicer line, C / W cooling or heating. The nozzle is the physical
+    // extruder, or on hotend_as_extruder printers the filament (I). No physical extruder: no line at all.
+    std::string out;
+    if (!m_handle_hotend_as_extruder && plan.old_physical_extruder < 0)
+        return out;
+    if (!is_heating)
+        out += "M400\n";
+    out += "M104";
+    out += m_handle_hotend_as_extruder ? " I" + std::to_string(tool) : " T" + std::to_string(plan.old_physical_extruder);
+    out += " S" + std::to_string(target_temp) + " N0";
+    out += is_heating ? " W" : " C";
+    if (!comment.empty())
+        out += " ;" + comment;
+    out += '\n';
+    return out;
+}
+
+// Bambu Studio 2.9.1 WipeTower::ramming() (WipeTower.cpp:3727-3920), on this tower's Y stack: the outgoing
+// filament rams its filament_change_length(_nc) on the tower before the swap, starting at m_depth_traversed.
+WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned)
+{
+    const NozzleChangePlan   &plan            = planned.nozzle_change;
+    const bool                extruder_change = plan.extruder_change;
+    const FilamentParameters &fp              = m_filpar[old_tool];
+
+    // The ramming lines follow the outgoing filament's nozzle.
+    const float nc_width       = nozzle_change_width(old_tool);
+    const float old_tool_width = tool_line_width(old_tool);
+    const float x_offset       = old_tool_width + (nc_width - old_tool_width) / 2.f;
+    const float box_width      = m_wipe_tower_width - 2.f * x_offset;
+    int         line_count     = box_width > EPSILON ? int(std::ceil(planned.nozzle_change_length / box_width)) : 0;
+    const float nc_depth       = planned.nozzle_change_depth;
+
+    auto flow_for = [this, nc_width](float height) { return height * (nc_width - height * (1.f - float(M_PI) / 4.f)) / filament_area(); };
+    const float nz_extrusion_flow = flow_for(m_layer_height);
+
+    WipeTowerWriter writer(m_layer_height, nc_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    writer.set_extrusion_flow(nz_extrusion_flow)
+        .set_z(m_z_pos)
+        .set_initial_tool(old_tool)
+        .set_origin_offset(m_rib_offset)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
+        .set_y_shift(m_y_shift);
+
+    const bool first_layer = is_first_layer();
+    float      dy          = first_layer ? nc_width : m_layer_info->extra_spacing * nc_width;
+    // This tower's purge rows start one perimeter width in (toolchange_Wipe()), Bambu Studio's block cur_depth.
+    const float     cur_depth = m_perimeter_width + m_depth_traversed;
+    box_coordinates cleaning_box(Vec2f(x_offset, cur_depth + (nc_width - old_tool_width) / 2.f), box_width, nc_depth);
+    const Vec2f     initial_position = cleaning_box.ld;
+    writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+
+    // Nozzle change preamble: tell the firmware (a hotend change on one extruder) and pre-cool.
+    writer.append(nozzle_change_marker(true, old_tool, new_tool, plan));
+    const std::string m632 = "M632 S" + std::to_string(new_tool) +
+                             (plan.dynamic_nozzle_map && plan.new_nozzle >= 0 ? " H" + std::to_string(plan.new_nozzle) : std::string()) + " M N\n";
+    if (!extruder_change) {
+        writer.append(m632);
+        if (fp.precool_target_temp.second != 0) {
+            const std::string m104 = format_line_M104(fp.precool_target_temp.second, old_tool, plan, false, "Wipe tower nozzle change pre cooling");
+            if (!m104.empty())
+                writer.append(m104).append("M106 S255\n");
+        }
+        writer.append("M633\n");
+    }
+
+    NozzleChangeResult result;
+    if (line_count > 0) {
+        const float max_e_ramming_speed = extruder_change ? fp.max_e_ramming_speed.first : fp.max_e_ramming_speed.second;
+        float       nozzle_change_speed = 60.0f * max_e_ramming_speed / nz_extrusion_flow;
+        float       bridge_speed        = std::min(60.0f * max_e_ramming_speed / flow_for(0.2f), nozzle_change_speed);
+
+        const float xl = cleaning_box.ld.x();
+        const float xr = cleaning_box.rd.x();
+        m_left_to_right       = true;
+        bool  need_change_flow = false;
+        // An extruder change stretches the ramming over the time the nozzle needs to reach its pre-cool target.
+        const float ramming_length  = line_count * (xr - xl);
+        const int   extruder        = plan.old_extruder;
+        auto        seconds         = [extruder](const std::vector<float> &t) { return extruder >= 0 && extruder < int(t.size()) ? t[extruder] : 0.f; };
+        const float precool_t       = extruder_change ? seconds(fp.precool_t.first) : seconds(fp.precool_t.second);
+        const float precool_t_first = extruder_change ? seconds(fp.precool_t_first_layer.first) : seconds(fp.precool_t_first_layer.second);
+        float       per_cooling_max_speed = nozzle_change_speed;
+        // PVA on a hotend_as_extruder printer keeps its volumetric ramming speed (Bambu Studio: the long cut
+        // retraction must not wait for the temperature).
+        const bool command_only_active = m_handle_hotend_as_extruder && fp.material == "PVA";
+        if (extruder_change && !command_only_active) {
+            if (first_layer && precool_t_first > EPSILON)
+                per_cooling_max_speed = ramming_length / precool_t_first * 60.f;
+            else if (precool_t > EPSILON)
+                per_cooling_max_speed = ramming_length / precool_t * 60.f;
+        }
+        nozzle_change_speed = std::min(nozzle_change_speed, per_cooling_max_speed);
+        bridge_speed        = std::min(bridge_speed, per_cooling_max_speed);
+
+        writer.set_e_speed_limit(max_e_ramming_speed);
+        for (int i = 0; true; ++i) {
+            if (need_thick_bridge_flow(writer.y())) {
+                writer.set_extrusion_flow(flow_for(0.2f));
+                writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
+                need_change_flow = true;
+            }
+            if (m_left_to_right)
+                writer.extrude(xr + wipe_tower_wall_infill_overlap * m_perimeter_width, writer.y(), need_change_flow ? bridge_speed : nozzle_change_speed);
+            else
+                writer.extrude(xl - wipe_tower_wall_infill_overlap * m_perimeter_width, writer.y(), need_change_flow ? bridge_speed : nozzle_change_speed);
+            if (i == line_count - 1)
+                break;
+            if ((writer.y() + dy - cleaning_box.ru.y() + (nc_width + old_tool_width) / 2.f) > float(EPSILON))
+                break;
+            if (need_change_flow) {
+                writer.set_extrusion_flow(nz_extrusion_flow);
+                writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
+                need_change_flow = false;
+            }
+            writer.extrude(writer.x(), writer.y() + dy, nozzle_change_speed);
+            m_left_to_right = !m_left_to_right;
+        }
+        if (need_change_flow)
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
+        writer.set_extrusion_flow(nz_extrusion_flow);
+        writer.set_e_speed_limit(0.f);
+        m_depth_traversed += nc_depth;
+
+        // Post-ramming: re-arm the hotend change for the travel phase.
+        if (!extruder_change)
+            writer.append(m632);
+
+        const float travel_time = extruder_change ? fp.ramming_travel_time.first : fp.ramming_travel_time.second;
+        const float fc_length   = extruder_change ? fp.change_length.first : fp.change_length.second;
+        if (travel_time > EPSILON && fc_length > EPSILON) {
+            // Reverse travel over the ramming lines for ramming_travel_time seconds (anti-ooze).
+            bool  left_to_right           = !m_left_to_right;
+            int   tpu_line_count          = line_count;
+            nozzle_change_speed *= 2;
+            float need_reverse_travel_dis = travel_time * nozzle_change_speed / 60.f;
+            float real_travel_dis         = tpu_line_count * (xr - xl - 2 * old_tool_width);
+            if (real_travel_dis < need_reverse_travel_dis)
+                nozzle_change_speed *= real_travel_dis / need_reverse_travel_dis;
+            writer.travel(writer.x(), writer.y() + dy / 2);
+            for (int i = 0; true; ++i) {
+                need_reverse_travel_dis -= (xr - xl - 2 * old_tool_width);
+                float offset_dis = need_reverse_travel_dis < 0 ? -need_reverse_travel_dis : 0.f;
+                if (left_to_right)
+                    writer.travel(xr - old_tool_width - offset_dis, writer.y(), nozzle_change_speed);
+                else
+                    writer.travel(xl + old_tool_width + offset_dis, writer.y(), nozzle_change_speed);
+                if (need_reverse_travel_dis < EPSILON)
+                    break;
+                if (i == tpu_line_count - 1)
+                    break;
+                writer.travel(writer.x(), writer.y() - dy);
+                left_to_right = !left_to_right;
+            }
+        } else {
+            // Wipe back along the last ramming line.
+            writer.add_wipe_point(writer.x(), writer.y()).add_wipe_point(m_left_to_right ? 0.f : m_wipe_tower_width, writer.y());
+        }
+        if (!extruder_change)
+            writer.append("M633\n");
+    }
+
+    writer.append(nozzle_change_marker(false, old_tool, new_tool, plan));
+
+    if (old_tool < m_used_filament_length.size() && layer_is_printed(true))
+        m_used_filament_length[old_tool] += writer.get_and_reset_used_filament_length();
+
+    result.start_pos          = writer.start_pos_rotated();
+    result.origin_start_pos   = initial_position;
+    result.end_pos            = writer.pos_rotated();
+    result.gcode              = writer.gcode();
+    result.wipe_path          = writer.wipe_path();
+    result.is_extruder_change = extruder_change;
+    return result;
+}
+
+// Bambu Studio 2.9.1 heater_off_nozzle_change() (WipeTower.cpp:3922): markers only; GCode turns the fan to full
+// and keeps the toolchange retraction at the model, and the pre-cooling pass turns the outgoing heater down.
+WipeTower::NozzleChangeResult WipeTower::heater_off_nozzle_change(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned) const
+{
+    NozzleChangeResult result;
+    result.heater_off_only     = true;
+    result.is_extruder_change  = true;
+    result.precool_filament_id = int(old_tool);
+    result.gcode               = nozzle_change_marker(true, old_tool, new_tool, planned.nozzle_change) +
+                                 nozzle_change_marker(false, old_tool, new_tool, planned.nozzle_change);
+    return result;
+}
+
+// Bambu Studio 2.9.1 idle_travel_cooling() (WipeTower.cpp:3944-4054): with no ramming length the outgoing hotend
+// cools while the head travels (no extrusion) over the new filament's purge area, timed by hotend_cooling_rate.
+WipeTower::NozzleChangeResult WipeTower::idle_travel_cooling(size_t old_tool, size_t new_tool, const WipeTowerInfo::ToolChange &planned)
+{
+    const NozzleChangePlan &plan = planned.nozzle_change;
+    const float wipe_length = planned.wipe_length;
+    const float wipe_depth  = planned.required_depth - planned.nozzle_change_depth;
+
+    const float new_width = tool_line_width(new_tool);
+    const float dy        = m_layer_info->extra_spacing * new_width;
+    const float xl        = new_width;
+    const float xr        = m_wipe_tower_width - xl;
+    const float line_len  = xr - xl;
+
+    const int line_count_by_length = line_len > EPSILON ? std::max(1, int(std::ceil(wipe_length / line_len))) : 0;
+    const int line_count_by_depth  = dy > EPSILON ? int(std::floor(wipe_depth / dy)) : 0;
+    const int line_count           = std::min(line_count_by_length, std::max(1, line_count_by_depth));
+    if (line_count <= 0)
+        return NozzleChangeResult();
+
+    const FilamentParameters &fp             = m_filpar[old_tool];
+    const bool                extruder_change = plan.extruder_change;
+    const int                 precool_target  = extruder_change ? fp.precool_target_temp.first : fp.precool_target_temp.second;
+    const float               max_travel_speed = m_travel_speed * 60.f;
+    float                     travel_speed     = max_travel_speed;
+    if (precool_target > 0) {
+        // Bambu Studio indexes the cooling rate by the outgoing nozzle.
+        float cooling_rate = plan.old_nozzle >= 0 && plan.old_nozzle < int(m_hotend_cooling_rate.size()) ? m_hotend_cooling_rate[plan.old_nozzle] : 2.f;
+        if (cooling_rate < EPSILON)
+            cooling_rate = 2.f;
+        const float current_temp = float(fp.nozzle_temperature);
+        if (current_temp > precool_target) {
+            const float cooling_time     = (current_temp - precool_target) / cooling_rate;
+            const float total_travel_len = line_count * line_len;
+            if (total_travel_len > EPSILON && cooling_time > EPSILON)
+                travel_speed = std::min(max_travel_speed, total_travel_len / cooling_time * 60.f);
+        }
+    }
+
+    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    writer.set_extrusion_flow(m_extrusion_flow)
+        .set_z(m_z_pos)
+        .set_initial_tool(old_tool)
+        .set_origin_offset(m_rib_offset)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
+        .set_y_shift(m_y_shift)
+        .append(nozzle_change_marker(true, old_tool, new_tool, plan));
+
+    // Alternate the entry corner every layer, like the purge does.
+    const bool  start_at_left   = (m_cur_layer_id % 4 == 0) || (m_cur_layer_id % 4 == 3);
+    const bool  start_at_bottom = (m_cur_layer_id % 4 == 0) || (m_cur_layer_id % 4 == 2);
+    const float cur_depth       = m_perimeter_width + m_depth_traversed;
+    const float depth_span      = (line_count - 1) * dy;
+    const Vec2f start_pos(start_at_left ? xl : xr, start_at_bottom ? cur_depth : cur_depth + depth_span);
+    writer.set_initial_position(start_pos, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+
+    writer.append(precool_target > 0 ? format_line_M104(precool_target, old_tool, plan, false, "Wipe tower idle travel pre cooling") :
+                                       format_line_M104(0, old_tool, plan, false, "Wipe tower idle travel heater off"));
+    writer.append("M632 S" + std::to_string(new_tool) + " D\n");
+
+    bool        moving_right = start_at_left;
+    const float row_step     = start_at_bottom ? dy : -dy;
+    for (int i = 0; i < line_count; ++i) {
+        writer.travel(moving_right ? xr : xl, writer.y(), travel_speed);
+        if (i < line_count - 1)
+            writer.travel(writer.x(), writer.y() + row_step);
+        moving_right = !moving_right;
+    }
+    writer.append("M633\n");
+    writer.append(nozzle_change_marker(false, old_tool, new_tool, plan));
+
+    NozzleChangeResult result;
+    result.start_pos               = writer.start_pos_rotated();
+    result.origin_start_pos        = start_pos;
+    result.end_pos                 = writer.pos_rotated();
+    result.gcode                   = writer.gcode();
+    result.is_extruder_change      = extruder_change;
+    result.zero_flush_idle_cooling = true;
+    result.precool_target_temp     = precool_target;
+    result.precool_filament_id     = int(old_tool);
     return result;
 }
 
@@ -2291,8 +2658,39 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
+float WipeTower::nozzle_change_width(size_t tool) const
+{
+    const float nozzle = tool < m_filpar.size() ? m_filpar[tool].nozzle_diameter : 0.f;
+    return nozzle > 0.f ? nozzle_change_perimeter_width(nozzle) : 2.5f * m_perimeter_width / Width_To_Nozzle_Ratio;
+}
+
+float WipeTower::nozzle_change_length(size_t old_tool, bool extruder_change, float layer_height) const
+{
+    if (old_tool >= m_filpar.size() || layer_height <= 0.f)
+        return 0.f;
+    const FilamentParameters &fp     = m_filpar[old_tool];
+    const float               length = extruder_change ? fp.change_length.first : fp.change_length.second;
+    const float               width  = nozzle_change_width(old_tool);
+    // Bambu Studio set_toolchange(): mm of filament per mm of a ramming line, at the ramming width.
+    const double e_flow = layer_height * (width - layer_height * (1.f - float(M_PI) / 4.f)) / fp.filament_area;
+    return e_flow > 0. ? float(length / e_flow) : 0.f;
+}
+
+float WipeTower::nozzle_change_depth(size_t old_tool, float length) const
+{
+    if (length <= 0.f)
+        return 0.f;
+    // The ramming box spans the tower between the outgoing filament's purge lines on both sides
+    // (Bambu Studio ramming(): x_offset = width + (ramming width - width) / 2 on each side).
+    const float nc_width  = nozzle_change_width(old_tool);
+    const float box_width = m_wipe_tower_width - (nc_width + tool_line_width(old_tool));
+    if (box_width <= EPSILON)
+        return 0.f;
+    return std::ceil(length / box_width) * nc_width;
+}
+
 void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool,
-                                unsigned int new_tool, float wipe_volume, float purge_volume)
+                                unsigned int new_tool, float wipe_volume, float purge_volume, const NozzleChangePlan &nozzle_change)
 {
 	assert(m_plan.empty() || m_plan.back().z <= z_par + WT_EPSILON);	// refuses to add a layer below the last one
 
@@ -2337,7 +2735,20 @@ void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned in
     depth += std::ceil(length_to_extrude / width) * new_pw;
     //depth *= m_extra_spacing;
 
-    m_plan.back().tool_changes.push_back(WipeTowerInfo::ToolChange(old_tool, new_tool, depth, 0.f, 0.f, wipe_volume, length_to_extrude, purge_volume));
+    // Bambu Studio 2.9.1 (set_toolchange): a change onto another nozzle also reserves the outgoing filament's
+    // ramming lines, in front of the new filament's purge.
+    float nc_length = 0.f;
+    float nc_depth  = 0.f;
+    if (nozzle_change.need_ramming) {
+        nc_length = nozzle_change_length(old_tool, nozzle_change.extruder_change, layer_height_par);
+        nc_depth  = nozzle_change_depth(old_tool, nc_length);
+        depth += nc_depth;
+    }
+    WipeTowerInfo::ToolChange tool_change(old_tool, new_tool, depth, 0.f, 0.f, wipe_volume, length_to_extrude, purge_volume);
+    tool_change.nozzle_change        = nozzle_change;
+    tool_change.nozzle_change_length = nc_length;
+    tool_change.nozzle_change_depth  = nc_depth;
+    m_plan.back().tool_changes.push_back(tool_change);
 #endif
 }
 
@@ -2360,9 +2771,12 @@ void WipeTower::make_rib_tower_square()
     // plan_toolchange() at the new line length.
     const float line_len = m_wipe_tower_width - 2 * m_perimeter_width;
     for (auto &info : m_plan)
-        for (auto &toolchange : info.tool_changes)
+        for (auto &toolchange : info.tool_changes) {
+            // The ramming lines are whole lines across the new width too (Bambu Studio re-plans with set_toolchange()).
+            toolchange.nozzle_change_depth = nozzle_change_depth(toolchange.old_tool, toolchange.nozzle_change_length);
             toolchange.required_depth = std::ceil(volume_to_length(toolchange.wipe_volume, tool_line_width(toolchange.new_tool), info.height) / line_len) *
-                                        tool_line_width(toolchange.new_tool);
+                                        tool_line_width(toolchange.new_tool) + toolchange.nozzle_change_depth;
+        }
 }
 
 // Orca #15841: a folded layer is generated like any other but thrown away by the emitter, so its
@@ -2450,7 +2864,8 @@ void WipeTower::plan_tower()
                     x_to_wipe_new = std::max(x_to_wipe_new, x_to_wipe);
 
                     int line_count = std::ceil((x_to_wipe_new - WT_EPSILON) / line_len);
-                    toolchange.required_depth = line_count * new_pw;
+                    // The first layer's ramming lines are solid too (Bambu Studio ramming(): dy = ramming width).
+                    toolchange.required_depth = line_count * new_pw + toolchange.nozzle_change_depth;
                     toolchange.wipe_volume = x_to_wipe_new / x_to_wipe * toolchange.wipe_volume;
                     toolchange.wipe_length = x_to_wipe_new;
                 }
@@ -2459,6 +2874,7 @@ void WipeTower::plan_tower()
                 info.extra_spacing = m_extra_spacing;
                 for (auto& toolchange : info.tool_changes) {
                     toolchange.required_depth *= m_extra_spacing;
+                    toolchange.nozzle_change_depth *= m_extra_spacing; // ramming rows are spread like the purge rows
                     toolchange.wipe_length = volume_to_length(toolchange.wipe_volume, tool_line_width(toolchange.new_tool), info.height);
                 }
             }
@@ -2598,6 +3014,11 @@ static WipeTower::ToolChangeResult merge_tcr(WipeTower::ToolChangeResult& first,
     out.wipe_path = second.wipe_path;
     out.initial_tool = first.initial_tool;
     out.new_tool = second.new_tool;
+    // Bambu Studio merge_tcr: the nozzle change travels with whichever part carries one.
+    if (first.nozzle_change_result.has_action())
+        out.nozzle_change_result = first.nozzle_change_result;
+    else if (second.nozzle_change_result.has_action())
+        out.nozzle_change_result = second.nozzle_change_result;
 
     // BBS
     out.purge_volume += second.purge_volume;
@@ -2844,9 +3265,11 @@ void WipeTower::plan_interfaces()
                     filaments.push_back((unsigned int) f);
             // tool_change() purges from the first planned change to this filament.
             float wipe_depth = tc.required_depth;
+            float nc_depth   = tc.nozzle_change_depth;
             for (const WipeTowerInfo::ToolChange &b : layer.tool_changes)
                 if (b.new_tool == tc.new_tool) {
                     wipe_depth = b.required_depth;
+                    nc_depth   = b.nozzle_change_depth;
                     break;
                 }
             // The tower's first layer is never an interface (Bambu Studio: "first layer never be contact").
@@ -2856,7 +3279,8 @@ void WipeTower::plan_interfaces()
             if (tc.run_in) {
                 // The purge starts one perimeter in from the tower's left side and runs to the right,
                 // so the run-in comes in from the left along its first line.
-                tc.run_in_cross = Vec2f(0.f, m_perimeter_width + traversed);
+                // Past the outgoing filament's ramming lines (Bambu Studio 2.9.1 nozzle change).
+                tc.run_in_cross = Vec2f(0.f, m_perimeter_width + traversed + nc_depth);
                 for (int below = 0; below < TowerInterface::GAP_LAYERS && below <= int(layer_id); ++below) {
                     const size_t lower = layer_id - below;
                     m_interface_gaps[lower].push_back({ Vec2f(0.f, tc.run_in_cross.y() + y_shift[layer_id] - y_shift[lower]), true });

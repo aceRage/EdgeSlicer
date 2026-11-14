@@ -77,8 +77,8 @@ combination). It is not needed for the ramming + cooling structure. This port br
 `get_block_gap_width()` (wipe_tower infill gap: we use the ramming width), `is_valid_last_layer()`
 (per-extruder printable height, skips ramming on an extruder's last layer above its height),
 `filament_prime_volume_nc` and grab-length purge reduction, side scrape, `prime_tower_ramming_line_width`
-(key not in our config; the BBS default 0 = the table, which is what we use), BBS's PVA command-only rule
-(kept: one `if`, cheap; see code).
+(key not in our config; the BBS default 0 = the table, which is what we use). BBS's PVA rule (no
+cooling stretch for PVA on hotend_as_extruder printers) is ported.
 
 ## 4. The keys
 
@@ -136,9 +136,12 @@ All filament keys, BBS 2.9.1 definitions and defaults (PrintConfig.cpp 3094-3112
 ## 7. Stages (one commit each, one build)
 
 1. Keys + GUI + invalidation. Gate: CONFIG-ONLY everywhere.
-2. Planner depth + `NozzleChangeResult` generation (`ramming()`), writer ramming limit. Unit tests.
-3. GCode emission in append_tcr. Unit + G-code tests (H2D/H2C/H3C).
-4. H3C heater-off / idle-travel cooling. Unit tests.
+2. Tower: planner depth, `NozzleChangeResult` generation (`ramming()`, `heater_off_nozzle_change()`,
+   `idle_travel_cooling()`), writer ramming limit, Print's per-change nozzle plan. On its own this stage
+   reserves the ramming depth and generates the results, but nothing writes them yet.
+3. GCode emission in append_tcr, tests (`[BBSTowerRamming]`: unit + H2D / X1C G-code).
+
+Stages 2 and 3 are built together (the gate of stage 2 alone would show a deeper tower with a gap).
 
 Tests: `[BBSTowerRamming]` in fff_print_tests (depth formula, line count, speed stretch, M632/M633 order,
 reverse travel, heater-off / idle-travel output, X1C two-filament unchanged, non-BBL unchanged).
