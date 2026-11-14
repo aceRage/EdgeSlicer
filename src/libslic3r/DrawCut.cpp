@@ -6,6 +6,7 @@
 #include "ExPolygon.hpp"
 #include "Tesselate.hpp"
 #include "AABBTreeIndirect.hpp"
+#include "AABBMesh.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -3804,6 +3805,27 @@ std::vector<float> draw_cut_inside_field(const indexed_triangle_set& cutter,
     if (field_bbox)
         *field_bbox = fb;
     return field;
+}
+
+double draw_cut_extension_clearance(const AABBMesh& mesh, const Vec3d& from, const Vec3d& dir)
+{
+    const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
+    // Every hit along the ray, nearest first; the first one the ray goes INTO counts.
+    // A face met edge-on (normal square to the ray) is neither entered nor left and is
+    // skipped too - that is the face the line was drawn on, met along its own plane.
+    double t = std::numeric_limits<double>::max();
+    for (const AABBMesh::hit_result& hit : mesh.query_ray_hits(from + 0.05 * d, d))
+        if (hit.is_hit() && hit.normal().dot(d) < -1e-6) {
+            t = hit.distance() + 0.05;
+            break;
+        }
+    // The 0.1 mm margin keeps the extended surface off the wall it stops at.
+    return std::max(0.0, t - 0.1);
+}
+
+void draw_cut_chain_set_edited(DrawCutChain& chain, const std::vector<DrawCutSample>& points)
+{
+    chain.set_samples(points, chain.is_closed(), chain.is_finished_open());
 }
 
 } // namespace Slic3r
