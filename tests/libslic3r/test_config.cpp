@@ -220,6 +220,52 @@ SCENARIO("Config ini load/save interface", "[Config]") {
     }
 }
 
+TEST_CASE("A string list item holding a semicolon reads back as one item", "[Config][Escape]")
+{
+    // ';' separates the items, so an item holding one must be quoted. Before the fix an item
+    // was quoted only for a space, tab, quote, backslash or line break, so "a;b" came back as
+    // "a" and "b".
+    const std::vector<std::string> cases[] = {
+        {"PLA;HS", "PETG"},              // a filament or preset name with no space
+        {"M106 S255", "M107;fan off"},   // a one-line G-code snippet with no space before ';'
+        {"a;b;c"},                       // a single item
+        {"", "x;y", ""},                 // empty items around it
+    };
+    for (const std::vector<std::string> &in : cases) {
+        const std::string        stored = escape_strings_cstyle(in);
+        std::vector<std::string> out;
+        REQUIRE(unescape_strings_cstyle(stored, out));
+        CHECK(out == in);
+    }
+    CHECK(escape_strings_cstyle({"PLA;HS", "PETG"}) == "\"PLA;HS\";PETG");
+}
+
+TEST_CASE("different_settings_to_system keeps one entry per preset through a G-code header", "[Config][Escape]")
+{
+    // Each entry is itself a ';'-joined key list (print, filaments..., printer). The G-code header
+    // and the .ini export write the list with serialize(); importing the config reads it back.
+    DynamicPrintConfig cfg;
+    auto *opt   = cfg.option<ConfigOptionStrings>("different_settings_to_system", true);
+    opt->values = {"brim_type;enable_support;initial_layer_print_height", "", "machine_start_gcode;z_hop"};
+
+    DynamicPrintConfig loaded;
+    loaded.load_from_ini_string_commented("; different_settings_to_system = " + opt->serialize() + "\n",
+                                          ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(loaded.option<ConfigOptionStrings>("different_settings_to_system")->values == opt->values);
+}
+
+TEST_CASE("String lists written before the semicolon fix read the same as before", "[Config][Escape]")
+{
+    // Older versions left such items unquoted, so their files hold the items split apart; the
+    // reader is unchanged and reads them exactly as it always did.
+    std::vector<std::string> out;
+    REQUIRE(unescape_strings_cstyle("brim_type;enable_support;;\"Generic PLA @System\";z_hop", out));
+    CHECK(out == std::vector<std::string>{"brim_type", "enable_support", "", "Generic PLA @System", "z_hop"});
+    out.clear();
+    REQUIRE(unescape_strings_cstyle("\"M107\\nG92 E0\";\"say \\\"hi\\\"\"", out));
+    CHECK(out == std::vector<std::string>{"M107\nG92 E0", "say \"hi\""});
+}
+
 SCENARIO("DynamicPrintConfig serialization", "[Config]") {
     WHEN("DynamicPrintConfig is serialized and deserialized") {
         FullPrintConfig full_print_config;

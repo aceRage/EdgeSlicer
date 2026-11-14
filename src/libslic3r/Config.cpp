@@ -90,12 +90,13 @@ std::string escape_strings_cstyle(const std::vector<std::string> &strs)
             // Separate the strings.
             (*outptr ++) = ';';
         const std::string &str = strs[j];
-        // Is the string simple or complex? Complex string contains spaces, tabs, new lines and other
-        // escapable characters. Empty string shall be quoted as well, if it is the only string in strs.
+        // Is the string simple or complex? Complex string contains spaces, tabs, semicolons (the
+        // separator), new lines and other escapable characters. Empty string shall be quoted as well,
+        // if it is the only string in strs.
         bool should_quote = strs.size() == 1 && str.empty();
         for (size_t i = 0; i < str.size(); ++ i) {
             char c = str[i];
-            if (c == ' ' || c == '\t' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
+            if (c == ' ' || c == '\t' || c == ';' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
                 should_quote = true;
                 break;
             }
