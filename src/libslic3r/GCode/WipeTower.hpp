@@ -539,6 +539,9 @@ private:
 	void plan_tower();
 	// Orca #15841: whether the layer reaches the G-code, and so whether its extrusions count as filament used.
 	bool layer_is_printed(bool toolchanges_on_layer) const;
+    // Whether the tower lays this planned layer at all: with sparse layers skipped only a layer with a
+    // tool change is printed (WipeTowerIntegration leaves the others out), the tower's first included.
+    bool plan_layer_is_laid(size_t layer_idx) const;
 
 	// Goes through m_plan and recalculates depths and width of the WT to make it exactly square - experimental
 	void make_wipe_tower_square();
@@ -728,15 +731,24 @@ void combine_sparse_wipe_tower_plan(PlanLayers &plan, const FilamentParams &filp
 // Edge (OD16 review): how many printed tower layers `current` is above `first_layer_idx`, for the brim
 // chamfer that shrinks one loop per layer. Plain index difference (negative below the first layer),
 // less the layers folded away in between, so a combined tower still steps its chamfer down one loop
-// per printed layer. Without the combination this is exactly current - first_layer_idx.
-template<class PlanLayers>
-int wipe_tower_printed_layer_distance(const PlanLayers &plan, size_t first_layer_idx, size_t current)
+// per printed layer. It also leaves out the layers is_laid(index) says the tower does not lay at all:
+// the sparse layers wipe_tower_no_sparse_layers skips, over which the next tower layer sits directly on
+// the last one laid, so that one is the next step of the chamfer. With every layer laid and none
+// folded this is exactly current - first_layer_idx.
+template<class PlanLayers, class IsLaid>
+int wipe_tower_printed_layer_distance(const PlanLayers &plan, size_t first_layer_idx, size_t current, IsLaid is_laid)
 {
     int distance = int(current) - int(first_layer_idx);
     for (size_t i = first_layer_idx + 1; distance > 0 && i <= current && i < plan.size(); ++i)
-        if (plan[i].combined_away)
+        if (plan[i].combined_away || ! is_laid(i))
             --distance;
     return distance;
+}
+
+template<class PlanLayers>
+int wipe_tower_printed_layer_distance(const PlanLayers &plan, size_t first_layer_idx, size_t current)
+{
+    return wipe_tower_printed_layer_distance(plan, first_layer_idx, current, [](size_t) { return true; });
 }
 
 // Edge (OD16 review): whether a wipe tower ToolChangeResult's G-code declares its layer height (a
