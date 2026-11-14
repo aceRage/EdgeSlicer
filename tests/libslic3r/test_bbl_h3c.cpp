@@ -416,7 +416,9 @@ TEST_CASE("H3C: a change into a hotend that already holds the filament flushes n
     for (int i = 0; i < 2; ++i) {
         ModelObject *object = model.add_object();
         object->name        = "cube" + std::to_string(i);
-        object->add_volume(Test::mesh(Test::TestMesh::cube_20x20x20, Vec3d::Zero(), Vec3d(0.5, 0.5, 0.25)));
+        TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
+        cube.scale(Vec3f(0.5f, 0.5f, 0.25f));
+        object->add_volume(std::move(cube));
         object->add_instance();
         object->center_around_origin();
         object->instances.front()->set_offset(Vec3d(150. + 30. * i, 160., 0.));
