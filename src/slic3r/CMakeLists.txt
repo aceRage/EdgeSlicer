@@ -600,6 +600,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
+    GUI/AmsMatch.cpp
+    GUI/AmsMatch.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp
