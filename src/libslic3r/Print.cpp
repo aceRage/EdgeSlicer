@@ -1890,6 +1890,7 @@ CompactedTowerZone compacted_wipe_tower_zone(const PrintConfig &config, const Po
     // the tower outline at a low Z. The spiral centre sits one radius away from the start point, so the
     // circle reaches 2 * radius beyond the outline. radius = lift / (2*pi*atan(travel_slope)) is the
     // same formula GCodeWriter uses; both are per filament, so take the widest any filament can make.
+    // travel_slope is set in degrees and GCodeWriter takes it in radians (Extruder::travel_slope()).
     double spiral_reach = 0.;
     for (size_t i = 0; i < config.z_hop.size(); ++i) {
         const double lift = std::min(double(config.z_hop.get_at(i)), 5.);
@@ -1898,7 +1899,7 @@ CompactedTowerZone compacted_wipe_tower_zone(const PrintConfig &config, const Po
         const double slope = i < config.travel_slope.size() ? double(config.travel_slope.get_at(i)) : 0.;
         if (slope < EPSILON)
             continue;
-        spiral_reach = std::max(spiral_reach, 2. * lift / (2. * PI * std::atan(slope)));
+        spiral_reach = std::max(spiral_reach, 2. * lift / (2. * PI * std::atan(Geometry::deg2rad(slope))));
     }
 
     // Working footprint = outline grown by the spiral envelope. All later clearance tests use this, so
