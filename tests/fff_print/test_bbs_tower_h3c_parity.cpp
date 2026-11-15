@@ -539,6 +539,57 @@ TEST_CASE("Side scrape: travel only, beside the tower, before the purge, only wh
     }
 }
 
+namespace {
+
+// One side scrape in sliced G-code, from "; CP TOOLCHANGE SIDE SCRAPE" to the purge ("; CP TOOLCHANGE WIPE").
+struct ScrapeWindow
+{
+    std::vector<double> zs;                    // the Z of its moves, in order (down, then up)
+    size_t              unretracts      = 0;   // E-only moves with positive E
+    bool                unretract_after = true; // every unretract after the last Z move
+    bool                other_extrusion = false;
+    double              layer_z         = 0.;  // the object layer's Z (the last "; Z_HEIGHT:" before it)
+};
+
+std::vector<ScrapeWindow> scrape_windows(const std::string &gcode)
+{
+    static const std::regex   z_re(R"(^G1 [^;]*Z([\d.]+))");
+    static const std::regex   layer_re(R"(^; Z_HEIGHT: ([\d.]+))");
+    std::vector<ScrapeWindow> out;
+    const std::vector<std::string> lines = split_lines(gcode);
+    double layer_z = 0.;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::smatch m;
+        if (std::regex_search(lines[i], m, layer_re))
+            layer_z = std::stod(m[1].str());
+        if (lines[i].rfind("; CP TOOLCHANGE SIDE SCRAPE", 0) != 0)
+            continue;
+        ScrapeWindow w;
+        w.layer_z = layer_z;
+        size_t last_z = i;
+        size_t j      = i;
+        for (; j < lines.size() && lines[j].rfind("; CP TOOLCHANGE WIPE", 0) != 0; ++j) {
+            if (std::regex_search(lines[j], m, z_re) && ! has_token(lines[j], 'E')) {
+                w.zs.push_back(std::stod(m[1].str()));
+                last_z = j;
+            }
+            double e = 0.;
+            if (lines[j].rfind("G1 ", 0) == 0 && has_token(lines[j], 'E', &e)) {
+                if (e > 0. && ! has_token(lines[j], 'X') && ! has_token(lines[j], 'Y')) {
+                    ++w.unretracts;
+                    w.unretract_after &= j > last_z;
+                } else
+                    w.other_extrusion = true;
+            }
+        }
+        out.push_back(std::move(w));
+        i = j;
+    }
+    return out;
+}
+
+} // namespace
+
 TEST_CASE("H3C G-code: the side scrape descends beside the tower, the unretract follows it", "[BBSTowerH3C][PrintGCode]")
 {
     DynamicPrintConfig cfg = machine_config(H3C);
@@ -550,39 +601,19 @@ TEST_CASE("H3C G-code: the side scrape descends beside the tower, the unretract 
     // Every placeholder is filled in.
     CHECK(gcode.find("[wipe_tower_") == std::string::npos);
 
-    const std::vector<std::string> lines = split_lines(gcode);
-    static const std::regex        z_re(R"(^G1 [^;]*Z([\d.]+))");
-    size_t                         scrapes = 0;
-    for (size_t i = line_index(lines, "; CP TOOLCHANGE SIDE SCRAPE"); i != std::string::npos;
-         i = line_index(lines, "; CP TOOLCHANGE SIDE SCRAPE", i + 1)) {
-        ++scrapes;
-        const size_t wipe = line_index(lines, "; CP TOOLCHANGE WIPE", i);
-        REQUIRE(wipe != std::string::npos);
-        std::vector<double> zs;
-        size_t              unretracts = 0;
-        size_t              last_z     = 0;
-        for (size_t j = i; j < wipe; ++j) {
-            std::smatch m;
-            if (std::regex_search(lines[j], m, z_re) && ! has_token(lines[j], 'E')) {
-                zs.push_back(std::stod(m[1].str()));
-                last_z = j;
-            }
-            double e = 0.;
-            if (lines[j].rfind("G1 ", 0) == 0 && has_token(lines[j], 'E', &e)) {
-                // Only the unretract, after the diagonal, with no move of its own.
-                CHECK(e > 0.);
-                CHECK_FALSE(has_token(lines[j], 'X'));
-                CHECK_FALSE(has_token(lines[j], 'Y'));
-                CHECK(j > last_z);
-                ++unretracts;
-            }
-        }
-        REQUIRE(zs.size() == 2);
-        CHECK(zs[0] < zs[1]);
-        CHECK(zs[0] >= 0.6 - 1e-6);
-        CHECK(unretracts <= 1);
+    const std::vector<ScrapeWindow> scrapes = scrape_windows(gcode);
+    CHECK(! scrapes.empty());
+    for (const ScrapeWindow &w : scrapes) {
+        REQUIRE(w.zs.size() == 2);
+        CHECK(w.zs[0] < w.zs[1]);
+        CHECK(w.zs[0] >= 0.6 - 1e-6);
+        // Back up to the layer the purge then prints at (no sparse layers skipped: the object's layer).
+        CHECK_THAT(w.zs[1], WithinAbs(w.layer_z, 1e-3));
+        // The tool change's unretract, held back until after the scrape, with no move of its own.
+        CHECK(w.unretracts == 1);
+        CHECK(w.unretract_after);
+        CHECK_FALSE(w.other_extrusion);
     }
-    CHECK(scrapes > 0);
 
     // The X1C presets have no scrape.
     Model             x1c_model;
@@ -661,4 +692,201 @@ TEST_CASE("Mixed nozzle diameters: a warning when the tower's layer height is ou
         config.set_deserialize_strict({ { "enable_prime_tower", "0" } });
         CHECK(tower_layer_warnings(config).empty());
     }
+}
+
+// ---- Review #1056 S5: the scrape over a brim, on the left/right walls, on a rib wall, on a compacted tower, and the
+// 2.2 mm clearance check. ----
+
+namespace {
+
+const WipeTower::ToolChangeResult *scrape_on_layer(const DirectTower &t, size_t layer)
+{
+    if (layer >= t.result.size())
+        return nullptr;
+    for (const WipeTower::ToolChangeResult &tcr : t.result[layer])
+        if (tcr.side_scrape)
+            return &tcr;
+    return nullptr;
+}
+
+// The outermost Y (largest when `max`, else smallest) of the layer's extrusions where they cross x.
+bool extrusion_extreme_y_at(const std::vector<WipeTower::ToolChangeResult> &layer, float x, bool max, float &out)
+{
+    bool found = false;
+    for (const WipeTower::ToolChangeResult &tcr : layer)
+        for (size_t i = 1; i < tcr.extrusions.size(); ++i) {
+            const WipeTower::Extrusion &a = tcr.extrusions[i - 1];
+            const WipeTower::Extrusion &b = tcr.extrusions[i];
+            if (b.width <= 0.f || (a.pos.x() - x) * (b.pos.x() - x) > 0.f || std::abs(b.pos.x() - a.pos.x()) < 1e-6f)
+                continue;
+            const float y = a.pos.y() + (x - a.pos.x()) / (b.pos.x() - a.pos.x()) * (b.pos.y() - a.pos.y());
+            out           = found ? (max ? std::max(out, y) : std::min(out, y)) : y;
+            found         = true;
+        }
+    return found;
+}
+
+} // namespace
+
+TEST_CASE("Side scrape over a brim: never below the top of the last brim chamfer layer + 0.4 mm", "[BBSTowerH3C]")
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    // H3C 0.20 Standard: 0.8 mm tower lines, so a 3 mm brim draws 4 loops on the first layer and the chamfer 2 and 1
+    // on the next two: its top is the third layer (z 0.6), the floor 1.0.
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", "3" } });
+    const auto t = direct_tower(cfg, 12);
+    for (size_t layer = 0; layer <= 4; ++layer) {
+        INFO("layer " << layer);
+        CHECK(scrape_on_layer(*t, layer) == nullptr);
+    }
+    const WipeTower::ToolChangeResult *tcr = scrape_on_layer(*t, 11);
+    REQUIRE(tcr != nullptr);
+    CHECK_THAT(tcr->side_scrape_z_low, WithinAbs(1.0, 1e-4));
+    CHECK_THAT(tcr->side_scrape_depth, WithinAbs(2.4 - 1.0, 1e-4));
+    CHECK_THAT(tcr->side_scrape_min_height_above_base, WithinAbs(0.8, 1e-4));
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : t->result)
+        for (const WipeTower::ToolChangeResult &r : layer)
+            if (r.side_scrape) {
+                CHECK(r.side_scrape_z_low >= 1.f - 1e-4f);
+            }
+}
+
+TEST_CASE("Side scrape on the left and right walls", "[BBSTowerH3C]")
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "prime_tower_side_scrape_face", "left_right" } });
+    const auto t = direct_tower(cfg, 8);
+    size_t     left = 0, right = 0;
+    for (size_t layer = 0; layer < t->result.size(); ++layer) {
+        const WipeTower::ToolChangeResult *tcr = scrape_on_layer(*t, layer);
+        if (tcr == nullptr)
+            continue;
+        INFO("layer " << layer << " scrape start " << tcr->start_pos.x() << ", " << tcr->start_pos.y());
+        // Outside a side wall by the wall gap + the scrape length, beside the tower's depth.
+        const bool l = tcr->start_pos.x() < -2.f;
+        const bool r = tcr->start_pos.x() > t->tower->width() + 1.9f;
+        CHECK((l || r));
+        CHECK(tcr->start_pos.y() > 0.f);
+        CHECK(tcr->start_pos.y() < t->tower->get_depth());
+        left += l;
+        right += r;
+    }
+    // The starts alternate between the two walls.
+    CHECK(left > 0);
+    CHECK(right > 0);
+}
+
+TEST_CASE("Side scrape on a rib wall: on the straight part, outside the wall", "[BBSTowerH3C]")
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "wipe_tower_wall_type", "rib" } });
+    const auto t       = direct_tower(cfg, 8);
+    size_t     scrapes = 0;
+    for (size_t layer = 1; layer < t->result.size(); ++layer) {
+        const WipeTower::ToolChangeResult *tcr = scrape_on_layer(*t, layer);
+        if (tcr == nullptr)
+            continue;
+        ++scrapes;
+        // The start is beyond the outer extrusion of this layer and the one below at its own X, front or back.
+        const float x = tcr->start_pos.x();
+        float       lo = 0.f, hi = 0.f, lo_below = 0.f, hi_below = 0.f;
+        REQUIRE(extrusion_extreme_y_at(t->result[layer], x, false, lo));
+        REQUIRE(extrusion_extreme_y_at(t->result[layer], x, true, hi));
+        REQUIRE(extrusion_extreme_y_at(t->result[layer - 1], x, false, lo_below));
+        REQUIRE(extrusion_extreme_y_at(t->result[layer - 1], x, true, hi_below));
+        INFO("layer " << layer << " start " << x << ", " << tcr->start_pos.y() << "; walls " << lo << " .. " << hi);
+        const bool front = tcr->start_pos.y() < std::min(lo, lo_below) - 1.9f;
+        const bool back  = tcr->start_pos.y() > std::max(hi, hi_below) + 1.9f;
+        CHECK((front || back));
+        CHECK(tcr->side_scrape_z_low >= 0.6f - 1e-4f);
+    }
+    CHECK(scrapes > 0);
+}
+
+TEST_CASE("H3C G-code, no sparse layers: the scrape descends from the compacted tower top", "[BBSTowerH3C][PrintGCode]")
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "wipe_tower_no_sparse_layers", "1" } });
+    // Two 4 mm cubes; the second prints filament 2 below 1 mm and above 3 mm, so the layers in between change no
+    // filament and the tower above 3 mm is compacted about 2 mm below the objects.
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(TriangleMesh(its_make_cube(20., 20., 4.)));
+        object->volumes.front()->name = object->name;
+        object->config.set("extruder", 1);
+        object->add_instance()->set_offset(Vec3d(60. + 40. * i, 60., 0.));
+        object->ensure_on_bed();
+        if (i == 1)
+            for (const t_layer_height_range range : { t_layer_height_range{ 0., 1. }, t_layer_height_range{ 3., 4. } }) {
+                DynamicPrintConfig range_config;
+                range_config.set_key_value("extruder", new ConfigOptionInt(2));
+                range_config.set_key_value("layer_height", new ConfigOptionFloat(cfg.opt_float("layer_height")));
+                object->layer_config_ranges[range].assign_config(std::move(range_config));
+            }
+    }
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(! gcode.empty());
+    CHECK(gcode.find("[wipe_tower_") == std::string::npos);
+
+    size_t compacted = 0;
+    for (const ScrapeWindow &w : scrape_windows(gcode)) {
+        REQUIRE(w.zs.size() == 2);
+        INFO("object layer " << w.layer_z << ", scrape Z " << w.zs[0] << " -> " << w.zs[1]);
+        CHECK(w.zs[0] < w.zs[1]);
+        // Never below the compacted tower's first layer + 0.4 mm.
+        CHECK(w.zs[0] >= 0.6 - 1e-6);
+        CHECK(w.unretracts == 1);
+        CHECK(w.unretract_after);
+        CHECK_FALSE(w.other_extrusion);
+        if (w.layer_z > 3.) {
+            ++compacted;
+            // The tower's own top, well below the object's layer: the purge that follows prints there.
+            CHECK(w.zs[1] < w.layer_z - 1.);
+        }
+    }
+    CHECK(compacted > 0);
+}
+
+namespace {
+
+// An H3C plate with a brimless tower at (160, 180) and a cube 1 mm left of it (filament 1), another far away
+// (filament 2): the "too close" warning of Print::validate.
+bool tower_too_close_warning(bool side_scrape)
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 2.)));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(i == 0 ? Vec3d(149., 182., 0.) : Vec3d(60., 60., 0.));
+        object->ensure_on_bed();
+    }
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    return std::any_of(warnings.begin(), warnings.end(),
+                       [](const StringObjectException &w) { return w.string.find("too close to others") != std::string::npos; });
+}
+
+} // namespace
+
+TEST_CASE("The side scrape's 2.2 mm count in the tower clearance check", "[BBSTowerH3C]")
+{
+    // 1 mm between the cube and a brimless tower: clear of the tower, inside the scrape's ring.
+    CHECK(tower_too_close_warning(true));
+    CHECK_FALSE(tower_too_close_warning(false));
 }
