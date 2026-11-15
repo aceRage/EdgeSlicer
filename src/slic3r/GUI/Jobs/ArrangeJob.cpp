@@ -774,11 +774,12 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     }
 
     //BBS: adjust the bed_index, create new plates, get the max bed_index
+    const int plates_before = plate_list.get_plate_count();
     for (ArrangePolygon& ap : m_selected) {
         //if (ap.bed_idx < 0) continue;  // bed_idx<0 means unarrangable
         //BBS: partplate postprocess
         if (only_on_partplate)
-            plate_list.postprocess_bed_index_for_current_plate(ap);
+            plate_list.postprocess_bed_index_for_current_plate(ap, plates_before);
         else
             plate_list.postprocess_bed_index_for_selected(ap);
 
