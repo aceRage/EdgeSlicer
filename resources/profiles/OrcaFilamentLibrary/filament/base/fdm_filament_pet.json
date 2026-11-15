@@ -4,6 +4,9 @@
 	"inherits": "fdm_filament_common",
 	"from": "system",
 	"instantiation": "false",
+	"fins_extrude_safe_temp": [
+		"71"
+	],
 	"eng_plate_temp": [
 		"0"
 	],

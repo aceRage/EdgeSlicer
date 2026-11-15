@@ -85,6 +85,8 @@
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
 #include "CostsDialog.hpp"
+#include "StartupSoundDialog.hpp"
+#include "libslic3r/GCode/StartupSound.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
 #include <wx/textdlg.h>
@@ -3806,6 +3808,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Support filament"), L"param_support_filament");
         optgroup->append_single_option_line("support_filament", "support_settings_filament#base");
         optgroup->append_single_option_line("support_interface_filament", "support_settings_filament#interface");
+        // EdgeSlicer: the interface filament's temperature (design_support_upgrades_2026-11-14 1B).
+        optgroup->append_single_option_line("support_interface_nozzle_temperature");
         // I3 fix: wire support_filament_matching into the GUI, mirroring Part
         // 1's brim_filament_source wiring at Tab.cpp:2650 (same pattern: no wiki
         // fragment yet, comAdvanced). Without this the setting was invisible/unsettable
@@ -3919,6 +3923,10 @@ void TabPrint::build()
         // Bambu Studio 2.9.1 (Tab.cpp:3415-3419).
         optgroup->append_single_option_line("prime_tower_acceleration", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_line_width", "multimaterial_settings_prime_tower");
+        // Orca #10780 / #15035: Type 1 tower block planner.
+        optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_flat_ironing", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
@@ -4190,7 +4198,9 @@ std::vector<wxString> TabPrint::tool_selector_labels() const
         const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
         if (!ref.valid)
             continue;
-        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter);
+        // H3C slot process groups: a slot tool's chip shows its own tile, a size group's the tiles not split off it.
+        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter, ref.rack_slot,
+                                                m_preset_bundle->nozzle_split_rack_slots(ref.extruder));
         labels.push_back(from_u8(chip.size + " " + chip.flow) + "\t" + from_u8(chip.tiles));
     }
     return labels;
@@ -4364,8 +4374,15 @@ bool TabPrint::tool_sizes_mixed() const
     if (m_preset_bundle == nullptr)
         return false;
     // Different nozzle sizes on the extruders, or a rack with other sizes (size tools).
-    return has_mixed_nozzle_diameters(m_preset_bundle->effective_nozzle_diameters()) ||
-           m_preset_bundle->nozzle_tool_count() > m_preset_bundle->effective_nozzle_diameters().size();
+    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
+    if (has_mixed_nozzle_diameters(nozzles))
+        return true;
+    // H3C slot process groups: a slot split off for its pin or its nozzle type has the extruder's size; only another size counts.
+    for (size_t tool = nozzles.size(); tool < m_preset_bundle->nozzle_tool_count(); ++tool)
+        if (const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
+            ref.valid && ref.extruder < nozzles.size() && !same_nozzle_diameter(ref.diameter, nozzles[ref.extruder]))
+            return true;
+    return false;
 }
 
 std::string TabPrint::shown_tool_id() const
@@ -5979,6 +5996,8 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_soluble");
         // BBS
         optgroup->append_single_option_line("filament_is_support");
+        // Orca #10780 (Bambu Studio Tab.cpp): developer mode only.
+        optgroup->append_single_option_line("filament_adhesiveness_category");
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
@@ -6073,6 +6092,10 @@ void TabFilament::build()
             DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
 
             update_dirty();
+            // The target against the material's safe chamber temperature. Asked of "chamber_temperatures" (Bambu
+            // Studio's name for the key) in the bed temperature group's handler, it never ran.
+            if (opt_key == "chamber_temperature")
+                m_config_manipulation.check_chamber_temperature(&filament_config);
             if (opt_key == "chamber_minimal_temperature" || opt_key == "chamber_temperature")
                 m_config_manipulation.check_chamber_minimal_temperature(&filament_config);
 
@@ -6163,9 +6186,6 @@ void TabFilament::build()
             }
             else if (opt_key == "nozzle_temperature_initial_layer") {
                 m_config_manipulation.check_nozzle_temperature_initial_layer_range(&filament_config, int(flow_variant_view_index()));
-            }
-            else if (opt_key == "chamber_temperatures") {
-                m_config_manipulation.check_chamber_temperature(&filament_config);
             }
 
             on_value_change(opt_key, value);
@@ -6334,6 +6354,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
+        // #1052 review S2 (owner): what a Bambu Lab prime tower primes after a change to this filament (the
+        // process "Prime volume" is greyed out there); the hotend-change value only on a hotend rack (H2C).
+        optgroup->append_single_option_line("filament_prime_volume");
+        optgroup->append_single_option_line("filament_prime_volume_nc");
         // BBS: flush settings and extruder-change long retraction (BBL machines such as H2D). Upstream
         // shows these on its own "Multi Filament" page, in this order; this group is the fork's nearest
         // equivalent. Only one flush temperature line shows: the Fast one when the project's
@@ -6343,6 +6367,27 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_flush_volumetric_speed");
         optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
         optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
+        // BBS 2.9.1 (Tab.cpp 4829-4844, 4933-4936): the prime tower's nozzle-change ramming of the outgoing
+        // filament (two-nozzle and rack printers), extruder change and hotend change side by side.
+        {
+            Line ramming_line = { L("Filament ramming length"), L("Filament length used in ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_change_length"));
+            ramming_line.append_option(optgroup->get_option("filament_change_length_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Travel time after ramming"), L("A reverse travel movement after ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Ramming volumetric speed"), L("The maximum volumetric speed for ramming, where -1 means using the maximum volumetric speed.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Precooling target temperature"), L("Precooling target temperature during ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature"));
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature_nc"));
+            optgroup->append_line(ramming_line);
+            optgroup->append_single_option_line("filament_idle_travel_cooling_enabled");
+        }
 
     page = add_options_page(L("Dependencies"), "advanced");
         optgroup = page->new_optgroup(L("Compatible printers"), "param_dependencies_printers");
@@ -6880,7 +6925,7 @@ void TabFilament::toggle_options()
         } else if (support_multi_bed_types) {
             // u1 has 7 plates
             toggle_line("supertack_plate_temp_initial_layer", true);
-            toggle_line("cool_plate_temp", true);
+            toggle_line("supertack_plate_temp", true);
             toggle_line("cool_plate_temp_initial_layer", true);
             toggle_line("cool_plate_temp", true);
             toggle_line("textured_cool_plate_temp_initial_layer", true);
@@ -6950,6 +6995,19 @@ void TabFilament::toggle_options()
         const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
+
+        // #1052 review S2: shown where they are used, the mirror of the process "Prime volume" grey-out
+        // (WipeTower::bambu_prime_volume() on Bambu Lab printers). The hotend-change prime needs a hotend change on
+        // one extruder: a rack that is not driven as separate extruders (H2C, not H3C).
+        const auto *rack_counts = cfg.option<ConfigOptionInts>("extruder_max_nozzle_count");
+        const auto *nozzles     = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+        const auto *as_extruder = cfg.option<ConfigOptionBool>("handle_hotend_as_extruder");
+        const bool  rack        = rack_counts != nullptr &&
+                          std::any_of(rack_counts->values.begin(), rack_counts->values.end(), [](int c) { return c > 1; });
+        const bool  hotend_as_extruder = (as_extruder != nullptr && as_extruder->value) ||
+                                        (rack && nozzles != nullptr && nozzles->values.size() == 1 && rack_counts->values.size() == 1);
+        toggle_line("filament_prime_volume", is_BBL_printer);
+        toggle_line("filament_prime_volume_nc", is_BBL_printer && rack && !hotend_as_extruder);
     }
 
     // Per-nozzle process P5: with a nozzle size selected, only the values that can differ per nozzle are editable.
@@ -7195,6 +7253,7 @@ void TabPrinter::build_fff()
         optgroup = page->new_optgroup(L("Machine start G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+            update_sound_widgets();
         };
         optgroup->edit_custom_gcode = edit_custom_gcode_fn;
         option = optgroup->get_option("machine_start_gcode");
@@ -7202,10 +7261,18 @@ void TabPrinter::build_fff()
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
+        {
+            // Startup sound (tests/design_startup_sounds.md): a MIDI file -> the M1006 tune above.
+            Line startup_sound_line = Line{ "", "" };
+            startup_sound_line.full_width = 1;
+            startup_sound_line.widget = [this](wxWindow* parent) { return sound_create_widget(parent, false); };
+            optgroup->append_line(startup_sound_line);
+        }
 
         optgroup = page->new_optgroup(L("Machine end G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+            update_sound_widgets();
         };
         optgroup->edit_custom_gcode = edit_custom_gcode_fn;
         option = optgroup->get_option("machine_end_gcode");
@@ -7213,6 +7280,13 @@ void TabPrinter::build_fff()
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
+        {
+            // Ending sound: the same, for the M1006 tune in the end G-code above.
+            Line ending_sound_line = Line{ "", "" };
+            ending_sound_line.full_width = 1;
+            ending_sound_line.widget = [this](wxWindow* parent) { return sound_create_widget(parent, true); };
+            optgroup->append_line(ending_sound_line);
+        }
 
         optgroup              = page->new_optgroup(L("Printing by object G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, optgroup](const t_config_option_key &opt_key, const boost::any &value) {
@@ -8101,6 +8175,69 @@ void TabPrinter::clear_pages()
     Tab::clear_pages();
     m_reset_to_filament_color = nullptr;
     m_rate_note = nullptr;
+    m_sound_btn[0] = m_sound_btn[1] = nullptr;
+    m_sound_note[0] = m_sound_note[1] = nullptr;
+}
+
+static const char* sound_gcode_key(bool end) { return end ? "machine_end_gcode" : "machine_start_gcode"; }
+
+wxSizer* TabPrinter::sound_create_widget(wxWindow* parent, bool end)
+{
+    const int em = em_unit(parent);
+    auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* btn = new Button(parent, (end ? _L("Ending sound") : _L("Startup sound")) + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(end ? _L("Make the tune this printer plays when a print finishes from a MIDI file")
+                        : _L("Make the tune this printer plays at the start of a print from a MIDI file"));
+    btn->Bind(wxEVT_BUTTON, [this, end](wxCommandEvent&) { edit_sound(end); });
+    hsizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxTOP, em / 2);
+    m_sound_btn[end] = btn;
+    m_sound_note[end] = new wxStaticText(parent, wxID_ANY,
+        _L("Replaces the M1006 tune (from \"M1006 S1\" to \"M1006 W\") in the G-code above."));
+    m_sound_note[end]->SetFont(wxGetApp().normal_font());
+    hsizer->Add(m_sound_note[end], 1, wxALIGN_CENTER_VERTICAL | wxTOP, em / 2);
+    update_sound_widgets();
+    return hsizer;
+}
+
+// Only G-code that already plays an M1006 tune gets the button: the printer's firmware understands
+// M1006 (the stock X1, A1, A2L, P2S, H2, H3 and X2D start and end G-code do; P1P/P1S and X1E have
+// none), and the tune has a known place to go. No tune is ever inserted where there was none.
+void TabPrinter::update_sound_widgets()
+{
+    if (m_config == nullptr)
+        return;
+    for (int i = 0; i < 2; ++i) {
+        const bool end = i == 1;
+        if (m_sound_btn[i] == nullptr || !m_config->has(sound_gcode_key(end)))
+            continue;
+        const bool show = StartupSound::has_tune_block(m_config->opt_string(sound_gcode_key(end)));
+        if (m_sound_btn[i]->IsShown() == show)
+            continue;
+        m_sound_btn[i]->Show(show);
+        if (m_sound_note[i] != nullptr)
+            m_sound_note[i]->Show(show);
+        if (wxWindow* parent = m_sound_btn[i]->GetParent())
+            parent->Layout();
+    }
+}
+
+void TabPrinter::edit_sound(bool end)
+{
+    if (m_config == nullptr)
+        return;
+    StartupSoundDialog dlg(this, end ? StartupSoundDialog::Target::End : StartupSoundDialog::Target::Start);
+    if (dlg.ShowModal() != wxID_OK || dlg.tune_block().empty())
+        return;
+    std::string gcode = m_config->opt_string(sound_gcode_key(end));
+    if (!StartupSound::replace_tune_block(gcode, dlg.tune_block())) {
+        MessageDialog(this, end ? _L("Machine end G-code has no M1006 tune to replace.") : _L("Machine start G-code has no M1006 tune to replace."),
+                      end ? _L("Ending sound") : _L("Startup sound"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    set_custom_gcode(sound_gcode_key(end), gcode);
+    update_dirty();
+    update();
 }
 
 wxSizer* TabPrinter::rate_note_create_widget(wxWindow* parent)
@@ -8412,6 +8549,7 @@ void TabPrinter::toggle_options()
         update_rack_controls(e);
     // Per-nozzle process P7: so do the project nozzle size pickers.
     update_project_nozzle_sizes();
+    update_sound_widgets();
 
     //BBS: whether the preset is Bambu Lab printer
     bool is_BBL_printer = false;
@@ -8537,7 +8675,9 @@ void TabPrinter::toggle_options()
         toggle_option("retract_restart_extra_toolchange", have_multiple_extruders && toolchange_retraction, at("retract_restart_extra_toolchange"));
 
         toggle_option("long_retractions_when_cut", !use_firmware_retraction && m_config->opt_int("enable_long_retraction_when_cut"), at("long_retractions_when_cut"));
-        toggle_line("retraction_distances_when_cut#0", m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
+        // The line of this extruder's page, keyed by the value it edits (not #0, which is on the first page only).
+        toggle_line("retraction_distances_when_cut#" + std::to_string(at("retraction_distances_when_cut")),
+                    m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
         //toggle_option("retraction_distances_when_cut", m_config->opt_bool("long_retractions_when_cut",i),i);
 
         toggle_option("travel_slope", m_config->opt_enum("z_hop_types", at("z_hop_types")) != ZHopType::zhtNormal, at("travel_slope"));

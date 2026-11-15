@@ -1,4 +1,5 @@
 #include "ShowcaseCallouts.hpp"
+#include "ShowcaseSurfaceColours.hpp"
 #include "ShowcaseScene.hpp"   // parse_hex_color
 
 #include "../CustomGCode.hpp"
@@ -311,6 +312,12 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
                     co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint, co_min_z(per_state[s], *mo, *mv) });
             }
         }
+        // A modifier on a filament of its own colours the part where it covers it (the Showcase draws
+        // it, ShowcaseSurfaceColours.hpp), so its filament is one of the object's.
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv != nullptr && mv->is_modifier())
+                if (const int f = visible_filament(*mv); f > 0)
+                    co_add_base(o.bases, BaseRegion{ f, false, CalloutSource::Part, co_min_z(mv->mesh().its, *mo, *mv) });
         for (const auto &range : mo->layer_config_ranges) {
             const ConfigOption *opt = range.second.option("extruder");
             const int           f   = opt != nullptr ? opt->getInt() : 0;

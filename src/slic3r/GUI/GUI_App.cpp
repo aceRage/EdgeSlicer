@@ -1,6 +1,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
+#include "AmsTypes.hpp"
 #include "AmsUiPreview.hpp"
 #include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
@@ -5898,6 +5899,16 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
 
     if (dialog.ShowModal() == wxID_OK)
         input_file = dialog.GetPath();
+}
+
+wxString GUI_App::transition_tridid(int trid_id, bool rack_printer)
+{
+    if (rack_printer) {
+        const std::string label = GUI::AmsTypes::rack_tray_label(trid_id);
+        if (!label.empty())
+            return wxString::FromUTF8(label);
+    }
+    return transition_tridid(trid_id);
 }
 
 wxString GUI_App::transition_tridid(int trid_id)
