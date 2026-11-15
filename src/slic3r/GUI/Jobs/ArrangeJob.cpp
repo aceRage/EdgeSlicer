@@ -548,7 +548,10 @@ void ArrangeJob::prepare_partplate() {
     }
 
     // add the virtual object into unselect list if has
-    plate_list.preprocess_exclude_areas(m_unselected, current_plate_index + 1);
+    // EdgeSlicer: on every bed the arrange may use. Arranging one plate, bed 0 is that plate and
+    // what does not fit goes to beds 1, 2, ... (new plates after the existing ones), so the zones
+    // are needed there too, not only on beds up to the plate's index.
+    plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
 }
 
 //BBS: add partplate logic
