@@ -2638,6 +2638,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     const bool                   multi_block_fill = m_wipe_tower_blocks.size() > 1 && (extrude_fill_wall || extrude_fill);
     std::vector<box_coordinates> fill_boxes;
     std::vector<int>             fill_box_categories; // multi_block_fill only
+    std::vector<float>           fill_box_origins;    // the block start: its purge rows lie on start + k * row pitch
     if (multi_block_fill) {
         for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
             float block_fill_height = block.depth - 2 * m_perimeter_width;
@@ -2648,6 +2649,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             fill_boxes.emplace_back(Vec2f(m_perimeter_width, block.start_depth + m_perimeter_width), m_wipe_tower_width - 2 * m_perimeter_width,
                                     block_fill_height);
             fill_box_categories.push_back(block.filament_adhesiveness_category);
+            fill_box_origins.push_back(block.start_depth);
         }
     }
     if (fill_boxes.empty()) {
@@ -2669,8 +2671,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
 
     for (size_t box_idx = 0; box_idx < fill_boxes.size(); ++box_idx) {
         const box_coordinates &fill_box = fill_boxes[box_idx];
-        // Edge (#1052 review S3): solid under the next layer's purge or ramming rows in this block.
-        const bool box_solid = solid_infill || (box_idx < fill_box_categories.size() && next_layer_purges_into(fill_box_categories[box_idx]));
+        // Edge (#1052 review S3): rows on the block's purge grid under the next layer's purge or ramming rows in it.
+        const bool box_grid = !solid_infill && box_idx < fill_box_categories.size() && next_layer_purges_into(fill_box_categories[box_idx]);
         if (box_idx > 0)
             writer.travel(m_left_to_right ? fill_box.ru : fill_box.lu);
 
@@ -2686,7 +2688,9 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                   .append(";--------------------\n"
                           "; CP EMPTY GRID START\n")
                   .comment_with_value(" layer #", m_num_layer_changes + 1);
-            if (box_solid) {
+            if (box_grid) {
+                grid_fill(writer, fill_box, fill_box_origins[box_idx], block_row_pitch(fill_box_categories[box_idx]), feedrate);
+            } else if (solid_infill) {
                 float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
                 if (first_layer) {          // the infill should touch perimeters
                     left -= m_perimeter_width;
@@ -2832,6 +2836,31 @@ bool WipeTower::next_layer_purges_into(int category) const
     return false;
 }
 
+// Edge (#1052 review S3): the pitch of a block's purge rows on the current layer.
+float WipeTower::block_row_pitch(int category) const
+{
+    const auto it = m_block_infill_gap_width.find(category);
+    return m_layer_info->extra_spacing * (it == m_block_infill_gap_width.end() ? m_perimeter_width : it->second.first);
+}
+
+// Edge (#1052 review S3): rows across fill_box on the lattice origin_y + k * row, strictly inside the box (its rectangle
+// prints the edges), travelling between them.
+void WipeTower::grid_fill(WipeTowerWriter &writer, const box_coordinates &fill_box, float origin_y, float row, float feedrate) const
+{
+    if (row < m_perimeter_width - WT_EPSILON)
+        row = m_perimeter_width;
+    float y = origin_y + std::ceil((fill_box.ld.y() - origin_y) / row - 1e-4f) * row;
+    if (y < fill_box.ld.y() + WT_EPSILON)
+        y += row;
+    const float xl = fill_box.ld.x(), xr = fill_box.rd.x();
+    bool        left_to_right = std::abs(writer.x() - xl) <= std::abs(writer.x() - xr);
+    for (; y < fill_box.lu.y() - WT_EPSILON; y += row) {
+        writer.travel(left_to_right ? xl : xr, y);
+        writer.extrude(left_to_right ? xr : xl, y, feedrate);
+        left_to_right = !left_to_right;
+    }
+}
+
 // Orca #10780 (Bambu Studio finish_block()): the rest of a block this layer's tool changes did not purge into, as
 // sparse fill printed with filament_id, a filament of the block's category where the layer has one.
 WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill)
@@ -2878,12 +2907,16 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
                                 std::any_of((m_layer_info + 1)->tool_changes.begin(), (m_layer_info + 1)->tool_changes.end(),
                                             [this](const WipeTowerInfo::ToolChange &tch) { return m_filpar[tch.new_tool].is_soluble || m_filpar[tch.old_tool].is_soluble; });
         solid_infill |= first_layer && m_adhesion;
-        // Edge (#1052 review S3): a block whose category the next layer purges (or rams) into is filled solid, so
-        // those rows are not bridges over this sparse grid; the soluble rule above, for one more trigger. Only on a
-        // tower with more than one block: a single block is purged into on every layer and stays as upstream.
-        solid_infill |= next_layer_purges_into(block.filament_adhesiveness_category);
+        // Edge (#1052 review S3): a block whose category the next layer purges (or rams) into gets rows on its purge
+        // grid instead of the sparse fill, so those rows are not bridges over it, and the rows are themselves on the
+        // purge rows of the layer below (a solid fill at its own pitch is not, on a stretched tower). The soluble
+        // rule above, for one more trigger. Only on a tower with more than one block: a single block is purged into
+        // on every layer and stays as upstream.
+        const bool grid = !solid_infill && next_layer_purges_into(block.filament_adhesiveness_category);
 
-        if (solid_infill) {
+        if (grid) {
+            grid_fill(writer, fill_box, fill_box.ld.y(), block_row_pitch(block.filament_adhesiveness_category), feedrate);
+        } else if (solid_infill) {
             float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
             if (first_layer) {          // the infill should touch perimeters
                 left -= m_perimeter_width;

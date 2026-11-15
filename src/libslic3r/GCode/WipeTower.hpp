@@ -786,6 +786,8 @@ private:
     ToolChangeResult   finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill = true);
     // Edge (#1052 review S3): the next layer lays purge or ramming rows in this category's block (multi-block towers).
     bool               next_layer_purges_into(int category) const;
+    float              block_row_pitch(int category) const;
+    void               grid_fill(WipeTowerWriter &writer, const box_coordinates &fill_box, float origin_y, float row, float feedrate) const;
     ToolChangeResult   finish_block_solid(const WipeTowerBlock &block, size_t filament_id, WipeTowerLayerType layer_type);
     // reheat: "Wipe tower reheat before wipe"; after_nozzle_change: the ramming announced its own line width.
     void               toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length,
