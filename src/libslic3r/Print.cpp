@@ -16,6 +16,7 @@
 #include "Flow.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
+#include "LocalesUtils.hpp"
 #include "LocalZOrderOptimizer.hpp"
 #include "MixedSublayer.hpp"
 #include "ShortestPath.hpp"
@@ -1141,6 +1142,24 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "prime_tower_enable_framework"
             || opt_key == "prime_tower_flat_ironing"
             || opt_key == "filament_adhesiveness_category"
+            // Bambu Studio 2.9.1 (Print.cpp:322-361): the H3C tower speed model, tail slowdown, line ironing,
+            // side scrape and the purge speed curve; the H3C tower speed is capped by the machine XY limits.
+            || opt_key == "prime_tower_feedrate_factor"
+            || opt_key == "prime_tower_tail_speed_factor"
+            || opt_key == "prime_tower_tail_slowdown_volume"
+            || opt_key == "prime_tower_line_ironing"
+            || opt_key == "prime_tower_ironing_speed"
+            || opt_key == "prime_tower_side_scrape"
+            || opt_key == "prime_tower_side_scrape_face"
+            || opt_key == "prime_tower_side_scrape_length"
+            || opt_key == "prime_tower_side_scrape_height"
+            || opt_key == "prime_tower_side_scrape_speed"
+            || opt_key == "prime_tower_side_scrape_wall_gap"
+            || opt_key == "prime_tower_side_scrape_point_spacing"
+            || opt_key == "prime_tower_side_scrape_along_length"
+            || opt_key == "filament_prime_tower_speed_factor_curve"
+            || opt_key == "machine_max_speed_x"
+            || opt_key == "machine_max_speed_y"
             || opt_key == "wipe_tower_wall_type"
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
@@ -1972,7 +1991,10 @@ double compacted_tower_footprint_padding(const PrintConfig &config, double brim_
     // deposited material reaches half a line width further still. Allowing a line width per side
     // covers both, which is what keeps an estimated footprint enclosing the real one and the
     // pre-slice check stricter than the precise one.
-    return std::max(0., brim_width) + 2. * config.nozzle_diameter.get_at(0);
+    //
+    // Bambu Studio 2.9.1: the side scrape prints nothing, but takes the nozzle outside the wall, so it enlarges the
+    // space the tower needs just like the brim does.
+    return std::max(0., brim_width) + 2. * config.nozzle_diameter.get_at(0) + prime_tower_side_scrape_margin(config);
 }
 
 Polygons compacted_wipe_tower_rings(const CompactedTowerZone &zone, bool any_body_tier)
@@ -2112,7 +2134,16 @@ static CompactedTowerZone compacted_tower_zone_from_tool_changes(const Print &pr
     }
     if (tower_pts.empty())
         return CompactedTowerZone();
-    return compacted_wipe_tower_zone(config, Geometry::convex_hull(tower_pts));
+    // Travels were dropped above; the side scrape is the one that matters (Bambu Studio 2.9.1 Print.cpp:4100): it
+    // descends beside the wall at tower height, so the nozzle really occupies that ring.
+    Polygon      tower_hull         = Geometry::convex_hull(tower_pts);
+    const double side_scrape_margin = prime_tower_side_scrape_margin(config);
+    if (side_scrape_margin > 0.) {
+        const Polygons grown = offset(tower_hull, float(scaled(side_scrape_margin)));
+        if (! grown.empty())
+            tower_hull = grown.front();
+    }
+    return compacted_wipe_tower_zone(config, tower_hull);
 }
 
 bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
@@ -2430,6 +2461,24 @@ static Polygons estimated_prime_tower_outline(const Print &print, bool with_brim
     return outline;
 }
 
+// Review #1056 S1: how far the side scrape reaches beyond the tower brim - the part of its ring the brim
+// does not already reserve. 0 with the scrape off or with a brim at least as wide as the scrape's reach.
+static double side_scrape_ring_beyond_brim(const Print &print)
+{
+    const double margin = prime_tower_side_scrape_margin(print.config());
+    if (margin <= 0.)
+        return 0.;
+    const double brim = print.wipe_tower_data(int(print.extruders(true).size())).brim_width;
+    return std::max(0., margin - std::max(0., brim));
+}
+
+static Polygons grown_by(Polygons polygons, double distance)
+{
+    if (distance > 0. && ! polygons.empty())
+        polygons = offset(polygons, float(scaled(distance)));
+    return polygons;
+}
+
 // Orca #15146: a tower placed where the bed has no corner (delta, circular or custom beds) is reported
 // before slicing instead of only once the tower is generated (the exact check in _make_wipe_tower()).
 // Only the body is tested here: the brim estimate can overshoot the generated brim and must not
@@ -2441,7 +2490,8 @@ std::string Print::prime_tower_off_bed_error() const
     const Print &print = *this;
     if (!print.has_wipe_tower())
         return {};
-    const Polygons body = estimated_prime_tower_outline(print, /*with_brim=*/false);
+    // The scrape travels beside the wall, so where it reaches past the brim the bed has to hold it too.
+    const Polygons body = grown_by(estimated_prime_tower_outline(print, /*with_brim=*/false), side_scrape_ring_beyond_brim(print));
     if (body.empty())
         return {};
     Polygon bed;
@@ -2476,7 +2526,7 @@ static std::string prime_tower_reach_error(const Print &print, bool grouping_don
     if (config.print_sequence == PrintSequence::ByObject && print.objects().size() > 1)
         return {};
 
-    const Polygons tower = estimated_prime_tower_outline(print);
+    const Polygons tower = grown_by(estimated_prime_tower_outline(print), side_scrape_ring_beyond_brim(print));
     if (tower.empty())
         return {};
 
@@ -2588,7 +2638,11 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     //BBS: add the wipe tower check logic
     const PrintConfig &       config   = print.config();
     const Vec3d         plate_origin = print.get_plate_origin();
-    const Polygons      convex_hulls_temp = estimated_prime_tower_outline(print);
+    Polygons            convex_hulls_temp = estimated_prime_tower_outline(print);
+    // Bambu Studio 2.9.1 (Print.cpp:1215-1221): the side scrape takes the nozzle outside the tower wall, so the object
+    // and exclusion area checks reserve that ring too (grown in every direction, independent of the rotation).
+    if (const double side_scrape_margin = prime_tower_side_scrape_margin(config); side_scrape_margin > 0. && !convex_hulls_temp.empty())
+        convex_hulls_temp = offset(convex_hulls_temp, float(scaled(side_scrape_margin)));
     if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {
         if (warning) {
             if (!warning->string.empty() && warning->string.back() != '\n')
@@ -2618,6 +2672,34 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         }*/
         return {L("Prime Tower") + L(" is too close to exclusion area, and collisions will be caused.\n")};
     }
+    return {};
+}
+
+// Review #1056 S1: print by object runs sequential_print_clearance_valid() instead of the by-layer check, which has
+// no tower test, yet a single object printed "by object" still builds a tower when it changes filament. The same
+// tower / object test as by layer (the brimmed outline grown by the side scrape's reach), and the same warning.
+static StringObjectException by_object_tower_clearance_warning(const Print &print)
+{
+    if (! print.has_wipe_tower() || print.objects().size() != 1)
+        return {};
+    Polygons tower = estimated_prime_tower_outline(print);
+    if (tower.empty())
+        return {};
+    if (const double margin = prime_tower_side_scrape_margin(print.config()); margin > 0.)
+        tower = offset(tower, float(scaled(margin)));
+    for (const PrintObject *object : print.objects())
+        for (const PrintInstance &inst : object->instances()) {
+            const ModelInstance *model_instance = inst.model_instance;
+            Polygon hull = object->model_object()->convex_hull_2d(
+                Geometry::assemble_transform(Vec3d::Zero(), model_instance->get_rotation(), model_instance->get_scaling_factor(), model_instance->get_mirror()));
+            hull.translate(inst.shift - object->center_offset());
+            if (! intersection(Polygons{ hull }, tower).empty()) {
+                StringObjectException w;
+                w.string     = L("Prime Tower") + L(" is too close to others, and collisions may be caused.\n");
+                w.is_warning = true;
+                return w;
+            }
+        }
     return {};
 }
 
@@ -3113,6 +3195,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             ret.type = STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT;
             return ret;
         }
+        // A single object printed by object can still build a tower: test it against the object (warning only).
+        if (StringObjectException tower_warning = by_object_tower_clearance_warning(*this); !tower_warning.string.empty())
+            add_warning(tower_warning);
     }
     else {
         //BBS
@@ -3318,6 +3403,38 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 warn(L("Different filament diameters may not work well when the prime tower is enabled. "
                        "It's very experimental, so please proceed with caution."), "filament_diameter");
                 break;
+            }
+        }
+
+        // Mixed nozzle diameters (H3C rack): the objects' layers merge into slabs per nozzle (AdaptiveLayerMerge), but the
+        // prime tower still purges every filament at the plate's layer height (Bambu Studio's mixed-diameter tower is not
+        // ported). Warn when that height is outside the layer height range of a nozzle that purges into the tower.
+        if (extruders.size() > 1 && has_multiple_used_nozzle_diameters(m_config, extruders)) {
+            std::vector<double> tower_heights;
+            for (const PrintObject *object : m_objects)
+                tower_heights.push_back(object->config().layer_height.value);
+            sort_remove_duplicates(tower_heights);
+            bool warned = false;
+            for (unsigned int filament : extruders) {
+                const AdaptiveLayerHeightRange range = adaptive_layer_height_range_for_nozzle(m_config, filament + 1, extruders);
+                if (range.max_height <= EPSILON)
+                    continue;
+                for (double height : tower_heights) {
+                    if (range.contains(height))
+                        continue;
+                    warn(Slic3r::format(L("The prime tower prints every filament at the layer height of %1% mm. Filament %2% prints with a "
+                                          "%3% mm nozzle, whose layer height range is %4%-%5% mm. Its prime tower lines may be weak "
+                                          "and the tower may lean or fall. Mixed nozzle diameters are not planned on the prime tower "
+                                          "yet: use a layer height inside every nozzle's range, or check the tower in a test print."),
+                                        float_to_string_decimal_point(height), filament + 1,
+                                        float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1)),
+                                        float_to_string_decimal_point(range.min_height), float_to_string_decimal_point(range.max_height)),
+                         "layer_height");
+                    warned = true;
+                    break;
+                }
+                if (warned)
+                    break;
             }
         }
 

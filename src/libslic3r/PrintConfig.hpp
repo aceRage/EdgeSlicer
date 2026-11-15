@@ -968,6 +968,12 @@ enum CounterboreHoleBridgingOption {
      wtwRib
  };
 
+// Bambu Studio 2.9.1 prime_tower_side_scrape_face: the pair of tower walls the side scrape runs on.
+enum SideScrapeFace : int {
+    sssfLeftRight = 0,
+    sssfFrontBack
+};
+
 // Which prime tower tool changes count as a "tower interface" (a material printed onto a
 // different one) for the wipe_tower_interface_* options. Bambu Studio decides this per layer from
 // its per-adhesion-category block planner, which neither tower generator here has; these modes
@@ -1104,6 +1110,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SideScrapeFace)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 // Snapmaker: flow-variant
@@ -2417,10 +2424,34 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_nozzle_map))
 )
 
+// Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintTowerConfig,
+
+    // Bambu Studio 2.9.1 (H3C): tower speed on hotend_as_extruder printers, slowdown at the end of a tower
+    // visit, the purge-start line ironing and its speed, the side scrape after a tool change.
+    ((ConfigOptionFloat,              prime_tower_feedrate_factor))
+    ((ConfigOptionPercent,            prime_tower_tail_speed_factor))
+    ((ConfigOptionFloat,              prime_tower_tail_slowdown_volume))
+    ((ConfigOptionBool,               prime_tower_line_ironing))
+    ((ConfigOptionFloat,              prime_tower_ironing_speed))
+    ((ConfigOptionBool,               prime_tower_side_scrape))
+    ((ConfigOptionEnum<SideScrapeFace>, prime_tower_side_scrape_face))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_length))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_height))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_speed))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_wall_gap))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_point_spacing))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
+    // Per-row speed multipliers of the tower purge ("" = the built-in ramp), per filament.
+    ((ConfigOptionStrings,            filament_prime_tower_speed_factor_curve))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))

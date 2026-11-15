@@ -198,6 +198,14 @@ public:
         Vec2f tool_change_start_pos = Vec2f::Zero();
         // Orca #10780: a solid "contact" tool change, where a category starts or stops on the tower.
         bool  is_contact            = false;
+        // Bambu Studio 2.9.1: the change scrapes the ooze beside the tower before its purge. Its G-code carries
+        // [wipe_tower_deretract_gcode] (the unretract, after the scrape) and the Z placeholders
+        // [wipe_tower_scrape_z_low] / [wipe_tower_scrape_z_top], which GCode::append_tcr fills in: the tower only
+        // knows the Z it planned the layer at, wipe_tower_no_sparse_layers prints it lower.
+        bool  side_scrape                       = false;
+        float side_scrape_z_low                 = 0.f; // lowest scrape Z in the planned layer frame
+        float side_scrape_depth                 = 0.f; // requested descent below the tower top
+        float side_scrape_min_height_above_base = 0.f; // keep this far above the tower's first layer
 
 		// Sum the total length of the extrusion.
 		float total_extrusion_length_in_plane() {
@@ -289,8 +297,15 @@ public:
 
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f,
-	                     const NozzleChangePlan &nozzle_change = NozzleChangePlan());
+	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume,
+	                     float prime_volume, const NozzleChangePlan &nozzle_change);
+	// Without a nozzle change. An overload rather than a default argument: GCC (and clang) reject a default argument
+	// that value-initialises a nested struct with default member initializers inside its enclosing class.
+	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f,
+	                     float prime_volume = 0.f)
+	{
+	    plan_toolchange(z_par, layer_height_par, old_tool, new_tool, wipe_volume, prime_volume, NozzleChangePlan());
+	}
     // Bambu Studio 2.9.1 (set_toolchange): path length of the ramming lines old_tool lays before a nozzle change
     // (filament_change_length(_nc) over a ramming line's extrusion per mm), and the depth whole lines of it take
     // in a tower of this width. Public for the tests.
@@ -500,6 +515,10 @@ public:
         float               retract_length        = 0.f;
         float               retract_speed         = 0.f;
         float               flat_iron_area        = 0.f;
+        // Bambu Studio 2.9.1: filament_prime_tower_speed_factor_curve (empty = the built-in ramp) and the
+        // prime_tower_feedrate_factor the H3C tower speed is scaled by.
+        std::vector<float>  speed_factor_curve;
+        float               feedrate_factor       = 1.f;
     };
 
     // Orca #10780 (Bambu Studio): a block holds the purges of one adhesiveness category, in a fixed band
@@ -706,8 +725,44 @@ private:
     void    record_outer_wall(const Polygon &wall);
     // Measures the first printed layer's wall and sets m_rib_offset / m_rib_footprint from it.
     void    set_rib_offset();
-    // Speed of the outer wall and brim: Bambu Studio caps it at prime_tower_max_speed.
-    float   wall_feedrate(size_t tool) const;
+    // Bambu Studio 2.9.1 calc_tower_feedrate(): the tower speed of tool's extrusions at the tower flow. First layer: the
+    // first-layer speed; on hotend_as_extruder printers (H3C) the volumetric speed times prime_tower_feedrate_factor,
+    // capped by the machine's XY limit; otherwise the volumetric speed capped at prime_tower_max_speed.
+    float   calc_tower_feedrate(size_t tool, bool first_layer) const;
+    // Speed of the outer wall, brim and fills (calc_tower_feedrate() on the current layer).
+    float   wall_feedrate(size_t tool) const { return calc_tower_feedrate(tool, is_first_layer()); }
+
+    // Bambu Studio 2.9.1 tail slowdown (handle_hotend_as_extruder only): the last prime_tower_tail_slowdown_volume mm3 of
+    // every tower visit at prime_tower_tail_speed_factor, never on the tower's first layer.
+    bool    tail_slowdown_applies() const { return m_handle_hotend_as_extruder && m_tail_speed_factor < 1.f && !is_first_layer(); }
+    void    apply_tail_slowdown(ToolChangeResult &tcr) const;
+
+    // Bambu Studio 2.9.1 side scrape (WipeTower.cpp 4659-4995). The geometry works on one pair of opposite walls with
+    // two abstract axes: "across" is the axis the nozzle approaches the wall on, "along" the wall tangent;
+    // across_is_x picks the left/right pair, positive_side the wall with the larger coordinate. All of it is in the
+    // tower footprint frame m_scrape_walls is stored in: the writer frame with the layer's y shift folded in.
+    struct SideScrapeZ
+    {
+        float z_low                 = 0.f;
+        float depth                 = 0.f;
+        float min_height_above_base = 0.f;
+    };
+    // With the scrape on, every layer keeps the full tower depth, so no wall steps inward above the brim chamfer.
+    bool    keeps_outer_walls_unshrunk() const { return m_enable_side_scrape; }
+    bool    toolchange_side_scrape(WipeTowerWriter &writer, const Vec2f &initial_position, Vec2f *out_scrape_start, SideScrapeZ *out_z);
+    bool    outer_wall_extreme_at(float z, bool across_is_x, bool positive_side, float along, float &out_across) const;
+    bool    side_wall_straight_along_range(bool across_is_x, bool positive_side, float &along_begin, float &along_end) const;
+    // Lowest Z the scrape descends to: above the highest layer that carries a brim chamfer loop (the tower's first
+    // layer without a brim), with a clearance.
+    // above_base: the same floor measured from the top of the tower's first layer in laid layers.
+    float   side_scrape_z_floor(float *above_base = nullptr) const;
+    // Records a wall or brim loop the current layer printed (tower-local polygon) for the scrape geometry.
+    void    record_scrape_wall(const Polygon &wall);
+    // The brim chamfer loops the tower prints on plan layer `layer` (finish_layer_new()'s rule).
+    int     brim_chamfer_loops_num(size_t layer) const;
+    // First layer with the scrape on (Bambu Studio finish_layer_new()): loops fill what the outer wall encloses beside
+    // the purge bands, so the base the scrape pushes against is glued to the bed everywhere.
+    void    fill_first_layer_voids(WipeTowerWriter &writer, const Polygon &outer_wall, const std::vector<std::pair<float, float>> &purge_bands, float feedrate);
 
 
     // to store information about tool changes for a given layer
@@ -836,7 +891,39 @@ private:
 
     bool               m_handle_hotend_as_extruder = false;
     std::vector<float> m_hotend_cooling_rate;
+
+    // Bambu Studio 2.9.1 (H3C): machine XY speed limit, mm/min (the H3C tower is capped by it, not by m_max_speed).
+    float              m_machine_max_speed         = 500.f * 60.f;
+    // prime_tower_tail_speed_factor (0.1 .. 1) and prime_tower_tail_slowdown_volume (mm3).
+    float              m_tail_speed_factor         = 1.f;
+    float              m_tail_slowdown_volume      = 10.f;
+    // prime_tower_line_ironing and prime_tower_ironing_speed (mm/min).
+    bool               m_line_ironing              = true;
+    float              m_ironing_speed             = 10.f * 60.f;
+    // prime_tower_side_scrape and its settings.
+    bool               m_enable_side_scrape        = false;
+    bool               m_side_scrape_on_left_right = false;
+    float              m_side_scrape_length        = 2.f;
+    float              m_side_scrape_height        = 1.5f;
+    float              m_side_scrape_speed         = 1400.f * 60.f;
+    float              m_side_scrape_wall_gap      = 0.2f;
+    float              m_side_scrape_point_spacing = 1.f;
+    float              m_side_scrape_along_length  = 2.f;
+    // Every scrape attempt advances it, cycling the start points over both walls of the pair.
+    unsigned int       m_side_scrape_seq           = 0;
+    // The printed walls and brim loops per layer Z, tower footprint frame (only with the scrape on). A separate store
+    // from m_outer_wall, which keeps rib walls only (with the rib offset) for the conflict checker.
+    std::map<float, Polylines> m_scrape_walls;
 };
+
+// Bambu Studio 2.9.1: how far the side scrape takes the nozzle outside the tower wall (wall gap + scrape length),
+// 0 with the scrape off. The tower collision checks grow the tower by it.
+double prime_tower_side_scrape_margin(const PrintConfig &config);
+
+// Bambu Studio 2.9.1 apply_wipe_tower_tail_slowdown(): the last tail_volume mm3 (<= 0: all) of a tower visit's G-code at
+// speed_factor of its feedrate, splitting the move the tail starts in. Exposed for the tests.
+void wipe_tower_tail_slowdown(std::string &gcode, float tail_volume, float speed_factor, float filament_area,
+                              const Vec2f *initial_position, const Vec2f *tool_change_start_position);
 
 
 // Compaction rule for wipe_tower_no_sparse_layers. Shared by the G-code emitter and by the
