@@ -711,7 +711,10 @@ public:
                     }
                 }
             } else {
-                pl.simplify(SCALED_WIPE_TOWER_RESOLUTION);
+                // A rectangle wall keeps its corners: simplifying would cut the corner next to a gap that
+                // ends within the tolerance of it into a slanted wall line.
+                if (allow_arcs)
+                    pl.simplify(SCALED_WIPE_TOWER_RESOLUTION);
                 for (size_t j = 0; j + 1 < pl.points.size(); ++j)
                     segments.emplace_back(unscaled<float>(pl.points[j]), unscaled<float>(pl.points[j + 1]));
             }

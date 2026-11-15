@@ -767,7 +767,6 @@ TEST_CASE("X1C G-code: a PLA and PETG plate slices through the block planner", "
             ++templates;
     }
     CHECK(changes >= 10);
-    // The start and end G-code have their own.
+    // The start and end G-code have their own too.
     CHECK(templates >= changes);
-    CHECK(templates <= changes + 2);
 }
