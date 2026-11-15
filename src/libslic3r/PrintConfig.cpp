@@ -9500,7 +9500,10 @@ void PrintConfigDef::init_fff_params()
     // BBS
     def = this->add("prime_volume", coFloat);
     def->label = L("Prime volume");
-    def->tooltip = L("The volume of material to prime extruder on tower.");
+    // Review S2 (#1052): greyed out on Bambu Lab printers (ConfigManipulation), whose tower primes the filament value.
+    def->tooltip = L("The volume of material to prime extruder on tower.\n\n"
+                     "Not used on Bambu Lab printers: their prime tower primes each filament's own volume, "
+                     "\"Prime volume on filament change\" in the filament preset.");
     def->sidetext = u8"mm³";	// cubic milimeters, don't need translation
     def->min = 1.0;
     def->mode = comSimple;
