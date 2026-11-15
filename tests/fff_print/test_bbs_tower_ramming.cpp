@@ -801,7 +801,7 @@ TEST_CASE("H2C rack hotend change: filament_prime_volume_nc primes it, the rammi
     hotend.new_nozzle            = 2;
     hotend.old_extruder          = 1;
     hotend.old_physical_extruder = 0;
-    // Two layers 0 -> 1, each primed with what Print hands the tower for a hotend change or for an extruder change.
+    // Two layers, 0 -> 1 then 1 -> 0, each primed with what Print hands the tower for a hotend change or for an extruder change.
     auto tower_with = [&config, &hotend](bool use_nc) {
         auto t = std::make_unique<DirectTower>();
         t->config = config;
@@ -810,8 +810,9 @@ TEST_CASE("H2C rack hotend change: filament_prime_volume_nc primes it, the rammi
         t->tower->set_extruder(1, t->config);
         for (int layer = 0; layer < 2; ++layer) {
             const float z = 0.2f * (layer + 1);
-            t->tower->plan_toolchange(z, 0.2f, 0, 0);
-            t->tower->plan_toolchange(z, 0.2f, 0, 1, WipeTower::bambu_prime_volume(t->config, 1, use_nc), 0.f, hotend);
+            const unsigned int from = unsigned(layer % 2);
+            t->tower->plan_toolchange(z, 0.2f, from, from);
+            t->tower->plan_toolchange(z, 0.2f, from, 1 - from, WipeTower::bambu_prime_volume(t->config, 1 - from, use_nc), 0.f, hotend);
         }
         t->tower->generate(t->result);
         return t;
@@ -821,7 +822,7 @@ TEST_CASE("H2C rack hotend change: filament_prime_volume_nc primes it, the rammi
     // Twice the prime: a deeper tower.
     CHECK(nc->tower->get_depth() > ec->tower->get_depth() + 5.f);
 
-    const WipeTower::NozzleChangeResult &ncr = change_on_layer(*nc, 1).nozzle_change_result;
+    const WipeTower::NozzleChangeResult &ncr = change_on_layer(*nc, 0).nozzle_change_result;
     REQUIRE(ncr.has_action());
     CHECK_FALSE(ncr.is_extruder_change);
     const std::vector<std::string> lines = split_lines(ncr.gcode);
