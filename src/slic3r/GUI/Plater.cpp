@@ -20255,9 +20255,9 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     auto orig = this->partplate_list.get_curr_plate()->get_origin();
     Vec2d orig2d = { orig[0], orig[1] };
 
-    BBoxData data;
     for (auto obj : objects)
     {
+        BBoxData data;
         // Ultra (H2C nozzle rack): PrintObject::get_first_layer_bbox already returns plate-relative
         // coordinates, so subtracting the plate origin here shifted every object bbox in
         // Metadata/plate_N.json by exactly one plate origin (measured on the user's plate 5:
@@ -20279,15 +20279,11 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
         auto   wt_corners = print->first_layer_wipe_tower_corners();
         // when loading gcode.3mf, wipe tower info may not be correct
         if (!wt_corners.empty()) {
-            BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-            auto        bb        = unscaled(bb_scaled);
-            bb.min -= orig2d;
-            bb.max -= orig2d;
-            bbox_all.merge(bb);
-            data.name = "wipe_tower";
-            data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-            data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
-            id_bboxes.emplace_back(data);
+            // Its own entry: it used to reuse the last object's, area and layer height included.
+            BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, partplate_list.get_curr_plate()->get_index(),
+                                                             float(print->config().initial_layer_print_height.value));
+            bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
+            id_bboxes.emplace_back(std::move(data));
         }
     }
 
