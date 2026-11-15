@@ -290,8 +290,15 @@ public:
 
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
-	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f,
-	                     const NozzleChangePlan &nozzle_change = NozzleChangePlan());
+	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume,
+	                     float prime_volume, const NozzleChangePlan &nozzle_change);
+	// Without a nozzle change. An overload rather than a default argument: GCC (and clang) reject a default argument
+	// that value-initialises a nested struct with default member initializers inside its enclosing class.
+	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f,
+	                     float prime_volume = 0.f)
+	{
+	    plan_toolchange(z_par, layer_height_par, old_tool, new_tool, wipe_volume, prime_volume, NozzleChangePlan());
+	}
     // Bambu Studio 2.9.1 (set_toolchange): path length of the ramming lines old_tool lays before a nozzle change
     // (filament_change_length(_nc) over a ramming line's extrusion per mm), and the depth whole lines of it take
     // in a tower of this width. Public for the tests.
