@@ -767,7 +767,17 @@ TrustStore load_trust_store()
     store.user_publishers = publishers_from_json(user, "user");
     for (Publisher& pub : store.user_publishers)
         pub.source = "user";
-    store.pins = pins_from_json(user);
+    store.pins                = pins_from_json(user);
+    const auto unsandboxed_it = user.find("unsandboxed");
+    if (unsandboxed_it != user.end() && unsandboxed_it->is_array()) {
+        for (const nlohmann::json& entry : *unsandboxed_it) {
+            if (!entry.is_string())
+                continue;
+            const std::string key = entry.get<std::string>();
+            if (!key.empty())
+                store.unsandboxed.push_back(key);
+        }
+    }
     return store;
 }
 
@@ -813,10 +823,18 @@ bool save_trust_store(const TrustStore& store, std::string& error)
         nlohmann::json entry = {{"sha256", ascii_lower(pin.sha256)}, {"plugin_key", pin.plugin_key}};
         pins.push_back(std::move(entry));
     }
+    nlohmann::json unsandboxed = nlohmann::json::array();
+    for (const std::string& key : store.unsandboxed) {
+        if (key.empty())
+            continue;
+        if (std::find(unsandboxed.begin(), unsandboxed.end(), key) == unsandboxed.end())
+            unsandboxed.push_back(key);
+    }
     const nlohmann::json root = {
         {"version", 1},
         {"publishers", std::move(publishers)},
         {"pins", std::move(pins)},
+        {"unsandboxed", std::move(unsandboxed)},
     };
 
     if (!atomic_replace_file(path, root.dump(2) + "\n", error))
@@ -924,6 +942,47 @@ bool local_install_needs_prompt(const std::string& plugin_key, const std::string
 {
     const TrustStore store = load_trust_store();
     return !is_hash_pinned(store, plugin_key, sha256);
+}
+
+bool is_unsandboxed(const std::string& plugin_key)
+{
+    if (plugin_key.empty())
+        return false;
+    const TrustStore store = load_trust_store();
+    if (store.user_file_corrupt)
+        return false;
+    return std::find(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key) != store.unsandboxed.end();
+}
+
+bool allow_unsandboxed(const std::string& plugin_key, std::string& error)
+{
+    error.clear();
+    if (plugin_key.empty()) {
+        error = "unsandboxed override requires a plugin_key";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(trust_mutex());
+    TrustStore                  store = load_trust_store();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
+    if (std::find(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key) == store.unsandboxed.end())
+        store.unsandboxed.push_back(plugin_key);
+    return save_trust_store(store, error);
+}
+
+bool clear_unsandboxed(const std::string& plugin_key, std::string& error)
+{
+    error.clear();
+    std::lock_guard<std::mutex> lock(trust_mutex());
+    TrustStore                  store = load_trust_store();
+    if (store.user_file_corrupt) {
+        error = "trust.json is corrupt; reset it before saving";
+        return false;
+    }
+    store.unsandboxed.erase(std::remove(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key), store.unsandboxed.end());
+    return save_trust_store(store, error);
 }
 
 bool reset_corrupt_trust_store(std::string& error)

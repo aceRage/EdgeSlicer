@@ -350,8 +350,9 @@ function build_slicer() {
         fi
 
         if [ -f "${APP_MACOS_DIR}/edge-plugin-host" ]; then
-            echo "Signing edge-plugin-host..."
-            codesign --force --sign - "${APP_MACOS_DIR}/edge-plugin-host" 2>/dev/null || true
+            echo "Signing edge-plugin-host with App Sandbox entitlements..."
+            HELPER_ENTITLEMENTS="${PROJECT_DIR}/scripts/edge-plugin-host.entitlements"
+            codesign --force --sign - --entitlements "${HELPER_ENTITLEMENTS}" "${APP_MACOS_DIR}/edge-plugin-host" 2>/dev/null || true
         fi
         
         if [ -f "${LIBSENTRY}" ]; then

@@ -297,8 +297,11 @@ if [ -f "$APP_MACOS_DIR/crashpad_handler" ]; then
     codesign --force --verbose --options runtime --timestamp --sign "$CERTIFICATE_ID" "$APP_MACOS_DIR/crashpad_handler"
 fi
 if [ -f "$APP_MACOS_DIR/edge-plugin-host" ]; then
-    echo "  - 签名: edge-plugin-host"
-    codesign --force --verbose --options runtime --timestamp --sign "$CERTIFICATE_ID" "$APP_MACOS_DIR/edge-plugin-host"
+    echo "  - 签名: edge-plugin-host (App Sandbox entitlements)"
+    HELPER_ENTITLEMENTS="$PROJECT_DIR/scripts/edge-plugin-host.entitlements"
+    codesign --force --verbose --options runtime --timestamp \
+        --entitlements "$HELPER_ENTITLEMENTS" \
+        --sign "$CERTIFICATE_ID" "$APP_MACOS_DIR/edge-plugin-host"
 fi
 
 # 2.4 签名整个 app bundle（应用 entitlements）

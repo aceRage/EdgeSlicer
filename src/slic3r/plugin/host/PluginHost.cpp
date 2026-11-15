@@ -52,7 +52,7 @@ void PluginHost::RegisterBindings(pybind11::module_& module)
     PluginHostUi::RegisterBindings(host);
 
     // Slicing print-graph data model (Phase 6). Early steps hand live Print* / PrintObject*
-    // in-process; they run unsandboxed.
+    // in-process; they run unsandboxed and are the accepted Phase 8 exception (Home card says so).
     host_bindings::register_slicing(host);
 }
 

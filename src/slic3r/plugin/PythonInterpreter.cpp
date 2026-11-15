@@ -474,6 +474,11 @@ std::string PythonInterpreter::shared_packages_dir()
     return (boost::filesystem::path(data_dir()) / "python" / "packages" / PythonInterpreter::python_abi_tag()).string();
 }
 
+std::string PythonInterpreter::bundled_python_home()
+{
+    return find_bundled_python_home().string();
+}
+
 std::string PythonInterpreter::bundled_python_executable()
 {
     const boost::filesystem::path python_home = find_bundled_python_home();

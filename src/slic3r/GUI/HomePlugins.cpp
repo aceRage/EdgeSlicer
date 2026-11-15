@@ -59,6 +59,7 @@ static HomeTab::PluginView view_of(PluginManager& mgr, const PluginDescriptor& d
         v.error = mgr.get_plugin_load_error(d.plugin_key);
     v.update_available = false; // catalog updates are Phase 11
     v.trust            = plugin_trust::evaluate(d).label;
+    v.running_unsandboxed = plugin_trust::is_unsandboxed(d.plugin_key);
     v.types            = d.display_types;
 
     if (v.loaded) {

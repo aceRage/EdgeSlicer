@@ -393,8 +393,8 @@ if (EDGE_PYTHON_PLUGINS)
         VERBATIM)
     if (APPLE)
         add_custom_command(TARGET Snapmaker_Orca POST_BUILD
-            COMMAND sh -c "codesign --force --sign - '${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
-            COMMENT "Signing edge-plugin-host"
+            COMMAND sh -c "codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
+            COMMENT "Signing edge-plugin-host with App Sandbox entitlements"
             VERBATIM)
     endif ()
     add_custom_command(TARGET Snapmaker_Orca POST_BUILD

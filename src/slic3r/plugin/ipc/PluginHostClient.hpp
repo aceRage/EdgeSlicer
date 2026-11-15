@@ -3,6 +3,8 @@
 #include <slic3r/plugin/PythonPluginInterface.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 
+#include "PluginSandbox.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -15,7 +17,7 @@
 namespace Slic3r {
 struct SlicingPipelineContext;
 class DynamicPrintConfig;
-}
+} // namespace Slic3r
 
 namespace Slic3r::plugin_ipc {
 
@@ -31,11 +33,11 @@ public:
     static bool should_use_host();
     // True when the helper is missing (or a test env override forced in-process) so Edge
     // falls back to in-process execute. The Home card surfaces this.
-    static bool host_fallback_active();
-    static void set_force_in_process_for_testing(bool force);
-    static void set_execute_timeout_for_testing(int timeout_ms);
-    static void set_allow_env_overrides_for_testing(bool allow);
-    static void reset_spawn_count_for_testing();
+    static bool          host_fallback_active();
+    static void          set_force_in_process_for_testing(bool force);
+    static void          set_execute_timeout_for_testing(int timeout_ms);
+    static void          set_allow_env_overrides_for_testing(bool allow);
+    static void          reset_spawn_count_for_testing();
     static std::uint64_t spawn_count();
 
     // Snapshot of print config for a post-process execute. Omits the same banned keys
@@ -45,22 +47,23 @@ public:
 
     // Starts a Script capability on a worker that talks to the child. Same completion
     // contract as ScriptAsyncRuntime::start.
-    bool start_script(const std::string& plugin_key,
-                      const std::string& capability_name,
+    bool start_script(const std::string&                           plugin_key,
+                      const std::string&                           capability_name,
                       std::function<void(const ScriptCompletion&)> on_done);
 
-    ExecutionResult execute_post_process(const std::string& plugin_key,
-                                         const std::string& capability_name,
+    ExecutionResult execute_post_process(const std::string&            plugin_key,
+                                         const std::string&            capability_name,
                                          const SlicingPipelineContext& ctx,
-                                         std::string& error);
+                                         std::string&                  error);
 
     void cancel(const std::string& plugin_key);
     void unload(const std::string& plugin_key);
     bool has_active_run(const std::string& plugin_key) const;
 
     // SIGKILL / TerminateProcess the child. The next execute respawns.
-    bool kill_child_for_testing();
-    std::int64_t child_pid_for_testing() const;
+    bool          kill_child_for_testing();
+    std::int64_t  child_pid_for_testing() const;
+    SandboxReport last_sandbox_report() const;
 
     void shutdown();
 

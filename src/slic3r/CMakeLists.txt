@@ -1292,6 +1292,12 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/ipc/PluginHostClient.cpp
         plugin/ipc/PluginHostChild.hpp
         plugin/ipc/PluginHostChild.cpp
+        plugin/ipc/PluginSandbox.hpp
+        plugin/ipc/PluginSandbox.cpp
+        plugin/ipc/PluginSandboxPriv.hpp
+        plugin/ipc/PluginSandboxLinux.cpp
+        plugin/ipc/PluginSandboxWin.cpp
+        plugin/ipc/PluginSandboxMac.cpp
         Utils/BoostProcessCompat.hpp
         GUI/HomePlugins.cpp
         GUI/HomePlugins.hpp
@@ -1377,6 +1383,10 @@ slic3r_unity_build(libslic3r_gui SKIP
     plugin/ipc/PluginHostRpc.cpp
     plugin/ipc/PluginHostClient.cpp
     plugin/ipc/PluginHostChild.cpp
+    plugin/ipc/PluginSandbox.cpp
+    plugin/ipc/PluginSandboxLinux.cpp
+    plugin/ipc/PluginSandboxWin.cpp
+    plugin/ipc/PluginSandboxMac.cpp
     GUI/PluginWarnings.cpp
     GUI/PluginProgressDialog.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
@@ -1507,6 +1517,9 @@ target_include_directories(libslic3r_gui PRIVATE ${PAHO_MQTT_C_PATH}/src)
 if (WIN32)
     target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)
     target_link_libraries(libslic3r_gui Advapi32)
+    if (EDGE_PYTHON_PLUGINS)
+        target_link_libraries(libslic3r_gui userenv)
+    endif ()
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
@@ -1555,7 +1568,7 @@ if (EDGE_PYTHON_PLUGINS)
         target_compile_definitions(edge-plugin-host PRIVATE BURY_EXPORTS)
     endif ()
     if (MSVC)
-        target_link_libraries(edge-plugin-host Setupapi.lib)
+        target_link_libraries(edge-plugin-host Setupapi.lib userenv.lib)
     endif ()
 endif ()
 

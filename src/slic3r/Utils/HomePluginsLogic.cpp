@@ -5,17 +5,13 @@
 #include <algorithm>
 #include <cctype>
 
-namespace Slic3r {
-namespace HomeTab {
+namespace Slic3r { namespace HomeTab {
 
 using json = nlohmann::json;
 
-static const char* const k_path_keys[] = { "entry_path", "plugin_root", "path", "thumbnail_url", "sharing_token" };
+static const char* const k_path_keys[] = {"entry_path", "plugin_root", "path", "thumbnail_url", "sharing_token"};
 
-static bool has_path_separator(const std::string& s)
-{
-    return s.find('/') != std::string::npos || s.find('\\') != std::string::npos;
-}
+static bool has_path_separator(const std::string& s) { return s.find('/') != std::string::npos || s.find('\\') != std::string::npos; }
 
 json sanitize_plugin_card(json card)
 {
@@ -42,12 +38,10 @@ json plugin_card(const PluginView& view)
     card["update_available"]    = view.update_available;
     card["trust"]               = view.trust; // Phase 5: host fills Signed / Approved locally / Untrusted
     card["in_process_pipeline"] = view.in_process_pipeline;
+    card["running_unsandboxed"] = view.running_unsandboxed;
     card["can_run"]             = false;
-    card["run_state"]           = (view.run_state == "running" || view.run_state == "success" ||
-                         view.run_state == "failure") ?
-                             view.run_state :
-                             "";
-    card["run_message"]         = sanitize_run_message(view.run_message);
+    card["run_state"]   = (view.run_state == "running" || view.run_state == "success" || view.run_state == "failure") ? view.run_state : "";
+    card["run_message"] = sanitize_run_message(view.run_message);
 
     std::vector<std::string> types = view.types;
     types.erase(std::remove(types.begin(), types.end(), std::string()), types.end());
@@ -55,7 +49,7 @@ json plugin_card(const PluginView& view)
     for (const PluginCapabilityView& c : view.capabilities) {
         if (c.name.empty() && c.type.empty())
             continue;
-        caps.push_back({ { "name", c.name }, { "type", c.type }, { "enabled", c.enabled } });
+        caps.push_back({{"name", c.name}, {"type", c.type}, {"enabled", c.enabled}});
         if (c.type == "script")
             card["can_run"] = true;
         if (!c.type.empty() && std::find(types.begin(), types.end(), c.type) == types.end())
@@ -74,12 +68,12 @@ json plugins_message(const std::vector<PluginView>& items, bool loading, const s
     for (const PluginView& item : items)
         if (!item.plugin_key.empty())
             list.push_back(plugin_card(item));
-    return { { "type", "plugins" },
-             { "items", std::move(list) },
-             { "loading", loading },
-             { "error", error },
-             { "catalog", false }, // Phase 11 placeholder
-             { "host_fallback", host_fallback } };
+    return {{"type", "plugins"},
+            {"items", std::move(list)},
+            {"loading", loading},
+            {"error", error},
+            {"catalog", false}, // Phase 11 placeholder
+            {"host_fallback", host_fallback}};
 }
 
 bool is_listed_plugin_key(const std::string& key, const std::vector<std::string>& listed)
@@ -89,8 +83,7 @@ bool is_listed_plugin_key(const std::string& key, const std::vector<std::string>
     return is_listed(key, listed);
 }
 
-bool is_listed_capability(const std::string& name, const std::string& type,
-                          const std::vector<PluginCapabilityView>& listed)
+bool is_listed_capability(const std::string& name, const std::string& type, const std::vector<PluginCapabilityView>& listed)
 {
     if (name.empty())
         return false;
@@ -112,8 +105,8 @@ std::string sanitize_run_message(std::string text)
             return false;
         if (path.front() == '/' || path.front() == '\\')
             return true;
-        return path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path.front())) != 0 &&
-               path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+        return path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path.front())) != 0 && path[1] == ':' &&
+               (path[2] == '\\' || path[2] == '/');
     };
 
     std::string out;
@@ -153,5 +146,4 @@ bool plugin_card_leaks_path(const json& card)
     return false;
 }
 
-} // namespace HomeTab
-} // namespace Slic3r
+}} // namespace Slic3r::HomeTab

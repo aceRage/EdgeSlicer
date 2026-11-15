@@ -58,6 +58,7 @@ TEST_CASE("home plugins: a card carries display fields only", "[HomePlugins]")
     CHECK(card["update_available"] == false);
     CHECK(card["trust"] == "");
     CHECK(card["in_process_pipeline"] == false);
+    CHECK(card["running_unsandboxed"] == false);
     REQUIRE(card["types"].size() == 1);
     CHECK(card["types"][0] == "script");
     REQUIRE(card["capabilities"].size() == 1);
@@ -147,6 +148,11 @@ TEST_CASE("home plugins: host envelope shape", "[HomePlugins]")
     CHECK_FALSE(plugin_card_leaks_path(msg["items"][0]));
     CHECK_FALSE(plugin_card_leaks_path(msg["items"][1]));
     CHECK(msg["items"][1]["in_process_pipeline"] == true);
+    CHECK(msg["items"][1]["running_unsandboxed"] == false);
+
+    PluginView unsandboxed = sample_view();
+    unsandboxed.running_unsandboxed = true;
+    CHECK(plugin_card(unsandboxed)["running_unsandboxed"] == true);
     CHECK(msg["items"][1]["error"] == "manifest is invalid");
 
     const json loading = plugins_message({}, true, "");

@@ -59,6 +59,9 @@ public:
     // Bundled Python executable path, or empty when no executable is found.
     static std::string bundled_python_executable();
 
+    // Bundled Python home (the tree that contains Lib/encodings or lib/pythonX.Y/encodings).
+    static std::string bundled_python_home();
+
     // Bundled uv executable path, or empty when uv is not bundled/found.
     static std::string bundled_uv_path();
 

@@ -2,14 +2,16 @@
 
 Revision: Edge `feature/plugins-p7-ipc-host`.
 Plan: plugins plan section 6 (sandbox workloads, Out-of-process host and IPC) and Phase 7 in
-section 10. Catalog publishing is Phase 11. Printer-agent hooks stay unwired. There is no OS
-sandbox in this phase (Phase 8).
+section 10. Catalog publishing is Phase 11. Printer-agent hooks stay unwired. OS sandbox
+profiles are Phase 8 (`docs/plugins/phase8-os-sandbox.md`).
 
 All of this is compiled only when `EDGE_PYTHON_PLUGINS` is ON (default OFF). `libslic3r` is
 not given that define. With it OFF, or ON with no pipeline plugin enabled, G-code is
 byte-identical to today and the empty plugin config keys are still skipped in the G-code dump
 (the Phase 6 B1 fix). Startup never spawns `edge-plugin-host` in golden or CI runs: the helper
-is launched on the first script or `psGCodePostProcess` execute only.
+is launched on the first script or `psGCodePostProcess` execute only. Phase 8
+(`docs/plugins/phase8-os-sandbox.md`) wraps this child in an OS sandbox; this document keeps
+the Phase 7 IPC contract.
 
 ## What was built
 
@@ -56,7 +58,8 @@ The child dies with Edge:
   suspended, assign, resume. The named-pipe client pid must match the child.
 - macOS / POSIX: extra parent-pipe EOF watchdog (plus the inherited IPC fd closing)
 
-There is no AppContainer, Seatbelt, Landlock, or seccomp in this phase.
+Phase 8 adds AppContainer (Windows), a signed App Sandbox helper (macOS), and Landlock+seccomp
+(Linux) on top of this spawn path. See `docs/plugins/phase8-os-sandbox.md`.
 
 ## Permission prompts
 
@@ -68,9 +71,10 @@ execute worker, so they cannot pop a permission dialog off the UI thread.
 - Plugin **import** (discovery, `load_plugin`, capability registration) still runs inside
   Edge so the Home card and slicer can see capabilities. Only **execute** (script and
   `psGCodePostProcess`) is out of process.
-- No OS sandbox until Phase 8. A malicious child that skips its own Python audit hook still
-  has the process's ambient filesystem until then; Edge-side host RPC and FS `audit_check`
-  cover the `orca.host` surface and audited `open()` events.
+- Phase 8 applies an OS sandbox to execute. A malicious child that skips its own Python audit
+  hook is then still constrained by Landlock/AppContainer/App Sandbox. Edge-side host RPC and
+  FS `audit_check` cover the `orca.host` surface and audited `open()` events. Without Phase 8
+  the child has the process's ambient filesystem.
 - Early slicing-pipeline steps remain in-process and unsandboxed.
 - `host.preset_bundle` / `host.plater` are not snapshotted over IPC in this phase (they throw
   in the child the same way they throw without a GUI). Script and post-process fixtures do not

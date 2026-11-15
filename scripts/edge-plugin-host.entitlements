@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Shipping OS sandbox for edge-plugin-host. Applied only when this helper is signed
+         (and, for distribution, notarised) with these entitlements. An unsigned helper is
+         fail-closed: Edge refuses the workload unless the user stored a per-plugin override.
+         Path grants that are only known at runtime (the plugin dir, the G-code folder) cannot
+         be baked in here; they are documented in docs/plugins/phase8-os-sandbox.md and need a
+         signed bundle to verify. sandbox-exec / Seatbelt is a labelled dev/test probe only. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- Bundled CPython is loaded from next to the helper; library validation would reject it. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Read the OS and the helper's own tree (bundled Python lives at @executable_path/python). -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/usr/lib/</string>
+        <string>/usr/libexec/</string>
+        <string>/System/</string>
+        <string>/Library/Frameworks/</string>
+        <string>/dev/</string>
+    </array>
+    <!-- Network is off by default. A plugin that was granted p4 network still has that grant
+         enforced on the Edge side; opening client sockets from the helper requires a signed
+         rebuild with com.apple.security.network.client, which is not shipped here. -->
+</dict>
+</plist>

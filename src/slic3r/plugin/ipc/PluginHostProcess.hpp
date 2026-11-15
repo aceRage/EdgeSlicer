@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginIpcChannel.hpp"
+#include "PluginSandbox.hpp"
 
 #include <boost/filesystem/path.hpp>
 
@@ -11,7 +12,7 @@ namespace Slic3r::plugin_ipc {
 
 struct SpawnedHost
 {
-    Channel     channel;
+    Channel      channel;
     std::int64_t pid = 0;
 #ifdef _WIN32
     void* process = nullptr; // HANDLE, owned
@@ -36,9 +37,14 @@ bool helper_env_overrides_allowed();
 // is Apple-only (glibc has no such flag), so Linux never takes a posix_spawn path.
 // Linux child installs PR_SET_PDEATHSIG. Every POSIX spawn also keeps a parent-pipe
 // EOF watchdog so the helper dies if the spawning thread exits while Edge lives.
+// The child is placed in its own process group; kill_host signals the group so
+// grandchildren die too. Linux also sets PR_SET_CHILD_SUBREAPER on Edge.
 // Windows: named pipe + Job object (KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=1, no breakaway),
-// create suspended, assign, resume. The pipe client pid must match the child.
+// create suspended, assign, resume. Phase 8 wraps the job in an AppContainer when
+// `spec` is supplied. The pipe client pid must match the child.
+// Nested bubblewrap is never used (Flatpak already is bwrap).
 bool spawn_host(SpawnedHost& out, std::string& error);
+bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error);
 
 void kill_host(SpawnedHost& host);
 void kill_host_pid(std::int64_t pid);

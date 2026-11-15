@@ -3,6 +3,7 @@
 #endif
 
 #include "PluginHostProcess.hpp"
+#include "PluginSandbox.hpp"
 
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -28,6 +29,9 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/prctl.h>
+#ifndef PR_SET_CHILD_SUBREAPER
+#define PR_SET_CHILD_SUBREAPER 36
+#endif
 #endif
 #include <cerrno>
 #include <poll.h>
@@ -134,10 +138,7 @@ int pipe_cloexec(int p[2])
 
 } // namespace
 
-void set_allow_helper_env_overrides_for_testing(bool allow)
-{
-    g_allow_env_overrides.store(allow, std::memory_order_release);
-}
+void set_allow_helper_env_overrides_for_testing(bool allow) { g_allow_env_overrides.store(allow, std::memory_order_release); }
 
 bool helper_env_overrides_allowed() { return g_allow_env_overrides.load(std::memory_order_acquire); }
 
@@ -166,7 +167,9 @@ bool helper_exists()
 
 #ifdef _WIN32
 
-bool spawn_host(SpawnedHost& out, std::string& error)
+bool spawn_host(SpawnedHost& out, std::string& error) { return spawn_host(out, SandboxSpec{}, error); }
+
+bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
 {
     close_host(out);
     const boost::filesystem::path helper = helper_path();
@@ -175,16 +178,21 @@ bool spawn_host(SpawnedHost& out, std::string& error)
         return false;
     }
 
-    wchar_t pipe_name[128];
+    const bool sandbox_on = !sandbox_env_disable_requested() && !sandbox_env_force_unavailable();
+    if (sandbox_on && !prepare_parent_sandbox(spec, error))
+        return false;
+
+    wchar_t     pipe_name[128];
     static LONG counter = 0;
     const LONG  n       = ::InterlockedIncrement(&counter);
-    swprintf(pipe_name, 128, L"\\\\.\\pipe\\edge-plugin-host-%lu-%ld",
-             static_cast<unsigned long>(::GetCurrentProcessId()), static_cast<long>(n));
+    swprintf(pipe_name, 128, L"\\\\.\\pipe\\edge-plugin-host-%lu-%ld", static_cast<unsigned long>(::GetCurrentProcessId()),
+             static_cast<long>(n));
 
-    HANDLE pipe = ::CreateNamedPipeW(pipe_name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 64 * 1024,
-                                     64 * 1024, 0, nullptr);
+    SECURITY_ATTRIBUTES* pipe_sa = sandbox_on ? static_cast<SECURITY_ATTRIBUTES*>(parent_sandbox_pipe_security_attributes()) : nullptr;
+    HANDLE pipe = ::CreateNamedPipeW(pipe_name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                     1, 64 * 1024, 64 * 1024, 0, pipe_sa);
     if (pipe == INVALID_HANDLE_VALUE) {
+        close_parent_sandbox();
         error = "CreateNamedPipe failed";
         return false;
     }
@@ -192,31 +200,46 @@ bool spawn_host(SpawnedHost& out, std::string& error)
     HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
     if (job == nullptr) {
         ::CloseHandle(pipe);
+        close_parent_sandbox();
         error = "CreateJobObject failed";
         return false;
     }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
-    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    jeli.BasicLimitInformation.ActiveProcessLimit = 1;
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    jeli.ProcessMemoryLimit               = 1024ull * 1024ull * 1024ull;
+    if (!spec.allow_exec) {
+        jeli.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        jeli.BasicLimitInformation.ActiveProcessLimit = 1;
+    }
     if (!::SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
         ::CloseHandle(job);
         ::CloseHandle(pipe);
+        close_parent_sandbox();
         error = "SetInformationJobObject failed";
         return false;
     }
 
-    const std::wstring cmd = quote_arg(helper.wstring()) + L" --ipc-pipe " + quote_arg(pipe_name);
+    const std::wstring   cmd = quote_arg(helper.wstring()) + L" --ipc-pipe " + quote_arg(pipe_name);
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(L'\0');
 
-    STARTUPINFOW        si{};
+    STARTUPINFOEXW      siex{};
+    STARTUPINFOW*       si = &siex.StartupInfo;
     PROCESS_INFORMATION pi{};
-    si.cb = sizeof(si);
-    const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
-    const BOOL  ok    = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi);
+    DWORD               flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
+    LPVOID              attr  = parent_sandbox_security_capabilities();
+    if (sandbox_on && attr) {
+        si->cb               = sizeof(siex);
+        siex.lpAttributeList = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr);
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+    } else {
+        si->cb = sizeof(STARTUPINFOW);
+    }
+    const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, si, &pi);
     if (!ok) {
         ::CloseHandle(job);
         ::CloseHandle(pipe);
+        close_parent_sandbox();
         error = "CreateProcess failed for edge-plugin-host";
         return false;
     }
@@ -227,13 +250,15 @@ bool spawn_host(SpawnedHost& out, std::string& error)
         ::CloseHandle(job);
         ::CloseHandle(pipe);
         error = "AssignProcessToJobObject failed";
+        close_parent_sandbox();
         return false;
     }
     ::ResumeThread(pi.hThread);
     ::CloseHandle(pi.hThread);
+    close_parent_sandbox();
 
     OVERLAPPED ov{};
-    ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ov.hEvent      = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     BOOL connected = ::ConnectNamedPipe(pipe, &ov);
     if (!connected) {
         const DWORD err = ::GetLastError();
@@ -286,6 +311,8 @@ void kill_host_handle(void* process)
 
 void kill_host(SpawnedHost& host)
 {
+    if (host.job)
+        ::TerminateJobObject(static_cast<HANDLE>(host.job), 1);
     kill_host_handle(host.process);
 }
 
@@ -335,13 +362,8 @@ void close_fd(int& fd)
     }
 }
 
-bool spawn_host_fork(SpawnedHost& out,
-                     const boost::filesystem::path& helper,
-                     int sv[2],
-                     int watchdog[2],
-                     int errp[2],
-                     long maxfd,
-                     std::string& error)
+bool spawn_host_fork(
+    SpawnedHost& out, const boost::filesystem::path& helper, int sv[2], int watchdog[2], int errp[2], long maxfd, std::string& error)
 {
     // argv lives in the parent so the child does not allocate after fork.
     const std::string helper_str = helper.string();
@@ -390,7 +412,7 @@ bool spawn_host_fork(SpawnedHost& out,
         // Error pipe must stay CLOEXEC so execv closes it and the parent's
         // poll(errp[0]) sees EOF instead of waiting the full 3 s.
         set_cloexec(err);
-        errp[1] = err;
+        errp[1]          = err;
         const int ipc_fd = 3;
         const int wd_fd  = 4;
         const int keep[] = {ipc_fd, wd_fd, errp[1]};
@@ -408,6 +430,9 @@ bool spawn_host_fork(SpawnedHost& out,
         (void) !::write(errp[1], &e, sizeof(e));
         ::_exit(127);
     }
+
+    // Race-proof the child's setpgid(0,0): the parent also assigns the group.
+    ::setpgid(pid, pid);
 
     close_fd(sv[1]);
     close_fd(errp[1]);
@@ -443,14 +468,24 @@ bool spawn_host_fork(SpawnedHost& out,
 
 } // namespace
 
-bool spawn_host(SpawnedHost& out, std::string& error)
+bool spawn_host(SpawnedHost& out, std::string& error) { return spawn_host(out, SandboxSpec{}, error); }
+
+bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
 {
+    (void) spec;
     close_host(out);
     const boost::filesystem::path helper = helper_path();
     if (!helper_exists()) {
         error = "edge-plugin-host not found at " + helper.string();
         return false;
     }
+#ifdef __linux__
+    static const int subreaper = ::prctl(PR_SET_CHILD_SUBREAPER, 1);
+    (void) subreaper;
+    if (sandbox_env_bwrap_requested() && running_inside_flatpak()) {
+        // Nested bwrap is never used; Landlock+seccomp inside Flatpak is the path.
+    }
+#endif
 
     int sv[2] = {-1, -1};
     if (socketpair_cloexec(sv) != 0) {
@@ -494,16 +529,15 @@ bool spawn_host(SpawnedHost& out, std::string& error)
     return true;
 }
 
-void kill_host(SpawnedHost& host)
-{
-    kill_host_pid(host.pid);
-}
+void kill_host(SpawnedHost& host) { kill_host_pid(host.pid); }
 
 void kill_host_pid(std::int64_t pid)
 {
     if (pid <= 0)
         return;
-    ::kill(static_cast<pid_t>(pid), SIGKILL);
+    const pid_t p = static_cast<pid_t>(pid);
+    ::kill(-p, SIGKILL);
+    ::kill(p, SIGKILL);
 }
 
 void close_host(SpawnedHost& host)

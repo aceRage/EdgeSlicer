@@ -2,6 +2,7 @@
 
 #include "PluginIpcChannel.hpp"
 #include "PluginIpcProtocol.hpp"
+#include "PluginSandbox.hpp"
 
 #include <libslic3r/PrintConfig.hpp>
 #include <libslic3r/Utils.hpp>
@@ -27,9 +28,9 @@
 namespace Slic3r::plugin_ipc {
 namespace {
 
-Channel*              g_channel  = nullptr;
-std::recursive_mutex* g_io_mutex = nullptr;
-std::atomic<std::uint64_t>* g_next_id = nullptr;
+Channel*                    g_channel  = nullptr;
+std::recursive_mutex*       g_io_mutex = nullptr;
+std::atomic<std::uint64_t>* g_next_id  = nullptr;
 
 nlohmann::json rpc_roundtrip(nlohmann::json request)
 {
@@ -37,10 +38,10 @@ nlohmann::json rpc_roundtrip(nlohmann::json request)
         throw std::runtime_error("plugin host RPC is not available");
     const std::uint64_t id = g_next_id->fetch_add(1, std::memory_order_relaxed);
     request["id"]          = id;
-    std::string error;
+    std::string    error;
     nlohmann::json reply;
     {
-        pybind11::gil_scoped_release release;
+        pybind11::gil_scoped_release          release;
         std::lock_guard<std::recursive_mutex> lock(*g_io_mutex);
         if (!g_channel->write_json(request, k_default_timeout_ms, error))
             throw std::runtime_error(error.empty() ? "host RPC write failed" : error);
@@ -59,10 +60,7 @@ void stamp_request_id(nlohmann::json& reply, const nlohmann::json& request)
 nlohmann::json execution_result_json(const ExecutionResult& result, bool cancelled, const nlohmann::json& request)
 {
     nlohmann::json reply{
-        {"type", k_type_result},
-        {"status", static_cast<int>(result.status)},
-        {"message", result.message},
-        {"data", result.data},
+        {"type", k_type_result},  {"status", static_cast<int>(result.status)}, {"message", result.message}, {"data", result.data},
         {"cancelled", cancelled},
     };
     stamp_request_id(reply, request);
@@ -110,8 +108,7 @@ bool load_plugin(const nlohmann::json& msg, std::string& error)
 ScriptCompletion run_script(const std::string& plugin_key, const std::string& capability_name)
 {
     ScriptCompletion completion;
-    auto cap = PluginManager::instance().get_plugin_capability(
-        {PluginCapabilityType::Script, capability_name, plugin_key});
+    auto             cap = PluginManager::instance().get_plugin_capability({PluginCapabilityType::Script, capability_name, plugin_key});
     if (!cap) {
         completion.error = "script capability not found";
         return completion;
@@ -120,13 +117,12 @@ ScriptCompletion run_script(const std::string& plugin_key, const std::string& ca
     std::mutex              mutex;
     std::condition_variable cv;
     bool                    done = false;
-    const bool started = ScriptAsyncRuntime::instance().start(plugin_key, capability_name, cap,
-                                                              [&](const ScriptCompletion& c) {
-                                                                  std::lock_guard<std::mutex> lock(mutex);
-                                                                  completion = c;
-                                                                  done       = true;
-                                                                  cv.notify_all();
-                                                              });
+    const bool started           = ScriptAsyncRuntime::instance().start(plugin_key, capability_name, cap, [&](const ScriptCompletion& c) {
+        std::lock_guard<std::mutex> lock(mutex);
+        completion = c;
+        done       = true;
+        cv.notify_all();
+    });
     if (!started) {
         completion.error = "failed to start script in plugin host";
         return completion;
@@ -140,8 +136,7 @@ ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error)
 {
     const std::string plugin_key      = msg.value("plugin_key", std::string());
     const std::string capability_name = msg.value("capability_name", std::string());
-    auto cap = PluginManager::instance().get_plugin_capability(
-        {PluginCapabilityType::SlicingPipeline, capability_name, plugin_key});
+    auto cap      = PluginManager::instance().get_plugin_capability({PluginCapabilityType::SlicingPipeline, capability_name, plugin_key});
     auto pipeline = std::dynamic_pointer_cast<SlicingPipelinePluginCapability>(cap);
     if (!pipeline) {
         error = "post-process capability not found";
@@ -189,10 +184,10 @@ nlohmann::json call_host(const std::string& method, const nlohmann::json& args)
     return reply.value("value", nlohmann::json::object());
 }
 
-AuditDecision rpc_audit_check(const std::string& event_name,
+AuditDecision rpc_audit_check(const std::string&              event_name,
                               const std::vector<std::string>& targets,
-                              bool is_write,
-                              const std::string& event_type)
+                              bool                            is_write,
+                              const std::string&              event_type)
 {
     nlohmann::json request = {
         {"type", k_type_audit_check},
@@ -217,12 +212,12 @@ AuditDecision rpc_audit_check(const std::string& event_name,
 int run_child(Channel& channel)
 {
     g_channel = &channel;
-    std::recursive_mutex io_mutex;
+    std::recursive_mutex       io_mutex;
     std::atomic<std::uint64_t> next_id{1};
     g_io_mutex = &io_mutex;
     g_next_id  = &next_id;
 
-    std::string error;
+    std::string    error;
     nlohmann::json hello;
     if (!channel.read_json(hello, k_handshake_timeout_ms, error)) {
         BOOST_LOG_TRIVIAL(error) << "edge-plugin-host handshake read failed: " << error;
@@ -243,15 +238,38 @@ int run_child(Channel& channel)
     if (hello.contains("resources_dir") && hello["resources_dir"].is_string())
         Slic3r::set_resources_dir(hello["resources_dir"].get<std::string>());
 
+    SandboxSpec spec;
+    if (hello.contains("sandbox") && hello["sandbox"].is_object()) {
+        std::string spec_error;
+        if (!sandbox_spec_from_json(hello["sandbox"], spec, spec_error)) {
+            nlohmann::json err = {{"type", k_type_error}, {"message", spec_error}};
+            (void) channel.write_json(err, k_handshake_timeout_ms, error);
+            return 5;
+        }
+    }
+    if (spec.python_home.empty())
+        spec.python_home = PythonInterpreter::bundled_python_home();
+    if (spec.plugin_root.empty() && !Slic3r::data_dir().empty())
+        spec.plugin_root = (boost::filesystem::path(Slic3r::data_dir()) / "orca_plugins").string();
+
     if (!PluginManager::instance().initialize(/*install_hooks=*/false)) {
         nlohmann::json err = {{"type", k_type_error},
-                              {"message", "failed to initialize plugin manager: " +
-                                              PythonInterpreter::instance().last_error()}};
+                              {"message", "failed to initialize plugin manager: " + PythonInterpreter::instance().last_error()}};
         (void) channel.write_json(err, k_handshake_timeout_ms, error);
         return 4;
     }
 
-    nlohmann::json hello_ok = {{"type", k_type_hello_ok}, {"protocol_version", k_protocol_version}};
+    // After CPython starts so encodings/libpython already opened, before load/execute so a
+    // plugin import cannot observe the unsandboxed filesystem. Landlock is inherited.
+    SandboxReport report;
+    std::string   sandbox_error;
+    const bool    sandboxed = apply_os_sandbox(spec, report, sandbox_error);
+    if (!sandboxed)
+        BOOST_LOG_TRIVIAL(error) << "edge-plugin-host OS sandbox not applied: " << sandbox_error;
+
+    nlohmann::json hello_ok = {{"type", k_type_hello_ok},
+                               {"protocol_version", k_protocol_version},
+                               {"sandbox", sandbox_report_to_json(report)}};
     if (!channel.write_json(hello_ok, k_handshake_timeout_ms, error))
         return 2;
 
@@ -276,7 +294,7 @@ int run_child(Channel& channel)
             continue;
         }
         if (type == k_type_load) {
-            std::string load_error;
+            std::string    load_error;
             nlohmann::json reply;
             if (load_plugin(msg, load_error))
                 reply = {{"type", k_type_load_ok}};
@@ -304,7 +322,7 @@ int run_child(Channel& channel)
                 reply = {{"type", k_type_error}, {"message", load_error}};
             } else if (kind == k_kind_post_process) {
                 try {
-                    std::string exec_error;
+                    std::string           exec_error;
                     const ExecutionResult result = run_post_process(msg, exec_error);
                     if (!exec_error.empty() && result.status == PluginResult::Success)
                         reply = {{"type", k_type_error}, {"message", exec_error}};
@@ -314,8 +332,7 @@ int run_child(Channel& channel)
                     reply = {{"type", k_type_error}, {"message", ex.what()}};
                 }
             } else {
-                const ScriptCompletion completion =
-                    run_script(plugin_key, msg.value("capability_name", std::string()));
+                const ScriptCompletion completion = run_script(plugin_key, msg.value("capability_name", std::string()));
                 if (!completion.error.empty() && !completion.cancelled)
                     reply = {{"type", k_type_error}, {"message", completion.error}};
                 else
