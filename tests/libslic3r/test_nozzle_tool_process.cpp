@@ -318,6 +318,17 @@ TEST_CASE("Showing a tool selects its profile; plate-wide edits go to the Plate,
     b.nozzle_tool_view_plate_key_changed("layer_height");
     b.nozzle_tool_view_sync();
     CHECK(b.plate_print_preset().config.opt_float("layer_height") == Approx(0.16));
+    // A project saved now records the plate's change against its system process (PR #1021: a
+    // system process has no parent of its own, and the selected preset is the tool's).
+    {
+        const auto *different = b.full_config().option<ConfigOptionStrings>("different_settings_to_system");
+        REQUIRE(different != nullptr);
+        REQUIRE_FALSE(different->values.empty());
+        std::vector<std::string> keys;
+        unescape_strings_cstyle(different->values.front(), keys);
+        CHECK(contains(keys, "layer_height"));
+        CHECK_FALSE(contains(keys, "wall_loops")); // the tool's own change is not the plate's
+    }
 
     b.end_nozzle_tool_view();
     CHECK(b.nozzle_tool_view() == -1);
