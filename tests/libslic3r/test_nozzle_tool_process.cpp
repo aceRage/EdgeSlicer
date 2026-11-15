@@ -321,7 +321,8 @@ TEST_CASE("Showing a tool selects its profile; plate-wide edits go to the Plate,
     // A project saved now records the plate's change against its system process (PR #1021: a
     // system process has no parent of its own, and the selected preset is the tool's).
     {
-        const auto *different = b.full_config().option<ConfigOptionStrings>("different_settings_to_system");
+        const DynamicPrintConfig saved     = b.full_config();
+        const auto              *different = saved.option<ConfigOptionStrings>("different_settings_to_system");
         REQUIRE(different != nullptr);
         REQUIRE_FALSE(different->values.empty());
         std::vector<std::string> keys;
