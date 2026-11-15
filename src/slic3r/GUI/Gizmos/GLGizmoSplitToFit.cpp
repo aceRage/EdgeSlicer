@@ -195,9 +195,9 @@ void GLGizmoSplitToFit::save_settings() const
 {
     using namespace split_fit_gizmo_detail;
     AppConfig *cfg = wxGetApp().app_config;
-    cfg->set(CFG_MARGIN_XY, format("%.2f", m_options.margin_xy));
-    cfg->set(CFG_MARGIN_Z, format("%.2f", m_options.margin_z));
-    cfg->set(CFG_MIN_T, format("%.2f", m_options.min_part_thickness));
+    cfg->set(CFG_MARGIN_XY, Slic3r::format("%.2f", m_options.margin_xy));
+    cfg->set(CFG_MARGIN_Z, Slic3r::format("%.2f", m_options.margin_z));
+    cfg->set(CFG_MIN_T, Slic3r::format("%.2f", m_options.min_part_thickness));
     cfg->set(CFG_LAYOUT, m_options.layout == SplitLayout::FullSizeFirst ? "full" : "even");
     cfg->set(CFG_REACH, m_options.nozzle_reach ? "1" : "0");
 }
