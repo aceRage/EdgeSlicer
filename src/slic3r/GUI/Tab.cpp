@@ -3952,7 +3952,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_sparse_layers_combination", "multimaterial_settings_prime_tower#combine-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
-        // Tower interface options (per-filament values on the filament Multimaterial page).
+        // Tower interface features: Bambu Studio 2.9.1's switch (Type 1 tower, contact layers), then the Edge options
+        // (per-filament values on the filament Multimaterial page). Kept together for a later master toggle.
+        optgroup->append_single_option_line("enable_tower_interface_features", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_extra_prime", "multimaterial_settings_prime_tower");
@@ -6334,6 +6336,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_tower_interface_print_temp");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_dist");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_length");
+        optgroup->append_single_option_line("filament_tower_interface_purge_volume");
 
         optgroup = page->new_optgroup(L("Tool change parameters with single extruder MM printers"), "param_toolchange");
         optgroup->append_single_option_line("filament_loading_speed_start", "semm");

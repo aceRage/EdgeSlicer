@@ -14,10 +14,11 @@
 //                                        outside the tower and run in through a wall gap;
 //   C  wipe_tower_interface_extra_prime  push filament_tower_interface_pre_extrusion_length + 2 mm
 //                                        through the standing nozzle before the purge.
-// Neither generator has Bambu's planner, so an interface is a tool change picked by
-// wipe_tower_interface_trigger (every change, material change, material family change), never on
-// the tower's first layer. Bambu's firmware purge (M620.13 in the H2 change_filament_gcode) is not
-// part of this; its placeholders stay stubbed off in GCode.cpp.
+// An interface here is a tool change picked by wipe_tower_interface_trigger (every change, material
+// change, material family change), never on the tower's first layer. Bambu Studio's own switch,
+// enable_tower_interface_features, works on the Type 1 tower's contact layers instead (WipeTower,
+// GCode::append_tcr: run-in, wall gaps, firmware purge M620.13); while it is on, that tower does not
+// use these options. WipeTower2 never reads it.
 //
 // B needs the wall gaps (wipe_tower_wall_gap) and is off without them: the run-in line crosses the
 // tower's outer wall only through a gap cut on the interface layer and the GAP_LAYERS - 1 layers

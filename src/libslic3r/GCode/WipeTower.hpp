@@ -635,6 +635,10 @@ private:
     BoundingBoxf    m_shared_bed;                        // printable area every nozzle reaches, plate coordinates
     float           m_run_in_reserve            = 0.f;
     std::vector<std::vector<TowerInterface::GapPoint>> m_interface_gaps;
+    // Bambu Studio 2.9.1 enable_tower_interface_features: contact layers run in from outside the tower through wall
+    // gaps, change_filament_gcode purges for the interface (GCode::append_tcr), a contact block left unfilled is filled
+    // hot. m_interface (the Edge options) is off while it is on.
+    bool            m_enable_tower_interface_features = false;
 
     // Bed properties
     enum {
@@ -826,6 +830,13 @@ private:
     // Tower interface steps around a purge; the writer stands at the start of the purge.
     void    interface_before_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
     void    interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
+    // Bambu Studio 2.9.1 contact-layer pre-extrusion (get_next_pos(), finish_block_solid()): the start of a purge or
+    // solid fill moved filament_tower_interface_pre_extrusion_dist outside the tower wall it starts at, kept on the bed.
+    Vec2f   contact_run_in_start(const Vec2f &start, size_t tool) const;
+    // Bambu Studio 2.9.1 WipeTowerWriter::format_line_M109() / format_line_M104(): the nozzle named by T<physical
+    // extruder>, or I<filament> on a hotend_as_extruder printer (H3C); N0 marks a slicer line, W / C heating or cooling.
+    std::string bbs_format_M109(size_t tool, int temperature, const std::string &comment) const;
+    std::string bbs_format_M104(size_t tool, int temperature, bool is_heating, const std::string &comment) const;
 
     // Orca #10780 / #15035 block planner (Bambu Studio's plan_tower_new() / generate_new()).
     void               plan_tower_new();

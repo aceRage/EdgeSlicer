@@ -1894,6 +1894,11 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_interface    = TowerInterface::Settings::from_config(config);
     m_use_gap_wall = config.wipe_tower_wall_gap.value;
     m_shared_bed   = TowerInterface::shared_printable_box(config);
+    // Bambu Studio 2.9.1 (WipeTower.cpp:1925): its interface features on the contact layers. Edge's own interface
+    // options approximate the same bundle on a tool change trigger; with Bambu's switch on they are not used here.
+    m_enable_tower_interface_features = config.enable_tower_interface_features.value;
+    if (m_enable_tower_interface_features)
+        m_interface = TowerInterface::Settings();
 
     // Bambu Studio 2.9.1 (WipeTower.cpp:1929-1935): the nozzle-change ramming mode and its cooling timing.
     m_handle_hotend_as_extruder = Slic3r::hotend_as_extruder(config);
@@ -2167,7 +2172,12 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     writer.speed_override_backup();
     writer.speed_override(100);
 
-    const Vec2f initial_position = get_next_pos(cleaning_box, wipe_length, new_tool, solid_toolchange);
+    // Bambu Studio 2.9.1 get_next_pos(): with the interface features a contact change starts its purge outside the tower
+    // (filament_tower_interface_pre_extrusion_dist), where GCode::append_tcr unretracts the extra pre-extrusion length; the
+    // first row runs in through the wall gap get_wall_skip_points() cut on this layer and the three below.
+    Vec2f initial_position = get_next_pos(cleaning_box, wipe_length, new_tool, solid_toolchange);
+    if (m_enable_tower_interface_features && solid_toolchange)
+        initial_position = contact_run_in_start(initial_position, new_tool);
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
@@ -3706,6 +3716,19 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
     writer.append(";--------------------\n"
                   "; CP EMPTY GRID START\n")
           .comment_with_value(" layer #", m_num_layer_changes + 1);
+    // Bambu Studio 2.9.1 (finish_block_solid(), WipeTower.cpp:4609-4626): with the interface features, a contact block no
+    // tool change purged into on this layer starts outside the tower, waits for the tower interface temperature (when it
+    // differs) and primes filament_tower_interface_pre_extrusion_length + 2 mm before its first row runs in through the
+    // wall gap. Edge: the filament filling the block names the nozzle (Bambu reads the last filament changed to).
+    const FilamentParameters &fill_fp        = m_filpar[filament_id];
+    const bool                is_contact     = m_enable_tower_interface_features && layer_type == WipeTowerLayerType::Contact;
+    const bool                interface_temp = is_contact && fill_fp.interface_temperature != fill_fp.nozzle_temperature;
+    if (is_contact && std::abs(block.cur_depth - block.start_depth) < EPSILON) {
+        initial_pos = contact_run_in_start(initial_pos, filament_id);
+        if (interface_temp)
+            writer.append(bbs_format_M109(filament_id, fill_fp.interface_temperature, "Wipe tower interface layer enter"));
+        writer.retract(-fill_fp.extra_prime_length - TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+    }
     writer.set_initial_position(initial_pos, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
     for (int i = 0; i < n; ++i) {
         writer.extrude(m_left_to_right ? right : left, writer.y(), feedrate);
@@ -3716,6 +3739,10 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
         m_left_to_right = !m_left_to_right;
         writer.extrude(writer.x(), writer.y() + spacing * (up_to_down ? -1.f : 1.f), feedrate);
     }
+    // Bambu Studio 2.9.1: back to the print temperature after the fill of a contact layer.
+    if (interface_temp)
+        writer.append(bbs_format_M104(filament_id, fill_fp.nozzle_temperature, fill_fp.nozzle_temperature > fill_fp.interface_temperature,
+                                      "Wipe tower interface layer leave restore"));
     writer.append("; CP EMPTY GRID END\n"
                   ";------------------\n\n\n\n\n\n\n");
 
@@ -4252,6 +4279,17 @@ void WipeTower::get_all_wall_skip_points()
 void WipeTower::get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const std::vector<float> &y_shifts)
 {
     std::unordered_map<int, float> cur_block_depth;
+    // Bambu Studio 2.9.1 pre_access_layer (4): a contact-layer gap is cut on its layer and the three below, at the same
+    // place on the bed. The layer itself already has it.
+    auto add_contact_skip_point = [this, layer_id, &y_shifts](const Vec2f &res) {
+        for (int below = 1; below < TowerInterface::GAP_LAYERS && below <= layer_id; ++below) {
+            const int   lower = layer_id - below;
+            const Vec2f p(res.x(), res.y() + y_shifts[layer_id] - y_shifts[lower]);
+            std::vector<Vec2f> &points = m_wall_skip_points[lower];
+            if (std::none_of(points.begin(), points.end(), [&p](const Vec2f &q) { return (p - q).squaredNorm() < 1e-6f; }))
+                points.push_back(p);
+        }
+    };
     for (WipeTowerInfo::ToolChange &tc : layer.tool_changes) {
         const size_t old_filament        = tc.old_tool;
         const size_t new_filament        = tc.new_tool;
@@ -4293,12 +4331,43 @@ void WipeTower::get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const s
         m_wall_skip_points[layer_id].emplace_back(res);
         cur_block_depth[new_category] = process_depth + wipe_depth;
 
+        // Bambu Studio 2.9.1 (pre_access_layer): a contact change with the interface features runs in from outside the
+        // tower, so its gap is cut on the three layers below as well.
+        if (m_enable_tower_interface_features && block->layers_type[layer_id] == WipeTowerLayerType::Contact)
+            add_contact_skip_point(res);
+
         if (tc.run_in) {
             const bool is_left = res.x() < m_wipe_tower_width / 2.f;
             for (int below = 0; below < TowerInterface::GAP_LAYERS && below <= layer_id; ++below) {
                 const int lower = layer_id - below;
                 m_interface_gaps[lower].push_back({ Vec2f(res.x(), res.y() + y_shifts[layer_id] - y_shifts[lower]), is_left });
             }
+        }
+    }
+
+    // Bambu Studio 2.9.1: a contact block the tool changes leave untouched on this layer is filled solid by
+    // finish_block_solid(), which starts outside the tower as well: a gap where its first row crosses the wall.
+    if (m_enable_tower_interface_features) {
+        for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
+            const auto  it          = cur_block_depth.find(block.filament_adhesiveness_category);
+            const float block_depth = it != cur_block_depth.end() ? it->second : block.start_depth;
+            if (block_depth + EPSILON >= block.start_depth + block.layer_depths[layer_id] - m_perimeter_width)
+                continue;
+            if (block.layers_type[layer_id] != WipeTowerLayerType::Contact || std::abs(block_depth - block.start_depth) >= EPSILON)
+                continue;
+            // In step with finish_block_solid(): its rows one line width apart, the top one at grid_depth.
+            const float dy_skip    = block.layer_depths[layer_id] - m_perimeter_width;
+            const int   n_skip     = int((dy_skip + 0.25f * m_perimeter_width) / m_perimeter_width + 1);
+            const float grid_depth = m_perimeter_width * float(n_skip - 1);
+            Vec2f       res;
+            switch (layer_id % 4) {
+            case 0: res = Vec2f(0.f, block_depth); break;
+            case 1: res = Vec2f(m_wipe_tower_width, block_depth + grid_depth); break;
+            case 2: res = Vec2f(m_wipe_tower_width, block_depth); break;
+            default: res = Vec2f(0.f, block_depth + grid_depth); break;
+            }
+            m_wall_skip_points[layer_id].emplace_back(res);
+            add_contact_skip_point(res);
         }
     }
 }
@@ -4813,6 +4882,44 @@ void WipeTower::interface_before_wipe(WipeTowerWriter &writer, const WipeTowerIn
     }
     if (m_interface.extra_prime && ! primed)
         writer.prime(fp.extra_prime_length + TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+}
+
+Vec2f WipeTower::contact_run_in_start(const Vec2f &start, size_t tool) const
+{
+    // Bambu Studio 2.9.1 moves the start along X, away from the tower's middle, and clamps it to the shared print bed
+    // (m_shared_print_bed). Here the clamp is the same box, taken through the writer's offsets.
+    const bool  left  = start.x() < m_wipe_tower_width / 2.f;
+    const Vec2f dir(left ? -1.f : 1.f, 0.f);
+    const float alpha = m_wipe_tower_rotation_angle * float(M_PI / 180.);
+    const Vec2f shift = Vec2f(0.f, m_y_shift) + m_rib_offset;
+    auto        to_bed = [alpha, shift, this](const Vec2f &p) -> Vec2f { return Vec2f(Eigen::Rotation2Df(alpha) * (p + shift)) + m_wipe_tower_pos; };
+    const float dist  = TowerInterface::clamp_to_bed(start, dir, tool < m_filpar.size() ? m_filpar[tool].run_in_distance : 0.f, to_bed, m_shared_bed);
+    return start + dir * dist;
+}
+
+std::string WipeTower::bbs_format_M109(size_t tool, int temperature, const std::string &comment) const
+{
+    const FilamentParameters &fp = m_filpar[tool];
+    std::string out = "M109";
+    out += m_handle_hotend_as_extruder ? " I" + std::to_string(tool) : " T" + std::to_string(fp.reheat_extruder);
+    out += " S" + std::to_string(temperature) + " N0";
+    if (!comment.empty())
+        out += " ;" + comment;
+    return out + "\n";
+}
+
+std::string WipeTower::bbs_format_M104(size_t tool, int temperature, bool is_heating, const std::string &comment) const
+{
+    const FilamentParameters &fp = m_filpar[tool];
+    // Cooling waits for the moves (G1 is non-blocking); heating may start early.
+    std::string out = is_heating ? "" : "M400\n";
+    out += "M104";
+    out += m_handle_hotend_as_extruder ? " I" + std::to_string(tool) : " T" + std::to_string(fp.reheat_extruder);
+    out += " S" + std::to_string(temperature) + " N0";
+    out += is_heating ? " W" : " C";
+    if (!comment.empty())
+        out += " ;" + comment;
+    return out + "\n";
 }
 
 // Orca #15841: a folded layer is generated like any other but thrown away by the emitter, so its
