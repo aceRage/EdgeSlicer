@@ -2072,6 +2072,22 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
 
     WipeTower::ToolChangeResult result = construct_tcr(writer, false, old_tool, false);
     result.purge_volume                = wipe_volume;
+    // The gap get_all_wall_skip_points() cut into this layer's wall for this tool change: level with
+    // it, a line in from the block's start on the gap's side (the column the block's first moves take),
+    // in the frame the writer emits (as start_pos). Not for the Local-Z changes, which have no gap of
+    // their own.
+    if (m_use_gap_wall && tool_change != nullptr && m_layer_info != m_plan.end()) {
+        const auto  &changes  = m_layer_info->tool_changes;
+        const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+        if (!changes.empty() && tool_change >= changes.data() && tool_change < changes.data() + changes.size() &&
+            layer_id < m_wall_skip_points.size() && size_t(tool_change - changes.data()) < m_wall_skip_points[layer_id].size()) {
+            const Vec2f &gap = m_wall_skip_points[layer_id][size_t(tool_change - changes.data())];
+            const float  in  = initial_position.x() + m_perimeter_width;
+            const float  x   = gap.x() < m_wipe_tower_width / 2.f ? in : m_wipe_tower_width - in;
+            result.gap_entry     = writer.rotate(Vec2f(x, gap.y()));
+            result.has_gap_entry = true;
+        }
+    }
     return result;
 }
 
