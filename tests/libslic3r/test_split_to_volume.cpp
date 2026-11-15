@@ -445,17 +445,18 @@ void check_apply(const indexed_triangle_set &its, const SplitUsableVolume &usabl
     for (size_t i = 0; i < res.parts.size(); ++i) {
         const ModelObject *part = res.parts[i];
         REQUIRE(part->instances.size() == 1);
+        INFO("part " << part->name);
         REQUIRE(open_edges(*part) == 0);
         const BoundingBoxf3 bb = part->instance_bounding_box(0);
-        INFO("part " << part->name);
         // Inside the usable box, and inside its own cell.
         REQUIRE(bb.size().x() <= usable.size.x() + 1e-3);
         REQUIRE(bb.size().y() <= usable.size.y() + 1e-3);
         REQUIRE(bb.size().z() <= usable.size.z() + 1e-3);
         const SplitPart &planned = plan.parts[size_t(res.part_index[i])];
+        // Apply may move a plane by up to about 0.07 mm off the vertices it would run through.
         for (int a = 0; a < 3; ++a) {
-            REQUIRE(bb.min[a] >= planned.bbox.min[a] - 1e-3);
-            REQUIRE(bb.max[a] <= planned.bbox.max[a] + 1e-3);
+            REQUIRE(bb.min[a] >= planned.bbox.min[a] - 0.1);
+            REQUIRE(bb.max[a] <= planned.bbox.max[a] + 0.1);
         }
         REQUIRE(part->name == "Block " + planned.name);
         names.insert(part->name);

@@ -648,6 +648,53 @@ static void copy_assembled_poses(const ModelObject &from, ModelObject &to)
             to.instances[i]->set_assemble_transformation(from.instances[i]->get_assemble_transformation());
 }
 
+// cut_mesh() treats a vertex within 1e-3 mm of the plane as lying on it, and a plane through
+// existing vertices can leave a few open edges. A grid hits that all the time: an even split of a
+// box puts the second plane exactly where the first cut's cap met the box's face diagonals. So the
+// plane is moved, by at most a twentieth of a millimetre, to where no vertex of the piece is that
+// close. Returns `pos` itself when it is already clear.
+static double clear_of_vertices(const ModelObject &piece, int axis, double pos)
+{
+    std::vector<double> coords;
+    const Transform3d   inst = piece.instances.front()->get_transformation().get_matrix();
+    for (const ModelVolume *v : piece.volumes) {
+        if (!v->is_model_part() || v->mesh().empty())
+            continue;
+        const Transform3d m = inst * v->get_matrix();
+        for (const Vec3f &p : v->mesh().its.vertices)
+            coords.push_back((m * p.cast<double>())[axis]);
+    }
+    std::sort(coords.begin(), coords.end());
+    auto clearance = [&coords](double x) {
+        auto   it = std::lower_bound(coords.begin(), coords.end(), x);
+        double d  = std::numeric_limits<double>::max();
+        if (it != coords.end())
+            d = std::min(d, *it - x);
+        if (it != coords.begin())
+            d = std::min(d, x - *(it - 1));
+        return d;
+    };
+    static constexpr double CLEAR = 2.5e-3, STEP = 2.5e-3;
+    if (clearance(pos) > CLEAR)
+        return pos;
+    for (int k = 1; k <= 20; ++k) {
+        if (clearance(pos + double(k) * STEP) > CLEAR)
+            return pos + double(k) * STEP;
+        if (clearance(pos - double(k) * STEP) > CLEAR)
+            return pos - double(k) * STEP;
+    }
+    return pos;
+}
+
+static size_t model_part_open_edges(const ModelObject &object)
+{
+    size_t n = 0;
+    for (const ModelVolume *v : object.volumes)
+        if (v->is_model_part() && !v->mesh().empty())
+            n += its_num_open_edges(v->mesh().its);
+    return n;
+}
+
 struct SplitApplyRun
 {
     const SplitPlan               &plan;
@@ -681,20 +728,32 @@ struct SplitApplyRun
         }
         // The middle plane of this axis inside the piece: between cells m - 1 and m.
         const int    m   = lo[axis] + (hi[axis] - lo[axis]) / 2;
-        const double pos = positions[axis][size_t(m) - 1];
-
-        // Cut::perform_with_plane() takes the plane in the frame of the instance without its offset (the
-        // gizmo's get_cut_matrix() does the same): only the coordinate along the axis matters.
-        const Vec3d offset = piece->instances.front()->get_offset();
-        Vec3d       point  = Vec3d::Zero();
-        point[axis]        = pos;
-        const Transform3d cut_matrix = Geometry::translation_transform(point - offset) * plane_rotation(axis);
+        const double nominal = clear_of_vertices(*piece, axis, positions[axis][size_t(m) - 1]);
+        const size_t open_in = model_part_open_edges(*piece);
 
         std::vector<ModelObject *> below, above;
-        {
+        // A cut that opens edges the piece did not have is made again a little to the side (at most
+        // three times, 0.01 mm apart); the last try is kept whatever it gives (warned after Apply).
+        static const double RETRY[] = { 0., 0.01, -0.01, 0.02 };
+        for (size_t attempt = 0; attempt < sizeof(RETRY) / sizeof(RETRY[0]); ++attempt) {
+            const double pos = nominal + RETRY[attempt];
+            // Cut::perform_with_plane() takes the plane in the frame of the instance without its offset
+            // (the gizmo's get_cut_matrix() does the same): only the coordinate along the axis matters.
+            const Vec3d offset = piece->instances.front()->get_offset();
+            Vec3d       point  = Vec3d::Zero();
+            point[axis]        = pos;
+            const Transform3d cut_matrix = Geometry::translation_transform(point - offset) * plane_rotation(axis);
+
             Cut cut(piece, 0, cut_matrix,
                     ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepPaint);
             const ModelObjectPtrs &res = cut.perform_with_plane();
+            size_t open_out = 0;
+            for (const ModelObject *r : res)
+                if (r != nullptr)
+                    open_out += model_part_open_edges(*r);
+            const bool last = attempt + 1 == sizeof(RETRY) / sizeof(RETRY[0]);
+            if (open_out > open_in && !last)
+                continue;
             for (const ModelObject *r : res) {
                 if (r == nullptr || r->volumes.empty() || r->instances.empty())
                     continue;
@@ -704,6 +763,7 @@ struct SplitApplyRun
                 copy_assembled_poses(*r, *copy);
                 (bb.center()[axis] > pos ? above : below).push_back(copy);
             }
+            break;
         }
         scratch.delete_object(piece);
         ++cuts_done;
