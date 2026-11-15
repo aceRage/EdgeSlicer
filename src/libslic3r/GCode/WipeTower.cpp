@@ -2757,8 +2757,10 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         } else {
             // limit max chamfer width to 3 mm
             int chamfer_loops_num = (int) (max_chamfer_width / spacing);
-            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer_id);
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer,
+            // and a tower with no sparse layers one loop per layer it lays, not per print layer between.
+            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer_id,
+                                                                [this](size_t idx) { return plan_layer_is_laid(idx); });
             // A layer below the tower's first real layer gets no chamfer (no sparse layers: those layers are
             // never printed, but their walls still go to the conflict checker).
             loops_num = dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
@@ -3503,9 +3505,12 @@ void WipeTower::plan_tower_new()
             m_extra_spacing = std::max(min_wipe_tower_depth / max_depth, m_extra_spacing);
     }
 
+    // Edge: the tower's first layer is the print's first, or with sparse layers skipped its first tool change,
+    // the layer it lays on the bed (the print's first is not laid then). 0 when nothing is skipped.
+    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
     for (size_t idx = 0; idx < m_plan.size(); ++idx) {
         WipeTowerInfo &info = m_plan[idx];
-        if (idx == 0) {
+        if (idx == first_tower_layer) {
             // The first layer is printed solid: its purge and ramming lines fill the depth reserved for them.
             info.extra_spacing = 1.f;
             for (WipeTowerInfo::ToolChange &tc : info.tool_changes) {
@@ -4122,6 +4127,13 @@ bool WipeTower::layer_is_printed(bool toolchanges_on_layer) const
     return ! m_sparse_layers_skipped || toolchanges_on_layer;
 }
 
+// With sparse layers skipped WipeTowerIntegration::tool_change() leaves out a layer whose only result
+// is the finish (wipe_tower_layer_is_sparse); that is a planned layer without tool changes.
+bool WipeTower::plan_layer_is_laid(size_t layer_idx) const
+{
+    return layer_idx < m_plan.size() && (! m_sparse_layers_skipped || ! m_plan[layer_idx].tool_changes.empty());
+}
+
 
 void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change)
 {
@@ -4139,8 +4151,17 @@ bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {
         return false;
     if (m_cur_block == nullptr || m_cur_layer_id < 1 || m_cur_layer_id - 1 >= m_cur_block->finish_depth.size())
         return false;
+    // Edge: the tower layer this one is laid on: the one below, or with sparse layers skipped the last one laid.
+    // A layer that is left out has no tool changes, so its finish_depth reads as open from wall to wall.
+    size_t below = m_cur_layer_id - 1;
+    while (below > 0 && ! plan_layer_is_laid(below))
+        --below;
+    // Nothing is open over the solid first layer (nor under the tower's first, with nothing laid below it).
+    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
+    if (below <= first_tower_layer || ! plan_layer_is_laid(below))
+        return false;
     end_pos_y   = m_cur_block->start_depth + m_cur_block->depth - m_perimeter_width;
-    start_pos_y = m_cur_block->finish_depth[m_cur_layer_id - 1];
+    start_pos_y = m_cur_block->finish_depth[below];
     return true;
 }
 

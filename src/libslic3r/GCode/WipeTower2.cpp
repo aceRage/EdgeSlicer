@@ -2971,7 +2971,11 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
             // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
+            // With sparse layers skipped G-code leaves out every layer but the first and those with a tool
+            // change (WipeTowerIntegration::tool_change), so count only those.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx, [this](size_t idx) {
+                return ! m_sparse_layers_skipped || idx == m_first_layer_idx || ! m_plan[idx].tool_changes.empty();
+            });
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative

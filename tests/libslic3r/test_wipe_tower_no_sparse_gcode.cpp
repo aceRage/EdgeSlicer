@@ -24,6 +24,7 @@
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 
+#include <fstream>
 #include <iostream>
 
 using namespace Slic3r;
@@ -1062,4 +1063,231 @@ TEST_CASE("No-sparse Bambu tower: rib slice stress", "[.NoSparseStress]")
         INFO("iteration " << i << ", first difference at line " << diff);
         REQUIRE(diff == -1);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A post in filament 1 with bands of filament 2 at 3-4 mm and 9-10 mm ("bands", found by the
+// EdgeSlicerRS port of the Bambu Lab tower). With no sparse layers the tower is laid only on the
+// four print layers that change filament, each one directly on the last.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Per laid tower layer (keyed by the Z it is extruded at): line length, x extent and the
+// extrusion per mm of every tower line.
+struct TowerLayerStats
+{
+    double              length = 0.;
+    double              xmin = 1e9, xmax = -1e9;
+    std::vector<double> e_per_mm;
+    double span() const { return xmax - xmin; }
+};
+
+std::map<double, TowerLayerStats> tower_layer_stats(const std::string &gcode)
+{
+    std::map<double, TowerLayerStats> out;
+    std::istringstream in(gcode);
+    std::string        line;
+    double             x = 0, y = 0, z = 0, e = 0;
+    bool               in_tower = false, relative_e = false;
+    const std::regex   word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
+        if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, de = 0;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': z = v; break;
+            case 'E': de = relative_e ? v : v - e; if (!relative_e) e = v; break;
+            }
+        }
+        const double len = std::hypot(nx - x, ny - y);
+        if (in_tower && de > 1e-6 && len > 1e-6) {
+            TowerLayerStats &s = out[std::round(z * 1000.) / 1000.];
+            s.length += len;
+            s.xmin = std::min(s.xmin, std::min(x, nx));
+            s.xmax = std::max(s.xmax, std::max(x, nx));
+            s.e_per_mm.push_back(de / len);
+        }
+        x = nx;
+        y = ny;
+    }
+    return out;
+}
+
+// EDGE_NSS_DUMP=<dir> keeps each slice's G-code there for a look by hand.
+std::string dump_gcode(const std::string &gcode, const std::string &name)
+{
+    static int n = 0;
+    if (const char *dir = std::getenv("EDGE_NSS_DUMP")) {
+        std::ofstream out(std::string(dir) + "/" + name + "_" + std::to_string(++n) + ".gcode");
+        out << gcode;
+    }
+    return gcode;
+}
+
+// One object of boxes, each given by its size, its low corner and its filament.
+struct Box { Vec3d size, corner; int extruder; };
+void add_boxes(Model &model, const char *name, const std::vector<Box> &boxes, const Vec3d &offset)
+{
+    ModelObject *object = model.add_object();
+    object->name        = name;
+    for (const Box &b : boxes) {
+        ModelVolume *v = object->add_volume(make_cube(b.size.x(), b.size.y(), b.size.z()));
+        // add_volume() centres the mesh on its own origin; place each box by its centre.
+        v->set_offset(b.corner + 0.5 * b.size);
+        v->config.set("extruder", b.extruder);
+    }
+    object->add_instance()->set_offset(offset);
+    object->ensure_on_bed();
+}
+
+// The bands post: 20 x 20 x 12 mm, filament 2 from 3 to 4 mm and from 9 to 10 mm.
+void add_bands_post(Model &model, const Vec3d &offset)
+{
+    std::vector<Box> boxes;
+    double z = 0.;
+    for (const auto &[height, extruder] : std::vector<std::pair<double, int>>{ { 3., 1 }, { 1., 2 }, { 5., 1 }, { 1., 2 }, { 2., 1 } }) {
+        boxes.push_back({ Vec3d(20., 20., height), Vec3d(0., 0., z), extruder });
+        z += height;
+    }
+    add_boxes(model, "bands.stl", boxes, offset);
+}
+
+DynamicPrintConfig bands_bbl_config(double layer_height, bool no_sparse)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "change_filament_gcode", "G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n" },
+        { "layer_height", layer_height },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops", 2 },
+        { "sparse_infill_density", "15%" },
+        { "enable_support", false },
+        { "skirt_loops", 0 },
+        { "enable_prime_tower", true },
+        { "wipe_tower_no_sparse_layers", no_sparse },
+        { "wipe_tower_wall_type", "rectangle" },
+        { "prime_tower_width", 35 },
+        { "prime_tower_brim_width", 3 },
+        { "wipe_tower_x", "140" },
+        { "wipe_tower_y", "140" },
+        { "travel_speed", 500 },
+        { "retraction_length", "0.8,0.8" },
+    });
+    return config;
+}
+
+std::string slice_bands_bbl(const DynamicPrintConfig &config)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    add_bands_post(model, Vec3d(40., 40., 0.));
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    return dump_gcode(Slic3r::Test::gcode(print), "bands_bbl");
+}
+
+} // namespace
+
+// The brim chamfer steps one loop in per layer the tower lays. It counted the print layers in between
+// instead, laid or not, so the tower's second layer (five print layers up) kept one loop of the
+// chamfer and the layers above it none.
+TEST_CASE("No-sparse Bambu tower: the brim chamfer steps one loop per laid tower layer", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, true)));
+    REQUIRE(layers.size() == 4);
+    std::vector<double> spans;
+    for (const auto &[z, s] : layers) {
+        INFO("tower layer z " << z << ": span " << s.span() << " mm, " << s.length << " mm of lines");
+        spans.push_back(s.span());
+    }
+    // Loops per side, counted from the tower body (35 mm between wall centres) at the brim pitch.
+    auto loops = [&spans](size_t i, double pitch) { return int(std::lround((spans[i] - 35.) / (2. * pitch))); };
+    const double pitch = (spans[1] - spans[2]) / 2.;
+    INFO("spans " << spans[0] << " " << spans[1] << " " << spans[2] << " " << spans[3] << ", pitch " << pitch);
+    // Each laid layer above the first is one loop per side narrower than the one below it, with
+    // the chamfer still running on the fourth laid layer (it is at most 3 mm, six or so loops).
+    CHECK(pitch > 0.3);
+    CHECK(pitch < 0.6);
+    CHECK(std::abs((spans[2] - spans[3]) / 2. - pitch) < 0.02);
+    CHECK(loops(1, pitch) == std::min(loops(0, pitch), int(3. / pitch)) - 1);
+    CHECK(loops(3, pitch) >= 1);
+}
+
+// The same on the other generator (WipeTower2), which lays the print's first layer too and steps its
+// chamfer from there.
+TEST_CASE("No-sparse tower (WipeTower2): the brim chamfer steps one loop per laid tower layer", "[WipeTower][NoSparseLayers]")
+{
+    DynamicPrintConfig config = final_purge_config(false, true);
+    config.set_deserialize_strict({ { "prime_tower_brim_width", 3 }, { "prime_tower_brim_chamfer", "1" } });
+    Print print;
+    Model model;
+    add_bands_post(model, Vec3d(40., 40., 0.));
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(dump_gcode(Slic3r::Test::gcode(print), "bands_type2"));
+    std::vector<double> spans;
+    std::ostringstream  all;
+    for (const auto &[z, s] : layers) {
+        all << " z " << z << ": " << s.span();
+        spans.push_back(s.span());
+    }
+    INFO("tower layer spans:" << all.str());
+    // The four layers that change filament (the print's first is not laid here).
+    REQUIRE(spans.size() == 4);
+    // Brim loops still on the third laid layer, and one loop per side fewer on each laid layer.
+    CHECK(spans[1] > spans[2] + 0.5);
+    CHECK(spans[2] > spans[3] + 0.5);
+}
+
+// "Solid fill for the first layer" went to print layer 0, which the tower does not lay when it has
+// no tool change, and the tower's real first layer on the bed got its rows spread out to the
+// stability depth instead. Its first layer should be about as solid as with the option off.
+TEST_CASE("No-sparse Bambu tower: the first layer laid on the bed is solid", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> on  = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, true)));
+    const std::map<double, TowerLayerStats> off = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, false)));
+    REQUIRE(!on.empty());
+    REQUIRE(!off.empty());
+    const double first_on = on.begin()->second.length, first_off = off.begin()->second.length;
+    INFO("first tower layer: " << first_on << " mm of lines with no sparse layers (z " << on.begin()->first << "), " << first_off
+                               << " mm with every layer (z " << off.begin()->first << ")");
+    CHECK(std::abs(on.begin()->first - 0.2) < 1e-3);
+    CHECK(first_on > 0.9 * first_off);
+}
+
+// A row over the open part of the tower's layer below is laid at bridge flow (layers thinner than
+// 0.2 mm). "The layer below" was the print's, laid on the tower or not: one with no tool change
+// left out reads as all open, so rows lying on the solid first layer were laid at bridge flow too.
+TEST_CASE("No-sparse Bambu tower: no bridge flow over the solid first layer", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.1, true)));
+    REQUIRE(layers.size() == 4);
+    auto second = std::next(layers.begin());
+    std::vector<double> e = second->second.e_per_mm;
+    REQUIRE(!e.empty());
+    std::vector<double> sorted = e;
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    const size_t heavy  = std::count_if(e.begin(), e.end(), [median](double v) { return v > 1.4 * median; });
+    INFO("second laid tower layer z " << second->first << ": " << heavy << " of " << e.size() << " lines over 1.4x the median "
+                                      << median << " mm of filament per mm");
+    CHECK(heavy == 0);
 }
