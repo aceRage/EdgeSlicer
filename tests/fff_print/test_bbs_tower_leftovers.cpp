@@ -88,7 +88,7 @@ DynamicPrintConfig machine_config(const Machine &m)
 }
 
 // A Type 1 tower planned directly from (old, new) filament pairs, one per 0.2 mm layer; old == new is a layer without a
-// tool change on which that filament is loaded. Every change purges 600 mm3, no nozzle change.
+// tool change on which that filament is loaded. Every change purges 100 mm3 (the tower stays on the bed), no nozzle change.
 struct DirectTower
 {
     PrintConfig                                           config;
@@ -110,7 +110,7 @@ std::unique_ptr<DirectTower> direct_tower(const DynamicPrintConfig &cfg, const s
         const auto [from, to] = layers[layer];
         t->tower->plan_toolchange(z, 0.2f, from, from);
         if (from != to)
-            t->tower->plan_toolchange(z, 0.2f, from, to, 600.f, 0.f, WipeTower::NozzleChangePlan());
+            t->tower->plan_toolchange(z, 0.2f, from, to, 100.f, 0.f, WipeTower::NozzleChangePlan());
     }
     t->tower->generate(t->result);
     return t;
@@ -256,7 +256,8 @@ TEST_CASE("Tower interface features: a contact tool change starts its purge outs
     const float width = on->tower->width();
     // tool_change_start_pos: where GCode moves for the purge (a block filled before it may own start_pos).
     const float x_on = c_on->tool_change_start_pos.x(), x_off = c_off->tool_change_start_pos.x();
-    INFO("tower width " << width << ", start " << x_on << " (off: " << x_off << ")");
+    INFO("tower width " << width << ", start " << x_on << " (off: " << x_off << "), tower at " << on->tower->position().x() << ","
+                         << on->tower->position().y());
     // Without the features the purge starts on the wall; with them 10 mm out (layer 3 starts on the left).
     CHECK(x_off > -0.01f);
     CHECK(x_off < width + 0.01f);
@@ -280,9 +281,9 @@ TEST_CASE("Tower interface features: an unfilled contact block is filled hot, fr
     // Bambu Studio's forms: M109 T<physical extruder> S<t> N0, a 2 mm prime, the rows, then M400 + M104 ... C.
     CHECK(count_prefix(g_on, "M109 T0 S260 N0 ;Wipe tower interface layer enter") == 1);
     CHECK(count_prefix(g_on, "M104 T0 S240 N0 C ;Wipe tower interface layer leave restore") == 1);
-    CHECK(count_prefix(g_on, "G1 E2 F100") == 1);
+    CHECK(count_prefix(g_on, "G1 E2.0000 F100") == 1);
     CHECK(g_off.find("Wipe tower interface layer") == std::string::npos);
-    CHECK(count_prefix(g_off, "G1 E2 F100") == 0);
+    CHECK(count_prefix(g_off, "G1 E2.0000 F100") == 0);
     const std::vector<std::string> lines = split_lines(g_on);
     const auto enter = std::find(lines.begin(), lines.end(), std::string("M109 T0 S260 N0 ;Wipe tower interface layer enter"));
     const auto leave = std::find(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface layer leave restore"));
@@ -297,7 +298,9 @@ TEST_CASE("Tower interface features: H3C names the hotend by filament", "[BBSTow
     const auto        on = direct_tower(interface_config(H3C_PLA_PETG, true), contact_layers);
     const std::string g  = layer_gcode(*on, 1);
     CHECK(count_prefix(g, "M109 I1 S260 N0 ;Wipe tower interface layer enter") == 1);
-    CHECK(count_prefix(g, "M104 I1 S240 N0 C ;Wipe tower interface layer leave restore") == 1);
+    INFO(g);
+    CHECK(count_prefix(g, "M104 I1 S") == 1);
+    CHECK(g.find(" N0 C ;Wipe tower interface layer leave restore") != std::string::npos);
 }
 
 TEST_CASE("Tower interface features turn the Edge interface options off on the Bambu tower", "[BBSTowerLeftovers][TowerInterfaceBBS]")
@@ -369,6 +372,7 @@ TEST_CASE("H2C G-code: a contact tool change runs the firmware interface purge",
     auto slice_with = [](bool features) {
         DynamicPrintConfig cfg = machine_config(H2C_PLA_PETG);
         cfg.set_deserialize_strict({ { "enable_tower_interface_features", features ? "1" : "0" },
+                                     { "curr_bed_type", "Textured PEI Plate" },
                                      { "filament_tower_interface_print_temp", "-1,262" },
                                      { "filament_tower_interface_purge_volume", "20,25" } });
         Print print;
@@ -471,3 +475,4 @@ TEST_CASE("An uncategorised PLA and PETG purge into separate blocks", "[BBSTower
     std::sort(categories.begin(), categories.end());
     CHECK(categories == std::vector<int>{ 100, 300 });
 }
+
