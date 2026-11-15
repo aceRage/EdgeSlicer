@@ -1212,6 +1212,22 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
     // Flat ironing irons the start of a purge behind its wall gap.
     toggle_field("prime_tower_flat_ironing", have_prime_tower && config->opt_bool("wipe_tower_wall_gap"));
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1073-1093): line ironing and the side scrape on the Type 1 tower;
+    // the feedrate factor and the tail slowdown only where hotends are handled as extruders (H3C).
+    for (auto el : {"prime_tower_line_ironing", "prime_tower_ironing_speed", "prime_tower_side_scrape"})
+      toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    const bool have_side_scrape = have_prime_tower && !supports_wipe_tower_2 && config->opt_bool("prime_tower_side_scrape");
+    for (auto el : {"prime_tower_side_scrape_face", "prime_tower_side_scrape_length", "prime_tower_side_scrape_height",
+                    "prime_tower_side_scrape_speed", "prime_tower_side_scrape_wall_gap", "prime_tower_side_scrape_point_spacing",
+                    "prime_tower_side_scrape_along_length"})
+      toggle_line(el, have_side_scrape);
+    {
+        const ConfigOptionBool *as_extruder = preset_bundle != nullptr ?
+            preset_bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("handle_hotend_as_extruder") : nullptr;
+        const bool hotend_as_extruder = as_extruder != nullptr && as_extruder->value;
+        for (auto el : {"prime_tower_feedrate_factor", "prime_tower_tail_speed_factor", "prime_tower_tail_slowdown_volume"})
+          toggle_line(el, have_prime_tower && !supports_wipe_tower_2 && hotend_as_extruder);
+    }
     for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
       toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab

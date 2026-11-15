@@ -3927,6 +3927,20 @@ void TabPrint::build()
         optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_flat_ironing", "multimaterial_settings_prime_tower");
+        // Bambu Studio 2.9.1 (Tab.cpp:3406-3430): H3C tower speed, tail slowdown, line ironing, side scrape.
+        optgroup->append_single_option_line("prime_tower_line_ironing", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_ironing_speed", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_feedrate_factor", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_tail_speed_factor", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_tail_slowdown_volume", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_face", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_length", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_height", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_speed", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_wall_gap", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_point_spacing", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_along_length", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
@@ -6032,6 +6046,7 @@ void TabFilament::build()
         // its tower settings.
         optgroup->append_single_option_line("filament_cooling_before_tower");
         optgroup->append_single_option_line("filament_tower_ironing_area");
+        optgroup->append_single_option_line("filament_prime_tower_speed_factor_curve");
         Line line = { L("Recommended nozzle temperature"), L("Recommended nozzle temperature range of this filament. 0 means no set") };
         line.append_option(optgroup->get_option("nozzle_temperature_range_low"));
         line.append_option(optgroup->get_option("nozzle_temperature_range_high"));
