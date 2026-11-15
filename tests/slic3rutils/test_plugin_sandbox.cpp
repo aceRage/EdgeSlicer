@@ -240,10 +240,10 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir       data_dir_guard("plugin-sandbox-hello");
-    ScopedSpawnedHost   spawned;
-    std::string         error;
-    const auto          t0 = std::chrono::steady_clock::now();
+    ScopedDataDir     data_dir_guard("plugin-sandbox-hello");
+    ScopedSpawnedHost spawned;
+    std::string       error;
+    const auto        t0 = std::chrono::steady_clock::now();
     REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     plugin_ipc::SandboxSpec spec;
     spec.python_home     = PythonInterpreter::bundled_python_home();
@@ -476,9 +476,9 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir       data_dir_guard("plugin-sandbox-seatbelt");
-    ScopedSpawnedHost   spawned;
-    std::string         error;
+    ScopedDataDir     data_dir_guard("plugin-sandbox-seatbelt");
+    ScopedSpawnedHost spawned;
+    std::string       error;
     REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     plugin_ipc::SandboxSpec spec;
     spec.python_home        = PythonInterpreter::bundled_python_home();
@@ -506,13 +506,11 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
     }
     const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
     INFO("sandbox kind=" << report.kind << " detail=" << report.detail);
-    if (!report.applied || report.kind != plugin_ipc::k_sandbox_kind_seatbelt_probe ||
-        report.detail.find("DEV/TEST") == std::string::npos) {
+    if (!report.applied || report.kind != plugin_ipc::k_sandbox_kind_seatbelt_probe || report.detail.find("DEV/TEST") == std::string::npos) {
         plugin_ipc::kill_host(spawned.host);
         const std::string child_err = plugin_ipc::drain_host_stderr(spawned.host);
         plugin_ipc::close_host(spawned.host);
-        SKIP("Seatbelt probe could not be confirmed: kind=" + report.kind + " detail=" + report.detail +
-             " stderr=" + child_err);
+        SKIP("Seatbelt probe could not be confirmed: kind=" + report.kind + " detail=" + report.detail + " stderr=" + child_err);
     }
     CHECK(report.applied);
     CHECK(report.kind == plugin_ipc::k_sandbox_kind_seatbelt_probe);

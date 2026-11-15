@@ -56,6 +56,8 @@ public:
                                          const SlicingPipelineContext& ctx,
                                          std::string&                  error);
 
+    // Cancels the in-flight request for plugin_key. Bound to that request id so a
+    // later job with the same key is not cancelled.
     void cancel(const std::string& plugin_key);
     void unload(const std::string& plugin_key);
     bool has_active_run(const std::string& plugin_key) const;

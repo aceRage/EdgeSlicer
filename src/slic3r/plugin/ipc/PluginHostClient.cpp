@@ -141,20 +141,23 @@ struct PluginHostClient::Impl
 #endif
     std::string                cancel_plugin_key;
     std::string                running_plugin_key;
+    std::uint64_t              cancel_request_id{0};
+    std::uint64_t              running_request_id{0};
     std::atomic<std::uint64_t> next_id{1};
     SandboxSpec                sandbox_spec;
     SandboxReport              sandbox_report;
 
-    bool is_cancelled_locked(const std::string& plugin_key) const
+    bool is_cancelled_locked(std::uint64_t request_id) const
     {
-        return cancel_requested.load(std::memory_order_acquire) && (cancel_plugin_key.empty() || cancel_plugin_key == plugin_key);
+        return cancel_requested.load(std::memory_order_acquire) && request_id != 0 && cancel_request_id == request_id;
     }
 
-    void consume_cancel_locked(const std::string& plugin_key)
+    void consume_cancel_locked(std::uint64_t request_id)
     {
-        if (cancel_plugin_key == plugin_key || cancel_plugin_key.empty()) {
+        if (request_id != 0 && cancel_request_id == request_id) {
             cancel_requested.store(false, std::memory_order_release);
             cancel_plugin_key.clear();
+            cancel_request_id = 0;
         }
     }
 
@@ -185,10 +188,12 @@ struct PluginHostClient::Impl
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             active.erase(job.plugin_key);
-            if (running_plugin_key == job.plugin_key)
+            if (running_request_id == job.request_id) {
                 running_plugin_key.clear();
+                running_request_id = 0;
+            }
             if (cancelled)
-                consume_cancel_locked(job.plugin_key);
+                consume_cancel_locked(job.request_id);
         }
         if (job.kind == Job::Kind::Script) {
             ScriptCompletion completion;
@@ -328,7 +333,7 @@ struct PluginHostClient::Impl
         for (;;) {
             {
                 std::lock_guard<std::mutex> lock(state_mutex);
-                if (is_cancelled_locked(plugin_key)) {
+                if (is_cancelled_locked(expected_id)) {
                     error = "cancelled";
                     return false;
                 }
@@ -348,7 +353,7 @@ struct PluginHostClient::Impl
             if (!host.channel.read_json(msg, wait_ms, error)) {
                 {
                     std::lock_guard<std::mutex> lock(state_mutex);
-                    if (is_cancelled_locked(plugin_key)) {
+                    if (is_cancelled_locked(expected_id)) {
                         error = "cancelled";
                         return false;
                     }
@@ -481,7 +486,8 @@ struct PluginHostClient::Impl
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             running_plugin_key  = job.plugin_key;
-            cancelled_before_io = is_cancelled_locked(job.plugin_key);
+            running_request_id  = job.request_id;
+            cancelled_before_io = is_cancelled_locked(job.request_id);
         }
         if (cancelled_before_io) {
             fail_job(job, "cancelled", true);
@@ -497,7 +503,7 @@ struct PluginHostClient::Impl
         bool cancelled_after_load = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
-            cancelled_after_load = is_cancelled_locked(job.plugin_key);
+            cancelled_after_load = is_cancelled_locked(job.request_id);
         }
         if (cancelled_after_load) {
             io.unlock();
@@ -521,7 +527,7 @@ struct PluginHostClient::Impl
         bool           cancelled = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
-            cancelled = is_cancelled_locked(job.plugin_key);
+            cancelled = is_cancelled_locked(job.request_id);
         }
         if (!ok) {
             reset_child_locked();
@@ -536,10 +542,12 @@ struct PluginHostClient::Impl
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             active.erase(job.plugin_key);
-            if (running_plugin_key == job.plugin_key)
+            if (running_request_id == job.request_id) {
                 running_plugin_key.clear();
-            if (is_cancelled_locked(job.plugin_key))
-                consume_cancel_locked(job.plugin_key);
+                running_request_id = 0;
+            }
+            if (is_cancelled_locked(job.request_id))
+                consume_cancel_locked(job.request_id);
         }
         if (job.kind == Job::Kind::Script) {
             ScriptCompletion completion;
@@ -573,6 +581,10 @@ struct PluginHostClient::Impl
                     continue;
                 job = std::move(queue.front());
                 queue.pop_front();
+                if (job && job->kind != Job::Kind::Unload) {
+                    running_plugin_key = job->plugin_key;
+                    running_request_id = job->request_id;
+                }
                 if (stopping.load(std::memory_order_acquire)) {
                     lock.unlock();
                     fail_job(*job, "plugin host is shutting down", false);
@@ -751,30 +763,48 @@ void PluginHostClient::unload(const std::string& plugin_key)
 
 void PluginHostClient::cancel(const std::string& plugin_key)
 {
-    Impl& i = impl();
+    Impl&         i          = impl();
+    std::uint64_t request_id = 0;
     {
         std::lock_guard<std::mutex> lock(i.state_mutex);
         if (!i.active.count(plugin_key))
             return;
+        if (i.running_plugin_key == plugin_key)
+            request_id = i.running_request_id;
+        if (request_id == 0) {
+            for (const auto& job : i.queue) {
+                if (job && job->plugin_key == plugin_key && job->request_id != 0) {
+                    request_id = job->request_id;
+                    break;
+                }
+            }
+        }
+        if (request_id == 0)
+            return;
         i.cancel_requested.store(true, std::memory_order_release);
         i.cancel_plugin_key = plugin_key;
+        i.cancel_request_id = request_id;
     }
     // Do not write a cancel frame: during a pump try_lock always fails, and an idle
     // id-less cancel reply would poison the next job as an id mismatch. Kill by pid
-    // (or the stored process handle on Windows) after the grace period.
-    std::thread([plugin_key, impl = m_impl]() {
+    // (or the stored process handle on Windows) after the grace period. Bind the
+    // kill to this request id so a stale cancel cannot hit the next job that reuses
+    // the same plugin_key (ASan made that race visible).
+    std::thread([plugin_key, request_id, impl = m_impl]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(k_cancel_grace_ms));
         if (!impl)
             return;
-        {
-            std::lock_guard<std::mutex> lock(impl->state_mutex);
-            if (!impl->cancel_requested.load(std::memory_order_acquire))
-                return;
-            if (!impl->active.count(plugin_key))
-                return;
-            if (impl->running_plugin_key != plugin_key)
-                return;
-        }
+        // Hold state_mutex across kill so run_job cannot start a new request_id
+        // on the same helper between the check and SIGKILL.
+        std::lock_guard<std::mutex> lock(impl->state_mutex);
+        if (!impl->cancel_requested.load(std::memory_order_acquire))
+            return;
+        if (impl->cancel_request_id != request_id)
+            return;
+        if (impl->running_request_id != request_id)
+            return;
+        if (impl->running_plugin_key != plugin_key)
+            return;
         impl->kill_live();
     }).detach();
 }
@@ -834,8 +864,10 @@ void PluginHostClient::shutdown()
         leftover.swap(m_impl->queue);
         m_impl->active.clear();
         m_impl->running_plugin_key.clear();
+        m_impl->running_request_id = 0;
         m_impl->cancel_requested.store(false, std::memory_order_release);
         m_impl->cancel_plugin_key.clear();
+        m_impl->cancel_request_id = 0;
     }
     {
         std::lock_guard<std::mutex> io(m_impl->io_mutex);

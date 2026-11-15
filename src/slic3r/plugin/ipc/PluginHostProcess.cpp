@@ -296,12 +296,12 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 
-    out.channel = Channel::from_windows_handle(pipe);
-    out.pid               = static_cast<std::int64_t>(pi.dwProcessId);
-    out.process           = pi.hProcess;
-    out.job               = job;
-    out.last_wait_status  = 0;
-    out.wait_reaped       = false;
+    out.channel          = Channel::from_windows_handle(pipe);
+    out.pid              = static_cast<std::int64_t>(pi.dwProcessId);
+    out.process          = pi.hProcess;
+    out.job              = job;
+    out.last_wait_status = 0;
+    out.wait_reaped      = false;
     return true;
 }
 
@@ -369,9 +369,14 @@ void close_fd(int& fd)
     }
 }
 
-bool spawn_host_fork(
-    SpawnedHost& out, const boost::filesystem::path& helper, int sv[2], int watchdog[2], int errp[2], int stderrp[2], long maxfd,
-    std::string& error)
+bool spawn_host_fork(SpawnedHost&                   out,
+                     const boost::filesystem::path& helper,
+                     int                            sv[2],
+                     int                            watchdog[2],
+                     int                            errp[2],
+                     int                            stderrp[2],
+                     long                           maxfd,
+                     std::string&                   error)
 {
     // argv lives in the parent so the child does not allocate after fork.
     const std::string helper_str = helper.string();

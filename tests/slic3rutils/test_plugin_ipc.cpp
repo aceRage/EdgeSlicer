@@ -819,6 +819,8 @@ TEST_CASE("A cancel that races a successful run does not auto-cancel the next jo
     CHECK(second.error.empty());
     CHECK_FALSE(second.cancelled);
     CHECK(second.result.message == "slept");
+    // Cancels are bound to the first job's request id, so a late grace-thread
+    // kill cannot mark this second run cancelled when the same plugin_key is reused.
 }
 
 const char* const WRITE_PROBE_SOURCE_PREFIX = R"PY(# /// script
