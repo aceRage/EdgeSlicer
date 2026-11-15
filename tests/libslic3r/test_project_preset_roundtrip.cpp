@@ -11,6 +11,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ProjectConfigFill.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
@@ -499,6 +500,103 @@ TEST_CASE("Unticking Use-for-every-printer gives a project preset its parent's p
     user.is_project_embedded = false;
     bundle->prints.set_project_preset_printers(user, ProjectPresetPrinters::EveryPrinter);
     CHECK_FALSE(Preset::fits_every_printer(user.config));
+}
+
+namespace {
+
+std::vector<std::string> project_different_keys(const std::string &path, size_t slot)
+{
+    const nlohmann::json cfg = nlohmann::json::parse(zip_entry(path, "Metadata/project_settings.config"));
+    std::vector<std::string> keys;
+    if (cfg.contains("different_settings_to_system") && cfg["different_settings_to_system"].size() > slot)
+        unescape_strings_cstyle(cfg["different_settings_to_system"][slot].get<std::string>(), keys);
+    return keys;
+}
+
+bool has_key(const std::vector<std::string> &keys, const std::string &key)
+{
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+} // namespace
+
+// Curved tops hand test 2026-11-15: a changed SYSTEM process (no "Save preset", just edited) was
+// stored with no "different_settings_to_system" entry for the process (Per-nozzle process P8 asked
+// get_preset_parent(), which has no parent for a system preset), so every open put the changed
+// values back to the system preset's: curved_tops_enabled = 1 came back as 0.
+TEST_CASE("An edited system process keeps its changes through save and re-open", "[Preset][Bundle][ProjectPreset][CurvedTops][slow]")
+{
+    std::string path;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        REQUIRE(bundle->prints.get_selected_preset().is_system);
+        REQUIRE_FALSE(bundle->prints.get_edited_preset().config.opt_bool("curved_tops_enabled"));
+        bundle->prints.get_edited_preset().config.set_key_value("curved_tops_enabled", new ConfigOptionBool(true));
+        bundle->prints.get_edited_preset().config.set_key_value("wall_loops", new ConfigOptionInt(5));
+        bundle->prints.update_dirty();
+        REQUIRE(bundle->prints.get_edited_preset().is_dirty);
+        path = project_path("edited_system_process.3mf");
+        store_project(*bundle, path);
+    }
+    const std::vector<std::string> recorded = project_different_keys(path, 0);
+    CHECK(has_key(recorded, "curved_tops_enabled"));
+    CHECK(has_key(recorded, "wall_loops"));
+
+    // Opened in a new session: still on, shown as a change to the system process.
+    auto second = bbl_bundle();
+    select_machine(*second, X1C, X1C_PROC, X1C_PLA);
+    open_project(*second, path);
+    CHECK(second->prints.get_selected_preset_name() == X1C_PROC);
+    CHECK(second->prints.get_edited_preset().config.opt_bool("curved_tops_enabled"));
+    CHECK(second->prints.get_edited_preset().config.opt_int("wall_loops") == 5);
+    CHECK(second->prints.get_edited_preset().is_dirty);
+
+    // Saved again (as after a slice) and opened once more.
+    const std::string again = project_path("edited_system_process_again.3mf");
+    store_project(*second, again);
+    CHECK(has_key(project_different_keys(again, 0), "curved_tops_enabled"));
+    auto third = bbl_bundle();
+    select_machine(*third, X1C, X1C_PROC, X1C_PLA);
+    open_project(*third, again);
+    CHECK(third->prints.get_edited_preset().config.opt_bool("curved_tops_enabled"));
+    CHECK(third->prints.get_edited_preset().config.opt_int("wall_loops") == 5);
+}
+
+// The CLI's side of the same: a setting given on the command line over a named system process.
+// Without a record the GUI loader resets it (what the curved tops test project did); with the
+// record_cli_overrides_as_different() entry it stays.
+TEST_CASE("A CLI project's command-line setting survives opening it in the GUI", "[Preset][Bundle][ProjectPreset][CurvedTops]")
+{
+    DynamicPrintConfig project;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        project = bundle->full_config_secure();
+    }
+    // What the CLI holds: one empty slot per preset (process, 2 filaments, printer), then the override.
+    project.option<ConfigOptionStrings>("different_settings_to_system", true)->values = { "", "", "", "" };
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("curved_tops_enabled", new ConfigOptionBool(true));
+    project.apply(overrides);
+
+    SECTION("not recorded: the loader puts the system value back")
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK_FALSE(bundle->prints.get_edited_preset().config.opt_bool("curved_tops_enabled"));
+    }
+    SECTION("recorded: kept")
+    {
+        CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                                Preset::printer_options()) == 1);
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK(bundle->prints.get_selected_preset_name() == X1C_PROC);
+        CHECK(bundle->prints.get_edited_preset().config.opt_bool("curved_tops_enabled"));
+    }
 }
 
 // Snapmaker #996: a 3MF pads filament_settings_id to the machine's slot count with empty names

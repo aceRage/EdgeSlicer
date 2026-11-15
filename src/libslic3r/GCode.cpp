@@ -11648,12 +11648,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
     const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
     const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
-    if (curved_top) {
-        if (m_writer.get_position().z() < curved_safe_z - EPSILON)
-            gcode += this->writer().travel_to_z(curved_safe_z, "curved tops: lift clear of the surface", true);
-        // A detour would drop back to the layer's nominal Z at its first point; go straight at the safe Z.
-        m_avoid_crossing_perimeters.disable_once();
-    }
+    if (curved_top)
+        gcode += this->curved_tops_travel_to(path.first_point(), path.role(), "move to first " + description + " point", curved_safe_z);
 
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
@@ -11668,11 +11664,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // Move to first point of extrusion path
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
-    if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
+    // Curved tops: curved_tops_travel_to() above already went there; the ZAA block below descends.
+    if (!curved_top && (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel)) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
-                                 sloped == nullptr ? (curved_top ? curved_safe_z :
-                                                      (zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
+                                 sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
         // Orca: ensure Z matches planned layer height
         // Ultra: slope_need_z_travel is also set for a flat path whose planned start Z (zaa_first_z: offset
@@ -13092,6 +13088,56 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         this->set_last_pos(travel.points.back());
     }
 
+    return gcode;
+}
+
+// EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): the travel to the first point of a conformal path.
+// The nozzle sits on (or just above) curved lines laid moments ago, so the order is fixed:
+//  1. retract, and wipe if enabled, where the nozzle is: the wipe runs back along the line just
+//     laid at that line's own heights (Wipe::update_path), so it has to happen before the lift;
+//  2. lift straight up to safe_z, which clears the highest curved surface by SAFE_LIFT_MM;
+//  3. travel in XY, level, at safe_z: no avoid-crossing detour (it would drop to the layer Z at its
+//     first point) and no z-hop of any type on top (a slope lift or spiral lift would merge Z into
+//     the XY move, and a spiral circles at the surface; safe_z is the hop);
+//  4. (the caller) descend vertically to the path's first Z.
+// Before this, the lift came first and travel_to() then retracted and wiped, which put the nozzle
+// back down on the surface, and the travel climbed from there to safe_z in one diagonal move
+// through the curved lines (hand test 2026-11-15).
+std::string GCode::curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z)
+{
+    std::string gcode;
+    m_need_change_layer_lift_z = false;
+    if (m_last_pos_defined && m_last_pos == point)
+        return gcode; // no XY move: the caller just sets the path's Z
+
+    // Travel acceleration and jerk, as travel_to() sets them for a travel off the first layer.
+    unsigned int acceleration_to_set = 0;
+    double       jerk_to_set         = 0.;
+    if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0)
+        acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+    if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0)
+        jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+    if (m_writer.get_gcode_flavor() == gcfKlipper) {
+        gcode += m_writer.set_accel_and_jerk(acceleration_to_set, jerk_to_set);
+    } else {
+        gcode += m_writer.set_travel_acceleration(acceleration_to_set);
+        gcode += m_writer.set_jerk_xy(jerk_to_set);
+    }
+
+    // 1. Retract and wipe at the surface.
+    gcode += this->retract(false, false, LiftType::NormalLift, role);
+    // 2. Straight up.
+    const double travel_z = std::max(safe_z, m_writer.get_position().z());
+    if (m_writer.get_position().z() < safe_z - EPSILON)
+        gcode += m_writer.travel_to_z(safe_z, "curved tops: lift clear of the surface", true);
+    // The safe Z is the hop: drop the one retract() asked for, of whatever z_hop_types.
+    m_writer.cancel_pending_lift();
+    m_avoid_crossing_perimeters.reset_once_modifiers();
+
+    m_writer.add_object_change_labels(gcode);
+    // 3. Level, straight.
+    gcode += m_writer.travel_to_xyz(Vec3d(this->point_to_gcode(point).x(), this->point_to_gcode(point).y(), travel_z), comment);
+    this->set_last_pos(point);
     return gcode;
 }
 

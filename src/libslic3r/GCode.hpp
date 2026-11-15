@@ -353,6 +353,9 @@ public:
     void            apply_print_config(const PrintConfig &print_config);
 
     std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
+    // EdgeSlicer SPIKE, curved tops: retract (and wipe) where the nozzle is, lift straight up to
+    // safe_z, travel level at safe_z. The caller descends. See GCode.cpp.
+    std::string     curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
     std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }

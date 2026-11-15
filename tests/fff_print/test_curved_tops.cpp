@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -114,7 +115,8 @@ double extrusion_dip(const std::string &gcode)
     return lowest;
 }
 
-void slice_puck(Print &print, Model &model, bool curved_tops)
+void slice_puck(Print &print, Model &model, bool curved_tops,
+                std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -126,8 +128,126 @@ void slice_puck(Print &print, Model &model, bool curved_tops)
         { "curved_tops_layers",         "3" },
         { "curved_tops_max_angle",      "15" },
     });
+    config.set_deserialize_strict(extra);
     Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, config);
     print.process();
+}
+
+// Every travel inside the curved block, checked against what is already printed. The block starts
+// after the last extrusion before the first curved one (an extrusion that changes Z along the move,
+// or goes below the highest Z extruded so far) and ends at the last extrusion. Wipes (negative E)
+// run back along the line just laid, at its heights, and are not travels.
+struct CurvedTravels
+{
+    size_t travels       = 0;
+    size_t slanted       = 0;   // XY travel that also moves Z
+    size_t under_margin  = 0;   // clearance below the margin somewhere along the travel
+    size_t arcs          = 0;   // G2/G3 (spiral lift) inside the block
+    double min_clearance = 1e9;
+};
+
+CurvedTravels check_curved_travels(const std::string &gcode, double radius, double margin)
+{
+    struct Move { char kind; double x0, y0, z0, x1, y1, z1; };   // kind: 'e' extrude, 't' travel, 'w' wipe, 'a' arc, 'z' other
+    std::vector<Move> moves;
+    {
+        std::istringstream in(gcode);
+        std::string        line;
+        double x = 0., y = 0., z = 0.;
+        while (std::getline(in, line)) {
+            const std::string code = line.substr(0, line.find(';'));
+            const bool arc = code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0;
+            if (!arc && code.rfind("G1 ", 0) != 0 && code.rfind("G0 ", 0) != 0)
+                continue;
+            auto word = [&code](char c, double &v) {
+                const auto pos = code.find(std::string(" ") + c);
+                if (pos == std::string::npos)
+                    return false;
+                v = std::atof(code.c_str() + pos + 2);
+                return true;
+            };
+            double nx = x, ny = y, nz = z, e = 0.;
+            word('X', nx);
+            word('Y', ny);
+            word('Z', nz);
+            word('E', e);
+            const bool xy = nx != x || ny != y;
+            const char kind = arc ? 'a' : (e > 0. && xy) ? 'e' : (e < 0. && xy) ? 'w' : xy ? 't' : 'z';
+            moves.push_back({ kind, x, y, z, nx, ny, nz });
+            x = nx; y = ny; z = nz;
+        }
+    }
+    size_t first_curved = moves.size(), last_ext = 0;
+    double highest = -1e9;
+    for (size_t i = 0; i < moves.size(); ++i) {
+        if (moves[i].kind != 'e')
+            continue;
+        last_ext = i;
+        if (first_curved == moves.size() && (std::abs(moves[i].z1 - moves[i].z0) > 1e-6 || moves[i].z1 < highest - 1e-3))
+            first_curved = i;
+        highest = std::max(highest, moves[i].z1);
+    }
+    size_t start = 0;
+    for (size_t i = 0; i < first_curved && i < moves.size(); ++i)
+        if (moves[i].kind == 'e')
+            start = i + 1;
+
+    // Extruded points, 0.1 mm apart, in a 0.5 mm grid.
+    const double cell = 0.5;
+    std::map<std::pair<long, long>, std::vector<Vec3d>> grid;
+    auto key = [cell](double x, double y) { return std::make_pair(long(std::floor(x / cell)), long(std::floor(y / cell))); };
+    auto highest_near = [&](double x, double y) {
+        double best = -1e9;
+        const auto k = key(x, y);
+        const long n = long(std::ceil(radius / cell));
+        for (long gx = k.first - n; gx <= k.first + n; ++gx)
+            for (long gy = k.second - n; gy <= k.second + n; ++gy) {
+                auto it = grid.find({ gx, gy });
+                if (it != grid.end())
+                    for (const Vec3d &p : it->second)
+                        if ((p.x() - x) * (p.x() - x) + (p.y() - y) * (p.y() - y) <= radius * radius)
+                            best = std::max(best, p.z());
+            }
+        return best;
+    };
+    CurvedTravels out;
+    if (first_curved == moves.size())
+        return out;
+    for (size_t i = 0; i <= last_ext; ++i) {
+        const Move &m = moves[i];
+        const double len = std::hypot(m.x1 - m.x0, m.y1 - m.y0);
+        const int    n   = std::max(1, int(std::ceil(len / 0.1)));
+        if (m.kind == 'e') {
+            for (int j = 0; j <= n; ++j) {
+                const double t = double(j) / n;
+                const Vec3d  p(m.x0 + (m.x1 - m.x0) * t, m.y0 + (m.y1 - m.y0) * t, m.z0 + (m.z1 - m.z0) * t);
+                grid[key(p.x(), p.y())].push_back(p);
+            }
+            continue;
+        }
+        if (i < start)
+            continue;
+        if (m.kind == 'a') {
+            ++out.arcs;
+            continue;
+        }
+        if (m.kind != 't')
+            continue;
+        ++out.travels;
+        if (std::abs(m.z1 - m.z0) > 1e-6)
+            ++out.slanted;
+        double worst = 1e9;
+        for (int j = 0; j <= n; ++j) {
+            const double t = double(j) / n;
+            const double h = highest_near(m.x0 + (m.x1 - m.x0) * t, m.y0 + (m.y1 - m.y0) * t);
+            if (h > -1e8)
+                worst = std::min(worst, m.z0 + (m.z1 - m.z0) * t - h);
+        }
+        out.min_clearance = std::min(out.min_clearance, worst);
+        if (worst < margin)
+            ++out.under_margin;
+    }
+    return out;
 }
 
 } // namespace
@@ -169,6 +289,38 @@ TEST_CASE("Curved tops: a gentle cap is printed as conformal layers", "[CurvedTo
     const double dip = extrusion_dip(Test::gcode(print));
     CHECK(dip < -0.8);
     CHECK(dip > -(1.2 + 3 * 0.2 + 0.3));
+}
+
+// Hand test 2026-11-15: after a wipe, the lift to the safe Z was merged into the XY travel as one
+// diagonal that climbed from the rim through the dome's freshly printed lines (0.45 mm below the
+// surface 7.8 mm into a 37.5 mm travel). Every travel in the curved block must run level at the
+// safe Z, clear of everything printed, for every z-hop type and with wipe on or off.
+TEST_CASE("Curved tops: travels in the curved block clear the printed surface", "[CurvedTops]")
+{
+    const std::string hop  = GENERATE(std::string("Normal Lift"), std::string("Slope Lift"), std::string("Spiral Lift"), std::string("Auto Lift"));
+    const std::string wipe = GENERATE(std::string("0"), std::string("1"));
+    INFO("z_hop_types = " << hop << ", wipe = " << wipe);
+
+    Print print;
+    Model model;
+    slice_puck(print, model, true, {
+        { "z_hop_types",              hop },
+        { "z_hop",                    "0.4" },
+        { "wipe",                     wipe },
+        { "wipe_distance",            "2" },
+        { "retraction_length",        "0.8" },
+        { "enable_arc_fitting",       "0" },
+        { "use_relative_e_distances", "1" },
+    });
+    const CurvedTravels t = check_curved_travels(Test::gcode(print), 0.2, 0.5);
+    INFO("travels " << t.travels << ", slanted " << t.slanted << ", under margin " << t.under_margin << ", arcs " << t.arcs
+                    << ", min clearance " << t.min_clearance << " mm");
+    // Six curved paths (wall + fill on three layers): at least five travels between them.
+    CHECK(t.travels >= 5);
+    CHECK(t.slanted == 0);
+    CHECK(t.arcs == 0);
+    CHECK(t.under_margin == 0);
+    CHECK(t.min_clearance >= 0.5);
 }
 
 TEST_CASE("Curved tops: head clearance and flow helpers", "[CurvedTops]")

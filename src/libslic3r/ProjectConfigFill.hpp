@@ -300,6 +300,49 @@ inline size_t fill_cli_system_preset(DynamicPrintConfig             &project,
     return fill_missing_project_keys(project, *sys, options, filled_keys, present_keys);
 }
 
+// A setting given on the CLI command line (`--curved-tops-enabled 1`) overrides the loaded presets,
+// but the project's "different_settings_to_system" ([process, filament 1..n, printer]) did not say
+// so. The GUI's project loader (PresetCollection::load_external_preset) puts every key that list
+// does not name back to the system preset's value, so a project exported by the CLI opened in the
+// GUI with the override silently gone (curved tops spike, hand test 2026-11-15). Record each
+// override in the slot of the preset type it belongs to. Returns how many slot entries changed.
+inline size_t record_cli_overrides_as_different(DynamicPrintConfig             &project,
+                                                const DynamicPrintConfig       &overrides,
+                                                const std::vector<std::string> &print_keys,
+                                                const std::vector<std::string> &filament_keys,
+                                                const std::vector<std::string> &printer_keys)
+{
+    auto *opt = project.option<ConfigOptionStrings>("different_settings_to_system");
+    if (opt == nullptr || opt->values.size() < 2)
+        return 0;
+    std::vector<std::string> &slots = opt->values;
+    const std::set<std::string> print(print_keys.begin(), print_keys.end());
+    const std::set<std::string> filament(filament_keys.begin(), filament_keys.end());
+    const std::set<std::string> printer(printer_keys.begin(), printer_keys.end());
+    size_t changed = 0;
+    auto add = [&slots, &changed](size_t slot, const std::string &key) {
+        std::vector<std::string> keys;
+        unescape_strings_cstyle(slots[slot], keys);
+        if (std::find(keys.begin(), keys.end(), key) != keys.end())
+            return;
+        keys.push_back(key);
+        slots[slot] = escape_strings_cstyle(keys);
+        ++changed;
+    };
+    for (const std::string &key : overrides.keys()) {
+        if (key == "different_settings_to_system" || key == "inherits_group")
+            continue;
+        if (print.count(key))
+            add(0, key);
+        else if (printer.count(key))
+            add(slots.size() - 1, key);
+        else if (filament.count(key))
+            for (size_t slot = 1; slot + 1 < slots.size(); ++slot)
+                add(slot, key);
+    }
+    return changed;
+}
+
 } // namespace Slic3r
 
 #endif // slic3r_ProjectConfigFill_hpp_
