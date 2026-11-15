@@ -156,8 +156,8 @@ bool has_token(const std::string &line, char key, double *value = nullptr)
     return false;
 }
 
-// The feedrates of the purge's extrusions (with X or Y, positive E, an F of their own), in order, from the
-// "; CP TOOLCHANGE WIPE" of the tool change to its end.
+// The distinct speeds of the purge's rows in order: the F of its extrusions (with X or Y, positive E, an F of their
+// own) from the "; CP TOOLCHANGE WIPE" of the tool change to its end, a repeat of the same speed counted once.
 std::vector<double> purge_feedrates(const std::string &gcode)
 {
     std::vector<double> out;
@@ -170,7 +170,9 @@ std::vector<double> purge_feedrates(const std::string &gcode)
         if (!in_wipe || line.rfind("G1 ", 0) != 0)
             continue;
         double e = 0., f = 0.;
-        if ((has_token(line, 'X') || has_token(line, 'Y')) && has_token(line, 'E', &e) && e > 0. && has_token(line, 'F', &f))
+        // The start ironing (wall gap) and the rest of the first row carry the same speed: one row, one value.
+        if ((has_token(line, 'X') || has_token(line, 'Y')) && has_token(line, 'E', &e) && e > 0. && has_token(line, 'F', &f) &&
+            (out.empty() || std::abs(out.back() - f) > 0.5))
             out.push_back(f);
     }
     return out;
@@ -373,13 +375,15 @@ TEST_CASE("Line ironing can be turned off; the ironing speed is prime_tower_iron
     const std::regex iron_travel(R"(^G1 X[-\d.]+ F600$)");
     SECTION("on (the default): the purge start is ironed into the wall gap")
     {
-        const std::string &gcode = change_on_layer(*direct_tower(cfg), 1).gcode;
+        const auto tower = direct_tower(cfg);
+        const std::string gcode = change_on_layer(*tower, 1).gcode;
         CHECK(count_matching(gcode, iron_travel) >= 1);
     }
     SECTION("off (the H3C presets): no ironing")
     {
         cfg.set_deserialize_strict({ { "prime_tower_line_ironing", "0" } });
-        const std::string &gcode = change_on_layer(*direct_tower(cfg), 1).gcode;
+        const auto tower = direct_tower(cfg);
+        const std::string gcode = change_on_layer(*tower, 1).gcode;
         CHECK(count_matching(gcode, iron_travel) == 0);
         CHECK(count_matching(gcode, std::regex(R"( F240$)")) == 0);
     }
@@ -387,7 +391,8 @@ TEST_CASE("Line ironing can be turned off; the ironing speed is prime_tower_iron
     {
         cfg.set_deserialize_strict({ { "prime_tower_flat_ironing", "1" }, { "prime_tower_ironing_speed", "20" } });
         cfg.option<ConfigOptionFloats>("filament_tower_ironing_area", true)->values = { 4., 4. };
-        const std::string &gcode = change_on_layer(*direct_tower(cfg), 1).gcode;
+        const auto tower = direct_tower(cfg);
+        const std::string gcode = change_on_layer(*tower, 1).gcode;
         CHECK(count_matching(gcode, std::regex(R"(^G1 [XY][-\d.]+ F1200$)")) >= 1);
     }
 }
@@ -432,7 +437,8 @@ TEST_CASE("H3C: the tower interface temperature lines name the filament (I)", "[
     };
     SECTION("H3C")
     {
-        const std::string &gcode = change_on_layer(*direct_tower(interface_config(H3C)), 1).gcode;
+        const auto tower = direct_tower(interface_config(H3C));
+        const std::string gcode = change_on_layer(*tower, 1).gcode;
         CHECK(count_matching(gcode, std::regex(R"(^M109 I0 S250 N0 ;tower interface temperature$)")) == 1);
         // Back down to the print temperature: wait for the moves, then cool (C).
         CHECK(count_matching(gcode, std::regex(R"(^M104 I0 S\d+ N0 C ;tower interface done, normal temperature$)")) == 1);
@@ -440,7 +446,8 @@ TEST_CASE("H3C: the tower interface temperature lines name the filament (I)", "[
     }
     SECTION("H2C keeps its extruder form")
     {
-        const std::string &gcode = change_on_layer(*direct_tower(interface_config(H2C)), 1).gcode;
+        const auto tower = direct_tower(interface_config(H2C));
+        const std::string gcode = change_on_layer(*tower, 1).gcode;
         CHECK(count_matching(gcode, std::regex(R"(^M109 S250 T\d ; tower interface temperature$)")) == 1);
         CHECK(count_matching(gcode, std::regex(R"(^M10[49] I)")) == 0);
     }
