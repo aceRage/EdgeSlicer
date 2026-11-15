@@ -268,6 +268,9 @@ protected:
         GAP_FILL,
         // Edge: press and hold, the paint grows over the surface (libslic3r/SpreadPaint.hpp)
         SPREAD,
+        // Edge (Airbrush P2): a held spray into the colour field, baked into paint on release
+        // (libslic3r/Airbrush/AirbrushSession.hpp). Only the colour gizmo offers it.
+        AIRBRUSH,
     };
 
     struct ProjectedMousePosition
@@ -291,6 +294,7 @@ protected:
 
     bool     m_paint_on_overhangs_only          = false;
     float    m_highlight_by_angle_threshold_deg = 0.f;
+    float    get_highlight_angle_limit_deg() const;
 
     GLModel m_circle;
     Vec2d m_old_center{ Vec2d::Zero() };
@@ -412,6 +416,18 @@ protected:
     bool wants_enter_leave_snapshots() const override { return true; }
 
     virtual wxString handle_snapshot_action_name(bool shift_down, Button button_down) const = 0;
+
+    // Edge (Airbrush P2). While airbrush_owns_mouse(), gizmo_event() hands presses, drags, releases,
+    // moves and Ctrl+wheel to on_airbrush_event() instead of painting; the colour gizmo implements them.
+    virtual bool  airbrush_owns_mouse() const { return false; }
+    virtual bool  on_airbrush_event(SLAGizmoEventType /*action*/, const Vec2d & /*mouse_position*/, bool /*shift_down*/, bool /*control_down*/) { return false; }
+    // The airbrush cursor ball, world mm.
+    virtual float airbrush_cursor_radius() const { return -1.f; }
+    // Edge (Airbrush P3): Esc while a spray or a fill waits for its bake cancels it. True when
+    // something was cancelled (the gizmo then stays open).
+    virtual bool  on_airbrush_escape() { return false; }
+    // Edge (Airbrush P3): the cursor of the Gradient / Pattern modes; false draws the spray ball.
+    virtual bool  render_airbrush_cursor(const std::vector<Transform3d> & /*trafos*/) { return false; }
 
     friend class ::Slic3r::GUI::GLGizmoMmuSegmentation;
 };

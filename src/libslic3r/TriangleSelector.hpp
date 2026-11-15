@@ -5,10 +5,15 @@
 
 
 #include <cfloat>
+#include <memory>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
 namespace Slic3r {
+
+namespace Showcase { class SurfaceColourCursor; }
+
+namespace Airbrush { class AirbrushField; }
 
 enum class EnforcerBlockerType : int16_t {
     // Maximum is 3. The value is serialized in TriangleSelector into 2 bits.
@@ -344,6 +349,13 @@ public:
                                       float                     edge_limit,
                                       bool                      protect_painted,
                                       std::vector<uint8_t>     *fully_inside = nullptr);
+    // Edge (Showcase surface colours): as above with protect_painted on, but only leaves whose state
+    // is set in protected_states (indexed by state) are kept; every other state can be replaced.
+    void select_triangles_with_cursor(const std::vector<int>  &facets,
+                                      std::unique_ptr<Cursor> &&cursor,
+                                      EnforcerBlockerType       new_state,
+                                      float                     edge_limit,
+                                      const std::vector<bool>  &protected_states);
 
     void seed_fill_select_triangles(const Vec3f        &hit,                          // point where to start
                                     int                 facet_start,                  // facet of the original mesh (unsplit) that the hit point belongs to
@@ -430,6 +442,12 @@ public:
         TriangleSplittingData seam;
         TriangleSplittingData mmu;
         TriangleSplittingData fuzzy;
+        // Airbrush P3 (A4): the volume's colour field, and the map from the field's space (the
+        // volume's own mesh) into the frame `mesh` was saved in (identity unless the caller moved
+        // `mesh`, as Cut::save_paintings() does). ModelVolume::restore_painting() remaps the paint
+        // UNDER the airbrush and Cut::finalize() / restore_painting() re-bake the field on top.
+        std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
+        Transform3d                                    field_to_saved = Transform3d::Identity();
     };
 
     // Remap painting data from source mesh to target mesh using spatial mapping.
@@ -599,6 +617,11 @@ private:
     // Edge: Spread paint (SpreadPaint.hpp).
     friend class GeodesicCursor;
     friend class SpreadSession;
+    // Edge: Showcase surface colours (Showcase/ShowcaseSurfaceColours.hpp).
+    friend class Showcase::SurfaceColourCursor;
+
+    // Edge: with select_triangles_with_cursor(..., protected_states), the states whose leaves are kept.
+    const std::vector<bool> *m_protected_states = nullptr;
 };
 
 } // namespace Slic3r

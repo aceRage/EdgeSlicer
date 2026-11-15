@@ -498,6 +498,9 @@ public:
 	static const std::string SECTION_FILAMENTS;
     static const std::string SECTION_MATERIALS;
     static const std::string SECTION_EMBOSS_STYLE;
+    // System process (print) presets the user hid in the Process manager (full name -> "true"). Every
+    // system process preset is shown unless it is listed here; user presets are always shown.
+    static const std::string SECTION_HIDDEN_PROCESSES;
 
     // 添加设备相关的方法
     void save_device_info(const DeviceInfo& device);

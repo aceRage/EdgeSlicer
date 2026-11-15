@@ -113,8 +113,20 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
 {
     const PrintConfig          &print_config = m_layer->object()->print()->config();
     ConfigOptionFloatOrPercent config_width;
-    if (use_initial_layer_width && print_config.initial_layer_line_width.value > 0) {
-        config_width = print_config.initial_layer_line_width;
+    // Per-nozzle process P5: the first-layer width of the process of the nozzle that prints this role, when the job
+    // has per-nozzle processes (nozzle_initial_layer_line_width, empty otherwise: the plate's width as before).
+    const ConfigOptionFloatOrPercent *initial_width = &print_config.initial_layer_line_width;
+    ConfigOptionFloatOrPercent        nozzle_initial_width;
+    if (use_initial_layer_width && !print_config.nozzle_initial_layer_line_width.values.empty()) {
+        const unsigned int filament = this->extruder(role);
+        if (filament >= 1 && filament <= print_config.nozzle_initial_layer_line_width.values.size()) {
+            const FloatOrPercent &w = print_config.nozzle_initial_layer_line_width.values[filament - 1];
+            nozzle_initial_width    = ConfigOptionFloatOrPercent(w.value, w.percent);
+            initial_width           = &nozzle_initial_width;
+        }
+    }
+    if (use_initial_layer_width && initial_width->value > 0) {
+        config_width = *initial_width;
     } else if (role == frExternalPerimeter) {
         config_width = m_region->config().outer_wall_line_width;
     } else if (role == frPerimeter) {
@@ -134,7 +146,7 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
     if (config_width.value == 0)
         config_width = m_layer->object()->config().line_width;
 
-    const auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(this->extruder(role) - 1));
+    const auto nozzle_diameter = float(nozzle_diameter_for_filament(print_config, this->extruder(role)));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
@@ -145,7 +157,7 @@ Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge) const
     const PrintObject       &print_object   = *this->layer()->object();
     Flow bridge_flow;
     // Here this->extruder(role) - 1 may underflow to MAX_INT, but then the get_at() will fall back to zero'th element, so everything is all right.
-    auto nozzle_diameter = float(print_object.print()->config().nozzle_diameter.get_at(this->extruder(role) - 1));
+    auto nozzle_diameter = float(nozzle_diameter_for_filament(print_object.print()->config(), this->extruder(role)));
     // ORCA: Bridge line width. 0 (Edge's default) keeps the widths below exactly as they were.
     const ConfigOptionFloatOrPercent& bridge_width_opt = region_config.bridge_line_width;
     const double                      bridge_width      = bridge_width_opt.get_abs_value(nozzle_diameter);
@@ -192,10 +204,79 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
     }
 }
 
-void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap)
+// Bambu Studio 2.9.1 (LayerRegion.cpp:17-125): auto circle contour-hole compensation.
+// A contour or hole counts as a circle when all its vertices lie within 0.5 mm of the same distance from
+// its centroid and the variance of those distances is small. Its offset is a linear model of the
+// compensation speed and the circle diameter, clamped to the filament's limits; the manual offset takes
+// another half of its value off. Circles below the diameter limit are flagged so their walls print at
+// the compensation speed (PerimeterGenerator, GCode::extrude_loop).
+void LayerRegion::auto_circle_compensation(SurfaceCollection &slices, const PrintConfig &print_config, float manual_offset)
 {
-    this->perimeters.clear();
-    this->thin_fills.clear();
+    static const double max_deviation = scale_(0.5);
+    static const double max_variance  = 5 * scale_(0.01) * scale_(0.01);
+
+    // Filaments are 1 based. Bambu reads wall_filament; ours may be 0 for "the object's filament".
+    int wall_filament = this->region().config().wall_filament.value;
+    if (wall_filament <= 0)
+        wall_filament = int(this->extruder(frExternalPerimeter));
+    const size_t idx = size_t(std::max(0, wall_filament - 1));
+
+    const double limited_speed           = print_config.circle_compensation_speed.get_at(idx);
+    const double counter_speed_coef      = print_config.counter_coef_1.get_at(idx);
+    const double counter_diameter_coef   = print_config.counter_coef_2.get_at(idx);
+    const double counter_compensate_coef = scale_(print_config.counter_coef_3.get_at(idx));
+    const double hole_speed_coef         = print_config.hole_coef_1.get_at(idx);
+    const double hole_diameter_coef      = print_config.hole_coef_2.get_at(idx);
+    const double hole_compensate_coef    = scale_(print_config.hole_coef_3.get_at(idx));
+    const double counter_limit_min_value = scale_(print_config.counter_limit_min.get_at(idx));
+    const double counter_limit_max_value = scale_(print_config.counter_limit_max.get_at(idx));
+    const double hole_limit_min_value    = scale_(print_config.hole_limit_min.get_at(idx));
+    const double hole_limit_max_value    = scale_(print_config.hole_limit_max.get_at(idx));
+    const double diameter_limit_value    = scale_(print_config.diameter_limit.get_at(idx));
+
+    for (Surface &surface : slices.surfaces) {
+        Point  center;
+        double diameter = 0;
+        if (surface.expolygon.contour.is_approx_circle(max_deviation, max_variance, center, diameter)) {
+            double offset_value = scale_(counter_speed_coef * limited_speed) + counter_diameter_coef * diameter + counter_compensate_coef;
+            offset_value        = std::clamp(offset_value, std::min(counter_limit_min_value, counter_limit_max_value), counter_limit_max_value);
+            offset_value -= manual_offset / 2;
+            Polygons offseted_polys = offset(surface.expolygon.contour, float(offset_value));
+            if (offseted_polys.size() == 1) {
+                surface.expolygon.contour = offseted_polys.front();
+                if (diameter < diameter_limit_value)
+                    surface.counter_circle_compensation = true;
+            }
+        }
+        for (size_t i = 0; i < surface.expolygon.holes.size(); ++i) {
+            Polygon &hole = surface.expolygon.holes[i];
+            if (hole.is_approx_circle(max_deviation, max_variance, center, diameter)) {
+                double offset_value = scale_(hole_speed_coef * limited_speed) + hole_diameter_coef * diameter + hole_compensate_coef;
+                offset_value        = std::clamp(offset_value, std::min(hole_limit_min_value, hole_limit_max_value), hole_limit_max_value);
+                // A positive value is how much the printed hole shrinks, so the hole is opened up by it
+                // (offset() of a clockwise hole grows it for a negative delta).
+                offset_value = -offset_value;
+                offset_value -= manual_offset / 2;
+                Polygons offseted_polys = offset(hole, float(offset_value));
+                if (offseted_polys.size() == 1) {
+                    hole = offseted_polys.front();
+                    if (diameter < diameter_limit_value)
+                        surface.holes_circle_compensation.push_back(int(i));
+                }
+            }
+        }
+    }
+}
+
+void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap,
+                                  double merged_height, bool clear_extrusions, const ExPolygons *lower_slices_override)
+{
+    if (clear_extrusions) {
+        this->perimeters.clear();
+        this->thin_fills.clear();
+    }
+    // Mixed nozzle diameters: the height every wall, gap fill and solid flow of this pass is sized for.
+    const double flow_height = merged_height > EPSILON ? merged_height : this->layer()->height;
 
     const PrintConfig       &print_config  = this->layer()->object()->print()->config();
     const PrintRegionConfig &region_config = this->region().config();
@@ -206,11 +287,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         perimeter_config.outer_wall_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(region_config.outer_wall_filament.value)));
     perimeter_config.sparse_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.sparse_infill_filament.value))));
     perimeter_config.solid_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.solid_infill_filament.value))));
-    // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
+    // In sync with PrintObject::_slice() slicing_mode_normal_below_layer: both ask
+    // PrintObject::spiral_vase_bottom_layers().
+    // The count is of the object's own layers, and Layer::id() starts at the raft's layer count: compare the
+    // object layer index, as the slicing step and detect_surfaces_type() do.
     bool spiral_mode = print_config.spiral_mode &&
-        //FIXME account for raft layers.
-        (this->layer()->id() >= size_t(region_config.bottom_shell_layers.value) &&
-         this->layer()->print_z >= region_config.bottom_shell_thickness - EPSILON);
+        this->layer()->id() - std::min(this->layer()->id(), this->layer()->object()->slicing_parameters().raft_layers()) >=
+            this->layer()->object()->spiral_vase_bottom_layers(region_config);
 
     double model_rotation_rad = 0.0;
     if (region_config.align_infill_direction_to_model) {
@@ -222,9 +305,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         // input:
         &slices,
         &compatible_regions,
-        this->layer()->height,
+        flow_height,
         this->layer()->slice_z,
-        this->flow(frPerimeter),
+        this->flow(frPerimeter, flow_height),
         &perimeter_config,
         &this->layer()->object()->config(),
         &print_config,
@@ -254,13 +337,21 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.upper_slices_same_region = &this->layer()->upper_layer->get_region(region_id)->slices;
 
     g.layer_id              = (int)this->layer()->id();
-    g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
-    g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
-    g.solid_infill_flow     = this->flow(frSolidInfill);
+    g.ext_perimeter_flow    = this->flow(frExternalPerimeter, flow_height);
+    // A merged overhang wall is the only extrusion filling its slab's Z span, so it needs the merged height like the
+    // regular walls (BambuStudio v02.09.01.70 LayerRegion.cpp:194-198). Unmerged walls keep the bridge flow, whose
+    // non-thick branch is sized for the physical layer height.
+    g.overhang_flow         = flow_height > this->layer()->height + EPSILON ?
+        this->flow(frPerimeter, flow_height).with_flow_ratio(region_config.bridge_flow.value) :
+        this->bridging_flow(frPerimeter, object_config.thick_bridges);
+    g.solid_infill_flow     = this->flow(frSolidInfill, flow_height);
 
     // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
     ExPolygons lower_slices;
-    if (this->layer()->lower_layer != nullptr) {
+    if (lower_slices_override != nullptr) {
+        lower_slices   = g.printable_slices(*lower_slices_override);
+        g.lower_slices = &lower_slices;
+    } else if (this->layer()->lower_layer != nullptr) {
         lower_slices   = g.printable_slices(this->layer()->lower_layer->lslices);
         g.lower_slices = &lower_slices;
     }

@@ -18,6 +18,7 @@
 #include "../PrintConfig.hpp"
 #include "../Flow.hpp"
 #include "../ExtrusionEntity.hpp"
+#include "FillCornerSmoothing.hpp"
 #include "../ExtrusionEntityCollection.hpp"
 #include "../ShortestPath.hpp"
 
@@ -103,6 +104,8 @@ struct FillParams
 
     // Orca: corner smoothing factor in the range [0, 1].
     double      smooth_factor { 0. };
+    // The corner smoothing in scaled coordinates.
+    CornerSmoothing corner_smoothing() const { return CornerSmoothing{smooth_factor, scaled<double>(resolution)}; }
 
     // For Lateral lattice
     coordf_t    lateral_lattice_angle_1    { 0.f };
@@ -293,6 +296,13 @@ public:
 };
    //Fill  Multiline 
    void multiline_fill(Polylines& polylines, const FillParams& params, float spacing);
+   // Joins polylines whose ends are at most max_gap apart, shortest gaps first and without closing a loop, so each such
+   // group prints as one path. Without can_reverse only the end of one polyline joins the start of another.
+   void join_close_ends(Polylines &polylines, double max_gap, bool can_reverse);
+   // EdgeSlicer: intersection_pl() of paths that may be closed rings, each ring rejoined where clipping cut it at its first point.
+   Polylines intersection_pl_rejoining_rings(const Polylines &polylines, const ExPolygons &clip);
+// Orca: appends the gap fills of a fill whose extrusions keep their order, each where it adds the least travel.
+void insert_gap_fill(const ThickPolylines &gaps, const Flow &flow, ExtrusionEntitiesPtr &entities);
 } // namespace Slic3r
 
 #endif // slic3r_FillBase_hpp_

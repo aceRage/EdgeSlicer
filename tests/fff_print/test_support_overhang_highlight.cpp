@@ -762,7 +762,7 @@ TEST_CASE("Support highlight benchmark: pre-slice preview (slice + detect + map)
 // Phase 4: one detector (Support/SupportOverhangDetect.hpp) for both generators and the highlight.
 // ---------------------------------------------------------------------------------------------
 
-TEST_CASE("Support highlight detector: the highlight and the generators detect the same overhangs", "[SupportHighlight]")
+TEST_CASE("Support highlight detector: the highlight and the generators detect the same overhangs", "[SupportHighlight][slow]")
 {
     // With the generators' extras out of the way (no small-overhang removal, no bridges, no
     // expansion; a 20 degree frustum has no sharp tails or cantilevers) what each generator holds up is
@@ -931,7 +931,7 @@ size_t count_facets(const SupportOverhangPreview &p, uint8_t cls)
 
 } // namespace
 
-TEST_CASE("Support highlight exact: the highlight holds up exactly what the slice does on a Benchy", "[SupportHighlight]")
+TEST_CASE("Support highlight exact: the highlight holds up exactly what the slice does on a Benchy", "[SupportHighlight][slow]")
 {
     Model model;
     if (! load_benchy(model)) {
@@ -989,7 +989,7 @@ TEST_CASE("Support highlight exact: the highlight holds up exactly what the slic
     CHECK(std::abs(normal_area - tree_area) > 0.05 * std::max(normal_area, tree_area));
 }
 
-TEST_CASE("Support highlight exact: object overrides and supports switched off", "[SupportHighlight]")
+TEST_CASE("Support highlight exact: object overrides and supports switched off", "[SupportHighlight][slow]")
 {
     // The process says normal supports; the object says tree. The highlight follows the object,
     // as the slice does.

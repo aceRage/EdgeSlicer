@@ -523,7 +523,8 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                 auto other_opt = other.option(opt_key2);
                 if (my_opt2 == nullptr && other_opt) {
                     my_opt2 = dynamic_cast<ConfigOptionVectorBase *>(this->option(opt_key2, true));
-                    if (my_opt2 && my_opt2->empty()) {
+                    const auto *other_vec0 = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                    if (my_opt2 && my_opt2->empty() && !(other_vec0 != nullptr && other_vec0->empty())) {
                         my_opt2->resize(1, other_opt);
                     }
                 }
@@ -533,6 +534,11 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                         continue;
                     if (other_opt) {
                         const auto *other_vec = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                        if (other_vec != nullptr && other_vec->empty()) {
+                            // Orca #16963: an empty source list has no entry at any index to copy.
+                            my_opt2->set(other_opt);
+                            continue;
+                        }
                         if (my_opt2->empty())
                             my_opt2->resize(size_t(index) + 1, other_opt);
                         else if (size_t(index) >= my_opt2->size())

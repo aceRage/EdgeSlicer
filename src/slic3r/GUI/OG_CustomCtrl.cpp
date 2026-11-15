@@ -98,7 +98,7 @@ void OG_CustomCtrl::init_ctrl_lines()
             height = m_bmp_blinking_sz.GetHeight() + m_v_gap;
             ctrl_lines.emplace_back(CtrlLine(height, this, line, true));
         }
-        else if (opt_group->label_width != 0 && (!line.label.IsEmpty() || option_set.front().opt.gui_type == ConfigOptionDef::GUIType::legend) )
+        else if (opt_group->label_width != 0 && (!line.label.IsEmpty() || line_is_legend(line)) )
         {
             wxSize label_sz = GetTextExtent(line.label);
             if (opt_group->split_multi_line) {
@@ -366,8 +366,9 @@ void OG_CustomCtrl::OnMotion(wxMouseEvent& event)
             tooltip += line.og_line.label_tooltip;
             // BBS: markdown tip
             focusedLine = &line;
-            markdowntip = line.og_line.label.empty() 
-                ? line.og_line.get_options().front().opt_id : into_u8(line.og_line.label);
+            const t_config_option_key* first_opt_id = line_first_option_id(line.og_line);
+            markdowntip = line.og_line.label.empty()
+                ? (first_opt_id ? *first_opt_id : std::string()) : into_u8(line.og_line.label);
             markdowntip.erase(0, markdowntip.find_last_of('#') + 1);
             // BBS
             break;
@@ -718,8 +719,10 @@ void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
         return;
     const std::vector<Option>& option_set = og_line.get_options();
 
-    const ConfigOptionMode& line_mode = option_set.front().opt.mode;
-    is_visible = og_line.toggle_visible && line_mode <= mode;
+    // A widget-only row (no option, e.g. the Printer settings Extruder page's "Nozzles in this project" button and the rack
+    // box) is shown in every mode. front() of its empty option list read null + 0x180 here (owner crash 2026-11-10, clicking
+    // Printer settings > Extruder 1 on any printer).
+    is_visible = og_line.toggle_visible && line_mode(og_line) <= mode;
 
     if (draw_just_act_buttons)
         return;
@@ -768,7 +771,9 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord h_pos, wxCoord v_pos)
         return;
     }
 
-    Field* field = ctrl->opt_group->get_field(og_line.get_options().front().opt_id);
+    // A widget-only row has no option and so no field.
+    const t_config_option_key* first_opt_id = line_first_option_id(og_line);
+    Field* field = first_opt_id ? ctrl->opt_group->get_field(*first_opt_id) : nullptr;
 
     bool suppress_hyperlinks = false;
     if (draw_just_act_buttons) {

@@ -8,6 +8,7 @@
 #include "../BrimFilament.hpp"
 // Ultra (dual-nozzle): filament->nozzle grouping compute.
 #include "../FilamentGroup.hpp"
+#include "../ToolSlots.hpp"
 #include "../FilamentGroupUtils.hpp"
 #include "../ImageRowWalls.hpp"
 #include "ToolOrderUtils.hpp"
@@ -54,6 +55,21 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
         return filament_id_1based;
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
+
+    // Mixed color sublayer: a layer whose row prints as Ratio passes is filed under the pass that ends it, so no
+    // nominal tool change follows the passes. Only without a prime tower: with one, the tower's tool-change plan
+    // and the G-code's nominal sequence must keep the ordinary resolve (as Subdivide does), or the planned and
+    // the requested tool changes no longer match (seen on the X1C tower).
+    if (current_object != nullptr && !current_object->local_z_intervals().empty() &&
+        current_object->print() != nullptr && !current_object->print()->has_wipe_tower()) {
+        const int mixed_idx = mixed_mgr->mixed_index_from_filament_id(filament_id_1based, num_physical);
+        if (mixed_idx >= 0)
+            if (const unsigned int ratio_last = local_z_ratio_last_extruder(current_object->local_z_intervals(),
+                                                                            current_object->local_z_sublayer_plan(), size_t(mixed_idx),
+                                                                            double(layer_print_z));
+                ratio_last != 0)
+                return ratio_last;
+    }
 
     // Z-direction gradient short-circuits the legacy A/B layer cycle below: the
     // gradient path needs the per-(object, layer) run lookup performed inside
@@ -407,11 +423,19 @@ static double calc_max_layer_height(const PrintConfig &config, double max_object
     return std::max(max_layer_height, max_object_layer_height);
 }
 
+static double calc_min_layer_height(const PrintConfig &config)
+{
+    double min_layer_height = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < config.nozzle_diameter.values.size(); ++ i)
+        min_layer_height = std::min(min_layer_height, config.min_layer_height.get_at(i));
+    return config.nozzle_diameter.values.empty() ? 0. : min_layer_height;
+}
+
 // For the use case when each object is printed separately
 // (print->config().print_sequence == PrintSequence::ByObject is true).
 ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extruder, bool prime_multi_material)
 {
-    m_is_BBL_printer = object.print()->is_BBL_printer();
+    m_wipe_tower_type1 = object.print()->wipe_tower_type() == WipeTowerType::Type1;
     m_print_full_config = &object.print()->full_print_config();
     m_print_config_ptr = &object.print()->config();
     m_print_object_ptr = &object;
@@ -479,7 +503,7 @@ bool ToolOrdering::insert_wipe_tower_extruder()
 // (print->config().print_sequence == PrintSequence::ByObject is false).
 ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material)
 {
-    m_is_BBL_printer = print.is_BBL_printer();
+    m_wipe_tower_type1 = print.wipe_tower_type() == WipeTowerType::Type1;
     m_print_full_config = &print.full_print_config();
     m_print_config_ptr = &print.config();
     // Ultra (dual-nozzle): non-const handle so reorder_extruders_for_minimum_flush_volume can store the
@@ -818,10 +842,32 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             if (object.config().support_interface_filament.value == 0 || support_layer->chameleon_residual_all_roles)
                 extruder_interface = pinned;
         }
+        // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 ToolOrdering.cpp:1144-1147):
+        // the filament the support merge plan pinned a "don't care" slab / interface to. Mirrors GCode::process_layer.
+        // 0 on every single-diameter plate.
+        if (object.config().support_filament.value == 0 && support_layer->planned_filament_id > 0)
+            extruder_support = resolve_mixed(unsigned(support_layer->planned_filament_id), layer_tools.layer_index,
+                                             float(support_layer->print_z), float(support_layer->height), &object);
+        if (object.config().support_interface_filament.value == 0 && support_layer->planned_interface_filament_id > 0)
+            extruder_interface = resolve_mixed(unsigned(support_layer->planned_interface_filament_id), layer_tools.layer_index,
+                                               float(support_layer->print_z), float(support_layer->height), &object);
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
             layer_tools.extruders.push_back(extruder_interface);
+        // EdgeSlicer (support interface interlock): woven body stripes with a "don't care" support
+        // filament print with the first non-interface extruder on the layer (GCode.cpp). On a support
+        // layer that holds nothing else, that would be the interface filament itself, and the weave
+        // would be all interface. Schedule the object's own (body-coloured) filament there.
+        if (support_layer->interlock_woven && object.config().support_filament.value == 0) {
+            const unsigned int iface = unsigned(object.config().support_interface_filament.value);
+            // object_extruders() is 0-based; this collection phase is 1-based.
+            for (unsigned int e : object.object_extruders())
+                if (e + 1 != iface && ! object.print()->config().filament_soluble.get_at(e)) {
+                    layer_tools.extruders.push_back(e + 1);
+                    break;
+                }
+        }
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);
@@ -875,7 +921,60 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                             something_nonoverriddable = true;
                 }
 
-                if (something_nonoverriddable){
+                // Phase 5a (docs/superpowers/specs/2026-10-16-imagemap-phase5-completion.md): an
+                // image-row wall registers the filaments its runs will ACTUALLY use on this layer,
+                // worked out by the same sampler GCode.cpp splits with, plus the part's own
+                // filament for whatever the image does not reach. Phase 4 registered the row's
+                // whole candidate list instead, and every id in a layer's tool list costs a real
+                // tool change and wipe-tower purge whether anything prints with it or not
+                // (Print::_make_wipe_tower plans one per id; GCode.cpp changes tool before it
+                // looks for extrusions).
+                std::vector<int> image_row_wall_ids;
+                bool             image_row_wall = false;
+                if (something_nonoverriddable && extruder_override == 0 && m_num_physical > 0 &&
+                    image_row_wall_configured_virtual_id(object, region) != 0 && object.model_object() != nullptr &&
+                    object.model_object()->get_model() != nullptr) {
+                    ImageRowWallContext wall_ctx;
+                    // Phase 5b: layer stripes keep the whole wall on the row's per-layer
+                    // filament, which the ordinary branch below registers (resolve_mixed()).
+                    if (image_row_wall_context_for_region(object, region, float(layerm->flow(frExternalPerimeter).width()),
+                                                          wall_ctx, layerCount, float(layer->print_z), float(layer->height)) &&
+                        wall_ctx.wall_method != IMAGE_FILL_WALL_STRIPES) {
+                        image_row_wall = true;
+                        const ImageAssetStore &assets = object.model_object()->get_model()->image_assets;
+                        auto add_id = [&image_row_wall_ids](int id) {
+                            if (id > 0 && std::find(image_row_wall_ids.begin(), image_row_wall_ids.end(), id) == image_row_wall_ids.end())
+                                image_row_wall_ids.push_back(id);
+                        };
+                        // Mirrors GCode.cpp's dispatch: each island collection's children are
+                        // either a claimed wall (split into runs) or printed whole with the
+                        // part's own filament.
+                        for (const ExtrusionEntity *island : layerm->perimeters.entities) {
+                            const auto *island_coll = dynamic_cast<const ExtrusionEntityCollection *>(island);
+                            if (island_coll == nullptr) {
+                                add_id(wall_ctx.base_filament);
+                                continue;
+                            }
+                            for (const ExtrusionEntity *e : island_coll->entities) {
+                                if (e != nullptr && image_row_wall_entity_is_claimed(*e, wall_ctx.split_first_inner)) {
+                                    for (int id : image_row_wall_entity_filaments(assets, wall_ctx, *e, layer->print_z, layer))
+                                        add_id(id);
+                                } else {
+                                    add_id(wall_ctx.base_filament);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (something_nonoverriddable && image_row_wall) {
+                    for (int id : image_row_wall_ids) {
+                        layer_tools.extruders.emplace_back(unsigned(id));
+                        if (layerCount == 0 &&
+                            std::find(firstLayerExtruders.begin(), firstLayerExtruders.end(), id) == firstLayerExtruders.end())
+                            firstLayerExtruders.emplace_back(id);
+                    }
+                } else if (something_nonoverriddable){
                     const unsigned int configured_wall = (extruder_override == 0) ? region.config().wall_filament.value : extruder_override;
                     unsigned int       wall_ext        = resolve_mixed(configured_wall, layerCount, float(layer->print_z), float(layer->height), &object);
                     const unsigned int grouped_id =
@@ -907,28 +1006,8 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                             firstLayerExtruders.emplace_back(wall_ext);
                     }
 
-                    // Phase 4 (image row on WALLS): when this region's wall filament names an
-                    // enabled ImageWeighted row, GCode.cpp splits the outer perimeter into
-                    // per-run collections, each tagged with ONE of the row's own candidate
-                    // filaments. That split happens at G-CODE time, which is after this function
-                    // runs - so unlike the fills loop below (which can read the tag off a
-                    // collection the slicer already produced), this branch cannot see the runs.
-                    // It therefore registers the row's whole CANDIDATE SET from the config, which
-                    // is the set the runs are guaranteed to be drawn from. Registering the set is
-                    // what makes GCode.cpp's own `layer_tools.has_extruder(correct_extruder_id)`
-                    // check find each run's filament in the layer's tool list; without it a run
-                    // would be silently reassigned to layer_tools.extruders.back(). Registering a
-                    // filament that no run on THIS layer ends up using costs nothing: the list is
-                    // deduplicated and reordered for minimum switches by reorder_extruders(), and
-                    // an extruder with no extrusions emits no tool change.
-                    if (extruder_override == 0 && m_mixed_mgr != nullptr && m_num_physical > 0) {
-                        for (unsigned int cand : image_row_wall_candidate_filaments(object, region, m_num_physical)) {
-                            layer_tools.extruders.emplace_back(cand);
-                            if (layerCount == 0 &&
-                                std::find(firstLayerExtruders.begin(), firstLayerExtruders.end(), int(cand)) == firstLayerExtruders.end())
-                                firstLayerExtruders.emplace_back(int(cand));
-                        }
-                    }
+                    // (Phase 4 registered an image-row wall's whole candidate list here. Phase 5a
+                    // registers the filaments the runs actually use, in the branch above.)
 
                     // Ultra: outer walls may use their own filament
                     if (extruder_override == 0 && region.config().outer_wall_filament.value > 0) {
@@ -1266,13 +1345,52 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             }
     }
 
-    // Calculate the wipe_tower_layer_height values.
-    coordf_t wipe_tower_print_z_last = 0.;
-    for (LayerTools &lt : m_layer_tools)
-        if (lt.has_wipe_tower) {
+    // Calculate the wipe_tower_layer_height values. Precise Z height ends each object at its exact
+    // top, so another object's layers can sit above these by less than the printer's minimum layer
+    // height. A tower layer that thin cannot be printed, and a purge sized for it runs up to hundreds
+    // of mm long, so it joins the tower layer below. The floor matches the towers' own WT_EPSILON
+    // merge, which would otherwise size the joined tool changes with the sliver's height. The EPSILON
+    // margin keeps layers sliced at exactly the minimum height, whose sums round below it, apart.
+    //
+    // The gap is measured from the tower layer below, as in Orca #17204: that is the height the
+    // joined purges print at, so a run of joined layers can never add up to more than the minimum.
+    // Layers without a tower (support-only layers between object layers) do not move it.
+    const double min_tower_layer_height = std::max(calc_min_layer_height(config), 1e-3);
+    coordf_t     wipe_tower_print_z_last = 0.;
+    // The layer that finishes the current tower layer, and whether any layer of it changes tools.
+    LayerTools  *tower_layer_end         = nullptr;
+    bool         tower_layer_changes     = false;
+    unsigned int current_extruder        = (unsigned int) -1;
+    for (LayerTools &lt : m_layer_tools) {
+        lt.wipe_tower_layer_ends = true;
+        // The G-code takes one tower result per tool change, so a layer that changes tools always
+        // takes one; a layer that does not takes one only when it finishes the tower layer.
+        const bool changes = ! lt.extruders.empty() &&
+            (current_extruder == (unsigned int) -1 || lt.extruders.size() > 1 || lt.extruders.front() != current_extruder);
+        if (! lt.extruders.empty())
+            current_extruder = lt.extruders.back();
+        if (! lt.has_wipe_tower)
+            continue;
+        // Only a layer that prints joins, so the tower layer is always finished by a printing layer.
+        if (tower_layer_end != nullptr && ! lt.extruders.empty() && lt.print_z - wipe_tower_print_z_last + EPSILON < min_tower_layer_height) {
+            lt.wipe_tower_print_z      = tower_layer_end->wipe_tower_print_z;
+            lt.wipe_tower_layer_height = tower_layer_end->wipe_tower_layer_height;
+            // The finish rides on the last tool change of the joined layers, as it does on its own
+            // layer: one that takes over after the last result is gone has nothing left to print.
+            if (changes || ! tower_layer_changes) {
+                tower_layer_end->wipe_tower_layer_ends = false;
+                tower_layer_end                        = &lt;
+            } else
+                lt.wipe_tower_layer_ends = false;
+            tower_layer_changes |= changes;
+        } else {
+            lt.wipe_tower_print_z      = lt.print_z;
             lt.wipe_tower_layer_height = lt.print_z - wipe_tower_print_z_last;
-            wipe_tower_print_z_last = lt.print_z;
+            wipe_tower_print_z_last    = lt.print_z;
+            tower_layer_end            = &lt;
+            tower_layer_changes        = changes;
         }
+    }
 }
 
 // H2 preload (preload_all_filaments): the layer-1 ordering rule. See ToolOrdering.hpp for the
@@ -1426,6 +1544,45 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         }
     }
 
+    // Mixed color sublayer: a Ratio pass prints its filament inside a layer whose nominal extruder may be another one
+    // (a component that never ends a layer, or keeps printing passes after its last nominal layer). Count those
+    // filaments as used, up to the layer of their last pass, so the writer, the start G-code placeholders, the
+    // adaptive PA tables and the "last use" heater shut-off (ooze prevention) all know them. Nothing changes without
+    // a Ratio pass.
+    {
+        std::vector<const PrintObject *> objects;
+        if (m_print != nullptr)
+            for (const PrintObject *object : static_cast<const Print *>(m_print)->objects())
+                objects.push_back(object);
+        else if (m_print_object_ptr != nullptr)
+            objects.push_back(m_print_object_ptr);
+        bool added = false;
+        for (const PrintObject *object : objects) {
+            const std::vector<SubLayerPlan> &plans = object->local_z_sublayer_plan();
+            for (const SubLayerPlan &plan : plans) {
+                if (!plan.ratio_pass || plan.layer_id >= object->layer_count())
+                    continue;
+                const coordf_t layer_z = object->get_layer(int(plan.layer_id))->print_z;
+                for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e) {
+                    if (plan.painted_masks_by_extruder[e].empty())
+                        continue;
+                    const unsigned int ext = unsigned(e);
+                    if (std::find(m_all_printing_extruders.begin(), m_all_printing_extruders.end(), ext) == m_all_printing_extruders.end()) {
+                        m_all_printing_extruders.push_back(ext);
+                        added = true;
+                    }
+                    auto it = m_last_layer_per_extruder.find(ext);
+                    if (it == m_last_layer_per_extruder.end())
+                        m_last_layer_per_extruder.emplace(ext, layer_z);
+                    else
+                        it->second = std::max(it->second, layer_z);
+                }
+            }
+        }
+        if (added)
+            sort_remove_duplicates(m_all_printing_extruders);
+    }
+
     if (prime_multi_material && ! m_all_printing_extruders.empty()) {
         // Reorder m_all_printing_extruders in the sequence they will be primed, the last one will be m_first_printing_extruder.
         // Then set m_first_printing_extruder to the 1st extruder primed.
@@ -1504,6 +1661,14 @@ std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintCo
     std::vector<MultiNozzleUtils::NozzleGroupInfo> nozzle_groups;
     auto extruder_nozzle_counts = get_extruder_nozzle_stats(print_config.extruder_nozzle_stats.values);
     for (size_t idx = 0; idx < extruder_nums; ++idx) {
+        // Per-nozzle process P4: an extruder whose rack nozzle diameters are declared (H2C) gets one group per kind
+        // of rack nozzle, so the grouping result carries each nozzle's real diameter.
+        std::vector<std::pair<std::string, std::pair<NozzleVolumeType, int>>> rack;
+        if (rack_nozzle_groups(print_config, idx, rack)) {
+            for (const auto &group : rack)
+                nozzle_groups.emplace_back(group.first, group.second.first, idx, group.second.second);
+            continue;
+        }
         if (idx >= extruder_nozzle_counts.size() || extruder_nozzle_counts[idx].empty()) {
             nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), nozzle_volume_type_at(print_config, idx), idx,
                                        extruder_max_nozzle_count_at(print_config, idx));
@@ -1639,6 +1804,8 @@ FilamentGroupContext build_filament_group_context(
             info.usage_type = filament_usage_types[idx];
         else
             info.usage_type = filament_usage_types.empty() ? FilamentUsageType::ModelOnly : filament_usage_types.front();
+        if (idx < print_config.filament_diameter.size())
+            info.diameter = float(print_config.filament_diameter.get_at(idx));
         context.model_info.filament_info.emplace_back(std::move(info));
     }
 
@@ -1678,7 +1845,8 @@ FilamentGroupContext build_filament_group_context(
     } else
         context.group_info.filament_volume_map = std::vector<int>(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
 
-    context.nozzle_info.nozzle_list = build_nozzle_list(nozzle_groups);
+    // A rack machine's nozzles numbered by physical slot (Bambu Studio 2.9.x): the ids reach slice_info and the printer.
+    context.nozzle_info.nozzle_list = grouping_nozzle_list(print_config, nozzle_groups);
     context.nozzle_info.extruder_nozzle_list = build_extruder_nozzle_list(context.nozzle_info.nozzle_list);
 
     if (context.nozzle_info.nozzle_list.empty())
@@ -1809,6 +1977,8 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
         }
 
         if (has_multiple_nozzle) {
+            // Per-nozzle process P4: every filament prints with a rack nozzle of the size it was sliced for.
+            pin_rack_nozzle_diameters(print_config, context.nozzle_info.nozzle_list, used_filaments, ret);
             auto result_opt = LayeredNozzleGroupResult::create(ret, context.nozzle_info.nozzle_list, used_filaments);
             if (!result_opt) return LayeredNozzleGroupResult();
             return *result_opt;
@@ -1976,6 +2146,10 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                 m_print, layer_data.layer_filaments, group_mode,
                 layer_data.physical_unprintables, layer_data.geometric_unprintables, layer_data.filament_unprintable_volumes);
             m_print->set_nozzle_group_result(std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(grouping));
+            // Per-nozzle process P4: the geometry was cut for each filament's rack nozzle size; refuse a grouping
+            // that would print it with another size on any layer.
+            if (const std::string mismatch = check_rack_nozzle_diameters(*print_config, grouping); !mismatch.empty())
+                throw Slic3r::SlicingError(mismatch);
             // Ultra (Phase 6): write the 1-based filament->extruder map into the live config so process (wipe
             // tower), the config block, and gcode all route filaments to their assigned nozzle. This is the
             // simple half of BBS's update_filament_maps_to_config; the per-nozzle filament-variant config
@@ -2020,7 +2194,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
-    if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_is_BBL_printer) {
+    if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_wipe_tower_type1) {
         for (unsigned int i = 0; i < number_of_extruders; ++i)
             wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
                                                        flush_matrix.begin() + (i + 1) * number_of_extruders));
@@ -2526,6 +2700,17 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         break;
 
                     auto &entities = this_support_layer->support_fills.entities;
+                    // EdgeSlicer (support interface interlock, design D5): no purge into the support
+                    // body of a layer with woven stripes. Always false with the feature off.
+                    if (this_support_layer->interlock_woven)
+                        support_overriddable = false;
+                    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70
+                    // ToolOrdering.cpp:4011-4014): a support layer the merge plan pinned to a filament is printed by
+                    // that nozzle only, so it takes no purge. 0 on every single-diameter plate.
+                    if (this_support_layer->planned_filament_id > 0)
+                        support_overriddable = false;
+                    if (this_support_layer->planned_interface_filament_id > 0)
+                        support_intf_overriddable = false;
                     if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {

@@ -398,6 +398,23 @@ void MonitorPanel::update_all()
         return;
     }
 
+    // EdgeSlicer: a LAN printer that keeps refusing its saved access code is not "Connecting...":
+    // from the second refused dial in a row the bar says the code was refused and its link opens
+    // the edit dialog (once the notice is up the redials pause until then, LanAccessCodeWatch.hpp).
+    {
+        DeviceManager* dev = wxGetApp().getDeviceManager();
+        const bool refused = dev && obj->is_lan_mode_printer() && dev->lan_access_code_bar(obj->dev_id) &&
+                             (obj->is_connecting() || !obj->is_connected());
+        if (refused) {
+            // show_status() resets the panel (set_default) and with it `obj`: keep the serial first.
+            const std::string dev_id = obj->dev_id;
+            show_status((int) MONITOR_DISCONNECTED);
+            m_side_tools->set_access_code_refused(dev_id);
+            return;
+        }
+        m_side_tools->set_access_code_refused(std::string());
+    }
+
     if (obj->is_connecting()) {
         show_status(MONITOR_CONNECTING);
         return;

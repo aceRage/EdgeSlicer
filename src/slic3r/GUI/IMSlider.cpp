@@ -1713,7 +1713,10 @@ bool IMSlider::is_wipe_tower_layer(int tick) const
 {
     if (!m_is_wipe_tower || tick >= (int) m_values.size()) return false;
     if (tick == 0 || (tick == (int) m_values.size() - 1 && m_values[tick] > m_values[tick - 1])) return false;
-    if ((m_values[tick - 1] == m_values[tick + 1] && m_values[tick] < m_values[tick + 1]) ||
+    // The tick after this one is looked at only where there is one: for the last tick, m_values[tick + 1] was read
+    // past the end of the vector whenever the last value was not above the one before it.
+    const bool has_next = tick + 1 < (int) m_values.size();
+    if ((has_next && m_values[tick - 1] == m_values[tick + 1] && m_values[tick] < m_values[tick + 1]) ||
         (tick > 0 && m_values[tick] < m_values[tick - 1])) // if there is just one wiping on the layer
         return true;
 

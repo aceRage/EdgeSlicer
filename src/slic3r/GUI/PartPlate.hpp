@@ -195,11 +195,11 @@ private:
     wxCoord m_name_texture_width;
     wxCoord m_name_texture_height;
 
+    // Copies m_name to the Print; invalidates the G-code export if a G-code template uses {plate_name}.
+    void sync_plate_name_to_print();
+
     void init();
     bool valid_instance(int obj_id, int instance_id) const;
-    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
-    // by its brim and the tower margin, in plate coordinates.
-    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     void generate_print_polygon(ExPolygon &print_polygon);
     void generate_exclude_polygon(ExPolygon &exclude_polygon);
     void generate_logo_polygon(ExPolygon &logo_polygon);
@@ -290,6 +290,9 @@ public:
     // full config (BambuStudio PartPlate::set_filament_maps / set_filament_map_mode).
     void set_manual_filament_map(const std::vector<int>& filament_map);
     void clear_manual_filament_map();
+    // The printer changed to another filament routing layout (PresetBundle::update_filament_routing_for_printer): the plate's
+    // map, manual grouping and dual-nozzle confirmation were made for the old printer's extruders. Returns whether any was set.
+    bool reset_filament_routing();
     // Empty unless this plate is in manual grouping.
     std::vector<int> get_manual_filament_map() const;
     // DualNozzleSync::Confirmation JSON (saved in the project; empty = never confirmed).
@@ -395,6 +398,10 @@ public:
     // printable outline (cut to the part every nozzle reaches on a dual-nozzle printer), `margin` mm inside it.
     // Zero on a bed that fills its bounding box: the drag's bounding-box clamp already covers those.
     Vec2d wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const;
+    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
+    // by its brim and the tower margin, in plate coordinates. Public for the phone's plate layout
+    // (RemoteAccess, slice_prime_tower), which marks a tower that meets them.
+    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
     // expand_mixed_slots = false keeps mixed filament slots as slots instead of their components.

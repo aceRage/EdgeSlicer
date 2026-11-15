@@ -20,6 +20,9 @@ namespace Slic3r {
 
 class DynamicPrintConfig;
 
+// A print_host value from a host and a port (-1: none) found by discovery or given by the device page.
+std::string print_host_address(const std::string& ip, int port);
+
 enum class PrintHostPostUploadAction {
     None,
     StartPrint,

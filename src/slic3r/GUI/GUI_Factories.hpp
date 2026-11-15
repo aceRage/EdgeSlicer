@@ -195,6 +195,7 @@ private:
     void        append_menu_item_replace_with_stl(wxMenu* menu);
     void        append_menu_item_edit_in_blender(wxMenu* menu);
     void        append_menu_item_edit_in_freecad(wxMenu* menu);
+    void        append_menu_item_edit_in_layerling(wxMenu* menu);
     void        append_menu_item_cad_fillet(wxMenu* menu);
     void        append_menu_item_change_extruder(wxMenu* menu);
     void        append_menu_item_set_visible(wxMenu* menu);
@@ -206,6 +207,8 @@ private:
     void        append_menu_item_assemble_separately(wxMenu *menu);
     void        append_menu_items_visibility(wxMenu *menu);
     void        append_menu_items_support_group(wxMenu *menu);
+    // Check item "Override paint" for modifier selections, rebuilt per open.
+    void        append_menu_item_override_paint(wxMenu *menu);
     void        append_menu_item_merge_to_single_object(wxMenu* menu);
     void        append_menu_item_merge_parts_to_single_part(wxMenu *menu);
     void        append_menu_item_merge_some_parts_to_single_part(wxMenu *menu);

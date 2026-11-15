@@ -65,6 +65,10 @@ struct FilamentColorItem
     std::string sku;
     double tdValue = 0.0;
     FilamentColor colorData;
+    // Optional "split" field of the colour library: the proportions of a coextruded multi-colour
+    // SKU ("30|70" or [30, 70] in the JSON), normalised to whole percents. Empty = equal split.
+    // Visual only (multi-colour P2).
+    std::string split;
 };
 
 struct FilamentColorInfo

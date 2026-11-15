@@ -18,6 +18,10 @@
 #include "slic3r/GUI/LibVGCode/LibVGCodeWrapper.hpp"
 #include "libvgcode/include/PathVertex.hpp"
 #include "libvgcode/include/Viewer.hpp"
+#include "libvgcode/src/Layers.hpp"
+#include "libvgcode/src/Settings.hpp"
+#include "libvgcode/src/Utils.hpp"
+#include "libvgcode/include/ColorRange.hpp"
 
 using namespace Slic3r;
 
@@ -243,4 +247,97 @@ TEST_CASE("libvgcode input: conversion cost on a large synthetic result", "[.][l
                     << su.vertices.size() << " vertices in " << summary_ms << " ms; sizeof(MoveVertex)="
                     << sizeof(GCodeProcessorResult::MoveVertex) << " sizeof(PathVertex)=" << sizeof(libvgcode::PathVertex));
     CHECK(in.vertices.size() >= n - 1);
+}
+
+// OrcaSlicer #16588: Layers::get_layer_id_at() searched with a reversed comparison, so the G-code
+// conflict warning named the wrong layer. The id it returns is the number of layers at or below z
+// (the 1-based layer number of the layer printed at z), which is what the warning prints.
+TEST_CASE("libvgcode layer lookup counts the layers at or below z", "[libvgcode][Regression]")
+{
+    libvgcode::Layers layers;
+    const float       zs[] = { 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
+    uint32_t          vertex_id = 0;
+    for (uint32_t layer = 0; layer < 5; ++layer) {
+        for (int i = 0; i < 2; ++i) {
+            libvgcode::PathVertex v;
+            v.type     = libvgcode::EMoveType::Extrude;
+            v.role     = libvgcode::EGCodeExtrusionRole::ExternalPerimeter;
+            v.position = { float(i), 0.f, zs[layer] };
+            v.layer_id = layer;
+            layers.update(v, vertex_id++);
+        }
+    }
+    REQUIRE(layers.count() == 5);
+
+    CHECK(layers.get_layer_id_at(0.1f) == 0);
+    // On a layer boundary: that layer is counted.
+    CHECK(layers.get_layer_id_at(0.2f) == 1);
+    CHECK(layers.get_layer_id_at(0.6f) == 3);
+    CHECK(layers.get_layer_id_at(1.0f) == 5);
+    // Between layers.
+    CHECK(layers.get_layer_id_at(0.5f) == 2);
+    CHECK(layers.get_layer_id_at(5.0f) == 5);
+    // The layer whose z is z: one less, as the preview's support overlay reads it.
+    CHECK(layers.get_layer_z(layers.get_layer_id_at(0.6f) - 1) == 0.6f);
+}
+
+// The preview legend's numeric views (flow, speed, ...) take their min/max from the extrusions of the
+// line types that are shown, so showing only Ironing gives a gradient over ironing alone.
+TEST_CASE("libvgcode color ranges only count extrusions of visible line types", "[libvgcode][Regression]")
+{
+    libvgcode::Settings settings;
+    libvgcode::PathVertex ironing;
+    ironing.type = libvgcode::EMoveType::Extrude;
+    ironing.role = libvgcode::EGCodeExtrusionRole::Ironing;
+    libvgcode::PathVertex solid = ironing;
+    solid.role = libvgcode::EGCodeExtrusionRole::SolidInfill;
+    libvgcode::PathVertex travel = ironing;
+    travel.type = libvgcode::EMoveType::Travel;
+
+    // everything shown: both extrusion roles count, travels never do
+    CHECK(libvgcode::counts_for_color_ranges(ironing, settings));
+    CHECK(libvgcode::counts_for_color_ranges(solid, settings));
+    CHECK_FALSE(libvgcode::counts_for_color_ranges(travel, settings));
+
+    // hide everything but Ironing
+    settings.extrusion_roles_visibility.fill(false);
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::Ironing)] = true;
+    CHECK(libvgcode::counts_for_color_ranges(ironing, settings));
+    CHECK_FALSE(libvgcode::counts_for_color_ranges(solid, settings));
+
+    // showing a role again brings it back
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::SolidInfill)] = true;
+    CHECK(libvgcode::counts_for_color_ranges(solid, settings));
+}
+
+TEST_CASE("libvgcode color range with no values is safe to query", "[libvgcode][Regression]")
+{
+    libvgcode::ColorRange range;
+    range.set_palette({ { 0, 0, 255 }, { 255, 0, 0 } });
+    CHECK(range.get_values().empty());
+    CHECK(range.get_color_at(1.0f) == libvgcode::Color{ 0, 0, 255 });
+}
+
+// The Layer height and Line width legends skip custom G-code extrusions: the start G-code's load line has no
+// height tag, so its height is guessed from Z (5.8 on the H3C) and stretched the legend to 0.20-5.80.
+TEST_CASE("libvgcode height and width ranges skip custom G-code extrusions", "[libvgcode][Regression]")
+{
+    libvgcode::Settings settings;
+    libvgcode::PathVertex wall;
+    wall.type = libvgcode::EMoveType::Extrude;
+    wall.role = libvgcode::EGCodeExtrusionRole::ExternalPerimeter;
+    libvgcode::PathVertex purge = wall;
+    purge.role = libvgcode::EGCodeExtrusionRole::Custom;
+    libvgcode::PathVertex travel = wall;
+    travel.type = libvgcode::EMoveType::Travel;
+
+    CHECK(libvgcode::counts_for_height_width_ranges(wall, settings));
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(purge, settings));
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(travel, settings));
+    // the other ranges (speed, fan, temperature...) still count it
+    CHECK(libvgcode::counts_for_color_ranges(purge, settings));
+
+    // a hidden line type stays out as before
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::ExternalPerimeter)] = false;
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(wall, settings));
 }

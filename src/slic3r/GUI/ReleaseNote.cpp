@@ -1064,6 +1064,8 @@ void PrintErrorDialog::refit_to_content()
     set_wrapped(m_staticText_release_note, m_message_text);
     set_wrapped(m_staticText_error_code, m_code_text);
     m_staticText_error_code->Show(!m_code_text.IsEmpty());
+    // Why Stop / Resume are missing, when they are (update_title_style).
+    m_staticText_error_code->SetToolTip(m_hidden_reason);
 
     // The height of what is inside, capped. Past the cap the area scrolls (genuinely long text);
     // the cap also respects a small display, since the buttons need room beneath it.
@@ -1128,13 +1130,45 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
     m_sizer_button->Clear();
     m_used_button = button_style;
 
-    // A command that carries "job_id" is rejected by the printer when the id is empty or stale,
-    // so those buttons are shown greyed rather than armed with something that cannot work. The
-    // user can still see what the printer would have offered, which is the point of showing them
-    // at all instead of hiding them.
-    const bool have_job_id = !m_job_id.empty();
+    // A command that carries "job_id" (Stop, the Resume family, Ignore and resume) is offered only
+    // when the printer named a job for this error and the command can go out on this connection.
+    // Otherwise the button is hidden - it used to be shown greyed, which on a refused new job (no
+    // job at all) left two dead buttons and no explanation - and the reason goes in a tooltip on
+    // what is left.
+    std::string blocker;
+    if (!m_obj)
+        blocker = "no_printer";
+    else {
+        blocker = m_obj->print_command_blocker("stop");
+        if (blocker.empty()) blocker = m_obj->print_command_blocker("resume");
+    }
+    const PrintErrorButtonLayout layout = layout_print_error_buttons(button_style, m_job_id, blocker.empty());
+    wxString why_hidden;
+    switch (layout.why) {
+    case PrintErrorButtonLayout::Why::NoJobId:
+        why_hidden = _L("Stop and Resume are not offered: the printer reported no print job with this error "
+                        "(for example a new job it refused to start), so there is nothing to stop or resume.");
+        break;
+    case PrintErrorButtonLayout::Why::CannotSend:
+        if (blocker == "status_only")
+            why_hidden = _L("Stop and Resume are not offered: this printer is connected through Bambu Connect in "
+                            "status-only mode, so EdgeSlicer cannot send it print commands.");
+        else if (blocker == "secured")
+            why_hidden = _L("Stop and Resume are not offered: this printer has Developer Mode off and rejects "
+                            "print commands that are not signed by Bambu. Use the printer's screen.");
+        else
+            why_hidden = _L("Stop and Resume are not offered: there is no connection to the printer to send them on.");
+        break;
+    default: break;
+    }
+    if (!layout.hidden.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action ids [" << format_action_ids(layout.hidden) << "] hidden ("
+                                << (layout.why == PrintErrorButtonLayout::Why::NoJobId ? std::string("no job_id for this error") : blocker)
+                                << ")";
+    }
+    m_hidden_reason = why_hidden;
 
-    for (int button_id : button_style) {
+    for (int button_id : layout.shown) {
         // Not a button: the table asking for it means "this error must not be dismissed by
         // closing the window", so the close box goes away and the user has to pick an action.
         if (button_id == REMOVE_CLOSE_BTN) continue;
@@ -1147,12 +1181,8 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
             BOOST_LOG_TRIVIAL(warning) << "PrintErrorDialog: no button for action id " << button_id;
             continue;
         }
-        const bool enabled = have_job_id || !print_error_action_needs_job_id(button_id);
-        it->second->Enable(enabled);
-        if (!enabled) {
-            BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action id " << button_id
-                                    << " disabled, no job_id for this error";
-        }
+        it->second->Enable(true);
+        it->second->SetToolTip(why_hidden);
         m_sizer_button->Add(it->second, 0, wxALL | wxEXPAND, FromDIP(5));
         it->second->Show();
     }

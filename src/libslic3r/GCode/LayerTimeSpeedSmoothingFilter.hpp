@@ -77,6 +77,9 @@ public:
 
     void reset();
 
+    // Per-nozzle process P4: the filament each G-code tool prints when the G-code names assigned tools.
+    void set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
+
     static const char *mode_key(LayerTimeSpeedSmoothMode mode);
     // t_target: the S2 solver's target time for this layer (before the apply-stage bisection
     // that reaches it against protected lines and caps; see LayerTimeSpeedSmoothingFilter.cpp
@@ -94,6 +97,7 @@ private:
     std::string flush();
 
     const PrintConfig             &m_config;
+    std::vector<int>               m_output_tool_filaments;
     LayerTimeSpeedSmoothMode       m_mode;
     LayerTimeSlowdownScope         m_slowdown_scope;
     bool                           m_spiral_mode;

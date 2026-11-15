@@ -5,6 +5,7 @@
 #include "GUI_App.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/HeightPatternInput.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
 
@@ -175,6 +176,8 @@ void ObjectLayers::create_layers_list()
 {
     for (const auto &layer : m_object->layer_config_ranges) {
         const t_layer_height_range& range = layer.first;
+        if (height_pattern_owns_range(*m_object, range))
+            continue;   // shown as one Height colour pattern row instead
         auto del_btn = new PlusMinusButton(m_og->ctrl_parent(), m_bmp_delete, range); 
         del_btn->DisableFocusFromKeyboard();
         del_btn->SetBackgroundColour(m_parent->GetBackgroundColour());

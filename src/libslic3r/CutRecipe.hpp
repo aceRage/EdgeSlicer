@@ -45,6 +45,7 @@
 // pulls it in, so it has to be named here.
 #include <libslic3r/FlexiJoint.hpp>
 #include <libslic3r/PushFit.hpp>
+#include <libslic3r/TacJoint.hpp>
 
 namespace Slic3r {
 
@@ -134,7 +135,13 @@ class ModelObject;
 //       older reader clamps an unknown connector type to 0 (Plug), so a v5 build reading a
 //       pin recipe would silently re-cut every pin as a plug. With 6 it refuses the recipe -
 //       the halves load, "Edit cut" is not offered.
-static constexpr int CutRecipeVersion = 6;
+//  7  TAC Joint = 6: versioned reference geometry and independent absolute clearances.
+//     Older readers must refuse the recipe rather than re-cutting TAC as a Plug.
+//  8  TAC Joint attachment to A/B. Older readers must not re-cut an attached
+//     connector as a separate pin. Saved result meshes remain readable.
+//  9  Optional cut-time TAC mesh application. Older builds retain the saved
+//     meshes but must not re-cut them with unapplied socket modifiers.
+static constexpr int CutRecipeVersion = 9;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -213,13 +220,14 @@ struct CutRecipeConnector
     FlexiJointParams flexi;
     // Only meaningful for CutConnectorType::PushFit (recipe version 6).
     PushFitParams    pushfit;
+    // Only meaningful for CutConnectorType::TacJoint (recipe version 7).
+    TacJointParams tac_joint;
 
     bool operator==(const CutRecipeConnector& o) const;
     bool operator!=(const CutRecipeConnector& o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle,
-           type, style, shape, flexi, pushfit);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, type, style, shape, flexi, pushfit, tac_joint);
     }
 };
 
@@ -380,6 +388,7 @@ struct CutRecipe
     bool keep_upper{ true };
     bool keep_lower{ true };
     bool keep_as_parts{ false };
+    bool apply_tac_joints{false};
     bool place_on_cut_upper{ true };
     bool place_on_cut_lower{ false };
     bool rotate_upper{ false };
@@ -446,6 +455,7 @@ struct CutRecipe
         ar(thickness);
         ar(keep_upper, keep_lower, keep_as_parts, place_on_cut_upper, place_on_cut_lower,
            rotate_upper, rotate_lower);
+        ar(apply_tac_joints);
         ar(upper_visibility, lower_visibility);
         ar(connectors);
         ar(mesh, mesh_hash);

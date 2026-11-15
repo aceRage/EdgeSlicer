@@ -52,7 +52,7 @@ CloneDialog::CloneDialog(wxWindow *parent)
     auto dlg_btns = new DialogButtons(this, {"Next", "OK", "Cancel"});
 
     dlg_btns->GetNEXT()->SetLabel(_L("Fill"));
-    dlg_btns->GetNEXT()->SetToolTip(_L("Fill bed with copies"));
+    dlg_btns->GetNEXT()->SetToolTip(_L("Fill bed with instances"));
     dlg_btns->GetNEXT()->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
         m_plater->fill_bed_with_instances();
         EndModal(wxID_OK);

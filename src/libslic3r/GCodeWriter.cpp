@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <assert.h>
 #include <boost/log/trivial.hpp>
 #include <GCode/GCodeProcessor.hpp>
@@ -292,6 +293,9 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, in
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
     if (!this->multiple_extruders || m_single_extruder_multi_material)
         tool = -1;
+    // Per-nozzle process P4: the T a filament's temperature names is the tool the G-code names for it.
+    if (tool >= 0)
+        tool = int(this->output_tool(unsigned(tool)));
     return set_temperature(temperature, this->config.gcode_flavor, wait, tool);
 }
 
@@ -377,9 +381,8 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
         gcode += value;
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
         if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
             if (GCodeWriter::full_gcode_comment)
                 gcode += " ; adjust ACCEL_TO_DECEL";
         }
@@ -392,6 +395,19 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
     gcode += "\n";
 
     return gcode;
+}
+
+void GCodeWriter::append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor)
+{
+    // Edge: a 3MF or CLI config can carry a factor outside the option's 1-100% range. Nothing for 0 or less
+    // (a negative ACCEL_TO_DECEL, or a cruise ratio of 1 or more, would be rejected by Klipper); above 100% is 100%.
+    if (!(accel_to_decel_factor > 0.))
+        return;
+    accel_to_decel_factor = std::min(accel_to_decel_factor, 100.);
+    gcode += " ACCEL_TO_DECEL=";
+    gcode += float_to_string_decimal_point(acceleration * accel_to_decel_factor / 100);
+    gcode += " MINIMUM_CRUISE_RATIO=";
+    gcode += float_to_string_decimal_point(1. - accel_to_decel_factor / 100);
 }
 
 std::string GCodeWriter::set_jerk_xy(double jerk)
@@ -474,11 +490,9 @@ std::string GCodeWriter::set_accel_and_jerk(unsigned int acceleration, double je
         gcode += " ACCEL=";
         gcode += std::to_string(acceleration);
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
-        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
-        }
+        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id))
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
         m_last_acceleration = acceleration;
     }
     if (set_jerk) {
@@ -714,7 +728,7 @@ std::string GCodeWriter::toolchange(unsigned int extruder_id)
     // if we are running a single-extruder setup, just set the extruder and return nothing
     std::ostringstream gcode;
     if (this->multiple_extruders || (this->config.filament_diameter.values.size() > 1 && !is_bbl_printers())) {
-        gcode << this->toolchange_prefix() << extruder_id;
+        gcode << this->toolchange_prefix() << this->output_tool(extruder_id);
         //BBS
         if (GCodeWriter::full_gcode_comment)
             gcode << " ; change extruder";
@@ -974,23 +988,31 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         this->set_current_position_clear(true);
         return this->travel_to_xy(to_2d(point));
     }
-    else {
-        /*  In all the other cases, we perform an actual XYZ move and cancel
-            the lift. */
-        m_lifted = 0;
-    }
+    // A lifted nozzle that has to end lower travels at the lifted height and descends at the
+    // target, so it never sinks while crossing the print. (OrcaSlicer #16933)
+    // Ordinary retract-on-layer-change never reaches this: lift() only sets m_to_lift, and the
+    // pending-lift branch above already hops and travels at hop height. This split is for an
+    // already-applied hop (m_lifted) that force_z or a below-layer target would otherwise
+    // cancel into one combined XYZ move.
+    const bool descend_after_xy = m_lifted > EPSILON && point(2) < m_pos(2) - EPSILON && this->is_current_position_clear() &&
+        (to_2d(point) - to_2d(m_pos)).norm() > EPSILON;
+    /*  In all the other cases, we move to the target Z and cancel the lift: in a single XYZ move,
+        or XY first and then Z after a filament change or when coming down from a lift. */
+    m_lifted = 0;
     
     //BBS: take plate offset into consider
     Vec3d point_on_plate = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
     std::string out_string;
     GCodeG1Formatter w;
-    if (!this->is_current_position_clear())
+    if (!this->is_current_position_clear() || descend_after_xy)
     {
-        //force to move xy first then z after filament change
+        //force to move xy first then z after filament change, or when coming down from a lift
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
         this->seed_formatter_guard(w);
         w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        // The Z move happens at the target, so it is emitted and timed from there.
+        m_pos = Vec3d(dest_point.x(), dest_point.y(), m_pos(2));
         out_string = w.string() + _travel_to_z(point_on_plate.z(), comment) + this->restore_uncapped_z_feedrate();
     } else {
         GCodeG1Formatter w;
@@ -1055,7 +1077,10 @@ std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, c
     const double speed  = this->z_travel_speed_uncapped();
     const double head_z = this->physical_z();
 
-    if (!this->config.enable_arc_fitting) { // Orca: if arc fitting is disabled, approximate the arc with small linear segments
+    // Orca: if arc fitting is disabled, approximate the arc with small linear segments. Bambu Studio 2.9.1 writes the
+    // spiral lift as one G3 on its printers whatever enable_arc_fitting says (the H3C/A2L/P2S presets turn it off), and
+    // the segmented spiral cost about 24 short Z-climbing moves per lift (owner decision 2026-11-05, #854).
+    if (!this->config.enable_arc_fitting && !m_is_bbl_printers) {
         const double z_start = m_pos(2); // starting Z height
 
         const double px = m_pos(0) - m_x_offset;        // take plate offset into consideration
@@ -1360,6 +1385,68 @@ std::string GCodeWriter::unlift()
     }
     m_to_lift = 0.;
     return gcode;
+}
+
+bool GCodeWriter::can_reach(const Vec2d &bed_point) const
+{
+    const Polygon *area = this->active_printable_area();
+    return area == nullptr || area->contains(Point::new_scale(bed_point.x(), bed_point.y()));
+}
+
+std::pair<std::string, std::string> GCodeWriter::park_and_return(const Vec2d &park, double clearance, double max_z) const
+{
+    if (m_extruder == nullptr || !this->is_current_position_clear())
+        return {};
+    const bool   comments = GCodeWriter::full_gcode_comment;
+    const Vec2d  here(m_pos.x() - m_x_offset, m_pos.y() - m_y_offset);
+    const double head_z    = this->physical_z();
+    const double nominal_z = m_pos.z() - m_lifted;
+    double       park_z    = std::max(head_z, nominal_z + clearance);
+    if (max_z > 0.)
+        park_z = std::min(park_z, std::max(head_z, max_z));
+
+    std::string there, back;
+    auto line = [this, comments](std::string &out, std::optional<Vec2d> xy, std::optional<double> z, std::optional<double> e,
+                                 double F, const char *comment) {
+        GCodeG1Formatter w;
+        if (xy)
+            w.emit_xy(*xy);
+        if (z)
+            w.emit_z(*z);
+        if (e)
+            w.emit_e(*e);
+        this->seed_formatter_guard(w);
+        w.emit_f(F);
+        w.emit_comment(comments, comment);
+        w.append_to(out);
+    };
+
+    // Retract, unless the filament already is; `back` gives back exactly what `there` took.
+    if (this->config.use_firmware_retraction) {
+        if (m_extruder->retracted() < EPSILON) {
+            there += FLAVOR_IS(gcfMachinekit) ? "G22 ; retract\n" : "G10 ; retract\n";
+            back   = FLAVOR_IS(gcfMachinekit) ? "G23 ; unretract\n" : "G11 ; unretract\n";
+        }
+    } else if (const double length = std::max(0., m_extruder->retraction_length() - m_extruder->retracted()); length > EPSILON) {
+        const bool relative = this->config.use_relative_e_distances.value;
+        line(there, std::nullopt, std::nullopt, relative ? -length : m_extruder->E() - length, m_extruder->retract_speed() * 60.,
+             "retract for pause");
+        line(back, std::nullopt, std::nullopt, relative ? length : m_extruder->E(), m_extruder->deretract_speed() * 60.,
+             "unretract after pause");
+    }
+    std::string unretract = std::move(back);
+    back.clear();
+
+    const bool lift = park_z > head_z + EPSILON;
+    if (lift)
+        line(there, std::nullopt, park_z, std::nullopt, this->z_travel_speed() * 60., "lift for pause");
+    const double travel_F = this->active_travel_speed() * 60.;
+    line(there, park, std::nullopt, std::nullopt, travel_F, "park for pause");
+    line(back, here, std::nullopt, std::nullopt, travel_F, "back from pause");
+    if (lift)
+        line(back, std::nullopt, head_z, std::nullopt, this->z_travel_speed() * 60., "lower after pause");
+    back += unretract;
+    return { std::move(there), std::move(back) };
 }
 
 std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int speed, unsigned int part_cooling_fan_min_pwm)

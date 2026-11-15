@@ -492,6 +492,21 @@ TEST_CASE("Callout label text", "[Showcase][Callouts]")
         f.weight_g = f.price = -1.;
         CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Silk");
     }
+    SECTION("a coextruded filament's swatch becomes a split disc (multi-colour P2)") {
+        f.colors     = { "#ff0000", "#0000ff" };
+        const CalloutLabel plain = build_callout_label(c, f, fields, words);
+        CHECK_FALSE(plain.swatch_disc);
+        f.coextruded = true;
+        f.split      = "30|70";
+        f.angle_deg  = 90.;
+        const CalloutLabel disc = build_callout_label(c, f, fields, words);
+        CHECK(disc.swatch_disc);
+        CHECK(disc.swatch_split == "30|70");
+        CHECK(disc.swatch_angle_deg == 90.);
+        CHECK(disc.swatches.size() == 2);
+        fields.swatch = false;
+        CHECK_FALSE(build_callout_label(c, f, fields, words).swatch_disc);
+    }
     SECTION("fields off") {
         fields.brand = fields.hex = fields.swatch = fields.type = false;
         const CalloutLabel l = build_callout_label(c, f, fields, words);
@@ -574,16 +589,22 @@ TEST_CASE("Callout targets from filament assignments", "[Showcase][Callouts]")
         CHECK(plan_callout_targets(model, { 2 }, nullptr).size() == 1);
     }
 
-    SECTION("a part with its own filament, a modifier draws nothing") {
+    SECTION("a part with its own filament, a modifier on a filament shows it") {
         ModelVolume *part = a->add_volume(make_cube(5., 5., 5.));
         part->config.set("extruder", 3);
         ModelVolume *mod = a->add_volume(make_cube(5., 5., 5.), ModelVolumeType::PARAMETER_MODIFIER);
         mod->config.set("extruder", 4);
+        // a modifier that only changes settings says nothing
+        ModelVolume *speed = a->add_volume(make_cube(5., 5., 5.), ModelVolumeType::PARAMETER_MODIFIER);
+        speed->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(50));
         const std::vector<CalloutTarget> t = plan_callout_targets(model, { 0 }, nullptr);
-        REQUIRE(t.size() == 2);
+        REQUIRE(t.size() == 3);
         CHECK(t[0].key == "f2");
         CHECK(t[1].key == "f3");
         CHECK(t[1].source == CalloutSource::Part);
+        // the Showcase draws the modifier's filament on the part it covers
+        CHECK(t[2].key == "f4");
+        CHECK(t[2].source == CalloutSource::Part);
     }
 
     SECTION("painted regions") {

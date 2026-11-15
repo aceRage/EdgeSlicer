@@ -5,6 +5,8 @@
 #include <wx/intl.h>
 #include <wx/collpane.h>
 
+#include <functional>
+
 #include "GUI_Utils.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/PlateBedTypes.hpp"
@@ -33,12 +35,15 @@ public:
     void Popup();
 
     void set_editing_filament_id(std::string id) { m_editing_filament_id = id; }
+    // Runs once, after the dialog closes (the preset managers reopen themselves this way).
+    void set_on_close_once(std::function<void()> cb) { m_on_close_once = std::move(cb); }
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
 
 private:
     std::string       m_editing_filament_id;
+    std::function<void()> m_on_close_once;
     PlateBedTypes::Allowed m_initial_bed_types;
     ParamsPanel * m_panel;
     wxWindowDisabler *m_winDisabler = nullptr;

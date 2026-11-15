@@ -266,8 +266,8 @@ public:
     // button the polled MachineObject may have moved on, and resuming "whatever the error is now"
     // is exactly the sort of surprise this dialog must not produce.
     //
-    // An empty job_id disables every button whose command needs one, rather than sending a
-    // command the firmware will reject.
+    // An empty job_id hides every button whose command needs one (layout_print_error_buttons),
+    // rather than sending a command the firmware will reject; a tooltip says why.
     void set_error_context(MachineObject* obj, int print_error, const std::string& job_id);
 
     // The blob that came with a "proceed" / "don't remind" style error, naming the command to
@@ -314,6 +314,7 @@ public:
     MachineObject*            m_obj{ nullptr };
     int                       m_print_error{ 0 };
     std::string               m_job_id;
+    wxString                  m_hidden_reason; // why Stop / Resume are not shown, for the tooltip
     nlohmann::json            m_action_json;
     std::function<void(int)>  m_on_suppress;
 };

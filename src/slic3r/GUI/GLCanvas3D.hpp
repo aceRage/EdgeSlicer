@@ -354,6 +354,8 @@ class GLCanvas3D
         Drag drag;
         bool ignore_left_up;
         bool ignore_right_up;
+        // ORCA a button was pressed on toolbar empty areas, swallow events until it is released
+        bool down_on_toolbar{ false };
 
         Mouse();
 
@@ -822,6 +824,17 @@ public:
         friend class GLCanvas3D;
     };
 
+    // Color Pattern overlay (see set_color_pattern_overlay)
+    struct ColorPatternSlab { double lo{ 0. }; double hi{ 0. }; ColorRGBA color; };
+    struct ColorPatternOverlay
+    {
+        int                          object_idx{ -1 };
+        std::vector<ColorPatternSlab> slabs;
+        GLModel                      box;   // unit cube, scaled and moved per slab
+    };
+    ColorPatternOverlay m_color_pattern_overlay;
+    void _render_color_pattern_overlay();
+
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
 
@@ -932,6 +945,11 @@ public:
     void on_change_color_mode(bool is_dark, bool reinit = true);
     const bool get_dark_mode_status() { return m_is_dark; }
     void set_as_dirty();
+
+    // Color Pattern: translucent bands drawn over one object (object-local Z, 0 = the object's bottom).
+    // Used by the Color Pattern dialog (live) and while the pattern's object-list row is selected.
+    void set_color_pattern_overlay(int object_idx, std::vector<ColorPatternSlab> slabs);
+    void clear_color_pattern_overlay();
     // True while any GLCanvas3D is inside render(). The other surfaces that share the app's one
     // GL context (the UV editor canvas) check this before making themselves current: a frame interrupted
     // by another surface finishes drawing into that surface and then presents a window the context no
@@ -1076,6 +1094,9 @@ public:
     void select_plate();
     //BBS: GUI refactor: GLToolbar&&gizmo
     int get_main_toolbar_offset() const;
+    // ORCA the top toolbar row: main toolbar, separator, gizmo bar and assemble view toolbar (not the collapse toolbar)
+    float get_top_toolbar_width() const;
+    float get_top_toolbar_height() const;
     int get_main_toolbar_height() const { return m_main_toolbar.get_height(); }
     int get_main_toolbar_width() const { return m_main_toolbar.get_width(); }
     float get_assemble_view_toolbar_width() const { return m_assemble_view_toolbar.get_width(); }
@@ -1150,6 +1171,11 @@ public:
     // y down) placed at the centre; effective_zoom receives the factor really used (the camera caps zoom).
     void render_gcode_preview_image(ThumbnailData& data, unsigned int w, unsigned int h, const std::string& view, const BoundingBoxf3& box, const BoundingBoxf3& bed,
                                     double zoom = 1.0, double cx = 0.5, double cy = 0.5, double* effective_zoom = nullptr);
+    // EDGE (multi-colour P5): frame times of the loaded toolpaths in the Tool view with the Preview
+    // "Show coextruded colours" toggle off and on, alternating `rounds` times, `frames` offscreen
+    // frames of w x h each (the first 3 of a run are not counted). Reports through the log and returns
+    // the text. Dev only: the hidden --showcase-render job runs it when EDGESLICER_PREVIEW_MC_BENCH is set.
+    std::string bench_preview_multicolour(int frames, int rounds, unsigned int w, unsigned int h);
 
     static void render_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, ModelObjectPtrs& model_objects,
         const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,
@@ -1538,6 +1564,7 @@ private:
     void _render_return_toolbar() const;
     void _render_separator_toolbar_right() const;
     void _render_separator_toolbar_left() const;
+    bool _is_mouse_over_top_toolbar(const Vec2d& mouse_pos) const;
     void _render_collapse_toolbar() const;
     // BBS
     //void _render_view_toolbar() const;

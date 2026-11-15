@@ -804,7 +804,93 @@ wxString HMSQuery::describe_error(const std::string& dev_id, const std::string& 
     } else {
         text = _query_error_msg(get_dev_id_type(dev_id), upper, lang_code);
     }
+    // The printer's own table has nothing to say - it has no table at all, or Bambu publishes this
+    // code with an empty description for that model (05024007 on the A1). The codes are shared
+    // across models, so another model's sentence for the same code is the printer's meaning.
+    if (text.IsEmpty()) text = find_in_other_tables(upper, lang_code);
     return format_error(text, upper);
+}
+
+// Every hms_<lang>_<series>.json in the downloaded and the shipped folder, downloaded first so a
+// newer cloud copy is read before the snapshot. The action tables and the legacy series-less file
+// are not text tables of a series and are skipped.
+static std::vector<fs::path> hms_text_tables_for_language(const std::string& lang)
+{
+    std::vector<fs::path> out;
+    const std::string     prefix = "hms_" + lang + "_";
+    for (const std::string& root : {data_dir(), resources_dir()}) {
+        if (root.empty()) continue;
+        const fs::path dir = fs::path(root) / HMS_PATH;
+        boost::system::error_code ec;
+        if (!fs::is_directory(dir, ec)) continue;
+        std::vector<fs::path> here;
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (name.size() <= prefix.size() + 5 || name.compare(0, prefix.size(), prefix) != 0) continue;
+            if (name.compare(name.size() - 5, 5, ".json") != 0) continue;
+            const std::string series = name.substr(prefix.size(), name.size() - prefix.size() - 5);
+            // A series is three letters/digits; this also keeps "hms_pt_..." from matching pt-BR.
+            if (series.empty() || series.find('_') != std::string::npos) continue;
+            here.push_back(it->path());
+        }
+        std::sort(here.begin(), here.end()); // deterministic: the same answer on every machine
+        out.insert(out.end(), here.begin(), here.end());
+    }
+    return out;
+}
+
+wxString HMSQuery::find_in_other_tables(const std::string& code, const std::string& lang_code)
+{
+    if (code.empty()) return wxEmptyString;
+    const bool is_hms = code.size() > 8;
+
+    std::unique_lock<std::mutex> lock(m_hms_mutex);
+
+    auto index_for = [this](const std::string& lang) -> const CrossIndex& {
+        auto found = m_cross_index.find(lang);
+        if (found != m_cross_index.end()) return found->second;
+        CrossIndex& idx = m_cross_index[lang];
+        for (const fs::path& path : hms_text_tables_for_language(lang)) {
+            std::ifstream file(encode_path(path.string().c_str()));
+            if (!file.is_open()) continue;
+            try {
+                const json  doc  = json::parse(file);
+                const json& data = doc.contains("data") ? doc["data"] : doc;
+                auto fold = [&](const char* table, std::unordered_map<std::string, std::string>& into) {
+                    if (!data.is_object() || !data.contains(table) || !data[table].is_object()) return;
+                    const json& list = data[table].value(lang, json());
+                    if (!list.is_array()) return;
+                    for (const auto& item : list) {
+                        if (!item.is_object()) continue;
+                        const std::string intro = item.value("intro", std::string());
+                        if (intro.empty()) continue;
+                        // First non-empty description wins; later tables never replace it.
+                        into.emplace(boost::to_upper_copy(item.value("ecode", std::string())), intro);
+                    }
+                };
+                fold("device_hms", idx.hms);
+                fold("device_error", idx.error);
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "HMS: cross-table index, cannot read " << path.string();
+            }
+        }
+        BOOST_LOG_TRIVIAL(info) << "HMS: cross-table index for " << lang << ": " << idx.hms.size() << " hms, "
+                                << idx.error.size() << " print_error codes";
+        return idx;
+    };
+
+    std::vector<std::string> langs{lang_code.empty() ? std::string("en") : lang_code};
+    if (langs.front() != "en") langs.push_back("en");
+    for (const std::string& lang : langs) {
+        const CrossIndex& idx   = index_for(lang);
+        const auto&       table = is_hms ? idx.hms : idx.error;
+        auto              hit   = table.find(code);
+        if (hit != table.end()) {
+            BOOST_LOG_TRIVIAL(info) << "hms: " << code << " answered from another model's table (" << lang << ")";
+            return wxString::FromUTF8(hit->second);
+        }
+    }
+    return wxEmptyString;
 }
 
 wxString HMSQuery::describe_print_error(const std::string& dev_id, int print_error, bool local_only)
@@ -817,6 +903,7 @@ void HMSQuery::clear_hms_info()
     std::unique_lock<std::mutex> lock(m_hms_mutex);
     m_hms_info_jsons.clear();
     m_hms_action_jsons.clear();
+    m_cross_index.clear();
     m_cloud_hms_last_update_time.clear();
 }
 

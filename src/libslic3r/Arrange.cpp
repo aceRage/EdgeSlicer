@@ -9,6 +9,7 @@
 #include <libnest2d/selections/firstfit.hpp>
 #include <libnest2d/utils/rotcalipers.hpp>
 
+#include <algorithm>
 #include <numeric>
 #include <ClipperUtils.hpp>
 
@@ -82,6 +83,17 @@ using ItemGroup = std::vector<std::reference_wrapper<Item>>;
 const double BIG_ITEM_TRESHOLD = 0.02;
 #define VITRIFY_TEMP_DIFF_THRSH 15  // bed temp can be higher than vitrify temp, but not higher than this thresh
 
+// The object distance a sequential (by object) print needs: a nozzle's width between short objects,
+// the extruder clearance radius otherwise. The user's own distance may only raise it.
+static coord_t seq_print_min_obj_distance(const ArrangeParams& params, const ArrangePolygons& selected)
+{
+    bool all_objects_are_short = std::all_of(selected.begin(), selected.end(), [&](const ArrangePolygon& ap) { return ap.height < params.nozzle_height; });
+    if (all_objects_are_short)
+        // The gap Print::sequential_print_clearance_valid() requires between short objects.
+        return std::max(params.min_obj_distance, scaled(std::max(float(MAX_OUTER_NOZZLE_DIAMETER), params.object_skirt_offset*2)+0.001));
+    return std::max(params.min_obj_distance, scaled(params.clearance_radius + 0.001)); // +0.001mm to avoid clearance check fail due to rounding error
+}
+
 void update_arrange_params(ArrangeParams& params, const DynamicPrintConfig* print_cfg, const ArrangePolygons& selected)
 {
     double                             skirt_distance = get_real_skirt_dist(*print_cfg);
@@ -90,10 +102,14 @@ void update_arrange_params(ArrangeParams& params, const DynamicPrintConfig* prin
     params.brim_skirt_distance = skirt_distance;
     params.bed_shrink_x += params.brim_skirt_distance;
     params.bed_shrink_y += params.brim_skirt_distance;
-    // for sequential print, we need to inflate the bed because clearance_radius is so large
+    // Orca #17011: printing by object, the objects' inflation (half the distance between them) may reach
+    // past the bed edge, so grow the bed by it. Short objects only need a nozzle's width between them,
+    // so they no longer get a bed grown by half the clearance radius. Edge keeps the growth here (not
+    // after the inflation is set) because Fill bed reads the shrunk bed before inflating its items.
     if (params.is_seq_print) {
-        params.bed_shrink_x -= params.clearance_radius / 2;
-        params.bed_shrink_y -= params.clearance_radius / 2;
+        const float grow = unscale<float>(seq_print_min_obj_distance(params, selected)) / 2;
+        params.bed_shrink_x -= grow;
+        params.bed_shrink_y -= grow;
     }
 }
 
@@ -103,12 +119,7 @@ void update_selected_items_inflation(ArrangePolygons& selected, const DynamicPri
     BoundingBox bedbb = Polygon(bedpts).bounding_box();
     // set obj distance for auto seq_print
     if (params.is_seq_print) {
-        bool all_objects_are_short = std::all_of(selected.begin(), selected.end(), [&](ArrangePolygon& ap) { return ap.height < params.nozzle_height; });
-        if (all_objects_are_short) {
-            params.min_obj_distance = std::max(params.min_obj_distance, scaled(std::max(MAX_OUTER_NOZZLE_DIAMETER/2.f, params.object_skirt_offset*2)+0.001));
-        }
-        else
-            params.min_obj_distance = std::max(params.min_obj_distance, scaled(params.clearance_radius + 0.001)); // +0.001mm to avoid clearance check fail due to rounding error
+        params.min_obj_distance = seq_print_min_obj_distance(params, selected);
     }
     double brim_max = 0;
     bool plate_has_tree_support = false;
@@ -135,11 +146,11 @@ void update_unselected_items_inflation(ArrangePolygons& unselected, const Dynami
 {
     float exclusion_gap = 1.f;
     if (params.is_seq_print) {
-        // bed_shrink_x is typically (-params.clearance_radius / 2+5) for seq_print
-        exclusion_gap = std::max(exclusion_gap, params.clearance_radius / 2 + params.bed_shrink_x + 1.f);  // +1mm gap so the exclusion region is not too close
-        // dont forget to move the excluded region
+        // bed_shrink_x includes the bed's growth by min_obj_distance / 2; add it back so the gap is the bed margin.
+        exclusion_gap = std::max(exclusion_gap, unscale<float>(params.min_obj_distance) / 2 + params.bed_shrink_x + 1.f);  // +1mm gap so the exclusion region is not too close
+        // dont forget to move the excluded region when the bed grows
         for (auto& region : unselected) {
-            if (region.is_virt_object) region.poly.translate(scaled(params.bed_shrink_x), scaled(params.bed_shrink_y));
+            if (region.is_virt_object) region.poly.translate(scaled(std::min(0.f, params.bed_shrink_x)), scaled(std::min(0.f, params.bed_shrink_y)));
         }
     }
     // For occulusion regions, inflation should be larger to prevent genrating brim on them.
@@ -660,6 +671,22 @@ protected:
                 score += height_score / valid_items_cnt;
         }
 
+        // Orca: the nozzle keeps coming down to a prime tower compacted by "No sparse layers", and
+        // the rod then sweeps the tower's Y span over the whole bed, so nothing taller than the rod
+        // clearance may share that span. Same test as compacted_wipe_tower_clearance().
+        if (params.compacted_tower_growth >= 0 && item.height > params.clearance_height_to_rod) {
+            const auto item_bb = item.boundingBox();
+            const auto iy1     = item_bb.minCorner().y() + item.inflation();
+            const auto iy2     = item_bb.maxCorner().y() - item.inflation();
+            for (const Item& p : m_items) {
+                if (!p.is_wipe_tower) continue;
+                const auto tower_bb = p.boundingBox();
+                const auto grown    = p.inflation() + params.compacted_tower_growth;
+                if (std::max(iy1, tower_bb.minCorner().y() + grown) - std::min(iy2, tower_bb.maxCorner().y() - grown) < scaled(params.clearance_dist_to_rod))
+                    score += LARGE_COST_TO_REJECT * 1.2;
+            }
+        }
+
         std::set<int> extruder_ids;
         for (int i = 0; i < m_items.size(); i++) {
             Item& p = m_items[i];
@@ -927,13 +954,19 @@ std::function<double(const Item &, const ItemGroup&)> AutoArranger<ExPolygon>::g
     };
 }
 
-template<class Bin> void remove_large_items(std::vector<Item> &items, Bin &&bin)
+// Drop the fixed objects lying wholly outside the bin, such as those on other plates. One that reaches
+// into the bin still takes the room it covers there, like an object at the bed edge whose inflation
+// crosses the edge of a shrunk bed.
+template<class Bin> void remove_items_outside_bin(std::vector<Item> &items, const Bin &bin)
 {
+    const auto binbb = sl::boundingBox(bin);
     auto it = items.begin();
     while (it != items.end())
     {
+        const auto bb = it->boundingBox();
         //BBS: skip virtual object
-        if (!it->is_virt_object && !sl::isInside(it->transformedShape(), bin))
+        if (!it->is_virt_object && (bb.maxCorner().x() < binbb.minCorner().x() || bb.minCorner().x() > binbb.maxCorner().x() ||
+                                    bb.maxCorner().y() < binbb.minCorner().y() || bb.minCorner().y() > binbb.maxCorner().y()))
             it = items.erase(it);
         else
             it++;
@@ -976,10 +1009,15 @@ void _arrange(
     //sl::offset(corrected_bin, md);
     ArrangeParams mod_params = params;
     mod_params.min_obj_distance = 0;  // items are already inflated
+    // Orca: centring the finished pile would carry objects taller than the rod clearance back into
+    // the Y span of a compacted prime tower, which objfunc() has just kept them out of.
+    if (params.compacted_tower_growth >= 0 &&
+        std::any_of(shapes.begin(), shapes.end(), [&params](const Item &itm) { return itm.height > params.clearance_height_to_rod; }))
+        mod_params.do_final_align = false;
 
     AutoArranger<BinT> arranger{corrected_bin, mod_params, progressfn, stopfn};
 
-    remove_large_items(excludes, corrected_bin);
+    remove_items_outside_bin(excludes, corrected_bin);
 
     // If there is something on the plate
     if (!excludes.empty()) arranger.preload(excludes);

@@ -976,6 +976,45 @@ static std::pair<int, std::string> prepare_filament_bambu(const Request& req, st
 
     const std::string ams  = std::to_string(std::atoi(req.ams.c_str()));
     const std::string slot = std::to_string(std::atoi(req.slot.c_str()));
+    // The H3C's AMS 3H and its rack spool holders: Bambu Studio's hotend-page command
+    // (FilamentCommands::rack_change_filament_json), as the Device tab sends it.
+    if (obj->is_rack_printer() && (obj->is_rack_ams_id(ams) || GUI::AmsTypes::is_rack_virtual_slot(std::atoi(ams.c_str())))) {
+        const bool     holder = !obj->is_rack_ams_id(ams);
+        const AmsTray* target = nullptr;
+        if (holder) {
+            for (const AmsTray& t : obj->vir_slots)
+                if (t.id == ams) target = &t;
+        } else {
+            target = obj->get_ams_tray(ams, slot);
+        }
+        if (!target) return { 404, obj->dev_name + " has no " + (holder ? "spool holder " + ams : "AMS 3H slot " + std::to_string(std::atoi(slot.c_str()) + 1)) };
+        const bool exists = holder ? tray_present(*target) : target->is_exists;
+        FilamentCommands::PrinterState st = filament_state(obj);
+        st.filament_at_extruder           = true; // a rack slot unloads into its own feeder (Bambu Studio sends it regardless)
+        const auto a = FilamentCommands::availability(st, exists, !load);
+        if (load && !a.can_load)
+            return { 409, "cannot load that slot: " + (a.why.empty() ? std::string("it is empty") : a.why) };
+        if (!load && !a.can_unload)
+            return { 409, "cannot unload that slot: " + (a.why.empty() ? std::string("it is empty") : a.why) };
+        p->kind            = "bambu";
+        p->printer_name    = obj->dev_name;
+        p->is_setting      = true;
+        p->command         = req.action;
+        p->call            = "command_rack_change_filament";
+        p->rack            = true;
+        p->fil_ams         = ams;
+        p->fil_slot        = holder ? "0" : slot;
+        p->fil_new_temp    = FilamentCommands::tray_mid_temp(target->nozzle_temp_min, target->nozzle_temp_max);
+        if (const AmsTray* curr = obj->get_curr_tray())
+            p->fil_old_temp = FilamentCommands::tray_mid_temp(curr->nozzle_temp_min, curr->nozzle_temp_max);
+        const std::string where = holder ? GUI::AmsTypes::rack_ext_label(std::atoi(ams.c_str())) : "AMS 3H slot " + std::to_string(std::atoi(slot.c_str()) + 1);
+        p->setting_text       = std::string(load ? "load " : "unload ") + where;
+        p->status_before      = obj->print_status;
+        p->print_error_before = obj->print_error;
+        out                   = p;
+        BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << p->setting_text << " prepared for " << obj->dev_name;
+        return { 200, "" };
+    }
     const bool        ext  = ams == "254" || (ams == "255" && obj->is_multi_extruders());
     const AmsTray*    tray = nullptr;
     if (ext) {
@@ -1228,8 +1267,11 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
             args["curr_temp"] = p->fil_old_temp;
             args["tar_temp"]  = p->fil_new_temp;
             // What goes over MQTT, bar the sequence id: the same builder the Device tab uses.
-            args["payload"]   = FilamentCommands::ams_change_filament_json(p->action == "load_filament", p->fil_ams, p->fil_slot,
-                                                                           p->fil_old_temp, p->fil_new_temp, p->multi_extruders);
+            args["payload"]   = p->rack ? FilamentCommands::rack_change_filament_json(p->action == "load_filament", p->fil_ams, p->fil_slot,
+                                                                                    p->fil_old_temp, p->fil_new_temp,
+                                                                                    GUI::AmsTypes::is_rack_virtual_slot(std::atoi(p->fil_ams.c_str())))
+                                        : FilamentCommands::ams_change_filament_json(p->action == "load_filament", p->fil_ams, p->fil_slot,
+                                                                                     p->fil_old_temp, p->fil_new_temp, p->multi_extruders);
         } else {
             args["fan"]      = p->heater;
             args["fan_type"] = p->fan_type;
@@ -1282,8 +1324,12 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
             // Exactly the calls the Device tab's own controls make (StatusPanel::on_set_bed_temp,
             // send_nozzle_temp, on_set_chamber_temp, the speed popup, on_lamp_switch, FanControl).
             if (is_filament_verb(p->action)) {
-                *rc = obj->command_ams_change_filament(p->action == "load_filament", p->fil_ams, p->fil_slot, p->fil_old_temp,
-                                                       p->fil_new_temp);
+                if (p->rack)
+                    *rc = obj->command_rack_change_filament(p->action == "load_filament", p->fil_ams, p->fil_slot, p->fil_old_temp,
+                                                            p->fil_new_temp);
+                else
+                    *rc = obj->command_ams_change_filament(p->action == "load_filament", p->fil_ams, p->fil_slot, p->fil_old_temp,
+                                                           p->fil_new_temp);
             } else if (p->action == "set_temp") {
                 if (p->heater == "bed")          *rc = obj->command_set_bed(p->int_value);
                 else if (p->heater == "chamber") *rc = obj->command_set_chamber(p->int_value);

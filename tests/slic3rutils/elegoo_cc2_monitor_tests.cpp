@@ -524,7 +524,7 @@ TEST_CASE("CC2 monitor: on demand, pushes and controls", "[ElegooCc2Monitor]")
     CHECK(f.printer->closes >= 1);
 }
 
-TEST_CASE("CC2 monitor: check-ins, failures and the access code", "[ElegooCc2Monitor]")
+TEST_CASE("CC2 monitor: check-ins, failures and the access code", "[ElegooCc2Monitor][slow]")
 {
     MonitorFixture f;
     SECTION("nobody looking: one check-in reads the status and closes")

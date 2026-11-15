@@ -2,6 +2,7 @@
 #define MULTI_NOZZLE_UTILS_HPP
 
 #include <vector>
+#include <memory>
 #include <map>
 #include <optional>
 #include <set>
@@ -238,6 +239,43 @@ public:
     const std::unordered_map<int, int>& get_extruder_nozzle_map() const { return extruder_nozzle_status; }
 };
 
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament. Tracks the
+// filament each hotend holds while the wipe tower is planned, so a change into a hotend that already holds
+// the next filament flushes nothing. A hotend is the filament's logical nozzle in the plate grouping (the
+// filament id itself when there is no grouping, i.e. one hotend per filament). Inactive on other printers.
+class HotendFilamentTracker
+{
+public:
+    HotendFilamentTracker(bool active, std::shared_ptr<const LayeredNozzleGroupResult> group)
+        : m_active(active), m_group(std::move(group))
+    {}
+    bool active() const { return m_active; }
+    int  hotend_of(int filament_id, int layer_id) const
+    {
+        if (m_group) {
+            const int nozzle = m_group->get_nozzle_id(filament_id, layer_id);
+            if (nozzle >= 0)
+                return nozzle;
+        }
+        return filament_id;
+    }
+    // The filament the hotend of filament_id holds, -1 when it holds none yet.
+    int filament_in_hotend_of(int filament_id, int layer_id) const
+    {
+        return m_recorder.get_filament_in_nozzle(hotend_of(filament_id, layer_id));
+    }
+    void load(int filament_id, int layer_id)
+    {
+        if (m_active && filament_id >= 0)
+            m_recorder.set_nozzle_status(hotend_of(filament_id, layer_id), filament_id);
+    }
+
+private:
+    bool                                              m_active;
+    std::shared_ptr<const LayeredNozzleGroupResult>   m_group;
+    NozzleStatusRecorder                              m_recorder;
+};
+
 struct FilamentChangeSimResult {
     double actual_time = 0.0;
     double sliced_time = 0.0;
@@ -275,6 +313,17 @@ std::vector<int> find_optimal_physical_assignment(
 std::vector<NozzleInfo> build_nozzle_list(std::vector<NozzleGroupInfo> info);
 std::vector<NozzleInfo> build_nozzle_list(double diameter, const std::vector<int>& filament_nozzle_map,
                                           const std::vector<int>& filament_volume_map, const std::vector<int>& filament_map);
+// One physical nozzle slot of an extruder (build_nozzle_list_from_extruder_nozzles).
+struct SlotNozzle
+{
+    std::string      diameter;
+    NozzleVolumeType volume_type{nvtStandard};
+};
+// Bambu Studio 2.9.x build_nozzle_list_from_extruder_nozzles (MultiNozzleUtils.cpp:32-94): every extruder's nozzles in
+// physical slot order, extruder 0's first, numbered across extruders, so group_id == index == the global physical slot
+// (H2C: left 0, right rack slots 1..6; H3C: 0..8). Nothing is reordered by size or type: a slice_info <filament group_id>
+// names the slot the printer checks the hotend of.
+std::vector<NozzleInfo> build_nozzle_list_from_extruder_nozzles(const std::vector<std::vector<SlotNozzle>>& extruder_nozzles);
 // 从gcode.3mf中加载nozzle info需要处理前后兼容性
 std::vector<NozzleInfo> load_nozzle_infos_with_compatibility(
     const std::vector<NozzleInfo>& nozzle_infos,

@@ -118,9 +118,11 @@ TEST_CASE("the model-site link checks match real URLs and nothing spoofed", "[Un
 TEST_CASE("local and IP hosts are recognised", "[Untrusted][Url]")
 {
     for (const char *h : {"127.0.0.1", "10.0.0.5", "192.168.1.20", "127.1", "2130706433", "0x7f.1", "[::1]", "localhost",
-                          "foo.localhost", "printer.local", "nas.lan", "box.home.arpa", "printer"})
+                          "foo.localhost", "printer.local", "nas.lan", "nas.home", "box.ts.net", "ts.net",
+                          "box.home.arpa", "printer"})
         CHECK(is_local_or_ip_host(h));
-    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org"})
+    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org",
+                          "nas.home.example.com", "home.com", "box.ts.network", "ts.net.example.com"})
         CHECK_FALSE(is_local_or_ip_host(h));
 }
 
@@ -328,6 +330,83 @@ TEST_CASE("model downloads that are never allowed", "[Untrusted][Download]")
                             "not a url"}) {
         INFO(url);
         CHECK(check_model_download(url, "edgeslicer").verdict == DownloadVerdict::Refuse);
+    }
+}
+
+TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Download][Redirect]")
+{
+    // The link check above only ever sees the address it was given. This is the check for where
+    // curl actually ended up (Http::restrict_redirects -> untrusted::redirect_target_refusal).
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://public-cdn.bblmw.com/models/a.3mf",
+                          // a redirect legitimately lands on another public host: the allowlist and the
+                          // file extension are not applied here
+                          "https://s3.us-west-2.amazonaws.com/x/a.3mf", "https://storage.example.org/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
+    }
+
+    const std::string downgraded = redirect_target_refusal("http://files.printables.com/a.3mf");
+    CHECK_FALSE(downgraded.empty());
+    CHECK(downgraded.find("not secure") != std::string::npos);
+    CHECK_FALSE(redirect_target_refusal("ftp://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("ftps://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("file:///C:/Windows/evil.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("not a url").empty());
+    CHECK_FALSE(redirect_target_refusal("https://user:pw@files.printables.com/a.3mf").empty());
+
+    // A public https host that redirects onto the user's own machine or LAN.
+    for (const char *u : {"https://127.0.0.1/a.3mf", "https://169.254.169.254/latest/meta-data/",
+                          "https://192.168.1.20/a.3mf", "https://10.0.0.5:8443/a.3mf", "https://[::1]/a.3mf",
+                          "https://localhost/a.3mf", "https://printer.local/a.3mf", "https://nas.lan/a.3mf",
+                          "https://nas.home/a.3mf", "https://box.ts.net/a.3mf", "https://octopi/a.3mf"}) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+}
+
+TEST_CASE("a redirect is refused however the loopback address is spelled", "[Untrusted][Download][Redirect]")
+{
+    // The address in a redirect's Location is chosen by whoever answered the request, so every
+    // spelling a resolver or a browser would accept for this machine or the LAN has to be refused
+    // too - not just the canonical "127.0.0.1". Each of these is a way to reach loopback, a
+    // link-local address, a unique-local address, or a name that only resolves on the LAN.
+    for (const char *u : {
+             "https://[::ffff:127.0.0.1]/x",   // IPv4-mapped IPv6 loopback
+             "https://[fe80::1]/x",            // IPv6 link-local
+             "https://[fc00::1]/x",            // IPv6 unique-local (fc00::/7)
+             "https://2130706433/x",           // 127.0.0.1 as one decimal integer
+             "https://0x7f000001/x",           // 127.0.0.1 in hex
+             "https://127.1/x",                // 127.0.0.1 abbreviated to two parts
+             "https://localhost./x",           // the trailing root dot
+             "https://LOCALHOST/x",            // host names are case-insensitive
+             "https://a@b@127.0.0.1/x",        // userinfo that hides the real host
+             "https://%31%32%37.0.0.1/x",      // percent-encoded digits are not a host name
+             "https:///x",                     // no host at all
+         }) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+
+    // A public IP literal is refused too, and for its own reason: the address is not this machine,
+    // but a Location that names an address instead of a host name is how a redirect gets past a
+    // check that reads names only. It must not be reported as being on a private network.
+    for (const char *u : {"https://8.8.8.8/x", "https://[2606:4700:4700::1111]/x", "https://1.1.1.1/x"}) {
+        INFO(u);
+        const std::string why = redirect_target_refusal(u);
+        CHECK(why.find("IP address") != std::string::npos);
+        CHECK(why.find("private network") == std::string::npos);
+    }
+    // A name on the LAN is still described as one. .home is the widening that matters here:
+    // a redirect onto a consumer .home host is refused as local, not as a public model site.
+    CHECK(redirect_target_refusal("https://printer.local/x").find("private network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://nas.home/x").find("private network") != std::string::npos);
+
+    // The same spellings that must still be allowed: this check is about where a transfer went,
+    // not about which sites may be downloaded from.
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://cdn.example.co.uk/a.3mf",
+                          "https://storage.example.org:8443/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
     }
 }
 

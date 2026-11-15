@@ -104,4 +104,12 @@ input[type=checkbox]:checked{
 	--pt-pop-bg: #36363C;
 	--pt-pop-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
 	--pt-input-bg: #2D2D31;
+	--pt-star-on: #F5B82E;
+	--pt-star-off: #6E6E75;
+	--pt-locked-fg: #7C7C83;
+	--pt-focus-ring: #26A69A;
+	--pt-focus-bg: #2F4744;
+	--pt-error: #F28B82;
+	--pt-sel-bg: #1E3F5C;
+	--pt-sel-bar: #6AB4F5;
 }

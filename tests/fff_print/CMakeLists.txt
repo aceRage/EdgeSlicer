@@ -6,22 +6,29 @@ add_executable(${_TEST_NAME}_tests
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
 	test_fill.cpp
+	test_narrow_solid_infill.cpp
 	test_flow.cpp
 	test_gcode.cpp
 	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
+	test_min_layer_time_pause.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp
+	test_height_colour_pattern_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_avoid_crossing_perimeters.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
+	test_temp_retract_grid.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
+	test_image_row_p5a.cpp
+	test_image_row_p5b.cpp
 	test_model.cpp
 	test_print.cpp
 	test_custom_gcode_placeholders.cpp
@@ -30,20 +37,46 @@ add_executable(${_TEST_NAME}_tests
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
+	test_h2c_timelapse_placement.cpp
+	test_h2c_tower_wait_pos.cpp
+	test_nozzle_process_gcode.cpp
+	test_tool_slots_gcode.cpp
+	test_nozzle_widths_gcode.cpp
+	test_adaptive_layer_merge_live.cpp
+	test_adaptive_layer_merge_support.cpp
+	test_nozzle_override_gcode.cpp
+	test_nozzle_tool_process_gcode.cpp
+	test_nozzle_rack_slots_gcode.cpp
+	test_nozzle_layer_height_gcode.cpp
+	test_mixed_width_tower.cpp
+	test_bbs_tower_ramming.cpp
+	test_mixed_sublayer_slice.cpp
+	test_bs29_keys.cpp
+	test_polyholes.cpp
+	test_precise_z_height.cpp
 	test_printobject.cpp
+	test_spiral_vase_bottom.cpp
+	test_second_internal_bridge.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
+	test_tree_support_fixes.cpp
 	test_support_groups.cpp
+	test_support_interlock.cpp
+	test_support_interface_temperature.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
+	test_counterbore_bridging.cpp
+	test_extra_perimeters.cpp
 	test_seam_position.cpp
+	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
+	test_scarf_seam.cpp
 	test_slice_bake.cpp
 	test_status_callback_race.cpp
 	test_modifier_effect.cpp
@@ -56,6 +89,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
+	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
 	test_ironing_overrides.cpp
@@ -65,7 +99,9 @@ add_executable(${_TEST_NAME}_tests
 	test_trianglemesh.cpp
 	test_wipe.cpp
 	test_wipe_tower.cpp
+	test_region_print_order.cpp
 	test_adaptive_pa.cpp
+	test_adaptive_pressure_advance.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
 	test_core_guards.cpp

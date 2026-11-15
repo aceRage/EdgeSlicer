@@ -5,6 +5,10 @@
 #include "libslic3r/MTUtils.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Print.hpp"
+
+#include <algorithm>
 
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -13,6 +17,8 @@
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
+#include "slic3r/GUI/RemoteAccess.hpp"
+#include "slic3r/GUI/RemoteSliceV1.hpp"
 
 #include "libnest2d/common.hpp"
 
@@ -69,11 +75,41 @@ static WipeTower get_wipe_tower(const Plater &plater, int plate_idx)
     return WipeTower{plater.canvas3D()->get_wipe_tower_info(plate_idx)};
 }
 
-arrangement::ArrangePolygon get_wipetower_arrange_poly(WipeTower* tower)
+// Orca: a prime tower compacted by "No sparse layers" stays low, so the toolhead comes down beside it
+// at every tool change. Objects have to keep the toolhead radius from it, as they do from one another
+// when printing by object, so the arranger is given the tower grown by that much.
+// object_gap is the distance in mm the arranger keeps around every object anyway, which counts
+// towards that clearance. Returns by how much (scaled) the polygon now reaches past the tower's own
+// zone, which the arranger needs to find the tower's Y span again, or -1 if the tower is left as is.
+static coord_t grow_compacted_wipe_tower(arrangement::ArrangePolygon& ap, double object_gap = 0.)
+{
+    PrintConfig config;
+    config.apply(wxGetApp().preset_bundle->full_config(), true);
+    if (!config.wipe_tower_no_sparse_layers.value || ap.poly.contour.points.empty())
+        return -1;
+
+    const Polygons footprint = offset(ap.poly.contour, float(scale_(compacted_tower_footprint_padding(config, config.prime_tower_brim_width.value))));
+    if (footprint.empty())
+        return -1;
+    const CompactedTowerZone zone = compacted_wipe_tower_zone(config, footprint.front());
+    if (zone.empty())
+        return -1;
+    const coord_t  growth = scaled(std::max(0., zone.body_radius - object_gap));
+    const Polygons grown  = offset(zone.hull, float(growth), jtRound, scale_(0.1));
+    if (grown.empty())
+        return -1;
+    ap.poly.contour = grown.front();
+    return growth;
+}
+
+arrangement::ArrangePolygon get_wipetower_arrange_poly(WipeTower* tower, double object_gap = 0., coord_t* compacted_growth = nullptr)
 {
     ArrangePolygon ap = tower->get_arrange_polygon();
     ap.bed_idx = 0;
     ap.setter = NULL; // do not move wipe tower
+    const coord_t growth = grow_compacted_wipe_tower(ap, object_gap);
+    if (compacted_growth)
+        *compacted_growth = growth;
     return ap;
 }
 
@@ -251,6 +287,70 @@ void ArrangeJob::prepare_all() {
     plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
 }
 
+// EdgeSlicer: prepare_all's plates and wipe towers, but only the loose instances are arranged -
+// those on no plate, and those not wholly on the unlocked plate they are registered to (hanging
+// over the edge, or pushed off it by a smaller printer). Every other instance, printable or not, is
+// a fixed item, so the loose ones go into the free space around it, or onto new plates. Loose
+// instances set not to print stay where they are. The object list keeps its order: rebuilding the
+// plates sorts the objects by arrange_order, which apply() sets from the placement order.
+void ArrangeJob::prepare_loose()
+{
+    clear_input();
+
+    PartPlateList& plate_list = m_plater->get_partplate_list();
+    for (size_t i = 0; i < plate_list.get_plate_count(); i++) {
+        PartPlate* plate = plate_list.get_plate(i);
+        bool same_as_global_print_seq = true;
+        plate->get_real_print_seq(&same_as_global_print_seq);
+        if (plate->is_locked() == false && !same_as_global_print_seq) {
+            plate->lock(true);
+            m_uncompatible_plates.push_back(i);
+        }
+    }
+
+    Model& model = m_plater->model();
+    int    order = 0;
+    for (size_t oidx = 0; oidx < model.objects.size(); ++oidx) {
+        ModelObject* mo = model.objects[oidx];
+        for (size_t i = 0; i < mo->instances.size(); ++i) {
+            ModelInstance* mi = mo->instances[i];
+            mi->arrange_order = ++order;
+            const int        pi          = plate_list.find_instance(int(oidx), int(i));
+            PartPlate*       plate       = pi < 0 ? nullptr : plate_list.get_plate(pi);
+            // A plate locked above only for its print sequence is not the person's lock: what hangs
+            // over its edge still leaves it (preprocess_arrange_polygon would put it back in place).
+            const bool       user_locked = plate && plate->is_locked() &&
+                                     std::find(m_uncompatible_plates.begin(), m_uncompatible_plates.end(), pi) == m_uncompatible_plates.end();
+            const auto       route       = SliceV1::loose_route(plate != nullptr, plate && plate->contain_instance_totally(int(oidx), int(i)),
+                                                                user_locked, mi->printable);
+            if (route == SliceV1::LooseRoute::Skip)
+                continue;
+            ArrangePolygon&& ap = prepare_arrange_polygon(mi);
+            ap.setter = [set = ap.setter, order](const ArrangePolygon& p) {
+                ArrangePolygon keep = p;
+                keep.itemid         = order;
+                set(keep);
+            };
+            if (route == SliceV1::LooseRoute::Place) {
+                ap.itemid = m_selected.size();
+                m_selected.emplace_back(std::move(ap));
+                continue;
+            }
+            if (plate_list.preprocess_arrange_polygon(int(oidx), int(i), ap, false)) {
+                ap.itemid = m_locked.size();
+                m_locked.emplace_back(std::move(ap));
+                continue;
+            }
+            ap.itemid = m_unselected.size();
+            m_unselected.emplace_back(std::move(ap));
+        }
+    }
+
+    prepare_wipe_tower();
+
+    plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
+}
+
 arrangement::ArrangePolygon estimate_wipe_tower_info(int plate_index, std::set<int>& extruder_ids)
 {
     PartPlateList& ppl = wxGetApp().plater()->get_partplate_list();
@@ -264,6 +364,21 @@ arrangement::ArrangePolygon estimate_wipe_tower_info(int plate_index, std::set<i
     auto arrange_poly = ppl.get_plate(plate_index_valid)->estimate_wipe_tower_polygon(full_config, plate_index, extruder_size);
     arrange_poly.bed_idx = plate_index;
     return arrange_poly;
+}
+
+// Orca: the gap in mm the arranger leaves around each of the objects it is about to place, as
+// update_selected_items_inflation() works it out: the spacing asked for, or else the room kept for
+// brims and tree supports.
+static double arranged_object_gap(const arrangement::ArrangeParams& params, const ArrangePolygons& selected)
+{
+    if (params.min_obj_distance != 0)
+        return unscale<double>(params.min_obj_distance) / 2.;
+    if (selected.empty())
+        return 0.;
+    const bool tree_support = std::any_of(selected.begin(), selected.end(), [](const ArrangePolygon& ap) { return ap.has_tree_support; });
+    const auto by_brim      = [](const ArrangePolygon& lhs, const ArrangePolygon& rhs) { return lhs.brim_width < rhs.brim_width; };
+    return tree_support ? std::max_element(selected.begin(), selected.end(), by_brim)->brim_width / 2. :
+                          std::min_element(selected.begin(), selected.end(), by_brim)->brim_width;
 }
 
 // 准备料塔。逻辑如下：
@@ -330,6 +445,8 @@ void ArrangeJob::prepare_wipe_tower()
     BOOST_LOG_TRIVIAL(info) << "arrange: need_wipe_tower=" << need_wipe_tower;
 
 
+    const double object_gap = arranged_object_gap(params, m_selected);
+
     ArrangePolygon    wipe_tower_ap;
     wipe_tower_ap.name = "WipeTower";
     wipe_tower_ap.is_virt_object = true;
@@ -351,7 +468,7 @@ void ArrangeJob::prepare_wipe_tower()
             continue;
         if (auto wti = get_wipe_tower(*m_plater, bedid)) {
             // wipe tower is already there
-            wipe_tower_ap = get_wipetower_arrange_poly(&wti);
+            wipe_tower_ap = get_wipetower_arrange_poly(&wti, object_gap, &params.compacted_tower_growth);
             wipe_tower_ap.bed_idx = bedid_unlocked;
             m_unselected.emplace_back(wipe_tower_ap);
         }
@@ -362,6 +479,7 @@ void ArrangeJob::prepare_wipe_tower()
                 extruder_ids.insert(plate_extruders.begin(), plate_extruders.end());
             }
             wipe_tower_ap = estimate_wipe_tower_info(bedid, extruder_ids);
+            params.compacted_tower_growth = grow_compacted_wipe_tower(wipe_tower_ap, object_gap);
             wipe_tower_ap.bed_idx = bedid_unlocked;
             m_unselected.emplace_back(wipe_tower_ap);
         }
@@ -425,7 +543,7 @@ void ArrangeJob::prepare_partplate() {
 
     // BBS
     if (auto wti = get_wipe_tower(*m_plater, current_plate_index)) {
-        ArrangePolygon&& ap = get_wipetower_arrange_poly(&wti);
+        ArrangePolygon&& ap = get_wipetower_arrange_poly(&wti, arranged_object_gap(params, m_selected), &params.compacted_tower_growth);
         m_unselected.emplace_back(std::move(ap));
     }
 
@@ -452,7 +570,11 @@ void ArrangeJob::prepare()
     Model::setPrintSpeedTable(config, print_config);
 
     int state = m_plater->get_prepare_state();
-    if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
+    if (m_loose_only) {
+        only_on_partplate = false;
+        prepare_loose();
+    }
+    else if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
         only_on_partplate = false;
         prepare_all();
     }
@@ -596,7 +718,7 @@ void ArrangeJob::process(Ctl &ctl)
         we_have_unpackable_items ? _u8L("Arranging is done but there are unpacked items. Reduce spacing and try again.") : _u8L("Arranging done."));
 }
 
-ArrangeJob::ArrangeJob() : m_plater{wxGetApp().plater()} { }
+ArrangeJob::ArrangeJob(bool loose_only) : m_plater{wxGetApp().plater()}, m_loose_only{loose_only} { }
 
 static std::string concat_strings(const std::set<std::string> &strings,
                                   const std::string &delim = "\n")
@@ -634,6 +756,23 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     }
     else
         plate_list.clear(false, false, true, -1);
+
+    // Place loose objects: what fits on no plate of this printer (larger than the bed, or taller
+    // than it prints) stays where it was and is named, rather than going beside the last plate
+    // (or to a virtual bed) where it would hang over an edge again and be offered once more.
+    std::set<std::string> unplaced;
+    if (m_loose_only) {
+        for (auto it = m_selected.begin(); it != m_selected.end();)
+            if (it->bed_idx < 0) {
+                unplaced.insert(it->name);
+                it = m_selected.erase(it);
+            } else
+                ++it;
+        for (const ArrangePolygon& ap : m_unprintable)
+            unplaced.insert(ap.name);
+        m_unprintable.clear();
+    }
+
     //BBS: adjust the bed_index, create new plates, get the max bed_index
     for (ArrangePolygon& ap : m_selected) {
         //if (ap.bed_idx < 0) continue;  // bed_idx<0 means unarrangable
@@ -713,6 +852,15 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
             _L("Arrangement ignored the following objects which can't fit into a single bed:\n%s"),
             concat_strings(names, "\n")));
     }
+    if (!unplaced.empty()) {
+        std::string names;
+        for (const std::string& n : unplaced)
+            names += (names.empty() ? "" : ", ") + n;
+        const std::string msg = GUI::format(_L("These objects do not fit on a plate of this printer and stay where they are: %s"), names);
+        m_plater->get_notification_manager()->push_notification(msg);
+        // Only the remote hub places loose objects: its job ends with this message.
+        RemoteAccess::get().note_error(msg);
+    }
     m_plater->get_notification_manager()->close_notification_of_type(NotificationType::ArrangeOngoing);
 
     //BBS: reload all objects due to arrange
@@ -720,7 +868,8 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
         plate_list.rebuild_plates_after_arrangement(!only_on_partplate, true, current_plate_index);
     }
     else {
-        plate_list.rebuild_plates_after_arrangement(!only_on_partplate, true);
+        // Placing loose objects keeps the plates there are, empty ones included: it adds, never removes.
+        plate_list.rebuild_plates_after_arrangement(!only_on_partplate && !m_loose_only, true);
     }
 
     // unlock the plates we just locked
@@ -729,6 +878,10 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
 
     // BBS: update slice context and gcode result.
     m_plater->update_slicing_context_to_current_partplate();
+
+    // Objects were re-sorted by arrange_order, refresh GLVolume ids before syncing the object list.
+    // Refresh immediately so the ids are updated even if the 3D canvas is hidden (e.g. on preview page).
+    m_plater->get_view3D_canvas3D()->reload_scene(true);
 
     wxGetApp().obj_list()->reload_all_plates();
 
@@ -770,6 +923,7 @@ arrangement::ArrangeParams init_arrange_params(Plater *p)
 
     params.clearance_height_to_rod             = print_config.extruder_clearance_height_to_rod.value;
     params.clearance_height_to_lid             = print_config.extruder_clearance_height_to_lid.value;
+    params.clearance_dist_to_rod               = print_config.extruder_clearance_dist_to_rod.value;
     // Bambu Studio arranges with extruder_clearance_max_radius (sequential_clearance_radius on Bambu Lab printers).
     params.clearance_radius                    = sequential_clearance_radius(print_config) + object_skirt_offset * 2;
     params.object_skirt_offset                 = object_skirt_offset;

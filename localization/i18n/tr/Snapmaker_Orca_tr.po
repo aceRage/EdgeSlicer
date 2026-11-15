@@ -1465,11 +1465,11 @@ msgstr "Özellik 1"
 msgid "Reverse rotation"
 msgstr "Ters dönüş"
 
-msgid "Rotate around center:"
-msgstr "Merkezin etrafında döndürün:"
+msgid "Orbit"
+msgstr "Merkezin etrafında döndürün"
 
-msgid "Parallel distance:"
-msgstr "Paralel mesafe:"
+msgid "Parallel distance"
+msgstr "Paralel mesafe"
 
 msgid "Flip by Face 2"
 msgstr "Yüzey 2’ye Göre Çevir"

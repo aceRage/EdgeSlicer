@@ -169,6 +169,7 @@ void AMSMaterialsSetting::create_panel_normal(wxWindow* parent)
     m_comboBox_filament = new wxComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, AMS_MATERIALS_SETTING_COMBOX_WIDTH, 0, nullptr, wxCB_READONLY);
 #else
     m_comboBox_filament = new ::ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, AMS_MATERIALS_SETTING_COMBOX_WIDTH, 0, nullptr, wxCB_READONLY);
+    m_comboBox_filament->EnableTypeToFilter(); // type "over" to list only the Overture filaments
 #endif
 
     m_sizer_filament->Add(m_comboBox_filament, 1, wxALIGN_CENTER, 0);
@@ -519,7 +520,7 @@ void AMSMaterialsSetting::on_select_reset(wxCommandEvent& event) {
         // set k / n value
         if (obj->cali_version <= -1 && obj->get_printer_series() == PrinterSeries::SERIES_P1P) {
             // set extrusion cali ratio
-            int cali_tray_id = ams_id * 4 + slot_id;
+            int cali_tray_id = obj->tray_index_of(ams_id, slot_id); // 28 + slot on the AMS 3H
 
             double k = 0.0;
             try {
@@ -540,7 +541,7 @@ void AMSMaterialsSetting::on_select_reset(wxCommandEvent& event) {
         }
         else {
             PACalibIndexInfo select_index_info;
-            int tray_id = ams_id * 4 + slot_id;
+            int tray_id = obj->tray_index_of(ams_id, slot_id); // 28 + slot on the AMS 3H
             if (is_virtual_tray()) {
                 tray_id = ams_id;
                 if (!obj->is_enable_np) {
@@ -696,7 +697,7 @@ void AMSMaterialsSetting::on_select_ok(wxCommandEvent &event)
         }
     }
     else {
-        int cali_tray_id = ams_id * 4 + slot_id;
+        int cali_tray_id = obj->tray_index_of(ams_id, slot_id); // 28 + slot on the AMS 3H
         double k = 0.0;
         try {
             k_text.ToDouble(&k);

@@ -1,0 +1,30 @@
+--- a/src/noisegen.cpp
++++ b/src/noisegen.cpp
+@@ -148,14 +148,20 @@
+ {
+   // All constants are primes and must remain prime in order for this noise
+   // function to work correctly.
+-  int n = (
+-      X_NOISE_GEN    * x
+-    + Y_NOISE_GEN    * y
+-    + Z_NOISE_GEN    * z
+-    + SEED_NOISE_GEN * seed)
+-    & 0x7fffffff;
++  //
++  // The arithmetic is done on unsigned int: it is meant to wrap, and signed
++  // overflow is undefined behaviour.  With int, an optimizing compiler may
++  // assume the product of non-negative values is non-negative and drop the
++  // final mask (clang does at -O1 and above); the function then returns
++  // negative values and ValueNoise3D leaves its documented -1.0 to +1.0 range.
++  unsigned int n = (
++      (unsigned int)X_NOISE_GEN    * (unsigned int)x
++    + (unsigned int)Y_NOISE_GEN    * (unsigned int)y
++    + (unsigned int)Z_NOISE_GEN    * (unsigned int)z
++    + (unsigned int)SEED_NOISE_GEN * (unsigned int)seed)
++    & 0x7fffffffU;
+   n = (n >> 13) ^ n;
+-  return (n * (n * n * 60493 + 19990303) + 1376312589) & 0x7fffffff;
++  return (int)((n * (n * n * 60493U + 19990303U) + 1376312589U) & 0x7fffffffU);
+ }
+ 
+ double noise::ValueCoherentNoise3D (double x, double y, double z, int seed,

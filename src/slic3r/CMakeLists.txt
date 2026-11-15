@@ -62,6 +62,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/BitmapComboBox.hpp
     GUI/BonjourDialog.cpp
     GUI/BonjourDialog.hpp
+    GUI/CrealityDiscoveryDialog.cpp
+    GUI/CrealityDiscoveryDialog.hpp
     GUI/calib_dlg.cpp
     GUI/calib_dlg.hpp
     GUI/Calibration.cpp
@@ -92,6 +94,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
     GUI/FillBedDialog.hpp
+    GUI/HeightPatternDialog.cpp
+    GUI/HeightPatternDialog.hpp
+    GUI/StartupSoundDialog.cpp
+    GUI/StartupSoundDialog.hpp
+    GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
     GUI/RoundDialog.cpp
@@ -153,12 +160,16 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
     GUI/FlowTypeHelper.hpp
+    GUI/ExtruderSettingsDialog.cpp
+    GUI/ExtruderSettingsDialog.hpp
     GUI/FlowVariantEdit.cpp
     GUI/FlowVariantEdit.hpp
     GUI/HighFlowCompat.cpp
     GUI/HighFlowCompat.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/ZipCleanup.cpp
+    GUI/ZipCleanup.hpp
     GUI/filamentsync/FilamentColorMapBox.cpp
     GUI/filamentsync/FilamentColorMapBox.hpp
     GUI/filamentsync/FilamentColorMapBoxGroup.cpp
@@ -213,6 +224,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
+    GUI/Gizmos/GLGizmoMmuSegmentationAirbrush.cpp
     GUI/Gizmos/GLGizmoAlignment.cpp
     GUI/Gizmos/GLGizmoAlignment.hpp
     GUI/Gizmos/GLGizmoMove.cpp
@@ -294,8 +306,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/ProjectSessions.hpp
+    GUI/ProjectStrip.cpp
+    GUI/ProjectStrip.hpp
+    GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
+    GUI/Showcase/ShowcaseHdriDialog.cpp
+    GUI/Showcase/ShowcaseHdriDialog.hpp
     GUI/Showcase/ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseRenderer.hpp
     GUI/Showcase/ShowcaseTextures.cpp
@@ -319,6 +337,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsDualLayout.hpp
     GUI/AmsDrying.cpp
     GUI/AmsDrying.hpp
+    GUI/AmsTypes.hpp
     GUI/AMSDryCtrlDialog.cpp
     GUI/AMSDryCtrlDialog.hpp
     GUI/AmsUiPreview.cpp
@@ -480,10 +499,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/MixedFilamentColorMapPanel.cpp
     GUI/MixedFilamentBadge.cpp
     GUI/MixedFilamentBadge.hpp
+    GUI/MixedSublayerUi.cpp
+    GUI/MixedSublayerUi.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp
     GUI/FilamentColorDialog.hpp
+    GUI/FilamentColourPicker.cpp
+    GUI/FilamentColourPicker.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
     GUI/OG_CustomCtrl.cpp
@@ -562,6 +585,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/LanAccessCodeWatch.hpp
+    GUI/PopupRowIcons.hpp
     GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
@@ -571,6 +596,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
@@ -635,6 +662,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
     GUI/CostsDialog.hpp
+    GUI/FilamentNozzleValuesDialog.cpp
+    GUI/FilamentNozzleValuesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -886,6 +915,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/ScrolledWindow.hpp
     GUI/Widgets/SegmentedToggle.cpp
     GUI/Widgets/SegmentedToggle.hpp
+    GUI/Widgets/NozzleStrip.cpp
+    GUI/Widgets/NozzleStrip.hpp
     GUI/Widgets/SideButton.cpp
     GUI/Widgets/SideButton.hpp
     GUI/Widgets/SideMenuPopup.cpp
@@ -975,6 +1006,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ColorSpaceConvert.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
+    Utils/CrealityHostDiscovery.cpp
+    Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
@@ -1141,6 +1174,15 @@ set(SLIC3R_GUI_SOURCES
     GUI/ThirdPartyFilamentMap.hpp
     GUI/ThirdPartyFilamentMapPanel.cpp
     GUI/ThirdPartyFilamentMapPanel.hpp
+    GUI/LayerlingPanel.cpp
+    GUI/LayerlingPanel.hpp
+    GUI/LayerlingBrowser.hpp
+    GUI/LayerlingBrowserWin.cpp
+    GUI/LayerlingBrowserGtk.cpp
+    GUI/LayerlingServer.cpp
+    GUI/LayerlingServer.hpp
+    GUI/PresetManagerDialog.cpp
+    GUI/PresetManagerDialog.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1167,6 +1209,7 @@ if (APPLE)
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
             GUI/ModelBrowserPanelMac.mm
+            GUI/LayerlingBrowserMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
             GUI/Showcase/ShowcaseVideoMac.mm
@@ -1261,6 +1304,10 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/UntrustedSettingsGuard.cpp                # namespace-scope using namespace Slic3r::untrusted
     GUI/CustomModelsMenu.cpp                      # file-local helpers with generic names (menu_label, add_item, ...)
     GUI/ModelBrowserPanel.cpp                     # WRL/WebView2 COM headers; namespace-scope using-directive
+    GUI/LayerlingBrowserWin.cpp                   # WRL/WebView2 COM headers; namespace-scope using-declarations
+    GUI/LayerlingBrowserGtk.cpp                   # declares WebKitGTK functions itself, as Widgets/WebView.cpp does
+    GUI/LayerlingPanel.cpp                        # file-local helpers with generic names (cfg, downloads_folder, ...)
+    GUI/LayerlingServer.cpp                       # file-local helpers with generic names (utf8_of, path_of, handle)
     GUI/Jobs/CreateFontStyleImagesJob.cpp         # namespace-scope using namespace Emboss
     GUI/Jobs/EmbossJob.cpp                        # namespace-scope using namespace Emboss
     GUI/TextLines.cpp                             # namespace-scope using namespace Emboss
@@ -1293,6 +1340,8 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
     GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
+    GUI/Showcase/ShowcaseHdriDialog.cpp           # file-local hdri_* helpers; Http (curl) next to wx headers
+    GUI/Showcase/ShowcaseBlenderExport.cpp        # file-local sbx_* helpers; wx image streams next to GL headers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
@@ -1302,12 +1351,14 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/FirewallCheckDialog.cpp                   # Windows shell headers; ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/BambuSetupNoticeDialog.cpp                # ::CheckBox vs GUI::CheckBox (Field.hpp)
     Utils/WinFirewall.cpp                         # windows.h + netfw.h (COM) ahead of neighbours' headers
+    GUI/ZipCleanup.cpp                            # <windows.h> for the background thread priority
     GUI/wxMediaCtrl2.cpp                          # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/MediaPlayCtrl.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/ParamsPanel.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Preferences.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
@@ -1352,7 +1403,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
 encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
-target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)

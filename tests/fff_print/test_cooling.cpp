@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -12,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "libslic3r/GCode.hpp"
+#include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 
@@ -1182,4 +1186,228 @@ TEST_CASE("The PWM floor holds for the fan written again after a tool change", "
         INFO(cmd);
         CHECK((part_fan_value(cmd) == 0 || part_fan_value(cmd) >= 51));
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The layer time the cooling slowdown counts, an error the Rust port turned up.
+//
+// With relative E, CoolingBuffer::parse_layer_gcode copied the new position from the old one before it reset the
+// old one's E, so a line with no E word took the E of the line before it: the "G1 F.." that opens every path (after
+// a deretraction, the deretraction's length) and the one that opens a wipe were each counted as an extruder move.
+// The layer was taken for longer than it is, slowed short of "slow_down_layer_time", and its fan set from that time.
+
+namespace {
+
+// The time a layer's G-code takes as the cooling slowdown counts it, from its first extrusion on: each move at the
+// feed rate in force, an XYZ move by its length, an E-only move by its E, a line that only sets F by nothing.
+// Lines before the first extruding XY move are left out, as CoolingBuffer leaves them out.
+double layer_time_from_first_extrusion(const std::string &gcode)
+{
+    double x = 0., y = 0., z = 0., f = 0., time = 0.;
+    bool   started = false;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        const std::string body = line.substr(0, line.find(';'));
+        double nx = x, ny = y, nz = z, e = 0.;
+        bool   has_e = false, has_xy = false;
+        std::istringstream words(body.substr(3));
+        std::string        word;
+        while (words >> word) {
+            const double v = std::atof(word.c_str() + 1);
+            switch (word[0]) {
+            case 'X': nx = v; has_xy = true; break;
+            case 'Y': ny = v; has_xy = true; break;
+            case 'Z': nz = v; break;
+            case 'E': e = v; has_e = true; break;
+            case 'F': f = v / 60.; break;
+            default: break;
+            }
+        }
+        if (!started && has_xy && has_e && e > 0.)
+            started = true;
+        if (started && f > 0.) {
+            const double d = std::sqrt((nx - x) * (nx - x) + (ny - y) * (ny - y) + (nz - z) * (nz - z));
+            time += (d > 0. ? d : std::abs(e)) / f;
+        }
+        x = nx, y = ny, z = nz;
+    }
+    return time;
+}
+
+// One layer through a CoolingBuffer set up from `config`, as layer `layer_id`, flushed. Relative E.
+std::string cool_one_layer(const DynamicPrintConfig &config, const std::string &layer_gcode, size_t layer_id)
+{
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    GCode gcodegen;
+    gcodegen.apply_print_config(print_config);
+    gcodegen.set_layer_count(20);
+    gcodegen.writer().set_extruders({0});
+    gcodegen.writer().set_extruder(0);
+    CoolingBuffer buffer(gcodegen);
+    return buffer.process_layer(std::string(layer_gcode), layer_id, true);
+}
+
+// A layer of known moves, as GCode writes them with the cooling markers: a travel, a 1.5 mm deretraction, a wall
+// of 110 mm at 30 mm/s opened by its speed line, a 5 mm wipe at 40 mm/s opened by its speed line, a 1 mm
+// retraction at 35 mm/s. From the first extrusion on it takes 110 / 30 + 5 / 40 + 1 / 35 = 3.8202 s. On main the
+// two speed lines were counted as well, for 1.5 mm at 30 mm/s and 0.8 mm (the wall's last E) at 40 mm/s: 0.07 s.
+const char *known_layer =
+    "G1 X10 Y10 F12000\n"
+    "G1 E1.5 F2100\n"
+    "G1 F1800;_EXTRUDE_SET_SPEED\n"
+    "G1 X40 Y10 E1.2\n"
+    "G1 X40 Y40 E1.2\n"
+    "G1 X10 Y40 E1.2\n"
+    "G1 X10 Y20 E0.8\n"
+    ";_EXTRUDE_END\n"
+    "G1 F2400;_WIPE\n"
+    "G1 X10 Y15 E-0.5\n"
+    "G1 E-1 F2100\n";
+constexpr double known_layer_time = 110. / 30. + 5. / 40. + 1. / 35.;
+
+DynamicPrintConfig known_layer_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"use_relative_e_distances", "1"},
+        {"slow_down_for_layer_cooling", "1"},
+        {"slow_down_min_speed", "1"},
+        {"dont_slow_down_outer_wall", "0"},
+        {"fan_min_speed", "0"},
+        {"fan_max_speed", "100"},
+        {"close_fan_the_first_x_layers", "0"},
+        {"full_fan_speed_layer", "0"},
+        {"part_cooling_fan_min_pwm", 0},
+    });
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("The cooling slowdown counts no extruder move on a line without E", "[Cooling][CoolingBuffer][Regression]")
+{
+    DynamicPrintConfig config = known_layer_config();
+
+    SECTION("a layer slowed for cooling takes the time asked") {
+        config.set_deserialize_strict({{"slow_down_layer_time", "10"}, {"fan_cooling_layer_time", "20"}});
+        const std::string out  = cool_one_layer(config, known_layer, 5);
+        const double      time = layer_time_from_first_extrusion(out);
+        INFO(out);
+        INFO("layer time after the slowdown " << time << " s, asked 10 s");
+        // CoolingBuffer aims at 1.001 times the time asked; the F words are rounded. On main 9.86 s.
+        CHECK(time >= 10. * 0.999);
+        CHECK(time <= 10. * 1.002);
+    }
+
+    SECTION("the fan is set from the time the layer takes") {
+        // Not slowed (3.5 s asked): the fan runs between full at 3.5 s and off at 4.5 s, 1 % for each 0.01 s.
+        config.set_deserialize_strict({{"slow_down_layer_time", "3.5"}, {"fan_cooling_layer_time", "4.5"}});
+        const std::string out = cool_one_layer(config, known_layer, 5);
+        INFO(out);
+        REQUIRE_THAT(layer_time_from_first_extrusion(out), Catch::Matchers::WithinRel(known_layer_time, 1e-4));
+        int fan = -1;
+        std::istringstream in(out);
+        std::string        line;
+        while (std::getline(in, line))
+            if (const int v = part_fan_value(line); v >= 0)
+                fan = v;
+        // CoolingBuffer takes the whole percent below: 3.8202 s gives 67 % (M106 S171); on main 3.8902 s, 60 % (S153).
+        const int expected_percent = int(std::floor((1. - (known_layer_time - 3.5)) * 100.));
+        REQUIRE(expected_percent == 67);
+        CHECK(fan == int(255.5 * expected_percent / 100.));
+    }
+}
+
+// The same on a sliced part: every layer slowed for cooling is printed in the time asked, not less. On main the
+// cube's layers came to 19.6 to 19.8 s of 20.
+TEST_CASE("Layers slowed for cooling take the time asked", "[Cooling][CoolingBuffer][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"use_relative_e_distances", "1"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"slow_down_for_layer_cooling", "1"},
+        {"slow_down_layer_time", "20"},
+        {"slow_down_min_speed", "1"},
+        {"dont_slow_down_outer_wall", "0"},
+        {"fan_cooling_layer_time", "60"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+    });
+    const std::string gcode = dumped("cooling_layer_time", slice({TestMesh::cube_20x20x20}, config));
+
+    // The G-code of each layer, from one ";LAYER_CHANGE" to the next.
+    std::vector<std::string> layers;
+    std::istringstream       in(gcode);
+    std::string              line;
+    while (std::getline(in, line)) {
+        if (line.rfind(";LAYER_CHANGE", 0) == 0)
+            layers.emplace_back();
+        if (!layers.empty())
+            layers.back() += line + "\n";
+    }
+    REQUIRE(layers.size() == 100);
+
+    // The last layer runs on into the end of the print; leave it out. The cube's sparse infill layers take about
+    // 14 s at their own speeds and are slowed; its first and solid layers take longer.
+    double shortest = DBL_MAX, longest = 0., total = 0.;
+    size_t shortest_layer = 0;
+    for (size_t i = 0; i + 1 < layers.size(); ++i) {
+        const double time = layer_time_from_first_extrusion(layers[i]);
+        total += time;
+        longest = std::max(longest, time);
+        if (time < shortest)
+            shortest = time, shortest_layer = i;
+    }
+    INFO("layers 0 to 98: shortest (layer " << shortest_layer << ") " << shortest << " s, longest " << longest << " s, mean "
+                                            << total / double(layers.size() - 1) << " s; asked 20 s");
+    CHECK(shortest >= 20. * 0.999);
+}
+
+// A move that repeats the one before it is kept, only its F word goes. The H2D tool change repeats the moves to the
+// tower's avoid position in its power-loss-resume branch (M622 J1 .. M623): the printer runs either the first or the
+// repeated moves, so the repeated "G1 X.. F30000" (already at that X as far as the cooling pass can tell) must stay.
+// Main kept it only because the line inherited an extruder move; with that fixed, the cooling pass dropped it.
+TEST_CASE("The cooling pass keeps a move that repeats the position, without its F", "[Cooling][CoolingBuffer][Regression]")
+{
+    DynamicPrintConfig config = known_layer_config();
+    config.set_deserialize_strict({{"slow_down_layer_time", "1"}, {"fan_cooling_layer_time", "2"}});
+    const std::string layer =
+        "G1 X10 Y10 F12000\n"
+        "G1 E1.5 F2100\n"
+        "G1 F1800;_EXTRUDE_SET_SPEED\n"
+        "G1 X40 Y10 E1.2\n"
+        ";_EXTRUDE_END\n"
+        "G1 Y320 F30000\n"
+        "G1 X110 F30000\n"
+        "G1 Y265 F18000\n"
+        "M622 J1\n"
+        "G1 Y320 F30000\n"
+        "G1 X110 F30000\n"
+        "G1 Y265 F18000\n"
+        "M623\n"
+        "G1 F2400\n"
+        "G1 F2400\n";
+    const std::string out = cool_one_layer(config, layer, 5);
+    INFO(out);
+    int x110 = 0, f_only = 0;
+    std::istringstream in(out);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.rfind("G1 X110", 0) == 0)
+            ++x110;
+        if (line.rfind("G1 F", 0) == 0 && line.find_first_of("XYZE") == std::string::npos)
+            ++f_only;
+    }
+    CHECK(x110 == 2);
+    // A line with nothing but an F word that sets the F in force is still dropped.
+    // Here "G1 F1800" that opens the path and the first "G1 F2400"; the second "G1 F2400" changes nothing.
+    CHECK(f_only == 2);
 }

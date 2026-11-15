@@ -110,6 +110,8 @@ private:
     ScalableBitmap      m_more_err_open;
     ScalableBitmap      m_more_err_close;
     bool                m_more_err_state{ false };
+    // EdgeSlicer: the selected LAN printer whose saved access code it refuses (empty: none).
+    std::string         m_refused_dev_id;
 
 public:
     void set_table_panel(Tabbook* tb) {m_tabpanel = tb;};
@@ -122,6 +124,10 @@ public:
     void update_status(MachineObject* obj);
     void update_connect_err_info(int code, wxString desc, wxString info);
     void show_status(int status);
+    // EdgeSlicer: the selected LAN printer refuses its saved access code
+    // (DeviceManager::lan_access_code_blocked). The orange bar says so and its link opens the
+    // printer's name / access code dialog instead of the wiki page. Empty: the plain bar again.
+    void set_access_code_refused(const std::string& dev_id);
 
 public:
     SideToolsPanel* get_panel() {return m_side_tools;};

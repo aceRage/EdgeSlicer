@@ -263,6 +263,8 @@ public:
     }
 
     bool is_enabled() const { return m_enabled; }
+    // ORCA
+    bool is_mouse_over_toolbar_icon(const Vec2d& mouse_pos) const { return get_gizmo_from_mouse(mouse_pos) != Undefined; }
     void set_enabled(bool enable) { m_enabled = enable; }
 
     void set_icon_dirty() { m_icons_texture_dirty = true; }
@@ -312,6 +314,8 @@ public:
     ClippingPlane get_clipping_plane() const;
     ClippingPlane get_assemble_view_clipping_plane() const;
     bool wants_reslice_supports_on_undo() const;
+    // Edge (Airbrush P3, A3): commit (or cancel) airbrush strokes still baking before an undo/redo.
+    void flush_pending_paint(bool commit);
 
     bool is_in_editing_mode(bool error_notification = false) const;
     bool is_hiding_instances() const;

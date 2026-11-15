@@ -89,6 +89,10 @@ public:
     std::string set_jerk_xy(double jerk);
     // Orca: set acceleration and jerk in one command for Klipper
     std::string set_accel_and_jerk(unsigned int acceleration, double jerk);
+    // Orca: Klipper's accel_to_decel limit for `acceleration`, sent as the legacy ACCEL_TO_DECEL and as the
+    // equivalent MINIMUM_CRUISE_RATIO = 1 - ACCEL_TO_DECEL / ACCEL that replaced it. Klipper before 0.13 and
+    // vendor forks read only the first, current Klipper only the second, and 0.13 prefers the second.
+    static void append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor);
     std::string set_junction_deviation(double junction_deviation); 
     std::string set_pressure_advance(double pa) const;
     std::string set_input_shaping(char axis, float damp, float freq, std::string type) const;
@@ -106,6 +110,14 @@ public:
     // printed with the same extruder.
     std::string toolchange_prefix() const;
     std::string toolchange(unsigned int extruder_id);
+    // Per-nozzle process P4: the tool number the G-code names for each filament (filament_output_tools), empty
+    // when the G-code names the filament's own tool. T<n> and the T of a tool's temperature go through it.
+    void        set_output_tools(std::vector<int> filament_tools) { m_output_tools = std::move(filament_tools); }
+    const std::vector<int> &output_tools() const { return m_output_tools; }
+    unsigned int output_tool(unsigned int filament_id) const
+    {
+        return filament_id < m_output_tools.size() && m_output_tools[filament_id] >= 0 ? unsigned(m_output_tools[filament_id]) : filament_id;
+    }
     std::string set_speed(double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     void        set_speed(std::string &out, double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     // SoftFever NOTE: the returned speed is mm/minute
@@ -171,6 +183,15 @@ public:
     // travel's feedrate, else empty. For G-code that follows a Z move and moves without an F word of its own.
     std::string restore_uncapped_z_feedrate() const;
     double      get_zhop() const { return m_lifted; }
+    // Edge (min_layer_time_pause): G-code that parks the head at `park` (bed coordinates) and brings it back,
+    // returned as {there, back} so the caller can put the dwell between them. `there` retracts (unless the
+    // filament already is), lifts to at least `clearance` above the layer (never above `max_z` when it is
+    // positive) and travels to `park`; `back` travels back, lowers and unretracts. It leaves this writer's
+    // state (position, lift, retraction, E) untouched: the G-code after it is the same with or without it,
+    // apart from the feedrate, which the caller restores. Empty when the head position is not known.
+    std::pair<std::string, std::string> park_and_return(const Vec2d &park, double clearance, double max_z) const;
+    // Edge: whether the active extruder can reach `bed_point` (bed coordinates). True when no area is known.
+    bool        can_reach(const Vec2d &bed_point) const;
 
     //BBS: set offset for gcode writer
     void set_xy_offset(double x, double y) { m_x_offset = x; m_y_offset = y; }
@@ -211,6 +232,8 @@ public:
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
   private:
+    // Per-nozzle process P4: see set_output_tools().
+    std::vector<int> m_output_tools;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_extruders;
     bool            m_single_extruder_multi_material;

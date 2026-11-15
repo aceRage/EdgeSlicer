@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/Arrange.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -32,7 +33,7 @@ ArrangePolygon make_square(coord_t side)
 // so the two are defined together and every expectation is derived from them.
 constexpr double NOZZLE_HEIGHT_MM = 2.5;
 constexpr double CLEARANCE_MM     = 30.;
-constexpr double NOZZLE_FLOOR_MM  = MAX_OUTER_NOZZLE_DIAMETER / 2.;
+constexpr double NOZZLE_FLOOR_MM  = MAX_OUTER_NOZZLE_DIAMETER; // Orca #17011
 
 ArrangeParams seq_print_params(coord_t min_dist)
 {
@@ -71,6 +72,50 @@ DynamicPrintConfig spacing_config(PrinterTechnology tech, PrintSequence seq, dou
     c.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(seq));
     c.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(clearance_radius));
     return c;
+}
+
+// Arranges as the arrange job does for a sequential print, on the bed_config() bed.
+void arrange_by_object(ArrangePolygons &items, ArrangePolygons &fixed)
+{
+    DynamicPrintConfig cfg = bed_config();
+    ArrangeParams      p   = seq_print_params(0);
+    p.bed_shrink_x         = BED_SHRINK_SEQ_PRINT;
+    p.bed_shrink_y         = BED_SHRINK_SEQ_PRINT;
+    // Rod and lid above the objects, so they need not each go to a bed of their own.
+    p.clearance_height_to_rod = float(NOZZLE_HEIGHT_MM * 10);
+    p.clearance_height_to_lid = float(NOZZLE_HEIGHT_MM * 40);
+    for (ArrangePolygon &ap : items)
+        ap.extrude_ids = {1}; // the sequential sort reads extrude_ids.front()
+
+    update_arrange_params(p, &cfg, items);
+    update_selected_items_inflation(items, &cfg, p);
+    update_unselected_items_inflation(fixed, &cfg, p);
+    arrange(items, fixed, get_shrink_bedpts(&cfg, p), p);
+}
+
+ArrangePolygons short_squares(int n, double side_mm)
+{
+    ArrangePolygons items;
+    for (int i = 0; i < n; ++i) {
+        items.emplace_back(make_square(scaled(side_mm)));
+        items.back().height = NOZZLE_HEIGHT_MM / 2;
+    }
+    return items;
+}
+
+// True when the polygons of the items on bed 0, each grown by `grow_mm`, are pairwise disjoint.
+bool disjoint_when_grown(const ArrangePolygons &items, const ArrangePolygons &fixed, double grow_mm)
+{
+    ExPolygons grown;
+    for (const ArrangePolygons *list : {&items, &fixed})
+        for (const ArrangePolygon &ap : *list)
+            if (ap.bed_idx == 0 && !ap.is_virt_object)
+                append(grown, offset_ex(ap.transformed_poly(), float(scale_(grow_mm))));
+    for (size_t i = 0; i < grown.size(); ++i)
+        for (size_t j = i + 1; j < grown.size(); ++j)
+            if (!intersection_ex(ExPolygons{grown[i]}, ExPolygons{grown[j]}).empty())
+                return false;
+    return true;
 }
 
 } // namespace
@@ -186,4 +231,65 @@ TEST_CASE("min_object_distance yields no floor when an FFF config lacks the opti
         c.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(12.));
         CHECK(min_object_distance(c) == Approx(12.).margin(1e-9));
     }
+}
+
+// Orca #17011: short objects only need a nozzle's width between them, far less than the clearance
+// radius, so the bed may only grow by half that width. A row of four 50 mm objects and their gaps
+// is wider than the 200 mm bed but would fit one grown by half the clearance radius. Twenty of
+// them overfill the bed, so the pile reaches its edges.
+TEST_CASE("Sequential print keeps short objects on the bed and a nozzle apart", "[Arrange][SeqPrint]")
+{
+    ArrangePolygons items = short_squares(20, 50.);
+    ArrangePolygons fixed;
+    arrange_by_object(items, fixed);
+
+    const BoundingBox bed_bb(Point(0, 0), Point(scaled(200.), scaled(200.)));
+    size_t            on_bed = 0;
+    for (const ArrangePolygon &ap : items) {
+        if (ap.bed_idx != 0)
+            continue;
+        ++on_bed;
+        CHECK(bed_bb.contains(ap.transformed_poly().contour.bounding_box()));
+    }
+    REQUIRE(on_bed > 1);
+    // Grown as Print::sequential_print_clearance_valid() grows them.
+    CHECK(disjoint_when_grown(items, fixed, 0.5 * MAX_OUTER_NOZZLE_DIAMETER - 0.1));
+}
+
+// Short objects keep off an extrusion calibration region. One along the back edge catches the
+// region being moved back by a positive bed shrink, which lets objects onto it.
+TEST_CASE("Sequential print keeps short objects off a calibration region", "[Arrange][SeqPrint]")
+{
+    const BoundingBox region_bb(Point(0, scaled(185.)), Point(scaled(200.), scaled(200.)));
+    ArrangePolygon    region;
+    region.poly                     = ExPolygon(region_bb.polygon());
+    region.bed_idx                  = 0;
+    region.is_virt_object           = true;
+    region.is_extrusion_cali_object = true;
+    ArrangePolygons items = short_squares(20, 40.);
+    ArrangePolygons fixed{region};
+    arrange_by_object(items, fixed);
+
+    for (const ArrangePolygon &ap : items)
+        if (ap.bed_idx == 0)
+            CHECK(ap.transformed_poly().contour.bounding_box().max.y() <= region_bb.min.y());
+}
+
+// An object closer to the bed edge than the bed margin, as one placed by hand, still takes its room
+// when Fill bed adds objects around it, though its inflation crosses the arrange bed's edge.
+TEST_CASE("Sequential print keeps short objects off one at the bed edge", "[Arrange][SeqPrint]")
+{
+    ArrangePolygon obstacle = make_square(scaled(40.));
+    obstacle.translation    = {scaled(1.), scaled(80.)};
+    obstacle.height         = NOZZLE_HEIGHT_MM / 2;
+    obstacle.extrude_ids    = {1};
+    ArrangePolygons fixed{obstacle};
+    ArrangePolygons items = short_squares(20, 40.);
+    arrange_by_object(items, fixed);
+
+    size_t on_bed = 0;
+    for (const ArrangePolygon &ap : items)
+        on_bed += ap.bed_idx == 0;
+    REQUIRE(on_bed > 0);
+    CHECK(disjoint_when_grown(items, fixed, 0.));
 }

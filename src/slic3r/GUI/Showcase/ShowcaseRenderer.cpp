@@ -10,8 +10,11 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
+#include "libslic3r/Showcase/ShowcaseSurfaceColours.hpp"
 
 #include "../3DScene.hpp"
 #include "../Camera.hpp"
@@ -19,11 +22,13 @@
 #include "../GLModel.hpp"
 #include "../GLShader.hpp"
 #include "../GUI_App.hpp"
+#include "../I18N.hpp"
 #include "../ImGuiWrapper.hpp"
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
 
+#include <igl/per_corner_normals.h>
 #include <imgui/imgui.h>
 
 #include <wx/glcanvas.h>
@@ -36,6 +41,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -61,18 +67,60 @@ static constexpr int SHOWCASE_CONTACT_UNIT    = 2;
 static constexpr int SHOWCASE_CONTACT_SIZE    = 512;
 
 // A multi-material painted volume as one model per painted state (state s = filament s, 0 = the
-// volume's own), rebuilt when the painting changed.
-static void showcase_ensure_painted_parts(GLVolume &v, const ModelVolume &mv)
+// volume's own), rebuilt when the painting changed. Edge: modifiers (and height ranges) that put
+// another filament on the part colour it the same way (ShowcaseSurfaceColours.hpp), so a part is
+// drawn in parts when it is painted or when such a modifier covers it. Returns whether it is.
+static bool showcase_ensure_painted_parts(GLVolume &v, const ModelVolume &mv, const Transform3d &instance_matrix, size_t num_filaments)
 {
-    if (mv.mmu_segmentation_facets.timestamp() == v.mmuseg_ts)
-        return;
+    if (!v.printable || !mv.is_model_part())
+        return false;
+    const bool painted = !mv.mmu_segmentation_facets.empty();
+    // The regions are only looked for on objects that have a modifier or a height range.
+    const ModelObject *mo = mv.get_object();
+    const bool may_colour = mo != nullptr && num_filaments >= 2 &&
+                            (!mo->layer_config_ranges.empty() ||
+                             std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *o) { return o->is_modifier(); }));
+    if (!painted && !may_colour) {
+        if (v.mmuseg_ts != 0) {
+            v.mmuseg_models.clear();
+            v.mmuseg_ts = 0;
+        }
+        return false;
+    }
+    // Key: the painting's timestamp alone (as before) when nothing else can colour the part.
+    ObjectBase::Timestamp key = mv.mmu_segmentation_facets.timestamp();
+    if (may_colour)
+        key = ObjectBase::Timestamp(Showcase::colour_regions_key(mv, instance_matrix, num_filaments) ^ (uint64_t(key) * 0x9e3779b97f4a7c15ull));
+    if (key == 0)
+        key = 1;
+    if (key == v.mmuseg_ts)
+        return !v.mmuseg_models.empty();
     v.mmuseg_models.clear();
+    v.mmuseg_ts = key;
     std::vector<indexed_triangle_set> its_per_color;
-    mv.mmu_segmentation_facets.get_facets(mv, its_per_color);
+    const std::vector<Showcase::ColourRegion> regions = may_colour ? Showcase::colour_regions_for(mv, instance_matrix, num_filaments) :
+                                                                     std::vector<Showcase::ColourRegion>();
+    if (regions.empty()) {
+        if (!painted)
+            return false;
+        mv.mmu_segmentation_facets.get_facets(mv, its_per_color);
+    } else {
+        const float edge = Showcase::surface_colour_edge_limit(instance_matrix * mv.get_matrix());
+        Showcase::surface_colour_facets(mv.mesh(), painted ? &mv.mmu_segmentation_facets.get_data() : nullptr, regions, edge, its_per_color);
+    }
     v.mmuseg_models.resize(its_per_color.size());
     for (size_t i = 0; i < its_per_color.size(); ++i)
-        v.mmuseg_models[i].init_from(its_per_color[i]);
-    v.mmuseg_ts = mv.mmu_segmentation_facets.timestamp();
+        if (!its_per_color[i].indices.empty())
+            v.mmuseg_models[i].init_from(its_per_color[i]);
+    return !v.mmuseg_models.empty();
+}
+
+// The instance matrix of a volume (identity when it is gone).
+static Transform3d showcase_instance_matrix(const GLVolume &v, const ModelObject *mo)
+{
+    if (mo != nullptr && v.instance_idx() >= 0 && size_t(v.instance_idx()) < mo->instances.size())
+        return mo->instances[size_t(v.instance_idx())]->get_matrix();
+    return Transform3d::Identity();
 }
 
 static ColorRGBA showcase_color(const std::string &hex, const ColorRGBA &fallback)
@@ -281,7 +329,8 @@ ShowcaseRenderer::~ShowcaseRenderer()
     // them here only while the canvas can still be made current.
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
                         m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
-                        m_callout_texture != 0 || m_live_fb != nullptr;
+                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0 || m_thick_fbo != 0 || m_transmit_fbo != 0 ||
+                        m_seam_tex != 0 || !m_strings_models.empty() || m_lens_fbo != 0 || m_bloom_fbo != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     for (std::unique_ptr<ShowcaseFramebuffers> *fb : { &m_batch_fb, &m_live_fb })
@@ -324,11 +373,25 @@ void ShowcaseRenderer::release_gl()
         m_env_fallback_texture = 0;
     }
     m_env_key.clear();
+    m_env_is_hdri = false;
+    if (m_hdri_backdrop != 0) {
+        glsafe(::glDeleteTextures(1, &m_hdri_backdrop));
+        m_hdri_backdrop = 0;
+    }
+    m_hdri_backdrop_id.clear();
     if (m_floor_texture != 0) {
         glsafe(::glDeleteTextures(1, &m_floor_texture));
         m_floor_texture = 0;
     }
     m_floor_key.clear();
+    // Realism 1f.
+    if (m_seam_tex != 0) {
+        glsafe(::glDeleteTextures(1, &m_seam_tex));
+        m_seam_tex = 0;
+    }
+    m_seam_count = m_seam_width = 0;
+    m_slice_imp_key.clear();
+    m_strings_models.clear();
     m_batch_fb.reset();
     m_live_fb.reset();
     m_live_fb_failed_w = m_live_fb_failed_h = 0;
@@ -361,6 +424,25 @@ void ShowcaseRenderer::release_offscreen()
     }
     m_refl_w = m_refl_h = 0;
     m_contact_valid = m_refl_valid = false;
+    // Realism 1d: the thickness pass (sized like the frame) and the coloured shadows' map.
+    for (unsigned int *fbo : { &m_thick_fbo, &m_transmit_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_thick_tex, &m_transmit_tex })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    if (m_thick_depth != 0) {
+        glsafe(::glDeleteRenderbuffers(1, &m_thick_depth));
+        m_thick_depth = 0;
+    }
+    m_thick_w = m_thick_h = 0;
+    m_thick_valid = m_transmit_valid = false;
+    release_dof();
+    release_lens();
 }
 
 void ShowcaseRenderer::release_layers()
@@ -370,6 +452,45 @@ void ShowcaseRenderer::release_layers()
             glsafe(::glDeleteTextures(1, &it.second.texture));
     m_layers.clear();
     m_layers_valid = false;
+    m_mc_smooth.clear();
+}
+
+GLModel *ShowcaseRenderer::mc_smooth_model(const ModelVolume &mv)
+{
+    const auto key = std::make_pair(size_t(mv.id().id), static_cast<const void *>(mv.mesh_ptr().get()));
+    if (auto it = m_mc_smooth.find(key); it != m_mc_smooth.end())
+        return it->second.get();
+    std::shared_ptr<GLModel> &slot = m_mc_smooth[key];
+    const indexed_triangle_set &its = mv.mesh().its;
+    if (its.vertices.empty() || its.indices.empty())
+        return nullptr;
+    using MapVertices = Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
+    using MapIndices  = Eigen::Map<const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
+    const Eigen::MatrixXd vertices = MapVertices(its.vertices.front().data(), Eigen::Index(its.vertices.size()), 3).cast<double>();
+    const Eigen::MatrixXi indices  = MapIndices(its.indices.front().data(), Eigen::Index(its.indices.size()), 3);
+    Eigen::MatrixXd       corner_normals;
+    // 30 degrees: a cube keeps its sharp faces, a tessellated curve (a bunny, a cylinder) goes smooth.
+    igl::per_corner_normals(vertices, indices, 30.0, corner_normals);
+
+    GLModel::Geometry geo;
+    geo.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    geo.reserve_vertices(3 * its.indices.size());
+    geo.reserve_indices(3 * its.indices.size());
+    unsigned int n = 0;
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const stl_triangle_vertex_indices &face = its.indices[i];
+        for (int j = 0; j < 3; ++j) {
+            Vec3f normal = corner_normals.row(Eigen::Index(i * 3 + size_t(j))).cast<float>();
+            if (!normal.allFinite() || normal.squaredNorm() < 1e-12f)
+                normal = its_face_normal(its, int(i));
+            geo.add_vertex(its.vertices[size_t(face[j])], normal);
+        }
+        geo.add_triangle(n, n + 1, n + 2);
+        n += 3;
+    }
+    slot = std::make_shared<GLModel>();
+    slot->init_from(std::move(geo));
+    return slot.get();
 }
 
 bool ShowcaseRenderer::is_supported()
@@ -477,6 +598,13 @@ RealisticRenderSettings ShowcaseRenderer::render_settings(const DrawTarget &t) c
     rs.ssao              = li.ssao;
     rs.world_light       = li.world_fixed;
     rs.world_light_dir   = Showcase::light_direction(li.azimuth_deg, li.elevation_deg);
+    {
+        // 1h-1: the sun of an HDRI environment is the key light, so the shadow map agrees with the picture.
+        float                sun_az, sun_el;
+        std::array<float, 3> sun_color;
+        if (sun_key(sun_az, sun_el, sun_color))
+            rs.world_light_dir = Showcase::light_direction(sun_az, sun_el);
+    }
     rs.shadow_intensity  = li.shadow_intensity;
     rs.shadow_map_size   = t.shadow_map_size;
     rs.ssao_radius_scale = t.ssao_radius_scale;
@@ -510,7 +638,19 @@ std::vector<Showcase::LightSource> ShowcaseRenderer::scene_lights(const Camera &
         li.azimuth_deg   = float(std::atan2(w.y(), w.x()) * 180. / PI);
         li.elevation_deg = float(std::asin(std::clamp(w.z(), -1., 1.)) * 180. / PI);
     }
-    return Showcase::three_point_lights(li);
+    // 1h-1: the sun of an HDRI environment replaces the key light's direction and colour (the fill
+    // and the rim are placed around it as usual); key_intensity still scales it.
+    float                sun_az, sun_el;
+    std::array<float, 3> sun_color;
+    const bool           sun = sun_key(sun_az, sun_el, sun_color);
+    if (sun) {
+        li.azimuth_deg   = sun_az;
+        li.elevation_deg = sun_el;
+    }
+    std::vector<Showcase::LightSource> lights = Showcase::three_point_lights(li);
+    if (sun && li.key_intensity > 0.f && !lights.empty())
+        lights.front().color = { sun_color[0] * li.key_intensity, sun_color[1] * li.key_intensity, sun_color[2] * li.key_intensity };
+    return lights;
 }
 
 // The object's layers as the slicer will make them (layer height, first layer, a variable layer
@@ -539,6 +679,41 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
         info.skin_top    = Showcase::skin_settings(object_config, true, 0.);
         info.skin_bottom = Showcase::skin_settings(object_config, false, 0.);
         info.skin        = true;
+        // Multi-colour P4: what mesh mode needs to stand in for the toolpaths.
+        {
+            const ConfigOptionInt *e = object_config.option<ConfigOptionInt>("extruder");
+            info.mc_skin = MultiColour::mesh_skin(object_config, e != nullptr && e->value > 0 ? e->value : 1);
+            double volume = 0., area = 0.;
+            if (!mo->instances.empty()) {
+                const Transform3d instance_matrix = mo->instances.front()->get_matrix();
+                const double      instance_det    = std::abs(instance_matrix.matrix().block<3, 3>(0, 0).determinant());
+                for (const ModelVolume *mv : mo->volumes)
+                    if (mv != nullptr && mv->is_model_part()) {
+                        volume += std::abs(double(its_volume(mv->mesh().its))) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
+                        // The surface in the plate's frame, for the shell share below.
+                        const Transform3d m = instance_matrix * mv->get_matrix();
+                        const indexed_triangle_set &its = mv->mesh().its;
+                        for (const stl_triangle_vertex_indices &f : its.indices) {
+                            const Vec3d a0 = m * its.vertices[size_t(f[0])].cast<double>();
+                            const Vec3d a1 = m * its.vertices[size_t(f[1])].cast<double>();
+                            const Vec3d a2 = m * its.vertices[size_t(f[2])].cast<double>();
+                            area += 0.5 * (a1 - a0).cross(a2 - a0).norm();
+                        }
+                    }
+                const double height = mo->instance_bounding_box(0).size().z();
+                if (height > 1e-3 && std::isfinite(volume)) {
+                    // What the printer extrudes is the shell (about the band of walls under the whole
+                    // surface) plus the sparse infill inside it, not the solid mesh. A gradient's colour runs
+                    // on that volume, so the solid volume would run it several times too fast.
+                    double density = 0.15;
+                    if (const auto *d = object_config.option<ConfigOptionPercent>("sparse_infill_density"))
+                        density = std::clamp(d->value / 100., 0., 1.);
+                    const double shell    = std::min(volume, area * double(info.mc_skin.wall_band));
+                    const double extruded = shell + (volume - shell) * density;
+                    info.volume_per_mm = float(extruded / height);
+                }
+            }
+        }
         const SlicingParameters  sp   = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
         std::vector<coordf_t>    profile;
         PrintObject::update_layer_height_profile(*mo, sp, profile);
@@ -581,12 +756,19 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
 
 const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
 {
-    if (m_scene == nullptr || m_scene->lighting.environment.empty())
+    if (m_scene == nullptr || m_scene->lighting.environment.empty()) {
+        m_env_is_hdri = false;   // 1h-1: no environment, so no HDRI sun either
         return nullptr;
+    }
     const Showcase::EnvironmentManifest &manifest = showcase_environments();
     const Showcase::EnvironmentInfo     *env      = manifest.find(m_scene->lighting.environment);
-    if (env == nullptr)
+    if (env == nullptr) {
+        // 1h-1: not a baked environment; an HDRI of the same id space?
+        if (const Showcase::HdriInfo *hdri = showcase_hdris().find(m_scene->lighting.environment))
+            return ensure_hdri(*hdri);
+        m_env_is_hdri = false;
         return nullptr;
+    }
     if (m_env_key == env->id)
         return m_env_texture != 0 ? env : nullptr;
     // One environment at a time is kept on the GPU.
@@ -594,6 +776,7 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
         glsafe(::glDeleteTextures(1, &m_env_texture));
         m_env_texture = 0;
     }
+    m_env_is_hdri = false;
     m_env_key = env->id;   // a file that fails is not retried every frame
     ShowcaseImage atlas;
     if (!showcase_load_rgba_file(showcase_environment_path(*env), atlas)) {
@@ -602,6 +785,116 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
     }
     m_env_texture = showcase_upload_environment(atlas, manifest.face_size, manifest.levels);
     return m_env_texture != 0 ? env : nullptr;
+}
+
+const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_hdri(const Showcase::HdriInfo &hdri)
+{
+    // The sun is taken out of the image-based light only when the key light stands in for it.
+    const bool        remove_sun = m_scene->lighting.sun_from_env;
+    // 1h-3: the list's generation too, so a re-added or deleted download / own HDRI of the same id is read again.
+    const std::string generation = std::to_string(showcase_hdris_generation());
+    const std::string key        = "hdri:" + generation + ":" + hdri.id + (remove_sun ? "+sun" : "");
+    if (m_env_key == key) {
+        m_env_is_hdri = m_env_texture != 0;
+        return m_env_texture != 0 ? &m_hdri_info : nullptr;
+    }
+    if (m_env_texture != 0) {
+        glsafe(::glDeleteTextures(1, &m_env_texture));
+        m_env_texture = 0;
+    }
+    m_env_key     = key;   // a file that fails is not retried every frame
+    m_env_is_hdri = true;
+    m_hdri_sun    = Showcase::HdrSun();
+    m_hdri_sun_removed = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    Showcase::HdrImage image;
+    std::string        error;
+    bool               loaded = false;
+    if (hdri.procedural) {
+        image  = Showcase::make_procedural_hdr(hdri.kind, 2048);
+        loaded = !image.empty();
+    } else {
+        loaded = Showcase::load_hdri_any(showcase_hdri_path(hdri), image, &error);   // 1h-3: .hdr or .exr
+    }
+    if (!loaded) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be read (" << error
+                                   << "); the scene falls back to its backdrop colours and plain lights";
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    Showcase::HdrBakeOptions options;
+    options.remove_sun = remove_sun;
+    options.face_size  = showcase_environments().face_size;
+    options.levels     = showcase_environments().levels;
+    Showcase::HdrEnvironment baked;
+    if (!Showcase::bake_hdr_environment(image, options, baked)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " has no usable light; falling back to the scene's backdrop colours";
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    ShowcaseImage atlas;
+    atlas.width  = baked.atlas_width;
+    atlas.height = baked.atlas_height;
+    atlas.rgba   = std::move(baked.atlas_rgba);
+    m_env_texture = showcase_upload_environment(atlas, baked.face_size, baked.levels);
+    if (m_env_texture == 0) {
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    // The sharp panorama for the backdrop, once per HDRI (the sun toggle does not change it).
+    if (m_hdri_backdrop_id != generation + ":" + hdri.id || m_hdri_backdrop == 0) {
+        if (m_hdri_backdrop != 0) {
+            glsafe(::glDeleteTextures(1, &m_hdri_backdrop));
+            m_hdri_backdrop = 0;
+        }
+        m_hdri_backdrop    = showcase_upload_equirect(image, baked.scale);
+        m_hdri_backdrop_id = generation + ":" + hdri.id;
+        if (m_hdri_backdrop == 0)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be uploaded as a backdrop; its light is used, the backdrop stays blurred";
+    }
+    m_hdri_info          = Showcase::EnvironmentInfo();
+    m_hdri_info.id       = hdri.id;
+    m_hdri_info.name     = hdri.name;
+    m_hdri_info.file     = hdri.file;
+    m_hdri_info.sh       = baked.sh;
+    m_hdri_info.has_sun  = baked.sun.found;
+    m_hdri_info.sun_dir  = baked.sun.dir;
+    m_hdri_info.source   = hdri.source;
+    m_hdri_info.authors  = hdri.authors;
+    m_hdri_info.licence  = hdri.licence;
+    m_hdri_sun           = baked.sun;
+    m_hdri_sun_removed   = remove_sun && baked.sun.found;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // Warning level on purpose: this is the "HDR environment or the fallback" choice the Mac check asks about.
+    std::ostringstream sun_text;
+    if (baked.sun.found)
+        sun_text << "sun found at " << baked.sun.dir[0] << "," << baked.sun.dir[1] << "," << baked.sun.dir[2] << " (share " << baked.sun.share << ")";
+    else
+        sun_text << "no dominant light";
+    BOOST_LOG_TRIVIAL(warning) << "Showcase: HDRI environment " << hdri.id << (hdri.procedural ? " (generated) " : " (" + hdri.file + ") ")
+                               << image.width << "x" << image.height << ", scale " << baked.scale << ", " << sun_text.str()
+                               << (m_hdri_sun_removed ? ", sun used as the key light" : "") << "; prepared in " << int(ms) << " ms";
+    return &m_hdri_info;
+}
+
+bool ShowcaseRenderer::sun_key(float &azimuth_deg, float &elevation_deg, std::array<float, 3> &color) const
+{
+    if (m_scene == nullptr || !m_scene->lighting.sun_from_env || !m_scene->lighting.world_fixed || !m_env_is_hdri || !m_hdri_sun_removed ||
+        !m_hdri_sun.found)
+        return false;
+    const std::array<float, 3> &e = m_hdri_sun.dir;
+    // The environment is turned by env_rotation about +Z, as the shaders do (they rotate a world
+    // direction by -rotation to look the environment up), so the sun in the world is turned by +rotation.
+    const double rot = double(m_scene->lighting.env_rotation_deg) * PI / 180.;
+    const double wx  = std::cos(rot) * double(e[0]) - std::sin(rot) * double(e[1]);
+    const double wy  = std::sin(rot) * double(e[0]) + std::cos(rot) * double(e[1]);
+    azimuth_deg      = float(std::atan2(wy, wx) * 180. / PI);
+    // A sun below the horizon still has to light and shadow something.
+    elevation_deg    = std::max(3.f, float(std::asin(std::clamp(double(e[2]), -1., 1.)) * 180. / PI));
+    color            = { m_hdri_sun.color[0] * m_hdri_sun.key_strength, m_hdri_sun.color[1] * m_hdri_sun.key_strength,
+                         m_hdri_sun.color[2] * m_hdri_sun.key_strength };
+    return true;
 }
 
 bool ShowcaseRenderer::ensure_floor_texture(float &tile_mm, float &roughness)
@@ -695,28 +988,29 @@ bool ShowcaseRenderer::ensure_background_texture()
 {
     if (m_scene == nullptr || m_project == nullptr || m_scene->background.image.empty())
         return false;
-    if (m_bg_texture != 0 && m_bg_image_key == m_scene->background.image)
+    // 1h-2b: a backplate's own turn and mirror are part of the picture uploaded.
+    const Showcase::Background &bg = m_scene->background;
+    const bool        plate = bg.type == Showcase::BackgroundType::Backplate;
+    const int         turn  = plate ? Showcase::floor_rotation_snap(double(bg.plate_rotation)) : 0;
+    const bool        flip  = plate && bg.plate_flip;
+    const std::string key   = bg.image + (turn != 0 || flip ? "#" + std::to_string(turn) + (flip ? "f" : "") : std::string());
+    if (m_bg_texture != 0 && m_bg_image_key == key)
         return true;
-    const Showcase::ImageBlob *blob = m_project->find_image(m_scene->background.image);
+    const Showcase::ImageBlob *blob = m_project->find_image(bg.image);
     if (blob == nullptr || blob->bytes.empty())
         return false;
-    wxMemoryInputStream stream(blob->bytes.data(), blob->bytes.size());
-    wxImage             image;
-    if (!image.LoadFile(stream, wxBITMAP_TYPE_ANY) || !image.IsOk()) {
+    // Decoded with the file's EXIF orientation applied (a phone photo stored sideways).
+    ShowcaseImage decoded;
+    if (!showcase_decode_image(blob->bytes, decoded)) {
         BOOST_LOG_TRIVIAL(warning) << "Showcase: the backdrop image could not be decoded";
-        m_bg_image_key = m_scene->background.image;   // do not retry every frame
+        m_bg_image_key = key;   // do not retry every frame
         return false;
     }
-    const int w = image.GetWidth(), h = image.GetHeight();
-    std::vector<uint8_t> rgba(size_t(w) * size_t(h) * 4);
-    const unsigned char *rgb   = image.GetData();
-    const unsigned char *alpha = image.HasAlpha() ? image.GetAlpha() : nullptr;
-    for (size_t i = 0; i < size_t(w) * size_t(h); ++i) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 0];
-        rgba[i * 4 + 1] = rgb[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb[i * 3 + 2];
-        rgba[i * 4 + 3] = alpha ? alpha[i] : 255;
-    }
+    int w = decoded.width, h = decoded.height;
+    std::vector<uint8_t> rgba = std::move(decoded.rgba);
+    if (flip)
+        Showcase::orient_rgba(rgba, w, h, 2);
+    Showcase::orient_rgba(rgba, w, h, Showcase::rotation_orientation(turn));
     if (m_bg_texture == 0)
         glsafe(::glGenTextures(1, &m_bg_texture));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_bg_texture));
@@ -731,12 +1025,13 @@ bool ShowcaseRenderer::ensure_background_texture()
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     m_bg_image_w   = w;
     m_bg_image_h   = h;
-    m_bg_image_key = m_scene->background.image;
+    m_bg_image_key = key;
     return true;
 }
 
 void ShowcaseRenderer::draw_background(const DrawTarget &t)
 {
+    m_bg_ground = false;
     ensure_fullscreen_quad();
     glsafe(::glDisable(GL_DEPTH_TEST));
     glsafe(::glDepthMask(GL_FALSE));
@@ -780,11 +1075,16 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     case Showcase::BackgroundType::Image: mode = ensure_background_texture() ? 3 : 1; break;
     case Showcase::BackgroundType::Transparent: mode = 4; break;
     case Showcase::BackgroundType::Environment: mode = 5; break;
+    // 1h-2: the photo backplate is the picture filling the frame.
+    case Showcase::BackgroundType::Backplate: mode = ensure_background_texture() ? 3 : 1; break;
     }
     // S2: the environment behind the model; without one, the scene's two colours as a gradient.
     const Showcase::EnvironmentInfo *env = mode == 5 ? ensure_environment() : nullptr;
     if (mode == 5 && env == nullptr)
         mode = 1;
+    // 1h-1: an HDRI environment draws its sharp panorama (mode 6) instead of the blurred cube.
+    if (mode == 5 && m_env_is_hdri && m_hdri_backdrop != 0)
+        mode = 6;
 
     const float fw = std::max(1e-6f, (t.frame[2] - t.frame[0]) * float(t.width));
     const float fh = std::max(1e-6f, (t.frame[3] - t.frame[1]) * float(t.height));
@@ -799,9 +1099,10 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     shader->set_uniform("viewport_size", Vec2f(float(t.width), float(t.height)));
     const float blur = m_scene ? std::clamp(m_scene->background.blur, 0.f, 1.f) : 0.f;
     shader->set_uniform("blur", blur);
+    shader->set_uniform("scene_dim", m_scene ? m_scene->materials.scene_dim() : 0.f);   // glow G1: lights off
     // Level 7 of a 4096 px picture is 32 px: very soft, still recognisable.
     shader->set_uniform("image_lod", blur * 7.f);
-    if (mode == 5) {
+    if (mode == 5 || mode == 6) {
         const Camera &camera = wxGetApp().plater()->get_camera();
         const Matrix4d inv_vp = (camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix()).inverse();
         shader->set_uniform("inv_view_projection", inv_vp);
@@ -811,16 +1112,47 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         shader->set_uniform("env_exposure", m_scene->lighting.env_intensity * std::exp2(m_scene->lighting.exposure));
         shader->set_uniform("tone_curve", int(m_scene->lighting.tone));
         shader->set_uniform("env_map", SHOWCASE_ENV_UNIT);
+        // 1h-2: projected onto the ground the model stands on, or an infinite panorama, maybe tilted.
+        m_bg_ground = scene_ground_dome(m_bg_dome);
+        shader->set_uniform("ground_on", m_bg_ground);
+        shader->set_uniform("ortho_view", camera.get_type() == Camera::EType::Ortho);
+        if (m_bg_ground) {
+            shader->set_uniform("ground_center", Vec3d(m_bg_dome.center[0], m_bg_dome.center[1], m_bg_dome.center[2]));
+            shader->set_uniform("ground_radius", float(m_bg_dome.radius));
+            shader->set_uniform("ground_floor_radius", float(m_bg_dome.floor_radius()));
+        }
+        const float pitch = m_scene->background.backdrop_pitch;
+        const bool  tilt  = !m_bg_ground && pitch != 0.f;
+        shader->set_uniform("tilt_on", tilt);
+        if (tilt) {
+            const Vec3d                 fwd = camera.get_dir_forward();
+            const std::array<double, 9> m   = Showcase::backdrop_pitch_matrix(double(pitch), { fwd.x(), fwd.y(), fwd.z() });
+            Matrix3d                    tm;
+            tm << m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8];
+            shader->set_uniform("backdrop_tilt", tm);
+        }
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_ENV_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, m_env_texture));
         glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
+    if (mode == 6) {
+        shader->set_uniform("image_tex", 0);
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_hdri_backdrop));
     }
     if (mode == 3) {
         // Fill (cover), fit (contain, the rest in colour 1) or tile (three rows of the picture).
         const float ia = float(m_bg_image_w) / float(std::max(1, m_bg_image_h));
         float sx = 1.f, sy = 1.f;
-        const Showcase::ImageFit fit = m_scene->background.fit;
-        if (fit == Showcase::ImageFit::Tile) {
+        const Showcase::ImageFit fit = type == Showcase::BackgroundType::Backplate ? Showcase::ImageFit::Fill : m_scene->background.fit;
+        if (type == Showcase::BackgroundType::Backplate) {
+            // 1h-2b: the backplate's zoom and pan (zoom 1, no pan = the cover fit below).
+            const Showcase::Background &b = m_scene->background;
+            const Showcase::PlateMapping pm = Showcase::plate_mapping(double(ia), double(frame_aspect), double(b.plate_zoom),
+                                                                      double(b.plate_offset_x), double(b.plate_offset_y));
+            sx = float(pm.sx);
+            sy = float(pm.sy);
+        } else if (fit == Showcase::ImageFit::Tile) {
             sy = 3.f;
             sx = 3.f * frame_aspect / ia;
         } else {
@@ -830,10 +1162,17 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
             else
                 sy = ia / frame_aspect;
         }
-        const float ox = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sx;
-        const float oy = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sy;
+        float ox = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sx;
+        float oy = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sy;
+        if (type == Showcase::BackgroundType::Backplate) {
+            ox = float(0.5 + 0.5 * std::clamp(double(m_scene->background.plate_offset_x), -1., 1.)) - 0.5f * sx;
+            oy = float(0.5 + 0.5 * std::clamp(double(m_scene->background.plate_offset_y), -1., 1.)) - 0.5f * sy;
+        }
         shader->set_uniform("uv_transform", std::array<float, 4>{ sx, sy, ox, oy });
         shader->set_uniform("tile", fit == Showcase::ImageFit::Tile);
+        // 1h-2b: a backplate continues past the safe frame (the live view's margins show more photo, not
+        // the backdrop colour); inside the frame it is the same.
+        shader->set_uniform("extend", type == Showcase::BackgroundType::Backplate);
         shader->set_uniform("image_tex", 0);
         glsafe(::glActiveTexture(GL_TEXTURE0));
         glsafe(::glBindTexture(GL_TEXTURE_2D, m_bg_texture));
@@ -841,9 +1180,9 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, fit == Showcase::ImageFit::Tile ? GL_REPEAT : GL_CLAMP_TO_EDGE));
     }
     m_canvas.m_background.render();
-    if (mode == 3)
+    if (mode == 3 || mode == 6)
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-    if (mode == 5) {
+    if (mode == 5 || mode == 6) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_ENV_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, 0));
         glsafe(::glActiveTexture(GL_TEXTURE0));
@@ -876,14 +1215,16 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     model.scale(Vec3d(radius, radius, 1.));
 
     const Showcase::Floor &fl = m_scene->floor;
+    // 1h-2: over a ground-projected environment or a photo backplate the floor is a shadow catcher.
+    const Showcase::FloorType ft = Showcase::effective_floor_type(*m_scene);
     int mode = 1;
-    if (fl.type == Showcase::FloorType::Solid)
+    if (ft == Showcase::FloorType::Solid)
         mode = 2;
-    else if (fl.type == Showcase::FloorType::Grid)
+    else if (ft == Showcase::FloorType::Grid)
         mode = 3;
     // S2: a photo floor, plain colour while its picture is missing.
     float tile_mm = 500.f, roughness = 0.2f;
-    if (fl.type == Showcase::FloorType::Texture || fl.type == Showcase::FloorType::Image)
+    if (ft == Showcase::FloorType::Texture || ft == Showcase::FloorType::Image)
         mode = ensure_floor_texture(tile_mm, roughness) ? 4 : 2;
 
     const bool shadows = m_canvas.m_shadow_map_valid && m_canvas.m_shadow_map_texture_id != 0;
@@ -923,7 +1264,15 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_CONTACT_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_2D, m_contact_tex[0]));
     }
+    // Realism 1d: coloured, lighter shadows under translucent filaments (unit 3).
+    const bool transmit = shadows && m_transmit_valid;
+    if (transmit) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 3));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_transmit_tex));
+    }
     glsafe(::glActiveTexture(GL_TEXTURE0));
+    shader->set_uniform("use_transmit", transmit);
+    shader->set_uniform("transmit_map", 3);
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * model);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
     shader->set_uniform("model_matrix", model);
@@ -933,6 +1282,7 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     shader->set_uniform("shadow_map_texel", 1.0f / float(std::max(1u, m_canvas.m_shadow_map_size)));
     shader->set_uniform("shadow_softness", m_scene->lighting.shadow_softness);
     shader->set_uniform("mode", mode);
+    shader->set_uniform("scene_dim", m_scene->materials.scene_dim());   // glow G1: lights off
     shader->set_uniform("floor_color", showcase_color(fl.color, ColorRGBA(0.95f, 0.95f, 0.95f, 1.f)));
     shader->set_uniform("shadow_strength", fl.shadow_strength);
     shader->set_uniform("fade_start", 0.45f);
@@ -955,7 +1305,7 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     shader->set_uniform("viewport_size", Vec2f(float(vp[2]), float(vp[3])));
     shader->set_uniform("camera_position", camera.get_position());
     m_floor_model->render();
-    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_FLOOR_TEX_UNIT, SHOWCASE_REFLECTION_UNIT, SHOWCASE_CONTACT_UNIT }) {
+    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_FLOOR_TEX_UNIT, SHOWCASE_REFLECTION_UNIT, SHOWCASE_CONTACT_UNIT, 3 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -1023,6 +1373,60 @@ void ShowcaseRenderer::draw_objects()
     shader->stop_using();
 }
 
+// Multi-colour (coextruded) filaments: each slot's colours, split, rotation and twist from the
+// project (the visual-only keys), as the shaders' uniform table (P3 toolpaths, P4 mesh).
+static MultiColour::UniformTable showcase_multicolour_table(const std::vector<ShowcaseFilament> &filaments)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return MultiColour::UniformTable();
+    std::vector<float> diameters;
+    for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
+        float d = 1.75f;
+        if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
+            p != nullptr && p->config.has("filament_diameter"))
+            d = float(p->config.opt_float("filament_diameter", 0u));
+        diameters.push_back(d);
+    }
+    // The same table the toolpath mode and Preview build (each slot's own settings from the project).
+    return MultiColour::table_from_config(bundle->project_config, diameters);
+}
+
+// Glow-in-the-dark (G1): which slots glow and in what colour, from the project (the visual-only keys),
+// and the project-wide intensity, as the shaders' table.
+static Glow::UniformTable showcase_glow_table()
+{
+    const PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return Glow::UniformTable();
+    // Drawn twice a frame (the object pass and the floor's mirror pass), and on every entry into
+    // Showcase: rebuilt only when a value it is made from changed.
+    static std::string        cached_signature;
+    static Glow::UniformTable cached_table;
+    static bool               cached = false;
+    std::string               signature = Glow::signature(*bundle);
+    if (!cached || signature != cached_signature) {
+        cached_table     = Glow::pack_uniforms(Glow::slots_from_bundle(*bundle), Glow::intensity_from_config(bundle->project_config));
+        cached_signature = std::move(signature);
+        cached           = true;
+    }
+    return cached_table;
+}
+
+static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const MultiColour::UniformTable &t)
+{
+    auto vec4s = [&shader](const char *name, const float *data, int count) {
+        if (const int at = shader.get_uniform_location(name); at >= 0)
+            glsafe(::glUniform4fv(at, count, data));
+    };
+    vec4s("mc_colors", t.colors.data(), int(t.colors.size() / 4));
+    vec4s("mc_bounds", t.bounds.data(), int(t.bounds.size() / 4));
+    vec4s("mc_params", t.params.data(), int(t.params.size() / 4));
+    vec4s("mc_global", t.global.data(), 1);
+    vec4s("mc_global2", t.global2.data(), 1);
+    vec4s("mc_grad", t.grad.data(), int(t.grad.size() / 4));
+}
+
 // S2: the objects with the filament materials. Draws each visible volume itself (rather than through
 // GLVolumeCollection::render) so every filament - also every painted colour of a multi-material
 // volume - gets its own finish. Opaque first; translucent filaments after, sorted back to front per
@@ -1030,8 +1434,26 @@ void ShowcaseRenderer::draw_objects()
 // (Z = 0) for the glossy floor.
 bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
 {
-    GLShaderProgram *shader = wxGetApp().get_shader("showcase_material");
-    if (shader == nullptr || m_scene == nullptr)
+    if (m_scene == nullptr)
+        return false;
+    // Every filament's colour (painted and mixed ones too) and finish.
+    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+
+    // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): coextruded slots without a
+    // slice, through the material program built with the shared functions. With no such slot (or
+    // the scene's "Coextruded colours" off) the plain program draws, exactly as before.
+    MultiColour::UniformTable multicolour;
+    GLShaderProgram          *shader = nullptr;
+    if (m_scene->materials.coextruded_look) {
+        multicolour = showcase_multicolour_table(filaments);
+        if (multicolour.any_multi)
+            shader = wxGetApp().get_shader("showcase_material_mc");
+    }
+    const bool mc = shader != nullptr;
+    if (shader == nullptr)
+        shader = wxGetApp().get_shader("showcase_material");
+    if (shader == nullptr)
         return false;
     GLVolumeCollection &volumes = m_canvas.m_volumes;
     if (volumes.empty())
@@ -1049,9 +1471,6 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     const Transform3d &projection = camera.get_projection_matrix();
     const RealisticRenderSettings rs = m_canvas._render_settings();
 
-    // Every filament's colour (painted and mixed ones too) and finish.
-    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
-    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
     auto finish_of = [this, &filaments](int filament) {
         if (filament >= 1 && size_t(filament) <= filaments.size())
             return m_scene->materials.finish_for(filament, filaments[size_t(filament - 1)].preset_name, filaments[size_t(filament - 1)].type);
@@ -1069,6 +1488,8 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         ColorRGBA        color;
         Showcase::Finish finish = Showcase::Finish::Standard;
         double           depth  = 0.;
+        int              filament = 0;  // 1-based, 0 = none (the wipe tower)
+        const ModelVolume *mv   = nullptr;  // P4: its mesh, for the smooth-normal copy
     };
     std::vector<Item> opaque, translucent;
     const ModelObjectPtrs &objects = wxGetApp().model().objects;
@@ -1087,16 +1508,18 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         const ModelVolume *mv = mo != nullptr && v->volume_idx() >= 0 && size_t(v->volume_idx()) < mo->volumes.size() ?
                                     mo->volumes[size_t(v->volume_idx())] : nullptr;
         int extruder = mv != nullptr ? mv->extruder_id() : v->extruder_id;
+        it.mv        = mv;
         if (extruder <= 0)
             extruder = 1;
         auto push = [&](Item item, int filament) {
-            item.color  = color_of(filament, v->color);
-            item.finish = finish_of(filament);
+            item.color    = color_of(filament, v->color);
+            item.finish   = finish_of(filament);
+            item.filament = filament;
             (Showcase::material_params(item.finish).alpha < 1.f || item.color.a() < 1.f ? translucent : opaque).push_back(item);
         };
-        if (mv != nullptr && v->printable && !mv->mmu_segmentation_facets.empty()) {
-            // Multi-material painting: one part per filament, as GLVolume::simple_render keeps them.
-            showcase_ensure_painted_parts(*v, *mv);
+        if (mv != nullptr && showcase_ensure_painted_parts(*v, *mv, showcase_instance_matrix(*v, mo), colors.size())) {
+            // Multi-material painting (and modifiers on a filament): one part per filament, as
+            // GLVolume::simple_render keeps them.
             for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
                 if (!v->mmuseg_models[i].is_initialized())
                     continue;
@@ -1110,8 +1533,48 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     }
     std::sort(translucent.begin(), translucent.end(), [](const Item &a, const Item &b) { return a.depth < b.depth; });
 
+    // Realism 1d: how thick the plastic is, for the filaments that let light through (not in the
+    // mirror: it takes a typical wall). Nothing is drawn when none does.
+    const float translucency = m_scene->materials.translucency;
+    m_thick_valid            = false;
+    if (!mirrored) {
+        std::vector<std::pair<GLVolume *, int>> thick_items;
+        for (const std::vector<Item> *list : { &opaque, &translucent })
+            for (const Item &it : *list)
+                if (!it.volume->is_wipe_tower && Showcase::effective_translucency(it.finish, translucency).transmission > 0.f)
+                    thick_items.emplace_back(it.volume, it.sub);
+        if (!thick_items.empty())
+            m_thick_valid = render_thickness(thick_items, view, projection, eye);
+    }
+
+    // Realism 1f: the imperfections; the seam and the strings come from the plate's slice.
+    const Showcase::Imperfections imp = m_scene->materials.imperfections;
+    const bool imp_on    = imp.wobble > 0.f || imp.seam > 0.f || imp.colour > 0.f;
+    const bool slice_imp = (imp.seam > 0.f || imp.strings > 0.f) && ensure_slice_imperfections();
+
     // Frame uniforms.
     shader->start_using();
+    shader->set_uniform("imp_wobble", imp.wobble);
+    shader->set_uniform("imp_seam", slice_imp ? imp.seam : 0.f);
+    shader->set_uniform("imp_colour", imp.colour);
+    shader->set_uniform("seam_table", 9);
+    shader->set_uniform("seam_count", slice_imp && imp.seam > 0.f ? m_seam_count : 0);
+    shader->set_uniform("seam_table_width", std::max(1, m_seam_width));
+    if (slice_imp && imp.seam > 0.f && m_seam_tex != 0) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 9));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_seam_tex));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
+    shader->set_uniform("use_thickness", m_thick_valid);
+    shader->set_uniform("thickness_map", 8);
+    shader->set_uniform("thickness_viewport", std::array<float, 4>{ m_thick_viewport[0], m_thick_viewport[1], m_thick_viewport[2], m_thick_viewport[3] });
+    if (m_thick_valid) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 8));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_thick_tex));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
+    if (mc)
+        showcase_set_multicolour_uniforms(*shader, multicolour);
     const bool sample_shadows = m_canvas.m_shadow_map_valid && m_canvas.m_shadow_map_texture_id != 0;
     if (sample_shadows) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_SHADOW_MAP_UNIT));
@@ -1138,6 +1601,11 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     }
     shader->set_uniform("camera_position", eye);
     shader->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+    // Glow G1: the lights-off view takes the light away from everything and lets the glow slots shine.
+    const float                glow_dim   = m_scene->materials.scene_dim();
+    const Glow::UniformTable   glow_table = glow_dim > 0.f ? showcase_glow_table() : Glow::UniformTable();
+    shader->set_uniform("scene_dim", glow_dim);
+    shader->set_uniform("glow_intensity", glow_table.intensity);
     // 1a: linear light into the HDR layer (the post pass applies the exposure and the curve), or
     // tone-mapped sRGB (the floor's mirror, which the floor composites in display space).
     shader->set_uniform("hdr_output", hdr);
@@ -1172,10 +1640,34 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         shader->set_uniform("mat_alpha", v->is_wipe_tower ? 1.f : mp.alpha);
         shader->set_uniform("mat_line_shade", mp.line_shade);
         shader->set_uniform("mat_fiber_noise", mp.fiber_noise);
+        // Realism 1d / 1e (0 for the wipe tower and the older finishes: the plain material).
+        {
+            const Showcase::Translucency tr = v->is_wipe_tower ? Showcase::Translucency() : Showcase::effective_translucency(it.finish, translucency);
+            shader->set_uniform("mat_transmission", tr.transmission);
+            shader->set_uniform("mat_density", tr.density);
+            shader->set_uniform("mat_sss", tr.sss);
+            const bool wt = v->is_wipe_tower;
+            shader->set_uniform("mat_sheen", wt ? 0.f : mp.sheen);
+            shader->set_uniform("mat_sparkle", wt ? 0.f : mp.sparkle);
+            shader->set_uniform("mat_speckle", wt ? 0.f : mp.speckle);
+            shader->set_uniform("mat_speckle_kind", wt ? 0 : int(mp.speckle_kind));
+        }
+        // Glow G1: this slot's glow (none for the wipe tower and with the lights on).
+        {
+            std::array<float, 4> glow{ 0.f, 0.f, 0.f, 0.f };
+            if (glow_dim > 0.f && !v->is_wipe_tower && it.filament >= 1 && it.filament <= MultiColour::GLSL_SLOTS)
+                std::copy_n(glow_table.slot.begin() + size_t(it.filament - 1) * 4, 4, glow.begin());
+            shader->set_uniform("glow_slot", glow);
+        }
 
         // 1c: an anisotropic finish needs the layers too, for the skin's turn per layer.
         const bool       aniso  = mp.anisotropy > 0.f && !v->is_wipe_tower;
-        const LayerInfo *layers = (line_depth > 0.f || aniso) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
+        // P4: so does a coextruded slot (its stripes follow the skin's lines).
+        const int        mc_slot = mc && !v->is_wipe_tower && it.filament >= 1 && size_t(it.filament) <= filaments.size() &&
+                                           it.filament <= MultiColour::GLSL_SLOTS &&
+                                           MultiColour::slot_is_multi(multicolour, it.filament - 1) ?
+                                       it.filament - 1 : -1;
+        const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0 || imp_on) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;
         shader->set_uniform("layer_mode", mode);
         if (layers != nullptr) {
@@ -1197,13 +1689,15 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         int   skin_count[2] = { 0, 0 };
         float skin_angles[16] = {};
         Vec2f skin_center     = Vec2f::Zero();
-        if (aniso && layers != nullptr && layers->skin) {
+        bool  zigzag[2]       = { true, true };
+        if ((aniso || mc_slot >= 0) && layers != nullptr && layers->skin) {
             const double rotation = std::atan2(world.matrix()(1, 0), world.matrix()(0, 0)) * 180. / PI;
             for (int s = 0; s < 2; ++s) {
                 Showcase::SkinSettings settings = s == 0 ? layers->skin_top : layers->skin_bottom;
                 settings.model_rotation_deg     = rotation;
                 const Showcase::SkinTangent st  = Showcase::skin_tangent_mode(settings);
                 skin_mode[s] = int(st.pattern);
+                zigzag[s]    = st.zigzag;
                 if (st.pattern == Showcase::SkinPattern::Lines) {
                     if (st.angles_deg.size() > 8)
                         skin_mode[s] = int(Showcase::SkinPattern::Isotropic);   // more than the shader holds
@@ -1224,6 +1718,21 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         if (const int at = shader->get_uniform_location("skin_angles"); at >= 0)
             glsafe(::glUniform1fv(at, 16, skin_angles));
         shader->set_uniform("skin_center", skin_center);
+        if (mc) {
+            // P4: the slot drawn (-1 = its plain colour) and how its toolpaths would run.
+            const MultiColour::MeshSkin skin = layers != nullptr ? layers->mc_skin : MultiColour::MeshSkin();
+            shader->set_uniform("mc_slot", mc_slot);
+            // The slicer turns walls in the plate's frame, so a mirrored instance keeps the direction.
+            shader->set_uniform("mc_wall_dir", skin.wall_dir);
+            shader->set_uniform("mc_spacing_top", skin.top_spacing);
+            shader->set_uniform("mc_spacing_bottom", skin.bottom_spacing);
+            shader->set_uniform("mc_spacing_first", skin.first_spacing);
+            shader->set_uniform("mc_zigzag_top", zigzag[0]);
+            shader->set_uniform("mc_zigzag_bottom", zigzag[1]);
+            shader->set_uniform("mc_volume_per_mm", layers != nullptr ? layers->volume_per_mm : 0.f);
+            shader->set_uniform("mc_layer_height", skin.layer_height);
+            shader->set_uniform("mc_wall_band", skin.wall_band);
+        }
 
         shader->set_uniform("view_model_matrix", view * world);
         shader->set_uniform("projection_matrix", projection);
@@ -1238,8 +1747,11 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             m.set_color(it.color);
             m.render();
         } else {
-            v->model.set_color(it.color);
-            v->model.render();
+            // P4: a coextruded volume with smooth normals, so its colours follow the surface.
+            GLModel *smooth = mc_slot >= 0 && it.mv != nullptr ? mc_smooth_model(*it.mv) : nullptr;
+            GLModel &model  = smooth != nullptr ? *smooth : v->model;
+            model.set_color(it.color);
+            model.render();
         }
         if (v->is_left_handed())
             glsafe(::glFrontFace(GL_CCW));
@@ -1277,10 +1789,13 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
         glsafe(::glDisable(GL_BLEND));
     }
+    // Realism 1f: the faint strings, last (translucent, over everything they hang in front of).
+    if (!mirrored && slice_imp && imp.strings > 0.f && !m_wisps.empty())
+        draw_strings(*shader, view, projection, eye, colors);
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glCullFace(GL_BACK));
 
-    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT }) {
+    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT, 8, 9 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -1465,14 +1980,362 @@ void ShowcaseRenderer::render_reflection()
     m_refl_valid = true;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Realism 1d: thickness and coloured shadows
+// ------------------------------------------------------------------------------------------------
+
+Showcase::Finish ShowcaseRenderer::filament_finish(int filament, const std::vector<ShowcaseFilament> &filaments) const
+{
+    if (m_scene == nullptr)
+        return Showcase::Finish::Standard;
+    if (filament >= 1 && size_t(filament) <= filaments.size())
+        return m_scene->materials.finish_for(filament, filaments[size_t(filament - 1)].preset_name, filaments[size_t(filament - 1)].type);
+    const Showcase::Finish *f = m_scene->materials.override_for(filament);
+    return f != nullptr ? *f : Showcase::Finish::Standard;
+}
+
+bool ShowcaseRenderer::render_thickness(const std::vector<std::pair<GLVolume *, int>> &items, const Transform3d &view,
+                                        const Transform3d &projection, const Vec3d &eye)
+{
+    GLShaderProgram *shader = wxGetApp().get_shader("showcase_thickness");
+    if (shader == nullptr || items.empty())
+        return false;
+    ShowcaseTargetState keep;
+    m_thick_viewport[0] = float(keep.viewport[0]);
+    m_thick_viewport[1] = float(keep.viewport[1]);
+    m_thick_viewport[2] = float(std::max(1, keep.viewport[2]));
+    m_thick_viewport[3] = float(std::max(1, keep.viewport[3]));
+    // Half the frame: the thickness changes slowly across a wall, and it is read with linear filtering.
+    const int w = std::max(1, keep.viewport[2] / 2);
+    const int h = std::max(1, keep.viewport[3] / 2);
+    if (m_thick_fbo == 0 || m_thick_w != w || m_thick_h != h) {
+        for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
+        if (m_thick_tex != 0)
+            glsafe(::glDeleteTextures(1, &m_thick_tex));
+        if (m_thick_depth != 0)
+            glsafe(::glDeleteRenderbuffers(1, &m_thick_depth));
+        if (m_thick_fbo == 0)
+            glsafe(::glGenFramebuffers(1, &m_thick_fbo));
+        glsafe(::glGenTextures(1, &m_thick_tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_thick_tex));
+        // R32F is colour-renderable in core 3.0 (macOS 4.1 too); sized format only.
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        glsafe(::glGenRenderbuffers(1, &m_thick_depth));
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, m_thick_depth));
+        glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
+        m_thick_w = w;
+        m_thick_h = h;
+    }
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_thick_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_thick_tex, 0));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_thick_depth));
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, bufs));
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: no thickness buffer at " << w << "x" << h << "; translucent plastics take a typical wall";
+        return false;
+    }
+    glsafe(::glViewport(0, 0, w, h));
+    glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    GLboolean blend = ::glIsEnabled(GL_BLEND);
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glCullFace(GL_FRONT));   // the back faces
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", projection);
+    shader->set_uniform("camera_position", eye);
+    shader->set_uniform("clip_floor", floor_drawn());
+    shader->set_uniform("build_clip_z", m_build_clip_z < 1e9 ? float(m_build_clip_z) : 1e30f);
+    for (const auto &[v, sub] : items) {
+        const Transform3d world = v->world_matrix();
+        shader->set_uniform("view_model_matrix", view * world);
+        shader->set_uniform("volume_world_matrix", world);
+        shader->set_uniform("world_normal_matrix", Matrix3d(world.matrix().block<3, 3>(0, 0).inverse().transpose()));
+        // A mirrored instance turns its winding over.
+        if (v->is_left_handed())
+            glsafe(::glFrontFace(GL_CW));
+        if (sub >= 0 && size_t(sub) < v->mmuseg_models.size())
+            v->mmuseg_models[size_t(sub)].render();
+        else
+            v->model.render();
+        if (v->is_left_handed())
+            glsafe(::glFrontFace(GL_CCW));
+    }
+    shader->stop_using();
+    glsafe(::glCullFace(GL_BACK));
+    if (blend)
+        glsafe(::glEnable(GL_BLEND));
+    return true;
+}
+
+void ShowcaseRenderer::render_transmit_map()
+{
+    m_transmit_valid = false;
+    if (m_scene == nullptr || !m_canvas.m_shadow_map_valid || m_canvas.m_shadow_map_texture_id == 0)
+        return;
+    GLShaderProgram *shader = wxGetApp().get_shader("showcase_transmit");
+    if (shader == nullptr)
+        return;
+    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    const ModelObjectPtrs              &objects   = wxGetApp().model().objects;
+    struct Caster
+    {
+        GLVolume *volume = nullptr;
+        Vec3f     transmit{ 0.f, 0.f, 0.f };
+    };
+    std::vector<Caster> casters;
+    bool                any_light = false;
+    for (GLVolume *v : m_canvas.m_volumes.volumes) {
+        if (v == nullptr || !v->is_active || (v->is_modifier && !v->is_wipe_tower))
+            continue;
+        Caster c;
+        c.volume = v;
+        if (!v->is_wipe_tower) {
+            const ModelObject *mo = v->object_idx() >= 0 && size_t(v->object_idx()) < objects.size() ? objects[size_t(v->object_idx())] : nullptr;
+            const ModelVolume *mv = mo != nullptr && v->volume_idx() >= 0 && size_t(v->volume_idx()) < mo->volumes.size() ?
+                                        mo->volumes[size_t(v->volume_idx())] : nullptr;
+            int extruder = mv != nullptr ? mv->extruder_id() : v->extruder_id;
+            if (extruder <= 0)
+                extruder = 1;
+            const Showcase::Translucency tr = Showcase::effective_translucency(filament_finish(extruder, filaments), m_scene->materials.translucency);
+            if (tr.transmission > 0.f) {
+                const ColorRGBA col = extruder >= 1 && size_t(extruder) <= colors.size() ? colors[size_t(extruder - 1)] : v->color;
+                auto lin = [](float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };
+                const std::array<float, 3> t = Showcase::shadow_transmittance({ lin(col.r()), lin(col.g()), lin(col.b()) }, tr.transmission);
+                c.transmit = Vec3f(t[0], t[1], t[2]);
+                any_light  = true;
+            }
+        }
+        casters.push_back(c);
+    }
+    if (!any_light)
+        return;
+
+    const int n = 1024;
+    ShowcaseTargetState keep;
+    if (m_transmit_fbo == 0) {
+        glsafe(::glGenFramebuffers(1, &m_transmit_fbo));
+        m_transmit_tex = showcase_render_texture(n, n, false);
+    }
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_transmit_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_transmit_tex, 0));
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, bufs));
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return;
+    glsafe(::glViewport(0, 0, n, n));
+    glsafe(::glClearColor(1.f, 1.f, 1.f, 1.f));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    // The least light any caster lets through along the light's ray: each caster counts once, however
+    // many of its faces the ray crosses (an opaque one lets none through).
+    glsafe(::glBlendEquation(GL_MIN));
+    glsafe(::glBlendFunc(GL_ONE, GL_ONE));
+    shader->start_using();
+    shader->set_uniform("projection_matrix", m_canvas.m_shadow_light_vp);
+    for (const Caster &c : casters) {
+        const Transform3d world = c.volume->world_matrix();
+        shader->set_uniform("view_model_matrix", world);
+        shader->set_uniform("volume_world_matrix", world);
+        shader->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+        shader->set_uniform("transmit", c.transmit);
+        c.volume->model.render();
+    }
+    shader->stop_using();
+    glsafe(::glBlendEquation(GL_FUNC_ADD));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_CULL_FACE));
+    m_transmit_valid = true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Realism 1f: the slice's seam and strings
+// ------------------------------------------------------------------------------------------------
+
+bool ShowcaseRenderer::ensure_slice_imperfections()
+{
+    if (m_scene == nullptr || !toolpaths_available())
+        return false;
+    PartPlate *plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+    const GCodeProcessorResult *result = plate != nullptr ? plate->get_slice_result() : nullptr;
+    if (result == nullptr || result->moves.empty())
+        return false;
+    const Vec3d origin  = plate->get_origin();
+    const float strings = m_scene->materials.imperfections.strings;
+    std::ostringstream key;
+    key << static_cast<const void *>(result) << ':' << result->id << ':' << result->moves.size() << ':' << origin.x() << ',' << origin.y() << ':' << strings;
+    if (key.str() == m_slice_imp_key)
+        return m_seam_count > 0 || !m_wisps.empty();
+    m_slice_imp_key = key.str();
+
+    // The moves as the imperfections see them, in world coordinates (the plate's origin added).
+    std::vector<Showcase::PathPoint> points;
+    points.reserve(result->moves.size());
+    for (const GCodeProcessorResult::MoveVertex &m : result->moves) {
+        Showcase::PathPoint p;
+        switch (m.type) {
+        case EMoveType::Travel: p.kind = Showcase::PathKind::Travel; break;
+        case EMoveType::Extrude: p.kind = Showcase::PathKind::Extrude; break;
+        case EMoveType::Seam: p.kind = Showcase::PathKind::Seam; break;
+        default: p.kind = Showcase::PathKind::Other; break;
+        }
+        p.x        = m.position.x() + float(origin.x());
+        p.y        = m.position.y() + float(origin.y());
+        p.z        = m.position.z() + float(origin.z());
+        p.extruder = int(m.extruder_id);
+        points.push_back(p);
+    }
+    const std::vector<Showcase::SeamPoint> seams = Showcase::seam_points(points);
+    m_wisps = Showcase::string_wisps(points, strings);
+
+    if (m_seam_tex != 0) {
+        glsafe(::glDeleteTextures(1, &m_seam_tex));
+        m_seam_tex = 0;
+    }
+    m_seam_count = 0;
+    m_seam_width = 0;
+    if (!seams.empty()) {
+        const int width  = int(std::min<size_t>(seams.size(), 1024));
+        const int height = int((seams.size() + size_t(width) - 1) / size_t(width));
+        std::vector<float> texels(size_t(width) * size_t(height) * 4, 0.f);
+        for (size_t i = 0; i < seams.size(); ++i) {
+            texels[i * 4 + 0] = seams[i].x;
+            texels[i * 4 + 1] = seams[i].y;
+            texels[i * 4 + 2] = seams[i].z;
+        }
+        glsafe(::glGenTextures(1, &m_seam_tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_seam_tex));
+        glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 4));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, texels.data()));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        m_seam_count = int(seams.size());
+        m_seam_width = width;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Showcase: imperfections from the slice: " << m_seam_count << " seam points, " << m_wisps.size() << " strings";
+    return m_seam_count > 0 || !m_wisps.empty();
+}
+
+void ShowcaseRenderer::draw_strings(GLShaderProgram &shader, const Transform3d &view, const Transform3d &projection, const Vec3d &eye,
+                                    const std::vector<ColorRGBA> &colors)
+{
+    // Ribbons facing the camera, about a pixel wide (thinner in mm when close), drawn faint so a sub-
+    // pixel string still reads as a hairline.
+    const Matrix4d &P   = projection.matrix();
+    GLint           vp[4] = { 0, 0, 1, 1 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, vp));
+    const double px_scale = 2. / std::max(1e-6, P(1, 1) * double(std::max(1, vp[3])));   // mm per pixel per mm of distance
+    const bool   ortho    = std::abs(P(3, 3) - 1.) < 1e-9;
+    const double ortho_mm = ortho ? 2. / std::max(1e-9, P(1, 1) * double(std::max(1, vp[3]))) : 0.;
+    std::map<int, GLModel::Geometry> by_extruder;
+    const int segments = 12;
+    for (const Showcase::StringWisp &w : m_wisps) {
+        GLModel::Geometry &g = by_extruder[w.extruder];
+        if (g.vertices.empty())
+            g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+        const unsigned int base = unsigned(g.vertices_count());
+        for (int s = 0; s <= segments; ++s) {
+            const float                t  = float(s) / float(segments);
+            const std::array<float, 3> p  = Showcase::wisp_point(w, t);
+            const std::array<float, 3> p2 = Showcase::wisp_point(w, std::min(1.f, t + 0.02f));
+            const std::array<float, 3> p1 = Showcase::wisp_point(w, std::max(0.f, t - 0.02f));
+            const Vec3d pos(p[0], p[1], p[2]);
+            const Vec3d dir = Vec3d(p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]).normalized();
+            const Vec3d to_eye = (eye - pos).normalized();
+            Vec3d side = dir.cross(to_eye);
+            if (side.squaredNorm() < 1e-12)
+                side = Vec3d::UnitZ();
+            side.normalize();
+            // Thinner at the ends, where the string leaves the part.
+            const double taper = 0.35 + 0.65 * std::sin(PI * double(t));
+            const double mm_px = ortho ? ortho_mm : (eye - pos).norm() * px_scale;
+            const double half  = 0.5 * std::max(0.04, 0.9 * mm_px) * taper;
+            const Vec3f  n     = to_eye.cast<float>();
+            g.add_vertex(Vec3f((pos + side * half).cast<float>()), n);
+            g.add_vertex(Vec3f((pos - side * half).cast<float>()), n);
+        }
+        for (int s = 0; s < segments; ++s) {
+            const unsigned int i = base + unsigned(2 * s);
+            g.add_triangle(i, i + 1, i + 2);
+            g.add_triangle(i + 1, i + 3, i + 2);
+        }
+    }
+    m_strings_models.clear();
+    // A plain plastic: the standard finish, no translucency or effects, faint.
+    const Showcase::MaterialParams mp = Showcase::material_params(Showcase::Finish::Standard);
+    shader.set_uniform("mat_roughness", mp.roughness);
+    shader.set_uniform("mat_f0", mp.f0);
+    shader.set_uniform("mat_metal_tint", 0.f);
+    shader.set_uniform("mat_anisotropy", 0.f);
+    shader.set_uniform("mat_clearcoat", 0.f);
+    shader.set_uniform("mat_alpha", 0.3f);
+    shader.set_uniform("mat_line_shade", 0.f);
+    shader.set_uniform("mat_fiber_noise", 0.f);
+    for (const char *name : { "mat_transmission", "mat_density", "mat_sss", "mat_sheen", "mat_sparkle", "mat_speckle", "imp_wobble", "imp_seam", "imp_colour" })
+        shader.set_uniform(name, 0.f);
+    shader.set_uniform("mat_speckle_kind", 0);
+    shader.set_uniform("layer_mode", 0);
+    shader.set_uniform("skin_mode_top", 0);
+    shader.set_uniform("skin_mode_bottom", 0);
+    shader.set_uniform("glow_slot", std::array<float, 4>{ 0.f, 0.f, 0.f, 0.f });
+    shader.set_uniform("force_opaque", false);
+    if (shader.get_uniform_location("mc_slot") >= 0)
+        shader.set_uniform("mc_slot", -1);
+    shader.set_uniform("view_model_matrix", view);
+    shader.set_uniform("projection_matrix", projection);
+    shader.set_uniform("volume_world_matrix", Transform3d::Identity());
+    shader.set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+    for (auto &[extruder, geometry] : by_extruder) {
+        if (geometry.is_empty())
+            continue;
+        auto model = std::make_shared<GLModel>();
+        model->init_from(std::move(geometry));
+        const ColorRGBA c = extruder >= 0 && size_t(extruder) < colors.size() ? colors[size_t(extruder)] : ColorRGBA(0.8f, 0.8f, 0.8f, 1.f);
+        model->set_color(ColorRGBA(c.r(), c.g(), c.b(), 1.f));
+        model->render();
+        m_strings_models.emplace_back(extruder, std::move(model));
+    }
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDisable(GL_BLEND));
+}
+
 void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 {
     Camera &camera = wxGetApp().plater()->get_camera();
 
     glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    m_hdr_resolved = false;
 
     update_visibility();
+    // 1h-1: an HDRI environment is loaded (and its sun found) before the render settings and the lights use it.
+    ensure_environment();
     // S5: the layer build-up of this frame: the slice's layers, or the model cut by a plane.
     const bool toolpaths = use_toolpaths();
     m_build_clip_z       = 1e30;
@@ -1512,10 +2375,12 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
         m_canvas._render_shadows(view, proj);
 
     // 4. The floor, receiving those shadows, with S2's contact shadow and mirror image when on.
-    m_contact_valid = m_refl_valid = false;
+    m_contact_valid = m_refl_valid = m_transmit_valid = false;
     if (!show_plate) {
         render_contact_shadow();
         render_reflection();
+        // Realism 1d: the light translucent casters let through onto the floor.
+        render_transmit_map();
         draw_floor(t);
     }
 
@@ -1572,6 +2437,23 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 // Realism 1a: the HDR layer's post pass
 // ------------------------------------------------------------------------------------------------
 
+std::string ShowcaseRenderer::export_path_line(bool hdr_drawn, bool has_hdr_layer, bool multisampled, bool wanted, bool refused)
+{
+    if (hdr_drawn)
+        return multisampled ? "HDR (RGBA16F objects layer, multisampled post pass)" : "HDR (RGBA16F objects layer, post pass)";
+    if (has_hdr_layer)
+        return "fallback (the HDR layer was made, but the objects were drawn outside it: toolpaths or the phong shader)";
+    if (refused)
+        return "fallback (the driver refused the RGBA16F layer)";
+    if (!wanted) {
+        const char *v = std::getenv("EDGESLICER_SHOWCASE_NO_HDR");
+        if (v != nullptr && *v != '\0' && *v != '0')
+            return "fallback (EDGESLICER_SHOWCASE_NO_HDR is set)";
+        return "fallback (the post-pass shaders are not loaded)";
+    }
+    return "fallback (no HDR layer)";
+}
+
 bool ShowcaseRenderer::want_hdr() const
 {
     if (m_scene == nullptr)
@@ -1583,6 +2465,20 @@ bool ShowcaseRenderer::want_hdr() const
     }();
     return !disabled && wxGetApp().get_shader("showcase_post") != nullptr && wxGetApp().get_shader("showcase_post_ms") != nullptr &&
            wxGetApp().get_shader("showcase_material") != nullptr;
+}
+
+void ShowcaseRenderer::note_hdr_choice(const char *where, bool hdr, const std::string &why)
+{
+    std::string what = hdr ? "HDR objects layer (RGBA16F) + post pass" : "fallback, no HDR layer (objects tone-map in their shader)";
+    if (!hdr && !why.empty())
+        what += ": " + why;
+    // The environment the frame is lit with belongs to the choice: an HDRI one is a different path.
+    what += m_env_is_hdri ? "; lit by an HDRI environment" : "";
+    std::string &last = m_hdr_choice_logged[where];
+    if (last == what)
+        return;
+    last = what;
+    BOOST_LOG_TRIVIAL(warning) << "Showcase: the " << where << " uses the " << what;
 }
 
 void ShowcaseRenderer::draw_post(const ShowcaseFramebuffers &fb)
@@ -1667,6 +2563,424 @@ void ShowcaseRenderer::present(unsigned int color_texture)
     post->stop_using();
     glsafe(::glDepthMask(GL_TRUE));
     glsafe(::glEnable(GL_DEPTH_TEST));
+}
+
+// ------------------------------------------------------------------------------------------------
+// Realism 1h-2: the ground-projected environment and depth of field
+// ------------------------------------------------------------------------------------------------
+
+bool ShowcaseRenderer::scene_ground_dome(Showcase::GroundDome &out) const
+{
+    if (m_scene == nullptr || !Showcase::ground_projection_active(*m_scene))
+        return false;
+    // The HDRI's own camera height and room size give the dome's shape; a baked environment has none.
+    double hdri_h = 1600., hdri_r = 16000.;
+    if (const Showcase::HdriInfo *h = showcase_hdris().find(m_scene->lighting.environment)) {
+        hdri_h = h->ground_height_mm;
+        hdri_r = h->ground_radius_mm;
+    }
+    BoundingBoxf3 box = objects_box();
+    if (!box.defined)
+        box = BoundingBoxf3(Vec3d(-50., -50., 0.), Vec3d(50., 50., 50.));
+    out = Showcase::ground_dome(m_scene->background, hdri_h, hdri_r, { box.min.x(), box.min.y(), box.min.z() },
+                                { box.max.x(), box.max.y(), box.max.z() });
+    return out.height > 0. && out.radius > out.height;
+}
+
+void ShowcaseRenderer::release_dof()
+{
+    for (unsigned int *fbo : { &m_dof_copy_fbo, &m_dof_coc_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_dof_color, &m_dof_depth, &m_dof_coc })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    m_dof_w = m_dof_h = 0;
+}
+
+bool ShowcaseRenderer::ensure_dof_buffers(int w, int h)
+{
+    if (m_dof_copy_fbo != 0 && m_dof_w == w && m_dof_h == h)
+        return true;
+    // The caller's framebuffer stays bound (making the buffers binds them).
+    ShowcaseTargetState keep;
+    release_dof();
+    for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
+    auto texture = [](GLint internal, GLenum format, GLenum type, int tw, int th) {
+        GLuint tex = 0;
+        glsafe(::glGenTextures(1, &tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, internal, tw, th, 0, format, type, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        return tex;
+    };
+    // Sized formats only (macOS core). The depth copy has the scene's format, so a blit can fill it.
+    m_dof_color = texture(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+    m_dof_depth = texture(GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, w, h);
+    m_dof_coc   = texture(GL_RG16F, GL_RG, GL_HALF_FLOAT, w, h);
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glGenFramebuffers(1, &m_dof_copy_fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_copy_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_dof_color, 0));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, m_dof_depth, 0));
+    glsafe(::glDrawBuffers(1, bufs));
+    bool ok = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glsafe(::glGenFramebuffers(1, &m_dof_coc_fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_dof_coc, 0));
+    glsafe(::glDrawBuffers(1, bufs));
+    ok = ok && ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE && ::glGetError() != GL_OUT_OF_MEMORY;
+    if (!ok) {
+        release_dof();
+        if (!m_dof_failed_logged)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no buffers for the depth of field at " << w << "x" << h << "; the frame stays sharp";
+        m_dof_failed_logged = true;
+        return false;
+    }
+    m_dof_w = w;
+    m_dof_h = h;
+    return true;
+}
+
+bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarget &t)
+{
+    m_dof_used.clear();
+    if (m_scene == nullptr || !m_scene->dof.enabled || fb.fbo == 0)
+        return false;
+    GLShaderProgram *dof    = wxGetApp().get_shader("showcase_dof");
+    const Camera    &camera = wxGetApp().plater()->get_camera();
+    if (dof == nullptr) {
+        m_dof_used = "off (the depth of field shader is not loaded)";
+        return false;
+    }
+    if (camera.get_type() != Camera::EType::Perspective) {
+        m_dof_used = "off (orthographic camera)";
+        return false;
+    }
+    const int       w       = fb.width, h = fb.height;
+    const double    frame_h = std::max(1., double(t.frame[3] - t.frame[1]) * double(h));
+    const double    frame_w = std::max(1., double(t.frame[2] - t.frame[0]) * double(w));
+    const Matrix4d &P       = camera.get_projection_matrix().matrix();
+    // The frame's own lens: the projection spans the target, the frame a part of it.
+    const double p11_frame = P(1, 1) * double(h) / frame_h;
+    const Vec3d  eye       = camera.get_position();
+    const Vec3d  fwd       = camera.get_dir_forward();
+    double       focus     = double(m_scene->dof.focus_mm);
+    if (m_scene->dof.focus_on_model) {
+        const BoundingBoxf3 box = objects_box();
+        if (box.defined)
+            focus = (box.center() - eye).dot(fwd);
+    }
+    focus = std::max(focus, std::max(camera.get_near_z(), 1.));
+    Showcase::DofSetup setup = Showcase::dof_setup(m_scene->dof, p11_frame, frame_w / frame_h, frame_h, focus);
+    // 1h-2 (deferred part): the live view keeps to the draft quality on a weak GPU; exports never do.
+    const bool draft_cap = t.live && weak_gpu();
+    if (draft_cap)
+        setup.taps = Showcase::live_dof_taps(setup.taps, true);
+    if (!setup.active) {
+        m_dof_used = "off (the circle of confusion is under a pixel)";
+        return false;
+    }
+    // Before the buffers are made: the frame's framebuffer and viewport come back afterwards.
+    ShowcaseTargetState keep;
+    if (!ensure_dof_buffers(w, h)) {
+        m_dof_used = "off (no buffers)";
+        return false;
+    }
+    // The finished colour and the depth, copied so the pass can read them while it writes the frame.
+    glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo));
+    glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_dof_copy_fbo));
+    glsafe(::glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST));
+
+    ensure_fullscreen_quad();
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glViewport(0, 0, w, h));
+
+    // Where nothing was drawn: the floor plane, the ground-projected dome, or far away.
+    int bg_mode = 0;
+    if (m_bg_ground)
+        bg_mode = 2;
+    else if (m_scene->background.type == Showcase::BackgroundType::Backplate)
+        bg_mode = 3;   // the photo has its own focus
+    else if (floor_drawn() && Showcase::effective_floor_type(*m_scene) != Showcase::FloorType::None)
+        bg_mode = 1;
+    const Matrix4d inv_vp = (P * camera.get_view_matrix().matrix()).inverse();
+
+    dof->start_using();
+    dof->set_uniform("viewport_size", Vec2f(float(w), float(h)));
+    dof->set_uniform("near_z", float(camera.get_near_z()));
+    dof->set_uniform("far_z", float(camera.get_far_z()));
+    dof->set_uniform("ortho", false);
+    dof->set_uniform("inv_view_projection", inv_vp);
+    dof->set_uniform("camera_position", eye);
+    dof->set_uniform("view_forward", fwd);
+    dof->set_uniform("bg_mode", bg_mode);
+    dof->set_uniform("ground_center", Vec3d(m_bg_dome.center[0], m_bg_dome.center[1], m_bg_dome.center[2]));
+    dof->set_uniform("ground_radius", float(m_bg_dome.radius));
+    dof->set_uniform("ground_floor_radius", float(m_bg_dome.floor_radius()));
+    dof->set_uniform("focus", float(setup.focus));
+    dof->set_uniform("k_px", float(setup.k_px));
+    dof->set_uniform("max_px", float(setup.max_px));
+    dof->set_uniform("taps", setup.taps);
+    dof->set_uniform("depth_tex", 0);
+    dof->set_uniform("color_tex", 1);
+    dof->set_uniform("coc_tex", 2);
+    // 1h-2 (deferred part): the foreground's spill and the highlights from the HDR layer.
+    const GLuint hdr_tex   = m_scene->dof.highlights > 0.f ? resolved_hdr(fb) : 0;
+    const float  highlight = hdr_tex != 0 ? m_scene->dof.highlights : 0.f;
+    dof->set_uniform("near_bleed", m_scene->dof.near_bleed);
+    dof->set_uniform("highlights", highlight);
+    dof->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+    dof->set_uniform("hdr_tex", 3);
+    // Unit 3 always holds a complete texture: without highlights the shader never reads it, but macOS
+    // validates every sampler a program declares and logs an "unloadable" unit 3 otherwise. The
+    // frame's colour copy is never drawn into by either pass, so it is safe there; the output is the
+    // same.
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, hdr_tex != 0 ? hdr_tex : m_dof_color));
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+
+    // 1. The circles of confusion.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
+    dof->set_uniform("mode", 0);
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_depth));
+    m_canvas.m_background.render();
+    // 2. The gather, back into the frame.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo));
+    dof->set_uniform("mode", 1);
+    glsafe(::glActiveTexture(GL_TEXTURE1));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_color));
+    glsafe(::glActiveTexture(GL_TEXTURE2));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_coc));
+    m_canvas.m_background.render();
+    for (int unit : { 3, 2, 1, 0 }) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    }
+    dof->stop_using();
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    std::ostringstream used;
+    used << "f/" << m_scene->dof.f_number << " at " << int(std::lround(setup.focus)) << " mm, lens " << int(std::lround(setup.focal_mm))
+         << " mm, far blur " << int(std::lround(std::min(setup.k_px, setup.max_px))) << " px, " << setup.taps << " taps"
+         << (bg_mode == 3 ? ", photo kept sharp" : bg_mode == 2 ? ", ground dome" : bg_mode == 1 ? ", floor plane" : "")
+         << (m_scene->dof.near_bleed ? ", foreground spill" : "") << (highlight > 0.f ? ", bokeh highlights" : "")
+         << (draft_cap ? ", draft (weak GPU)" : "");
+    m_dof_used = used.str();
+    return true;
+}
+
+bool ShowcaseRenderer::weak_gpu()
+{
+    if (m_weak_gpu < 0) {
+        const char *env = std::getenv("EDGESLICER_SHOWCASE_DRAFT_DOF");
+        const GLubyte *r = ::glGetString(GL_RENDERER);
+        const bool weak = (env != nullptr && *env != '\0' && *env != '0') ||
+                          (r != nullptr && Showcase::weak_gpu_renderer(reinterpret_cast<const char *>(r)));
+        m_weak_gpu = weak ? 1 : 0;
+        if (weak)
+            BOOST_LOG_TRIVIAL(info) << "Showcase: the live view's depth of field keeps to the draft quality on this GPU";
+    }
+    return m_weak_gpu == 1;
+}
+
+unsigned int ShowcaseRenderer::resolved_hdr(const ShowcaseFramebuffers &fb)
+{
+    if (!fb.has_hdr() || !m_hdr_drawn || fb.hdr == 0)
+        return 0;
+    if (fb.msaa_hdr_fbo != 0 && !m_hdr_resolved) {
+        // The multisampled layer averaged into the single-sampled one (colour only).
+        GLint read = 0, draw = 0;
+        glsafe(::glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read));
+        glsafe(::glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw));
+        glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.msaa_hdr_fbo));
+        glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb.hdr_fbo));
+        glsafe(::glBlitFramebuffer(0, 0, fb.width, fb.height, 0, 0, fb.width, fb.height, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+        glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(read)));
+        glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(draw)));
+    }
+    m_hdr_resolved = true;
+    return fb.hdr;
+}
+
+void ShowcaseRenderer::release_lens()
+{
+    for (unsigned int *fbo : { &m_lens_fbo, &m_bloom_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_lens_copy, &m_bloom_tex[0], &m_bloom_tex[1] })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    m_lens_w = m_lens_h = m_bloom_w = m_bloom_h = 0;
+}
+
+bool ShowcaseRenderer::apply_lens(const ShowcaseFramebuffers &fb, const DrawTarget &t)
+{
+    m_lens_used.clear();
+    if (m_scene == nullptr || !m_scene->lens.any() || fb.fbo == 0)
+        return false;
+    GLShaderProgram *lens = wxGetApp().get_shader("showcase_lens");
+    GLShaderProgram *blur = wxGetApp().get_shader("showcase_blur");
+    if (lens == nullptr) {
+        m_lens_used = "off (the camera effects shader is not loaded)";
+        return false;
+    }
+    const Showcase::LensEffects &le = m_scene->lens;
+    const int w = fb.width, h = fb.height;
+    ShowcaseTargetState keep;
+    auto texture = [](GLint internal, GLenum format, GLenum type, int tw, int th) {
+        GLuint tex = 0;
+        glsafe(::glGenTextures(1, &tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, internal, tw, th, 0, format, type, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        return tex;
+    };
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    if (m_lens_fbo == 0 || m_lens_w != w || m_lens_h != h) {
+        if (m_lens_copy != 0)
+            glsafe(::glDeleteTextures(1, &m_lens_copy));
+        if (m_lens_fbo == 0)
+            glsafe(::glGenFramebuffers(1, &m_lens_fbo));
+        m_lens_copy = texture(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_lens_fbo));
+        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lens_copy, 0));
+        glsafe(::glDrawBuffers(1, bufs));
+        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            release_lens();
+            m_lens_used = "off (no buffers)";
+            return false;
+        }
+        m_lens_w = w;
+        m_lens_h = h;
+    }
+    // The finished frame, copied so the pass can read it while it writes the frame.
+    glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo));
+    glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lens_fbo));
+    glsafe(::glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+
+    ensure_fullscreen_quad();
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    // The bloom: the HDR layer's brightest light at a quarter size, blurred wide (two rounds).
+    bool bloom = false;
+    if (le.bloom > 0.f && blur != nullptr) {
+        const GLuint hdr = resolved_hdr(fb);
+        if (hdr != 0) {
+            const int bw = std::max(1, w / 4), bh = std::max(1, h / 4);
+            if (m_bloom_fbo == 0 || m_bloom_w != bw || m_bloom_h != bh) {
+                for (unsigned int &tex : m_bloom_tex)
+                    if (tex != 0) {
+                        glsafe(::glDeleteTextures(1, &tex));
+                        tex = 0;
+                    }
+                if (m_bloom_fbo == 0)
+                    glsafe(::glGenFramebuffers(1, &m_bloom_fbo));
+                for (unsigned int &tex : m_bloom_tex)
+                    tex = texture(GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, bw, bh);
+                m_bloom_w = bw;
+                m_bloom_h = bh;
+            }
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_bloom_fbo));
+            glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloom_tex[0], 0));
+            glsafe(::glDrawBuffers(1, bufs));
+            if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+                glsafe(::glViewport(0, 0, bw, bh));
+                lens->start_using();
+                lens->set_uniform("mode", 1);
+                lens->set_uniform("hdr_tex", 2);
+                lens->set_uniform("viewport_size", Vec2f(float(bw), float(bh)));
+                lens->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+                glsafe(::glActiveTexture(GL_TEXTURE2));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, hdr));
+                m_canvas.m_background.render();
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+                glsafe(::glActiveTexture(GL_TEXTURE0));
+                lens->stop_using();
+                blur->start_using();
+                blur->set_uniform("source", 0);
+                // Wider with the output: the glow covers the same share of the frame at any size.
+                const float base = std::max(1.f, float(bh) / 135.f);
+                for (float spread : { 1.f * base, 3.f * base }) {
+                    for (int pass = 0; pass < 2; ++pass) {
+                        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloom_tex[1 - pass], 0));
+                        glsafe(::glBindTexture(GL_TEXTURE_2D, m_bloom_tex[pass]));
+                        blur->set_uniform("direction", pass == 0 ? Vec2f(spread / float(bw), 0.f) : Vec2f(0.f, spread / float(bh)));
+                        m_canvas.m_background.render();
+                    }
+                }
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+                blur->stop_using();
+                bloom = true;
+            }
+        }
+    }
+
+    // The frame through the lens.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo));
+    glsafe(::glViewport(0, 0, w, h));
+    const float fx = t.frame[0] * float(w), fy = t.frame[1] * float(h);
+    const float fw = std::max(1.f, (t.frame[2] - t.frame[0]) * float(w)), fh = std::max(1.f, (t.frame[3] - t.frame[1]) * float(h));
+    lens->start_using();
+    lens->set_uniform("mode", 0);
+    lens->set_uniform("color_tex", 0);
+    lens->set_uniform("bloom_tex", 1);
+    lens->set_uniform("viewport_size", Vec2f(float(w), float(h)));
+    lens->set_uniform("frame_px", std::array<float, 4>{ fx, fy, fw, fh });
+    lens->set_uniform("out_scale", float(std::max(1, t.out_scale)));
+    lens->set_uniform("grain", le.grain);
+    lens->set_uniform("vignette", le.vignette);
+    lens->set_uniform("bloom", bloom ? le.bloom : 0.f);
+    lens->set_uniform("chromatic", le.chromatic);
+    lens->set_uniform("distortion", le.distortion);
+    lens->set_uniform("seed", m_frame_seed);
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_lens_copy));
+    if (bloom) {
+        glsafe(::glActiveTexture(GL_TEXTURE1));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_bloom_tex[0]));
+    }
+    m_canvas.m_background.render();
+    for (int unit : { 1, 0 }) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    }
+    lens->stop_using();
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    std::ostringstream used;
+    used << "grain " << le.grain << ", vignette " << le.vignette << ", bloom " << (bloom ? le.bloom : 0.f)
+         << (le.bloom > 0.f && !bloom ? " (no HDR layer)" : "") << ", fringes " << le.chromatic << ", distortion " << le.distortion
+         << ", seed " << m_frame_seed;
+    m_lens_used = used.str();
+    return true;
 }
 
 void ShowcaseRenderer::ensure_watermark_texture(int frame_w, int frame_h)
@@ -1772,6 +3086,32 @@ void ShowcaseRenderer::draw_overlay(int vp_w, int vp_h)
                          ImVec2(x0 + float(m_wm_rect.x + m_wm_rect.w), y0 + float(m_wm_rect.y + m_wm_rect.h)), ImVec2(0.f, 0.f),
                          ImVec2(1.f, 1.f), IM_COL32(255, 255, 255, int(std::lround(op * 255.f))));
         }
+        // 1h-2: a photo backplate's horizon (where the user put it) and the camera's own, to line them up.
+        // The live view only: never in an export.
+        if (m_scene->background.type == Showcase::BackgroundType::Backplate) {
+            // The horizon is kept in the photo's coordinates: through the zoom and the pan to the frame.
+            const double ia = background_aspect();
+            const Showcase::PlateMapping pm = Showcase::plate_mapping(ia > 0. ? ia : double(f.w) / double(std::max(1, f.h)),
+                                                                      double(f.w) / double(std::max(1, f.h)), double(m_scene->background.plate_zoom),
+                                                                      double(m_scene->background.plate_offset_x), double(m_scene->background.plate_offset_y));
+            const float hy = y0 + float(1. - pm.frame_y(double(m_scene->background.plate_horizon))) * (y1 - y0);
+            dl->AddLine(ImVec2(x0, hy), ImVec2(x1, hy), IM_COL32(255, 196, 0, 210), 1.5f);
+            dl->AddText(ImVec2(x0 + 6.f, hy - ImGui::GetTextLineHeight() - 2.f), IM_COL32(255, 196, 0, 230), _u8L("Photo horizon").c_str());
+            const Camera &camera = wxGetApp().plater()->get_camera();
+            if (camera.get_type() == Camera::EType::Perspective && f.h > 0) {
+                const double p11   = camera.get_projection_matrix().matrix()(1, 1) * double(vp_h) / double(f.h);
+                const double fov_y = 2. * std::atan(1. / std::max(p11, 1e-6));
+                const double pitch = std::asin(std::clamp(-camera.get_dir_forward().z(), -1., 1.));
+                const double h     = Showcase::horizon_for_pitch(pitch, fov_y);
+                if (h > -0.05 && h < 1.05) {
+                    const float cy = y0 + float(1. - h) * (y1 - y0);
+                    for (float x = x0; x < x1; x += 14.f)
+                        dl->AddLine(ImVec2(x, cy), ImVec2(std::min(x + 8.f, x1), cy), IM_COL32(90, 200, 255, 210), 1.5f);
+                    dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(_u8L("Camera horizon").c_str()).x - 6.f, cy + 2.f), IM_COL32(90, 200, 255, 230),
+                                _u8L("Camera horizon").c_str());
+                }
+            }
+        }
         const std::string label = (boost::format("%1% x %2%") % m_scene->export_settings.width % m_scene->export_settings.height).str();
         const ImVec2      size  = ImGui::CalcTextSize(label.c_str());
         const ImVec2      pos(x1 - size.x - 8.f, y1 + 4.f <= float(vp_h) - size.y ? y1 + 4.f : y1 - size.y - 6.f);
@@ -1839,6 +3179,7 @@ void ShowcaseRenderer::render_frame()
                 m_live_fb_failed_h = int(vp_h);
                 BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDR buffers for the live view at " << vp_w << "x" << vp_h << " ("
                                            << samples << " samples); drawing without the post pass";
+                note_hdr_choice("live view", false, "float buffers refused at " + std::to_string(vp_w) + "x" + std::to_string(vp_h));
             } else
                 m_live_fb_failed_w = m_live_fb_failed_h = 0;
         }
@@ -1859,12 +3200,20 @@ void ShowcaseRenderer::render_frame()
                 ensure_fullscreen_quad();
                 m_canvas._render_ssao_pass(vp_w, vp_h);
             }
+            // 1h-2: depth of field over the finished frame.
+            apply_dof(fb, t);
+            // Realism 1g: the camera effects last.
+            apply_lens(fb, t);
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(window_fbo)));
             glsafe(::glViewport(0, 0, GLsizei(vp_w), GLsizei(vp_h)));
             glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
             present(fb.color);
+            note_hdr_choice("live view", m_hdr_drawn, m_hdr_drawn ? std::string() : "nothing was drawn into the HDR layer");
         } else if (fb.width != 0)
             fb.release();
+    } else {
+        note_hdr_choice("live view", false,
+                        std::getenv("EDGESLICER_SHOWCASE_NO_HDR") != nullptr ? "EDGESLICER_SHOWCASE_NO_HDR is set or the post shaders are missing" : "the post shaders are missing");
     }
     if (!offscreen) {
         // The window's own framebuffer, as before (no HDR layer).
@@ -1929,6 +3278,7 @@ void ShowcaseRenderer::place_default_camera()
 void ShowcaseRenderer::begin_batch()
 {
     m_batch      = true;
+    m_batch_path_logged = false;
     m_batch_w    = 0;
     m_batch_h    = 0;
     m_batch_msaa = -1;
@@ -2003,12 +3353,15 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     ShowcaseFramebuffers &fb = m_batch ? (m_batch_fb ? *m_batch_fb : *(m_batch_fb = std::make_unique<ShowcaseFramebuffers>())) : local_fb;
     // 1a: the objects' HDR layer when the post pass can run; a driver that refuses the float
     // buffers gets the same plan without it (the objects then tone-map in their shader).
-    bool hdr = want_hdr();
+    const bool wanted_hdr = want_hdr();
+    bool       hdr        = wanted_hdr;
+    bool       hdr_refused = false;
     for (; !reuse;) {
         if (fb.create(plan.internal_width, plan.internal_height, plan.msaa, hdr))
             break;
         if (hdr) {
-            hdr = false;
+            hdr         = false;
+            hdr_refused = true;
             log << "; the HDR layer (RGBA16F) was refused, rendering without the post pass";
         } else if (plan.msaa > 1) {
             plan.msaa = 0;
@@ -2059,6 +3412,7 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     dt.run_ssao          = false;
     dt.ssao_radius_scale = plan.ssao_radius_scale;
     dt.shadow_map_size   = plan.shadow_map_size;
+    dt.out_scale         = plan.ssaa;
     dt.scene_fbo         = fb.draw_fbo();
     dt.hdr_fbo           = fb.has_hdr() ? fb.draw_hdr_fbo() : 0;
     log << (fb.has_hdr() ? ", HDR objects layer (RGBA16F) + post pass" : ", no HDR layer");
@@ -2082,6 +3436,31 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     if (m_canvas._is_ssao_enabled()) {
         ensure_fullscreen_quad();
         m_canvas._render_ssao_pass(unsigned(plan.internal_width), unsigned(plan.internal_height));
+    }
+    // 1h-2: depth of field over the finished frame, at the internal (supersampled) size.
+    apply_dof(fb, dt);
+    // Realism 1g: the camera effects (grain at the output's pixels).
+    apply_lens(fb, dt);
+    // Where the plate's objects are (the golden fixtures' cameras are written against it).
+    if (const char *dbg = std::getenv("EDGESLICER_SHOWCASE_DEBUG"); dbg != nullptr && *dbg != '\0' && *dbg != '0') {
+        const BoundingBoxf3 ob = objects_box();
+        if (ob.defined)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase export debug: objects box " << ob.min.x() << "," << ob.min.y() << "," << ob.min.z() << " .. "
+                                       << ob.max.x() << "," << ob.max.y() << "," << ob.max.z();
+    }
+    if (!m_dof_used.empty())
+        log << ", depth of field " << m_dof_used;
+    if (!m_lens_used.empty())
+        log << ", camera effects " << m_lens_used;
+    if (m_bg_ground)
+        log << ", environment projected onto the ground (camera height " << int(std::lround(m_bg_dome.height)) << " mm, dome radius "
+            << int(std::lround(m_bg_dome.radius)) << " mm)";
+    // Which path the export took, at warning level so a release build's log keeps it (the report
+    // above is info): one line a still, one a video rather than one a frame.
+    if (!m_batch || !m_batch_path_logged) {
+        m_batch_path_logged = m_batch;
+        BOOST_LOG_TRIVIAL(warning) << "Showcase export path: "
+                                   << export_path_line(m_hdr_drawn, fb.has_hdr(), fb.msaa_hdr != 0, wanted_hdr, hdr_refused);
     }
 
     std::vector<uint8_t> pixels(size_t(plan.internal_width) * size_t(plan.internal_height) * 4);
@@ -2280,9 +3659,14 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
 
     GCodeViewer::ShowcaseLook look;
     look.hide_wipe_tower = m_scene->floor.hide_wipe_tower;
-    // S5b: only a build-up leaves out infill or supports; the toolpath source shows the whole slice.
-    look.show_infill   = m_build_fraction < 0. || m_build_infill;
-    look.show_supports = m_build_fraction < 0. || m_build_supports;
+    // S5b: during a build-up the video's own Infill / Supports switches decide what is laid. 1h-2b: the
+    // scene's switches (Materials, under Show) are for stills and the live view; they no longer also
+    // apply to a build-up (ANDed with the video's, a Materials > Infill left off made the video's
+    // build-up hollow with its Infill on).
+    const Showcase::ToolpathParts parts = Showcase::toolpath_parts(m_scene->materials, m_build_fraction >= 0., m_build_infill, m_build_supports);
+    look.show_infill   = parts.infill;
+    look.show_supports = parts.supports;
+    look.show_skirt    = parts.skirt;
     if (m_build_fraction >= 0. && m_build_fraction < 1.) {
         // Every layer takes the same time, the top one laid move by move.
         const std::vector<double>     zs = gv.get_layers_zs();
@@ -2313,6 +3697,17 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
         any_smooth |= l.smoothness > 0.f;
     }
     look.smooth = any_smooth;
+
+    // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
+    // Each slot's colours, split, rotation and twist from the project (the visual-only keys), into
+    // the toolpath shader's uniform table. Drawn with the smooth look only. The scene's "Coextruded
+    // colours" switch (P2) turns it off, as it does for the model (P4).
+    look.multicolour     = showcase_multicolour_table(filaments);
+    look.coextruded_look = m_scene->materials.coextruded_look;
+    // Before the 1b material program below, so it is built with the coextruded-colour prelude.
+    gv.apply_showcase_multicolour(look);
+    // ---- end multi-colour ----
+
     // The key light where the scene puts it (D14), in eye space as libvgcode lights.
     const Camera &camera = plater->get_camera();
     const std::vector<Showcase::LightSource> lights = scene_lights(camera);
@@ -2341,6 +3736,14 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
         glsafe(::glUniform1i(at("hdr_output"), hdr ? 1 : 0));
         glsafe(::glUniform1i(at("tone_curve"), int(m_scene->lighting.tone)));
         glsafe(::glUniform1f(at("sc_exposure"), std::exp2(m_scene->lighting.exposure)));
+        // Glow G1: the lights-off view, per extruder as the smooth look reads them.
+        {
+            const float              dim   = m_scene->materials.scene_dim();
+            const Glow::UniformTable glow  = dim > 0.f ? showcase_glow_table() : Glow::UniformTable();
+            glsafe(::glUniform1f(at("scene_dim"), dim));
+            glsafe(::glUniform1f(at("glow_intensity"), glow.intensity));
+            glsafe(::glUniform4fv(at("sc_glow"), 16, glow.slot.data()));
+        }
         const Showcase::EnvironmentInfo *env = ensure_environment();
         glsafe(::glUniform1i(at("use_env"), env != nullptr ? 1 : 0));
         glsafe(::glUniform1f(at("env_max_lod"), float(std::max(0, showcase_environments().levels - 1))));
@@ -2518,6 +3921,7 @@ bool ShowcaseRenderer::render_id_pass(int long_side, ShowcaseIdPass &out)
         const uint32_t v = uint32_t(id + 1);
         return ColorRGBA(float(v & 0xFF) / 255.f, float((v >> 8) & 0xFF) / 255.f, float((v >> 16) & 0xFF) / 255.f, 1.f);
     };
+    const size_t n_filaments = get_extruders_colors().size();
     shader->start_using();
     shader->set_uniform("projection_matrix", proj);
     for (GLVolume *v : m_canvas.m_volumes.volumes) {
@@ -2543,14 +3947,14 @@ bool ShowcaseRenderer::render_id_pass(int long_side, ShowcaseIdPass &out)
         e.base.object_default = own <= 0;
         e.base.source         = own > 0 ? Showcase::CalloutSource::Part : Showcase::CalloutSource::Object;
         shader->set_uniform("view_model_matrix", view * v->world_matrix());
-        if (v->printable && !mv->mmu_segmentation_facets.empty()) {
-            showcase_ensure_painted_parts(*v, *mv);
+        if (showcase_ensure_painted_parts(*v, *mv, showcase_instance_matrix(*v, mo), n_filaments)) {
+            const bool painted = !mv->mmu_segmentation_facets.empty();
             for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
                 if (!v->mmuseg_models[i].is_initialized())
                     continue;
                 ShowcaseIdPass::Entry part = e;
                 if (i > 0)
-                    part.base = Showcase::BaseRegion{ int(i), false, Showcase::CalloutSource::Paint };
+                    part.base = Showcase::BaseRegion{ int(i), false, painted ? Showcase::CalloutSource::Paint : Showcase::CalloutSource::Part };
                 v->mmuseg_models[i].set_color(id_color(out.entries.size()));
                 out.entries.push_back(part);
                 v->mmuseg_models[i].render();

@@ -450,3 +450,78 @@ TEST_CASE("slice_v1 send preview: send refusals read as what would happen", "[Sl
           "The QIDI Box's answer did not add up, so no slot would be picked and the print would not be started.");
     CHECK(SliceV1::preview_tense("unchanged text") == "unchanged text");
 }
+
+// ---- slice_prime_tower: the plate layout's prime tower and moving it ---------------------------
+
+TEST_CASE("slice_prime_tower: the hub proxies the move route and /pair says so", "[SliceV1][RemoteHub]")
+{
+    using RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("POST", "/api/plates/0/prime_tower"));
+    CHECK(instance_api_allowed("POST", "/api/plates/12/prime_tower"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/prime_tower"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/prime_tower"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/prime_tower/x"));
+    CHECK(instance_api_allowed("GET", "/api/plates/0/layout"));
+
+    const auto& f = SliceV1::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_prime_tower") != f.end());
+}
+
+TEST_CASE("slice_prime_tower: which plates print a tower, as the 3D view decides", "[SliceV1]")
+{
+    using SliceV1::plate_has_prime_tower;
+    // on, two filaments, by layer, objects, a sized estimate
+    CHECK(plate_has_prime_tower(true, false, 2, false, 3, true, 30.));
+    // off, or one filament without smooth timelapse
+    CHECK_FALSE(plate_has_prime_tower(false, false, 2, false, 3, true, 30.));
+    CHECK_FALSE(plate_has_prime_tower(true, false, 1, false, 3, true, 30.));
+    CHECK(plate_has_prime_tower(true, true, 1, false, 3, true, 30.));
+    // by object: only with exactly one printable instance
+    CHECK_FALSE(plate_has_prime_tower(true, false, 2, true, 3, true, 30.));
+    CHECK(plate_has_prime_tower(true, false, 2, true, 1, true, 30.));
+    // an empty plate, or an estimate that gives no tower (one filament really used)
+    CHECK_FALSE(plate_has_prime_tower(true, false, 2, false, 0, false, 30.));
+    CHECK_FALSE(plate_has_prime_tower(true, false, 2, false, 3, true, 0.));
+}
+
+TEST_CASE("slice_prime_tower: the tower's JSON in the layout's frame", "[SliceV1]")
+{
+    SliceV1::PrimeTower t;
+    t.x = 165.004; t.y = 220.5; t.width = 35.; t.depth = 27.333; t.brim = 3.; t.rotation = 0.;
+    t.footprint = { { 162.004, 217.5 }, { 203.004, 217.5 }, { 203.004, 250.833 }, { 162.004, 250.833 } };
+    t.overlaps  = true;
+    const json j = SliceV1::prime_tower_json(t);
+    CHECK(j["x"].get<double>() == Approx(165.0));
+    CHECK(j["y"].get<double>() == Approx(220.5));
+    CHECK(j["width"].get<double>() == Approx(35.));
+    CHECK(j["depth"].get<double>() == Approx(27.33));
+    CHECK(j["brim"].get<double>() == Approx(3.));
+    CHECK(j["rotation"].get<double>() == Approx(0.));
+    REQUIRE(j["footprint"].size() == 4);
+    CHECK(j["footprint"][2][0].get<double>() == Approx(203.0));
+    CHECK(j["footprint"][2][1].get<double>() == Approx(250.83));
+    CHECK(j["overlaps"].get<bool>());
+    for (const char* k : { "x", "y", "width", "depth", "brim", "rotation", "footprint", "overlaps" })
+        CHECK(j.contains(k));
+}
+
+TEST_CASE("slice_prime_tower: what a move is refused for", "[SliceV1]")
+{
+    using SliceV1::prime_tower_move_check;
+    CHECK(prime_tower_move_check(0, 2, true, true, 100., 120., true, false, false).ok());
+    // both coordinates, as numbers on a bed
+    CHECK(prime_tower_move_check(0, 2, true, false, 100., 0., true, false, false).status == 400);
+    CHECK(prime_tower_move_check(0, 2, false, true, 0., 120., true, false, false).status == 400);
+    CHECK(prime_tower_move_check(0, 2, true, true, std::nan(""), 120., true, false, false).status == 400);
+    CHECK(prime_tower_move_check(0, 2, true, true, 2.e5, 120., true, false, false).status == 400);
+    // slicing, then the plate, then its tower, then its lock
+    CHECK(prime_tower_move_check(0, 2, true, true, 100., 120., true, false, true).status == 409);
+    CHECK(prime_tower_move_check(2, 2, true, true, 100., 120., false, false, false).error == "no such plate");
+    CHECK(prime_tower_move_check(-1, 2, true, true, 100., 120., false, false, false).status == 404);
+    const SliceV1::Refusal none = prime_tower_move_check(1, 2, true, true, 100., 120., false, false, false);
+    CHECK(none.status == 404);
+    CHECK(none.error == "this plate has no prime tower");
+    const SliceV1::Refusal locked = prime_tower_move_check(1, 2, true, true, 100., 120., true, true, false);
+    CHECK(locked.status == 409);
+    CHECK(locked.error == "plate is locked");
+}

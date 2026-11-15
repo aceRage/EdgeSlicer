@@ -53,14 +53,14 @@ std::string get_host_from_url(const std::string& url_in)
 {
     auto& wcp_loger = GUI::WCP_Logger::getInstance();
         
-    wcp_loger.add_log("getting machine info from URL: " + url_in, false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log("getting machine info from URL: " + Http::url_without_userinfo(url_in), false, "", "Moonraker_Mqtt", "info");
     
     std::string url = url_in;
     // Add http:// if there is no scheme
     size_t double_slash = url.find("//");
     if (double_slash == std::string::npos) {
         url = "http://" + url;        
-        wcp_loger.add_log("added default protocol prefix, updated URL: " + url, false, "", "Moonraker_Mqtt", "info");
+        wcp_loger.add_log("added default protocol prefix, updated URL: " + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "info");
     }
     
     std::string out  = url;
@@ -85,13 +85,13 @@ std::string get_host_from_url(const std::string& url_in)
                     curl_free(host);
                 }
             } else {
-                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to get host from URL: " << url;
-                wcp_loger.add_log("failed to get host from URL: " + url, false, "", "Moonraker_Mqtt", "error");
+                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to get host from URL: " << Http::url_without_userinfo(url);
+                wcp_loger.add_log("failed to get host from URL: " + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "error");
             }
                 
         } else {
-            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse URL: " << url;
-            wcp_loger.add_log("failed to parse URL: " + url, false, "", "Moonraker_Mqtt", "error");
+            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse URL: " << Http::url_without_userinfo(url);
+            wcp_loger.add_log("failed to parse URL: " + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "error");
         }
             
         curl_url_cleanup(hurl);
@@ -164,13 +164,13 @@ std::string substitute_host(const std::string& orig_addr, std::string sub_addr)
                     wcp_loger.add_log("failed to extract URL after host replacement", false, "", "Moonraker_Mqtt", "error");
                 }
             } else {
-                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] host replacement failed: " << sub_addr << ", URL: " << orig_addr;
+                BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] host replacement failed: " << sub_addr << ", URL: " << Http::url_without_userinfo(orig_addr);
                 wcp_loger.add_log("host replacement failed: " + sub_addr, false, "", "Moonraker_Mqtt", "error");
             }
                 
         } else {
-            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse original URL: " << orig_addr;
-            wcp_loger.add_log("failed to parse original URL: " + orig_addr, false, "", "Moonraker_Mqtt", "error");
+            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] failed to parse original URL: " << Http::url_without_userinfo(orig_addr);
+            wcp_loger.add_log("failed to parse original URL: " + Http::url_without_userinfo(orig_addr), false, "", "Moonraker_Mqtt", "error");
         }
             
         curl_url_cleanup(hurl);
@@ -254,7 +254,7 @@ bool Moonraker::test_with_resolved_ip(wxString& msg) const
     auto url = substitute_host(make_url("api/version"), GUI::into_u8(msg));
     msg.Clear();
 
-    wcp_loger.add_log(name + std::string(": fetching version info, URL: ") + url, false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log(name + std::string(": fetching version info, URL: ") + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "info");
 
     std::string host = get_host_from_url(m_host);
     auto        http = Http::get(url); // std::move(url));
@@ -268,9 +268,9 @@ bool Moonraker::test_with_resolved_ip(wxString& msg) const
     http.header("Host", host);
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: failed to fetch version info, URL: %2%, error: %3%, HTTP status: %4%, response body: `%5%`") % name % url %
+            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: failed to fetch version info, URL: %2%, error: %3%, HTTP status: %4%, response body: `%5%`") % name % Http::url_without_userinfo(url) %
                                             error % status % body;
-            wcp_loger.add_log(std::string(name) + ": failed to fetch version info, URL: " + url + ", error: " + error + ", HTTP status: " + std::to_string(status) +
+            wcp_loger.add_log(std::string(name) + ": failed to fetch version info, URL: " + Http::url_without_userinfo(url) + ", error: " + error + ", HTTP status: " + std::to_string(status) +
                                   ", response body: " + body,
                               false, "", "Moonraker_Mqtt", "error");
             res = false;
@@ -394,7 +394,7 @@ bool Moonraker::test(wxString& msg) const
     bool res = true;
     auto url = make_url("printer/info");
     
-    wcp_loger.add_log(name + std::string(": fetching version info, URL: ") + url, false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log(name + std::string(": fetching version info, URL: ") + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "info");
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -505,7 +505,7 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
     // Handle different resolution scenarios
     if (resolved_addr.empty()) {
         // no resolved addresses - try system resolving        
-        wcp_loger.add_log("Failed to resolve hostname " + m_host + " to IP, using system resolver for upload", false, "", "Moonraker_Mqtt", "error");
+        wcp_loger.add_log("Failed to resolve hostname " + Http::url_without_userinfo(m_host) + " to IP, using system resolver for upload", false, "", "Moonraker_Mqtt", "error");
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
     } else if (resolved_addr.size() == 1) {
         // one address resolved - upload there        
@@ -580,7 +580,7 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
     bool        result             = true;
 
     info_fn(L"resolve", boost::nowide::widen(url));    
-    wcp_loger.add_log(name + std::string(": uploading file ") + upload_data.source_path.string() + " to " + url + ", filename: " + upload_filename.string() + ", path: " + upload_parent_path.string() + ", print: " + (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log(name + std::string(": uploading file ") + upload_data.source_path.string() + " to " + Http::url_without_userinfo(url) + ", filename: " + upload_filename.string() + ", path: " + upload_parent_path.string() + ", print: " + (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
 
     std::string host = get_host_from_url(m_host);
     auto        http = Http::post(url); // std::move(url));
@@ -600,10 +600,16 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
             wcp_loger.add_log(name + std::string(": file uploaded successfully: HTTP ") + std::to_string(status) + ": " + body, false, "", "Moonraker_Mqtt", "info");
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: failed to upload file to %2%: %3%, HTTP %4%, response body: `%5%`") % name % url % error %
+            BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: failed to upload file to %2%: %3%, HTTP %4%, response body: `%5%`") % name % Http::url_without_userinfo(url) % error %
                                             status % body;
-            wcp_loger.add_log(name + std::string(": failed to upload file to ") + url + ": " + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
+            wcp_loger.add_log(name + std::string(": failed to upload file to ") + Http::url_without_userinfo(url) + ": " + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
             // fallback to port 8080
+            if (!retry_on_port_8080(status)) {
+                error_fn(format_error(body, error, status));
+                result = false;
+                return;
+            }
+            const wxString first_error = format_error(body, error, status);
             wcp_loger.add_log("Retrying upload on port 8080", false, "", "Moonraker_Mqtt", "info");
             url = substitute_host(make_url_8080("server/files/upload"), GUI::into_u8(test_msg_or_host_ip));
 
@@ -622,7 +628,7 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
                     BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: port 8080 upload failed: %2%, HTTP %3%, response body: `%4%`") % name % error %
                                                     status % body;
                     wcp_loger.add_log(name + std::string(": port 8080 upload failed: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
-                    error_fn(format_error(body, error, status));
+                    error_fn(first_error + "\n(port 8080: " + format_error(body, error, status) + ")");
                     result = false;
                 })
                 .on_progress([&](Http::Progress progress, bool& cancel) {
@@ -688,11 +694,11 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
         wcp_loger.add_log("Using IP resolve workaround", false, "", "Moonraker_Mqtt", "info");
         info_fn(L"resolve", test_msg_or_host_ip);
         url = substitute_host(make_url("server/files/upload"), GUI::into_u8(test_msg_or_host_ip));        
-        wcp_loger.add_log("Upload URL after IP resolve: " + url, false, "", "Moonraker_Mqtt", "info");
+        wcp_loger.add_log("Upload URL after IP resolve: " + Http::url_without_userinfo(url), false, "", "Moonraker_Mqtt", "info");
     }
 #endif // _WIN32
     
-    wcp_loger.add_log(name + std::string(": uploading file ") + upload_data.source_path.string() + " to " + url + ", filename: " + upload_filename.string() + ", path: " + upload_parent_path.string() + ", print: " + (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log(name + std::string(": uploading file ") + upload_data.source_path.string() + " to " + Http::url_without_userinfo(url) + ", filename: " + upload_filename.string() + ", path: " + upload_parent_path.string() + ", print: " + (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
     auto http = Http::post(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 
@@ -718,6 +724,12 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
                                             body;
             wcp_loger.add_log(name + std::string(": failed to upload file: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
             // fallback to port 8080
+            if (!retry_on_port_8080(status)) {
+                error_fn(format_error(body, error, status));
+                res = false;
+                return;
+            }
+            const wxString first_error = format_error(body, error, status);
 
             wcp_loger.add_log("Retrying upload on port 8080", false, "", "Moonraker_Mqtt", "info");
             url = make_url_8080("server/files/upload");            
@@ -735,7 +747,7 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
                     BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: port 8080 upload failed: %2%, HTTP %3%, response body: `%4%`") % name % error %
                                                     status % body;
                     wcp_loger.add_log(name + std::string(": port 8080 upload failed: ") + error + ", HTTP " + std::to_string(status) + ", response body: `" + body + "`", false, "", "Moonraker_Mqtt", "error");
-                    error_fn(format_error(body, error, status));
+                    error_fn(first_error + "\n(port 8080: " + format_error(body, error, status) + ")");
                     res = false;
                 })
                 .on_progress([&](Http::Progress progress, bool& cancel) {
@@ -794,27 +806,47 @@ std::string Moonraker::make_url_8080(const std::string& path) const
 {
     auto& wcp_loger = GUI::WCP_Logger::getInstance();    
     wcp_loger.add_log("Building port 8080 URL, path: " + path, false, "", "Moonraker_Mqtt", "info");
-    size_t pos = m_host.find(":");
-    std::string target_host = m_host;
-    if (pos != std::string::npos && pos != std::string("http:").length() - 1 && std::string("https:").length() - 1) {
-        target_host = target_host.substr(0, pos);        
-        wcp_loger.add_log("Removed port number, target host: " + target_host, false, "", "Moonraker_Mqtt", "info");
+    return url_on_port_8080(m_host, path);
+}
+
+// Not when Moonraker itself has refused the upload and said why: a bad request (400), a refused or
+// missing key (401, 403), a file in use (409). A second upload of the whole file to another port only
+// hides that reason. Everything else is retried as before: no HTTP answer at all, no Moonraker API
+// there (404), and what a front proxy on the first port answers while Moonraker behind it restarts or
+// when its body limit is smaller than the file (405, 413, 5xx) - nobody knows which printers rely on that.
+bool Moonraker::retry_on_port_8080(unsigned status)
+{
+    switch (status) {
+    case 400:
+    case 401:
+    case 403:
+    case 409: return false;
+    default: return true;
     }
-    
-    std::string result;
-    if (target_host.find("http://") == 0 || target_host.find("https://") == 0) {
-        if (target_host.back() == '/') {
-            target_host = target_host.substr(0, target_host.length() - 1);
-            result = (boost::format("%1%:8080/%2%") % target_host % path).str();
-        } else {
-            result = (boost::format("%1%:8080/%2%") % target_host % path).str();
-        }
-    } else {
-        result = (boost::format("http://%1%:8080/%2%") % target_host % path).str();
+}
+
+std::string Moonraker::url_on_port_8080(const std::string& host, const std::string& path)
+{
+    std::string h = host;
+    while (!h.empty() && (h.back() == '/' || std::isspace((unsigned char) h.back())))
+        h.pop_back();
+    while (!h.empty() && std::isspace((unsigned char) h.front()))
+        h.erase(h.begin());
+    std::string scheme = "http://";
+    if (const size_t sep = h.find("://"); sep != std::string::npos) {
+        scheme = h.substr(0, sep + 3);
+        h      = h.substr(sep + 3);
     }
-        
-    wcp_loger.add_log("Port 8080 URL built: " + result, false, "", "Moonraker_Mqtt", "info");
-    return result;
+    // The origin only.
+    h = h.substr(0, h.find_first_of("/?#"));
+    // The port is the colon after the host: after any user:password@, and after an IPv6 literal's ']'.
+    const size_t at         = h.rfind('@');
+    const size_t host_start = at == std::string::npos ? 0 : at + 1;
+    const size_t close      = h.find(']', host_start);
+    const size_t colon      = h.find(':', close == std::string::npos ? host_start : close);
+    if (colon != std::string::npos)
+        h.erase(colon);
+    return scheme + h + ":8080/" + path;
 }
 
 // Construct full URL for API endpoint
@@ -1300,13 +1332,13 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
 
     // Log connection parameters (without sensitive content)
     BOOST_LOG_TRIVIAL(debug) << "[Moonraker_Mqtt] MQTTS connection parameters:"
-        << "\n - host: " << m_host
+        << "\n - host: " << Http::url_without_userinfo(m_host)
         << "\n - port: " << m_port
         << "\n - client ID: " << m_client_id
         << "\n - CA cert present: " << (!m_ca.empty() ? "yes" : "no")
         << "\n - client cert present: " << (!m_cert.empty() ? "yes" : "no")
         << "\n - private key present: " << (!m_key.empty() ? "yes" : "no");
-    wcp_loger.add_log("MQTTS connection parameters: " + m_host + ":" + std::to_string(m_port) + ", client ID: " + m_client_id + ", CA cert present: " + (!m_ca.empty() ? "yes" : "no") + ", client cert present: " + (!m_cert.empty() ? "yes" : "no") + ", private key present: " + (!m_key.empty() ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
+    wcp_loger.add_log("MQTTS connection parameters: " + Http::url_without_userinfo(m_host) + ":" + std::to_string(m_port) + ", client ID: " + m_client_id + ", CA cert present: " + (!m_ca.empty() ? "yes" : "no") + ", client cert present: " + (!m_cert.empty() ? "yes" : "no") + ", private key present: " + (!m_key.empty() ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
 
     // Detach the old clients under the lock, then disconnect/destroy them
     // outside it: ~MqttClient waits for the Paho threads to stop, so the lock

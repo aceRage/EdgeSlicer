@@ -310,7 +310,7 @@ void check_walk(const Walk &w)
 
 } // namespace
 
-SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool]")
+SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool][slow]")
 {
     for (const bool tower : { true, false }) {
         GIVEN(std::string("filament 1 on the left, 2 and 3 on the right, by layer, prime tower ") + (tower ? "on" : "off"))
@@ -400,7 +400,11 @@ TEST_CASE("Printers without pre-heating keep their G-code", "[BambuPreCool]")
         const std::string gcode = slice(print, model, cfg, H2D);
         CHECK_FALSE(PreCooling::pre_cooling_active(print));
         check_untouched(gcode);
-        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_(START|END)")) == 0);
+        // Bambu Studio 2.9.1 rams the outgoing filament on the tower at every extruder change whether or not the
+        // printer pre-heats (WipeTower::ramming, tests/design_bbs_tower_port.md), so the markers stay; only the
+        // pre-cooling lines inside them are gone.
+        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_START")) > 0);
+        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_START")) == count_lines(gcode, std::regex("^; NOZZLE_CHANGE_END")));
     }
     SECTION("H2D with every filament on one extruder: nothing is idle")
     {

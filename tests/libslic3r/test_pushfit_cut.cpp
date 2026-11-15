@@ -444,7 +444,7 @@ TEST_CASE("Pin attributes read from a file are clamped", "[PushFit][PushFitCut]"
             }) == p);
 }
 
-TEST_CASE("A cut recipe with a Pin survives a 3MF round trip as version 6", "[PushFit][PushFitCut]")
+TEST_CASE("A cut recipe with a Pin survives a 3MF round trip", "[PushFit][PushFitCut]")
 {
     PushFitParams p = pin_params(6.5f, 5.5f);
     p.slot_length   = 3.5f;
@@ -457,7 +457,7 @@ TEST_CASE("A cut recipe with a Pin survives a 3MF round trip as version 6", "[Pu
     cut_recipe_connectors_from_model({ c }, r.connectors);
     r.mesh = TriangleMesh(centred_cube());
     r.mesh_hash = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(r.mesh));
-    REQUIRE(CutRecipeVersion == 6);
+    REQUIRE(CutRecipeVersion >= 6);
 
     Model src;
     ModelObject* mo = make_cube(src);
@@ -467,7 +467,7 @@ TEST_CASE("A cut recipe with a Pin survives a 3MF round trip as version 6", "[Pu
     REQUIRE(back.objects.size() == 1);
     REQUIRE(back.objects.front()->cut_recipe.has_value());
     const CutRecipe& out = *back.objects.front()->cut_recipe;
-    REQUIRE(out.version == 6);
+    REQUIRE(out.version == CutRecipeVersion);
     REQUIRE(out.connectors.size() == 1);
     REQUIRE(out.connectors.front().type == int(CutConnectorType::PushFit));
     REQUIRE(out.connectors.front().pushfit == p);

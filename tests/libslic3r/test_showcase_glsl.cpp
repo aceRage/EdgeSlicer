@@ -4,9 +4,11 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -163,6 +165,41 @@ TEST_CASE("The shipped toolpath prelude assembles cleanly", "[Showcase][Showcase
                 CHECK(names[i] != names[j]);
             }
     }
+}
+
+TEST_CASE("The glow GLSL is in the shared block and repeats the C++ constants (glow G1)", "[Showcase][ShowcaseGlsl][Glow]")
+{
+    const std::string material = repo_file("resources/shaders/140/showcase_material.fs");
+    const std::string glue     = repo_file("resources/shaders/140/showcase_toolpath.glsl");
+    REQUIRE_FALSE(material.empty());
+    std::string block, error;
+    REQUIRE(extract_glsl_block(material, MATERIAL_GLSL_BLOCK, block, &error));
+    // In the block, so the toolpaths (which get only the block) can emit the glow too.
+    const std::vector<std::string> names = glsl_global_names(block);
+    for (const char *n : { "glow_vibrant", "glow_emission", "scene_dim", "glow_intensity" })
+        CHECK(contains(names, n));
+    CHECK(glue.find("sc_glow") != std::string::npos);
+
+    // glow_vibrant() is Glow::vibrant() with the same constants.
+    auto num = [](float v) {
+        std::ostringstream o;
+        o << v;
+        std::string s = o.str();
+        return s.find('.') == std::string::npos ? s + ".0" : s;
+    };
+    const size_t at = block.find("vec3 glow_vibrant");
+    REQUIRE(at != std::string::npos);
+    const std::string fn = block.substr(at, block.find("vec3 glow_emission") - at);
+    CHECK(fn.find("s < " + num(Slic3r::Glow::GREY_SAT)) != std::string::npos);
+    CHECK(fn.find("(1.0 - s) * " + num(Slic3r::Glow::SAT_LIFT)) != std::string::npos);
+    CHECK(fn.find("(1.0 - mx) * " + num(Slic3r::Glow::VAL_LIFT)) != std::string::npos);
+    CHECK(fn.find("vec3(" + std::to_string(int(std::lround(Slic3r::Glow::GREY_GLOW[0] * 255.f))) + ".0 / 255.0, 1.0, " +
+                  std::to_string(int(std::lround(Slic3r::Glow::GREY_GLOW[2] * 255.f))) + ".0 / 255.0)") != std::string::npos);
+
+    // Both glow uniforms the mesh and toolpath programs set are ones the shipped renderer sets by name.
+    const std::string renderer = repo_file("src/slic3r/GUI/Showcase/ShowcaseRenderer.cpp");
+    for (const char *u : { "\"scene_dim\"", "\"glow_intensity\"", "\"glow_slot\"", "\"sc_glow\"" })
+        CHECK(renderer.find(u) != std::string::npos);
 }
 
 TEST_CASE("libvgcode's segments fragment shader names are all reserved", "[Showcase][ShowcaseGlsl]")

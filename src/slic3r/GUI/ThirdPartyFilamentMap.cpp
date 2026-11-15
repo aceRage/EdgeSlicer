@@ -105,7 +105,12 @@ std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<Print
         ds.name   = s.name;
         ds.empty  = !s.loaded;
         ds.index  = s.index;
-        if (s.unit >= 0) {
+        if (s.cfs_external) {
+            // A Creality CFS printer's external spool holder: no unit, no tool number.
+            ds.unit_id = -1;
+            ds.slot_id = s.index;
+            ds.label   = s.name.empty() ? std::string("External") : s.name;
+        } else if (s.unit >= 0) {
             auto it = std::find(raw_units.begin(), raw_units.end(), s.unit);
             int  u  = (int) (it - raw_units.begin());
             if (it == raw_units.end()) {

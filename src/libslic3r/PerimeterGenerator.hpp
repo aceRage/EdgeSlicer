@@ -224,6 +224,12 @@ private:
 // Auto, ear and painted brims may leave the outer walls bare and keep the wall sequence.
 bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width);
 
+// Counterbore hole bridging, sacrificial layer: whether a counter-clockwise outline is convex. A corner counts as
+// turning the wrong way only where it lies more than SCALED_EPSILON (0.1 micron) inside the line through its two
+// neighbours: an outline that has been simplified can keep a point in the middle of a straight side, a nanometre off
+// it, which is no corner. Declared here for the unit tests.
+bool counterbore_outline_is_convex(const Polygon &outline);
+
 }
 
 #endif

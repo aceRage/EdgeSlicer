@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     BrimFilament.hpp
     PaintDepth.cpp
     PaintDepth.hpp
+    PaintWire.cpp
+    PaintWire.hpp
     ColorSplit.cpp
     ColorSplit.hpp
     ImageFill.cpp
@@ -102,13 +104,25 @@ set(lisbslic3r_sources
     FlexiJoint.hpp
     PushFit.cpp
     PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
+    TacJointBoolean.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
     Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseSurfaceColours.cpp
+    Showcase/ShowcaseSurfaceColours.hpp
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseHdr.cpp
+    Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcaseHdriLibrary.cpp
+    Showcase/ShowcaseHdriLibrary.hpp
+    Showcase/ShowcaseLens.cpp
+    Showcase/ShowcaseLens.hpp
+    Showcase/ShowcasePanelRules.hpp
     Showcase/ShowcaseCallouts.cpp
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
@@ -117,6 +131,10 @@ set(lisbslic3r_sources
     Showcase/ShowcaseMaterialGlsl.hpp
     Showcase/MultiColourFilament.cpp
     Showcase/MultiColourFilament.hpp
+    Showcase/MultiColourGlsl.cpp
+    Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
@@ -129,6 +147,12 @@ set(lisbslic3r_sources
     Showcase/ShowcasePath.hpp
     Showcase/ShowcaseRenderCli.cpp
     Showcase/ShowcaseRenderCli.hpp
+    Showcase/ShowcaseBlender.cpp
+    Showcase/ShowcaseBlender.hpp
+    Showcase/ShowcaseGltf.cpp
+    Showcase/ShowcaseGltf.hpp
+    Showcase/ShowcaseTubes.cpp
+    Showcase/ShowcaseTubes.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -167,6 +191,10 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
+    HeightPatternInput.cpp
+    HeightPatternInput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -234,6 +262,16 @@ set(lisbslic3r_sources
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp
     FillBedPack.hpp
+    Airbrush/AirbrushBake.cpp
+    Airbrush/AirbrushBake.hpp
+    Airbrush/AirbrushField.cpp
+    Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
+    Airbrush/AirbrushSession.cpp
+    Airbrush/AirbrushSession.hpp
+    Airbrush/BlueNoise.cpp
+    Airbrush/BlueNoise.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp
@@ -296,6 +334,8 @@ set(lisbslic3r_sources
     Format/BambuExport.hpp
     Format/BambuKeyAliases.cpp
     Format/BambuKeyAliases.hpp
+    Format/BambuMultiDiameter.cpp
+    Format/BambuMultiDiameter.hpp
     Format/BambuKnownKeys.cpp
     Format/GLTF.cpp
     Format/GLTF.hpp
@@ -341,6 +381,8 @@ set(lisbslic3r_sources
     GCode/FanMover.hpp
     GCode/LayerTimeSpeedSmoothingFilter.cpp
     GCode/LayerTimeSpeedSmoothingFilter.hpp
+    GCode/MinLayerTimePause.cpp
+    GCode/MinLayerTimePause.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode/ElegooGCodeProcessorHelper.cpp
@@ -360,6 +402,8 @@ set(lisbslic3r_sources
     GCode/PrintExtents.cpp
     GCode/PrintExtents.hpp
     GCodeReader.cpp
+    GCodeTemplateLint.cpp
+    GCodeTemplateLint.hpp
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
@@ -381,6 +425,8 @@ set(lisbslic3r_sources
     GCode/WipePathHelpers.hpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
+    GCode/StartupSound.cpp
+    GCode/StartupSound.hpp
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/ToolOrdering.cpp
@@ -455,6 +501,12 @@ set(lisbslic3r_sources
     MixedFilament.hpp
     MixedFilamentCliGates.cpp
     MixedFilamentCliGates.hpp
+    MixedSublayer.cpp
+    MixedSublayer.hpp
+    CliPresetSlots.cpp
+    CliPresetSlots.hpp
+    CliOutput.cpp
+    CliOutput.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
     BambuFlowSupport.cpp
@@ -550,6 +602,8 @@ set(lisbslic3r_sources
     FilamentPresetExport.hpp
     ProcessPresetExport.cpp
     ProcessPresetExport.hpp
+    PresetManagerModel.cpp
+    PresetManagerModel.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp
@@ -557,6 +611,17 @@ set(lisbslic3r_sources
     SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    NozzleOverride.cpp
+    NozzleOverride.hpp
+    NozzleProcess.cpp
+    NozzleProcess.hpp
+    NozzleRackMemory.cpp
+    NozzleRackMemory.hpp
+    ProjectSwapGuard.hpp
+    NozzleStripModel.cpp
+    NozzleStripModel.hpp
+    ToolSlots.cpp
+    ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp
@@ -623,13 +688,20 @@ set(lisbslic3r_sources
     SlicesToTriangleMesh.hpp
     SlicingAdaptive.cpp
     SlicingAdaptive.hpp
+    AdaptiveLayerMerge.cpp
+    AdaptiveLayerMerge.hpp
     Slicing.cpp
     Slicing.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
+    Support/SupportInterlock.cpp
+    Support/SupportInterlock.hpp
+    Support/SupportInterfaceRules.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportMergePlan.cpp
+    Support/SupportMergePlan.hpp
     Support/SupportOverhangDetect.cpp
     Support/SupportOverhangDetect.hpp
     Support/SupportOverhangHighlight.cpp
@@ -713,10 +785,18 @@ set(lisbslic3r_sources
     UntrustedInput.hpp
     ModelBrowserRules.cpp
     ModelBrowserRules.hpp
+    Layerling.cpp
+    Layerling.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp
     Zipper.hpp
+    ZipWorkDir.cpp
+    ZipWorkDir.hpp
+    ZipOpen.cpp
+    ZipOpen.hpp
+    ZipWorkCleaner.cpp
+    ZipWorkCleaner.hpp
 )
 
 if (APPLE)
@@ -765,6 +845,9 @@ slic3r_unity_build(libslic3r SKIP
     SLA/ConcaveHull.cpp             # its to_vec2() differs only by return type from SupportTreeBuildsteps.hpp's
     MinAreaBoundingBox.cpp          # libnest2d headers (opt namespace, boost.geometry traits for Point) clash with neighbours
     SLAPrint.cpp                    # libnest2d headers clash with neighbours
+    ZipOpen.cpp                     # file-local ascii_lower()/utf8_path() also in ZipWorkDir.cpp
+    ZipWorkDir.cpp                  # file-local ascii_lower()/utf8_path()/leaf_exists() with common names
+    ZipWorkCleaner.cpp              # file-local path_utf8()/utf8_path() and <windows.h>
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours
@@ -778,6 +861,9 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
     Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
     Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
+    Showcase/ShowcaseHdr.cpp        # file-local hdr_* helpers and a TBB include; kept out of the unity batches
+    Showcase/ShowcaseHdriLibrary.cpp # file-local hdri_stem; OpenSSL through ImageFill
+    Layerling.cpp                   # file-local helpers (lower, trim, starts_with) with common names
 )
 
 if (SLIC3R_STATIC)

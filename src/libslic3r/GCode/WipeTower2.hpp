@@ -234,7 +234,7 @@ public:
         float               ramming_step_multiplicator = 1.f;
         float               max_e_speed = std::numeric_limits<float>::max();
         std::vector<float>  ramming_speed;
-        float               nozzle_diameter;
+        float               nozzle_diameter = 0.f;
         // Orca #15841: tallest layer this filament's nozzle can lay down; caps the sparse layer combination.
         float               max_layer_height = 0.f;
         float               filament_area;
@@ -245,6 +245,13 @@ public:
         float               retract_length;
         float               retract_speed;
         float               flat_iron_area;
+        // The filament's own pressure advance, when its profile sets one (enable_pressure_advance).
+        bool                pressure_advance_enabled = false;
+        float               pressure_advance         = 0.f;
+        // Whether the slicer's G-code sets this filament's pressure advance again after a tool change:
+        // its profile value, or a pressure advance command in its filament start G-code or in the
+        // printer's change filament G-code. Only then may the ram change it.
+        bool                pressure_advance_reset = false;
         // Tower interface (TowerInterface::): the filament as the trigger sees it, and its values.
         TowerInterface::FilamentKind kind;
         int                 interface_temperature = 0;
@@ -389,6 +396,27 @@ private:
 		return layer_height * ( m_perimeter_width - layer_height * (1.f-float(M_PI)/4.f)) / filament_area();
 	}
 
+    // Mixed nozzle diameters (per-nozzle P2), FOrca 0b1f80cd22 (AGPL-3.0): the line width a tool lays
+    // its own tower lines at (ramming by the outgoing tool, the wipe by the incoming one), its nozzle x
+    // Width_To_Nozzle_Ratio. m_perimeter_width stays the tower's structure width (footprint, box walls,
+    // brim, sparse fill, finish layer). With uniform nozzles both are the same float, computed by the same
+    // expression, so every tower is unchanged.
+    float tool_line_width(size_t tool) const
+    {
+        if (tool < m_filpar.size() && m_filpar[tool].nozzle_diameter > 0.f)
+            return m_filpar[tool].nozzle_diameter * Width_To_Nozzle_Ratio;
+        return m_perimeter_width;
+    }
+    // The extrusion flow of tool's line width at the current layer height; exactly m_extrusion_flow when
+    // the tool's width is the structure width.
+    float tool_extrusion_flow(size_t tool) const
+    {
+        const float w = tool_line_width(tool);
+        if (w == m_perimeter_width)
+            return m_extrusion_flow;
+        return m_layer_height * (w - m_layer_height * (1.f - float(M_PI) / 4.f)) / filament_area();
+    }
+
 
 	// Calculates depth for all layers and propagates them downwards
 	void plan_tower();
@@ -437,6 +465,9 @@ private:
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
     const WipeTowerInfo::ToolChange     *m_active_tool_change = nullptr;
+    // Mixed nozzle diameters (per-nozzle P2): the incoming tool of a local-Z tool change, which has no
+    // m_active_tool_change, so toolchange_Unload() aligns the wipe with that tool's width. -1 = none.
+    int                                  m_local_z_new_tool = -1;
 
 	// This sums height of all extruded layers, not counting the layers which
 	// will be later removed when the "no_sparse_layers" is used.

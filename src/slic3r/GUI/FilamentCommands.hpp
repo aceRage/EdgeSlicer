@@ -82,6 +82,37 @@ inline nlohmann::json ams_change_filament_json(bool load, std::string ams_id, co
     return p;
 }
 
+// Load / unload on a nozzle rack's printer (the H3C), as Bambu Studio's hotend filament page sends it
+// (DeviceWeb AmsFilamentHotend PageFilament: command_ams_change_filament(..., extruder_id 0) for a
+// load, s_command_unload_filament for an unload):
+//   load   {command, curr_temp, tar_temp, ams_id, target = ams_id (an AMS 3H slot: the unit id, 32;
+//           a spool holder: its own id), slot_id (the AMS slot; 0 for a holder), extruder_id 0}
+//   unload {command, curr_temp, tar_temp, ams_id, target 255, slot_id 255 - slot (255 for a holder),
+//           extruder_id 0}
+// holder: ams_id names a spool holder (255 down to 247). sequence_id is added by the caller.
+inline nlohmann::json rack_change_filament_json(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp,
+                                                int new_temp, bool holder)
+{
+    nlohmann::json p;
+    const int ams = to_int(ams_id);
+    const int slot = to_int(slot_id);
+    p["command"]   = "ams_change_filament";
+    p["curr_temp"] = old_temp;
+    p["tar_temp"]  = new_temp;
+    p["ams_id"]    = ams;
+    if (load) {
+        int tray_id = 0;
+        if (ams < 16) tray_id = ams * 4 + slot; // Bambu Studio command_ams_change_filament
+        p["target"]  = tray_id == 0 ? ams : tray_id;
+        p["slot_id"] = holder ? 0 : slot;
+    } else {
+        p["target"]  = 255;
+        p["slot_id"] = holder ? 255 : 255 - slot;
+    }
+    p["extruder_id"] = 0;
+    return p;
+}
+
 // The middle of a tray's nozzle range, -1 when it has none (StatusPanel::on_ams_load_curr).
 inline int tray_mid_temp(const std::string& min, const std::string& max)
 {

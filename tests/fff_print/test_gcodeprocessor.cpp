@@ -755,3 +755,25 @@ TEST_CASE("Each extrusion weighs its filament's density", "[GCodeProcessor][Cent
     const Vec3d dense = center_of(masses[1]->total());
     CHECK_THAT((plate - light).dot(dense - light) / (dense - light).squaredNorm(), Catch::Matchers::WithinAbs(0.75, 0.01));
 }
+
+// Orca #17328: the comment carries the first layer's time, not the start G-code's time. A 50 mm move at
+// F60 (1 mm/s) makes the start block about 50 s, so the two times format to different strings and the
+// check below tells them apart. As upstream sums it, the first layer's time is everything up to the second
+// layer change, the start G-code included.
+TEST_CASE("The estimated first layer time comment reports the first layer", "[GCodeProcessor][Regression][Orca17328]")
+{
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, { { "machine_start_gcode", "G1 X50 Y50 Z0.2 F60" } });
+
+    GCodeProcessorResult result;
+    const std::string gcode = Test::gcode(print, result);
+
+    const PrintEstimatedStatistics::Mode &normal = result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+    REQUIRE(!normal.layers_times.empty());
+    const float first_layer_time = normal.layers_times.front();
+    const float start_gcode_time = normal.prepare_time;
+    REQUIRE(first_layer_time > 50.f);
+    REQUIRE(get_time_dhms(first_layer_time) != get_time_dhms(start_gcode_time));
+    CHECK(gcode.find(std::string("; estimated first layer printing time (normal mode) = ") + get_time_dhms(first_layer_time)) != std::string::npos);
+}

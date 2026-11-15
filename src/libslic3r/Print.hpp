@@ -79,6 +79,22 @@ struct LocalZInterval
     size_t sublayer_count { 0 };
 };
 
+struct SubLayerPlan;
+// Mixed color sublayer P3: what PrintObject::adapt_local_z_ratio_plan_to_merge_bands() did.
+struct MixedRatioMergeStats
+{
+    size_t split_bands { 0 };         // band tops split into passes
+    size_t whole_bands { 0 };         // band tops printed in one colour: no pass reached above the swallowed layers
+    size_t reordered_top_bands { 0 }; // Bambu Studio order asked for (or a top surface), but the first pass had to change
+};
+// The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
+bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
+// The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
+// that row has no Ratio pass there. ToolOrdering files the row's layer under it, so the layer's nominal extruder
+// is the one the Ratio passes end with and no extra tool change follows them.
+unsigned int local_z_ratio_last_extruder(const std::vector<LocalZInterval> &intervals, const std::vector<SubLayerPlan> &plans,
+                                         size_t row_idx, double print_z);
+
 struct SubLayerPlan
 {
     size_t layer_id { 0 };
@@ -90,6 +106,19 @@ struct SubLayerPlan
     double flow_height { 0.0 };
     size_t dependency_group { 0 };
     size_t dependency_order { 0 };
+    // Mixed color sublayer (MixedSublayer.hpp): a pass of a Ratio row. Ratio passes cover the whole mixed region,
+    // infill included, and may be the only plan of their layer (a layer whose minor component carried over).
+    bool   ratio_pass { false };
+    // The top pass of its Ratio row on this layer: ironing prints here only, once (D6).
+    bool   ratio_last_pass { false };
+    // How the planner ordered this Ratio row on this layer (Bambu Studio's ascending order, asked for or forced by a
+    // top surface) and the gradient share of component A it used (< 0: none). The AdaptiveLayerMerge band split
+    // (P3, D9) re-plans the row's passes over the band heights with the same choices.
+    bool   ratio_ascending { false };
+    double ratio_gradient_a { -1.0 };
+    // The height a Ratio pass takes its share of: the layer height, or the merged band height (P3). Every path of the
+    // pass keeps pass height / this of its own flow (bridges included).
+    double ratio_layer_height { 0.0 };
     std::vector<ExPolygons> painted_masks_by_extruder;
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;
@@ -218,6 +247,10 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
                                                   const DynamicPrintConfig *layer_range_config,
                                                   const ModelVolume        &volume,
                                                   size_t                    num_extruders);
+// The volume's own config sets a filament (extruder, wall, sparse or solid infill filament > 0).
+bool model_volume_sets_filament(const ModelVolume &volume);
+// A modifier with "Override paint" on that sets a filament: inside it its filament wins over colour painting.
+bool model_volume_overrides_paint(const ModelVolume &volume);
 
 template<typename T>
 class ConstVectorOfPtrsAdaptor {
@@ -281,6 +314,10 @@ struct PrintInstance
 };
 
 typedef std::vector<PrintInstance> PrintInstances;
+
+// Bridge over infill: the direction (radians) a bridge over bridged_area is to run in when nothing else sets it, by a
+// vote of the nearest of the anchors every 2 mm or so along its outline. Declared here for the unit tests.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors);
 
 class PrintObjectRegions
 {
@@ -378,6 +415,16 @@ private:
     // ref_cnt could only be modified by the main thread, thus it does not need to be atomic.
     size_t                                      m_ref_cnt{ 0 };
 };
+
+// How colour painting shadows a modifier's filament. Pure so the selection logic can be tested.
+//  region_is_alias: the modifier overrides nothing (its region is its parent's own).
+//  sets_filament: the modifier carries an explicit filament/extruder.
+//  filament_differs: its region's filament differs from the parent region's.
+//  overlaps_painted: the part it overlaps carries colour painting.
+//  overrides_paint: "Override paint" is on (and the modifier sets a filament), so paint does not shadow it.
+enum class ModifierPaintNote { None, SameFilamentPainted, FilamentOverriddenByPaint };
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint = false);
 
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
@@ -487,12 +534,18 @@ public:
     {
         m_local_z_intervals = std::move(intervals);
         m_local_z_sublayer_plan = std::move(sublayers);
+        m_local_z_plan_before_merge.reset();
     }
     void                                clear_local_z_plan()
     {
         m_local_z_intervals.clear();
         m_local_z_sublayer_plan.clear();
+        m_local_z_plan_before_merge.reset();
     }
+    // Mixed color sublayer P3 (D9): re-plan the Ratio rows whose region AdaptiveLayerMerge merged into bands, so
+    // their passes split each band patch's height on its top and skip the swallowed footprint. Runs right after
+    // compute_adaptive_merge_groups(); idempotent (the slice-time plan is kept and restored first).
+    MixedRatioMergeStats                adapt_local_z_ratio_plan_to_merge_bands();
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
@@ -516,6 +569,12 @@ public:
     const SlicingParameters&    slicing_parameters() const { return m_slicing_params; }
     // Orca: XYZ shrinkage compensation has introduced the const Vec3d &object_shrinkage_compensation parameter to the function below
     static SlicingParameters    slicing_parameters(const DynamicPrintConfig &full_config, const ModelObject &model_object, float object_max_z, const Vec3d &object_shrinkage_compensation);
+
+    // How many of this object's layers are the solid bottom of a spiral vase, for a region with these settings:
+    // bottom_shell_layers of them, and as many more as it takes for the bottom to be bottom_shell_thickness thick.
+    // Every place that tells the bottom of a vase from its spiral asks this: the slicing mode of a layer, its
+    // walls, the surfaces and shells that are detected, and the layers the G-code spirals.
+    size_t                      spiral_vase_bottom_layers(const PrintRegionConfig &region_config) const;
 
     size_t                      num_printing_regions() const throw() { return m_shared_regions->all_regions.size(); }
     const PrintRegion&          printing_region(size_t idx) const throw() { return *m_shared_regions->all_regions[idx].get(); }
@@ -627,6 +686,17 @@ public:
     // folds into wall_filament/sparse_infill_filament/solid_infill_filament, which makes the
     // region config differ and gives the modifier a region of its own.
     std::vector<std::string>    modifiers_without_overrides() const;
+    // Modifiers whose filament is shadowed by colour painting (names, ModelObject::volumes order).
+    //  same_filament_painted: filament-only modifier, same filament as its parent, parent painted -
+    //    a subset of modifiers_without_overrides(); the caller reports it instead of the plain notice.
+    //  filament_overridden: modifier with a different filament overlapping a painted volume.
+    // Painted areas are applied after modifiers (apply_mm_segmentation) and replace the filament.
+    struct ModifierPaintNotes
+    {
+        std::vector<std::string> same_filament_painted;
+        std::vector<std::string> filament_overridden;
+    };
+    ModifierPaintNotes          modifier_paint_notes() const;
     // Modifiers that got no region in ANY layer range - no part's extruded bounding box intersects
     // them - so their geometry never reaches the slice at all.
     std::vector<std::string>    modifiers_without_parent() const;
@@ -710,6 +780,8 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
+    // Test entry point to compute_adaptive_merge_groups(), so a unit test can re-plan a sliced object.
+    friend struct AdaptiveMergePlanAccess;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
@@ -732,8 +804,19 @@ public:
 
 private:
     void make_perimeters();
+    // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
+    // Decides which layers each wall region keeps and records the decision in
+    // LayerRegion::adaptive_merge_patches. It may mutate LayerRegion::slices, so it is only safe to call from the
+    // perimeter step, which calls it on every mixed-diameter plate before generating walls.
+    void compute_adaptive_merge_groups();
+    // The fill half of the merge: lifts each merge span's fill onto its group top at the merged height and drops
+    // the swallowed steps' fill. Runs at the end of prepare_infill(), before combine_infill().
+    void combine_adaptive_infill();
     void prepare_infill();
     void infill();
+    // Raises SlicingEmptyFirstLayer on this object when the first layer of `layers_src` (this object,
+    // or the object it shares its layers with) has slices but no extrusions. Needs posInfill started.
+    void warn_if_first_layer_prints_nothing(const PrintObject &layers_src);
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();
@@ -797,6 +880,8 @@ private:
     SupportLayerPtrs                        m_support_layers;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
+    // The slice-time Local-Z plan, kept while adapt_local_z_ratio_plan_to_merge_bands() has replaced it.
+    std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -1134,6 +1219,42 @@ enum FilamentTempType {
     HighLowCompatible,
     Undefine
 };
+
+// EdgeSlicer: support interface temperature (support_interface_nozzle_temperature, an object setting).
+// The temperature belongs to the filament for the whole plate: a filament that prints nothing but
+// support (interface and possibly support body) prints at the set temperature on every layer, the first
+// one included (owner decisions D3/D4, 2026-11-14). Every reader of the filament's temperature (tool
+// change heat-up and pre-heat, prime tower, ooze/standby, the layer 1 -> 2 switch, placeholders such as
+// temperature[] / first_layer_temperature[], the estimator) then sees one value, so no extra waits or
+// mid-layer reheats are introduced. A filament that also prints part of a model keeps its own
+// temperatures (ignored, with a warning).
+struct SupportInterfaceTemperatures
+{
+    enum class Ignored { NoInterfaceFilament, FilamentMatching, PrintsModel, Conflict };
+    struct IgnoredEntry
+    {
+        Ignored      reason;
+        int          filament;    // 0-based, -1 when there is none
+        int          temperature; // the value that was not used
+        std::string  object;      // object name
+        bool operator==(const IgnoredEntry &rhs) const
+        {
+            return reason == rhs.reason && filament == rhs.filament && temperature == rhs.temperature && object == rhs.object;
+        }
+    };
+    // Filament (0-based) -> nozzle temperature it prints at.
+    std::map<unsigned int, int> temperatures;
+    std::vector<IgnoredEntry>   ignored;
+
+    bool empty() const { return temperatures.empty() && ignored.empty(); }
+    bool operator==(const SupportInterfaceTemperatures &rhs) const { return temperatures == rhs.temperatures && ignored == rhs.ignored; }
+    bool operator!=(const SupportInterfaceTemperatures &rhs) const { return !(*this == rhs); }
+};
+
+// Writes `temperatures` into nozzle_temperature and nozzle_temperature_initial_layer of `config` at each
+// filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
+void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1190,7 +1311,16 @@ public:
     // empty and the grouper treats every filament as reachable on every nozzle. Setters exist so a later
     // input-population pass can fill them without touching the grouping code.
     const std::vector<std::vector<DynamicPrintConfig>>& get_extruder_filament_info() const { return m_extruder_filament_info; }
-    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& v) { m_extruder_filament_info = v; }
+    // Two-phase (upstream Orca #17195): the setter only stashes the payload; the next apply() installs it and
+    // invalidates the grouping steps when the loaded filaments actually changed.
+    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& filament_info)
+    {
+        m_pending_extruder_filament_info = filament_info;
+        m_extruder_filament_info_pending = true;
+    }
+    // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
+    // a pending payload there, the way apply() would. True when the grouping steps were taken back.
+    bool install_pending_extruder_filament_info();
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1198,6 +1328,12 @@ public:
     // Computed on demand: usage type is config-derived (real); physical/flow unprintables are stubbed empty
     // (the config subsystem they need is not ported).
     std::vector<FilamentUsageType> get_filament_usage_type() const;
+    // EdgeSlicer: support interface temperatures, resolved at the end of apply() (see SupportInterfaceTemperatures).
+    const SupportInterfaceTemperatures &support_interface_temperatures() const { return m_support_interface_temperatures; }
+    SupportInterfaceTemperatures        resolve_support_interface_temperatures() const;
+    // config() with the support interface temperatures written in; config() itself when there are none.
+    // `storage` holds the copy.
+    const PrintConfig &config_with_interface_temperatures(PrintConfig &storage) const;
     std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
     std::map<int, std::set<NozzleVolumeType>> get_filament_unprintable_flow(const std::vector<unsigned int>& used_filaments) const;
 
@@ -1263,6 +1399,23 @@ public:
     std::vector<unsigned int> object_extruders() const;
     std::vector<unsigned int> support_material_extruders() const;
     std::vector<unsigned int> extruders(bool conside_custom_gcode = false) const;
+    // Mixed-layer-height band merge. True when the plate prints with more than one nozzle diameter, and from
+    // then on the band merge is automatic: there is deliberately no config flag and no UI toggle (Lance's
+    // decision), so this detection is the only gate. BambuStudio's version also checked its
+    // multi_nozzle_diameter_mode project key; that check is dropped here, as is the second clause that compared
+    // used filaments against a separate layer-grid nozzle. Edge has no such nozzle:
+    // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
+    // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
+    bool                uses_multiple_nozzle_diameters() const;
+    // The band reference nozzle compute_adaptive_merge_groups() sizes every band against: the smallest nozzle
+    // printing any object's gated walls on this plate. The support merge plan (SupportMergePlan.cpp) asks for it so
+    // its ladders are the ones the walls stack on. 0 when nothing resolves. Defined in PrintObject.cpp.
+    double              adaptive_merge_reference_nozzle() const;
+    // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
+    // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
+    // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
+    // reference nozzle is collected from the object being planned, not from here.
+    void                used_printing_filaments(std::vector<unsigned int> &filaments) const;
     // On-demand evaluation vs filament_hot_bed_nozzles.json (calls extruders(true) once internally).
     void                filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,
                                                      bool& out_gesp,
@@ -1351,6 +1504,14 @@ public:
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
     void                        select_final_purge_variant();
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
+    // Orca/BambuStudio: the 0-based physical filaments the first layer prints with (first_layer = true), or the
+    // whole print (false). Set when the skirt and brim are made.
+    void set_slice_used_filaments(const std::vector<unsigned int> &first_layer_used_filaments, const std::vector<unsigned int> &used_filaments)
+    {
+        m_slice_used_filaments_first_layer = first_layer_used_filaments;
+        m_slice_used_filaments             = used_filaments;
+    }
+    std::vector<unsigned int>   get_slice_used_filaments(bool first_layer) const { return first_layer ? m_slice_used_filaments_first_layer : m_slice_used_filaments; }
 
     bool                        enable_timelapse_print() const;
 
@@ -1370,6 +1531,10 @@ public:
     //BBS: export gcode from previous gcode file from 3mf
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
+    // For the background thread that exported the G-code, when a step that then edits the file in place
+    // (post-processing scripts or plugins) failed and may have left it half edited: the next run exports
+    // the G-code again instead of reusing it.
+    void invalidate_gcode_export_from_worker() { this->invalidate_step_from_worker(psGCodeExport); }
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
     // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
     // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on
@@ -1411,6 +1576,10 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    // Orca #12781: the wipe tower generator this print uses. Bambu Lab printers always get Type1;
+    // the rest follow wipe_tower_type (default Type2). Same rule as resolve_wipe_tower_type(), plus
+    // the GUI's vendor flag.
+    WipeTowerType wipe_tower_type() const;
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);
@@ -1480,8 +1649,15 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
+    SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
+    // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
+    std::vector<std::vector<DynamicPrintConfig>>            m_pending_extruder_filament_info;
+    bool                                                    m_extruder_filament_info_pending { false };
+    // Installs the pending payload; the state mutex must be held. True when a grouping step was taken back.
+    bool                                                    install_pending_extruder_filament_info_unguarded();
     std::unordered_map<int, std::unordered_map<int, double>> m_filament_print_time;
     std::vector<std::set<int>>                             m_geometric_unprintable_filaments;
     // Ultra (Phase 10): AMS-aware grouping inputs kept out of the print config (see accessors).
@@ -1532,6 +1708,8 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    std::vector<unsigned int>               m_slice_used_filaments;
+    std::vector<unsigned int>               m_slice_used_filaments_first_layer;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

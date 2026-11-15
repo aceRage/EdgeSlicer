@@ -83,6 +83,13 @@ SCENARIO("Placeholder parser scripting", "[PlaceholderParser]") {
     SECTION("math: zdigits(5., 15, 8)") { REQUIRE(parser.process("{zdigits(5, 15, 8)}") == "000005.00000000"); }
     SECTION("math: digits(13.84375892476, 15, 8)") { REQUIRE(parser.process("{digits(13.84375892476, 15, 8)}") == "    13.84375892"); }
     SECTION("math: zdigits(13.84375892476, 15, 8)") { REQUIRE(parser.process("{zdigits(13.84375892476, 15, 8)}") == "000013.84375892"); }
+    // PrusaSlicer 2.9.7 (e2ecf3097e): width/precision near their limits used to overflow a 256-byte stack buffer.
+    SECTION("math: digits(-1e308, 64, 64) does not overflow") { REQUIRE(parser.process("{digits(-1e308, 64, 64)}").size() == 375); }
+    SECTION("math: zdigits(-1e308, 64, 64) does not overflow") { REQUIRE(parser.process("{zdigits(-1e308, 64, 64)}").size() == 375); }
+    SECTION("math: digits(1e308, 64, 64) does not overflow") { REQUIRE(parser.process("{digits(1e308, 64, 64)}").size() == 374); }
+    SECTION("math: digits width is clamped to 64") { REQUIRE(parser.process("{digits(5, 1000)}").size() == 64); }
+    SECTION("math: zdigits precision is clamped to 64") { REQUIRE(parser.process("{zdigits(5, 1, 1000)}").size() == 66); }
+    SECTION("math: digits negative width is treated as 0") { REQUIRE(parser.process("{digits(5, -3)}") == "5"); }
     SECTION("math: interpolate_table(13.84375892476, (0, 0), (20, 20))") { REQUIRE(std::stod(parser.process("{interpolate_table(13.84375892476, (0, 0), (20, 20))}")) == Approx(13.84375892476)); }
     SECTION("math: interpolate_table(13, (0, 0), (20, 20), (30, 20))") { REQUIRE(std::stod(parser.process("{interpolate_table(13, (0, 0), (20, 20), (30, 20))}")) == Approx(13.)); }
     SECTION("math: interpolate_table(25, (0, 0), (20, 20), (30, 20))") { REQUIRE(std::stod(parser.process("{interpolate_table(25, (0, 0), (20, 20), (30, 20))}")) == Approx(20.)); }

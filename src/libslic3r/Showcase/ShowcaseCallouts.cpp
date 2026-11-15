@@ -1,4 +1,5 @@
 #include "ShowcaseCallouts.hpp"
+#include "ShowcaseSurfaceColours.hpp"
 #include "ShowcaseScene.hpp"   // parse_hex_color
 
 #include "../CustomGCode.hpp"
@@ -311,6 +312,12 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
                     co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint, co_min_z(per_state[s], *mo, *mv) });
             }
         }
+        // A modifier on a filament of its own colours the part where it covers it (the Showcase draws
+        // it, ShowcaseSurfaceColours.hpp), so its filament is one of the object's.
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv != nullptr && mv->is_modifier())
+                if (const int f = visible_filament(*mv); f > 0)
+                    co_add_base(o.bases, BaseRegion{ f, false, CalloutSource::Part, co_min_z(mv->mesh().its, *mo, *mv) });
         for (const auto &range : mo->layer_config_ranges) {
             const ConfigOption *opt = range.second.option("extruder");
             const int           f   = opt != nullptr ? opt->getInt() : 0;
@@ -901,6 +908,11 @@ CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &f,
         label.color_name = f.color_name;
     if (fields.swatch && !f.colors.empty())
         label.swatches = f.colors;
+    if (fields.swatch && f.coextruded && f.colors.size() > 1) {
+        label.swatch_disc      = true;
+        label.swatch_split     = f.split;
+        label.swatch_angle_deg = f.angle_deg;
+    }
     if (fields.hex && !f.colors.empty())
         label.hex = co_upper_hex(f.colors.front());
     std::vector<std::string> parts;

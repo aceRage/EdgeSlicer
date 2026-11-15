@@ -212,7 +212,7 @@ void dump_or_compare(const std::string &name, const std::string &gcode_in)
 
 } // namespace
 
-TEST_CASE("Bambu Lab rib tower: ribs are printed, and only when asked for", "[BblRibTower]")
+TEST_CASE("Bambu Lab rib tower: ribs are printed, and only when asked for", "[BblRibTower][slow]")
 {
     for (const Machine *m : { &X1C, &H2D }) {
         for (const bool rib : { false, true }) {

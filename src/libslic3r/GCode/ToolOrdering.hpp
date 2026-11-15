@@ -181,6 +181,13 @@ public:
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;
     coordf_t 					wipe_tower_layer_height = 0.;
+    // print_z of the wipe tower layer this layer's tool changes print on. A layer too thin to be
+    // its own tower layer joins the one below, keeping that layer's z and height.
+    coordf_t                    wipe_tower_print_z = 0.;
+    // Whether this layer finishes its wipe tower layer. Of a tower layer and the layers joined to
+    // it, that is the last one changing tools, or the last one when none does.
+    bool                        wipe_tower_layer_ends = true;
+    bool                        joins_wipe_tower_layer_below() const { return has_wipe_tower && wipe_tower_print_z != print_z; }
     // Custom G-code (color change, extruder switch, pause) to be performed before this layer starts to print.
     const CustomGCode::Item    *custom_gcode = nullptr;
 
@@ -338,7 +345,8 @@ private:
     // grouping compute can store its result. Null in the ByObject/PrintObject path (grouping is skipped
     // there anyway). See reorder_extruders_for_minimum_flush_volume().
     Print*                     m_print = nullptr;
-    bool                       m_is_BBL_printer = false;
+    // Orca #12781: Print::wipe_tower_type() == Type1 (always so on Bambu Lab printers).
+    bool                       m_wipe_tower_type1 = false;
     // Mixed filament support: pointer to manager (owned by Print) and
     // number of physical extruders.
     const MixedFilamentManager* m_mixed_mgr    = nullptr;

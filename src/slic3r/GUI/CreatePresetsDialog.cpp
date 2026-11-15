@@ -262,57 +262,6 @@ static void sort_choices_natural(wxArrayString &choices)
 // "Bambu Lab X1 Carbon 0.4 nozzle"   -> "Bambu Lab X1 Carbon" + "0.4"
 static void split_printer_name_nozzle(const std::string &printer_name, std::string &base_name, std::string &nozzle);
 
-static bool delete_filament_preset_by_name(std::string delete_preset_name, std::string &selected_preset_name)
-{
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("select preset, name %1%") % delete_preset_name;
-    if (delete_preset_name.empty()) return false;
-
-    // Find an alternate preset to be selected after the current preset is deleted.
-    PresetCollection &m_presets = wxGetApp().preset_bundle->filaments;
-    if (delete_preset_name == selected_preset_name) {
-        const std::deque<Preset> &presets     = m_presets.get_presets();
-        size_t                    idx_current = m_presets.get_idx_selected();
-
-        // Find the visible preset.
-        size_t idx_new = idx_current;
-        if (idx_current > presets.size()) idx_current = presets.size();
-        if (idx_current < 0) idx_current = 0;
-        if (idx_new < presets.size())
-            for (; idx_new < presets.size() && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); ++idx_new)
-                ;
-        if (idx_new == presets.size())
-            for (idx_new = idx_current - 1; idx_new > 0 && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); --idx_new)
-                ;
-        selected_preset_name = presets[idx_new].name;
-        BOOST_LOG_TRIVIAL(info) << boost::format("cause by delete current ,choose the next visible, idx %1%, name %2%") % idx_new % selected_preset_name;
-    }
-
-    try {
-        // BBS delete preset
-        Preset *need_delete_preset = m_presets.find_preset(delete_preset_name);
-        if (!need_delete_preset) BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't find delete preset and name: %1%") % delete_preset_name;
-        if (!need_delete_preset->setting_id.empty()) {
-            BOOST_LOG_TRIVIAL(info) << "delete preset = " << need_delete_preset->name << ", setting_id = " << need_delete_preset->setting_id;
-            m_presets.set_sync_info_and_save(need_delete_preset->name, need_delete_preset->setting_id, "delete", 0);
-            wxGetApp().delete_preset_from_cloud(need_delete_preset->setting_id);
-        } else {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't preset setting id is empty and name: %1%") % delete_preset_name;
-        }
-        if (m_presets.get_edited_preset().name == delete_preset_name) {
-            m_presets.discard_current_changes();
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("delete preset dirty and cancelled");
-        }
-        m_presets.delete_preset(need_delete_preset->name);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " preset has been delete from filaments, and preset name is: " << delete_preset_name;
-    } catch (const std::exception &ex) {
-        // FIXME add some error reporting!
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("found exception when delete: %1% and preset name: %%") % ex.what() % delete_preset_name;
-        return false;
-    }
-
-    return true;
-}
-
 static std::string get_curr_time(const char* format = "%Y_%m_%d_%H_%M_%S")
 {
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
@@ -4830,7 +4779,7 @@ void EditFilamentPresetDialog::delete_preset()
 
         // delete preset
         std::string next_selected_preset_name = wxGetApp().preset_bundle->filaments.get_selected_preset().name;
-        bool        delete_result             = delete_filament_preset_by_name(need_delete_preset->name, next_selected_preset_name);
+        bool        delete_result             = delete_user_preset_by_name(Preset::TYPE_FILAMENT, need_delete_preset->name, next_selected_preset_name);
         BOOST_LOG_TRIVIAL(info) << __LINE__ << " filament preset name: " << need_delete_preset->name << (delete_result ? " delete successful" : " delete failed");
 
         wxGetApp().preset_bundle->filaments.select_preset_by_name(next_selected_preset_name, true);
@@ -5002,11 +4951,11 @@ wxWindow *EditFilamentPresetDialog::create_dialog_buttons()
             // delete inherit preset first
             std::string next_selected_preset_name = wxGetApp().preset_bundle->filaments.get_selected_preset().name;
             for (std::shared_ptr<Preset> preset : inherit_preset_names) {
-                bool delete_result = delete_filament_preset_by_name(preset->name, next_selected_preset_name);
+                bool delete_result = delete_user_preset_by_name(Preset::TYPE_FILAMENT, preset->name, next_selected_preset_name);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " inherit filament name: " << preset->name << (delete_result ? " delete successful" : " delete failed");
             }
             for (std::shared_ptr<Preset> preset : root_preset_names) {
-                bool delete_result = delete_filament_preset_by_name(preset->name, next_selected_preset_name);
+                bool delete_result = delete_user_preset_by_name(Preset::TYPE_FILAMENT, preset->name, next_selected_preset_name);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " root filament name: " << preset->name << (delete_result ? " delete successful" : " delete failed");
             }
             m_printer_compatible_presets.clear();

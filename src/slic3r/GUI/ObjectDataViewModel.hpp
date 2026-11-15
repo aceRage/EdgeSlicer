@@ -65,6 +65,7 @@ enum class InfoItemType
     FuzzySkin,
     //Sinking
     CutConnectors,
+    HeightPattern,  // one row per HeightColourPattern; the pattern id lives on the node
 };
 
 class ObjectDataViewModelNode;
@@ -109,6 +110,7 @@ class ObjectDataViewModelNode
     bool                            m_is_text_volume{ false };
     bool                            m_is_svg_volume{false};
     InfoItemType                    m_info_item_type {InfoItemType::Undef};
+    int                             m_pattern_id { 0 };   // InfoItemType::HeightPattern: the HeightColourPattern::id
     bool                            m_action_enable = false; // can undo all settings
     // BBS
     bool                            m_support_enable = false;
@@ -243,6 +245,7 @@ public:
     const wxString& GetName() const                 { return m_name; }
     ItemType        GetType() const                 { return m_type; }
     InfoItemType    GetInfoItemType() const         { return m_info_item_type; }
+    int             GetPatternId() const            { return m_pattern_id; }
 	void			SetIdx(const int& idx);
 	int             GetIdx() const                  { return m_idx; }
     //BBS: add part plate related logic
@@ -392,6 +395,11 @@ public:
                                     const bool create_frst_child = true);
     wxDataViewItem AddSettingsChild(const wxDataViewItem &parent_item);
     wxDataViewItem AddInfoChild(const wxDataViewItem &parent_item, InfoItemType info_type);
+    // Height colour pattern row: an info row that carries the pattern id and its own label.
+    wxDataViewItem AddHeightPatternChild(const wxDataViewItem &parent_item, int pattern_id, const wxString &label);
+    int            GetHeightPatternId(const wxDataViewItem &item) const;
+    wxDataViewItem GetHeightPatternItem(const wxDataViewItem &obj_item, int pattern_id) const;
+    void           DeleteHeightPatternItems(const wxDataViewItem &obj_item);
     wxDataViewItem AddInstanceChild(const wxDataViewItem &parent_item, size_t num);
     wxDataViewItem AddInstanceChild(const wxDataViewItem &parent_item, const std::vector<bool>& print_indicator, const std::vector<int>& plate_indicator);
     wxDataViewItem AddLayersRoot(const wxDataViewItem &parent_item);

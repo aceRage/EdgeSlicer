@@ -597,6 +597,7 @@ protected:
     void on_ams_load_curr();
     void on_ams_load_vams(wxCommandEvent& event);
     void on_ams_unload(SimpleEvent &event);
+    bool rack_slot_action(bool load, const std::string &ams_id, const std::string &slot_id);
     void on_ams_filament_backup(SimpleEvent& event);
     void on_ams_setting_click(SimpleEvent& event);
     void on_filament_edit(wxCommandEvent &event);
@@ -682,11 +683,11 @@ public:
     BBLSubTask *   last_subtask{nullptr};
     std::string    last_profile_id;
     std::string    last_task_id;
-    long           last_tray_exist_bits { -1 };
-    long           last_ams_exist_bits { -1 };
-    long           last_tray_is_bbl_bits{ -1 };
-    long           last_read_done_bits{ -1 };
-    long           last_reading_bits { -1 };
+    long long      last_tray_exist_bits { -1 };
+    long long      last_ams_exist_bits { -1 };
+    long long      last_tray_is_bbl_bits{ -1 };
+    long long      last_read_done_bits{ -1 };
+    long long      last_reading_bits { -1 };
     long           last_ams_version { -1 };
     int            last_cali_version{-1};
 

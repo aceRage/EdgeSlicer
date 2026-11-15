@@ -14,6 +14,8 @@
 uniform vec4  sc_mat_a[16];          // roughness, f0, metal_tint, anisotropy
 uniform vec4  sc_mat_b[16];          // clearcoat, fiber_noise, -, -
 uniform float sc_exposure;           // 2^EV, for the in-shader tone map without the HDR layer
+// G1: per extruder, as glow_emission() reads it (x: 0 no glow, 1 vibrant, 2 explicit; yzw linear).
+uniform vec4  sc_glow[16];
 
 // The lit colour of one bead fragment, linear.
 //   n         the bead's normal (world), v the unit direction to the eye (world)
@@ -47,7 +49,11 @@ vec3 external_lit(vec3 n, vec3 v, vec3 tangent, vec3 base, vec3 p, float groove,
 
     vec3 diffuse, specular;
     shade_material(n, v, t, albedo, roughness, ma.y, ma.z, ma.w, mb.x, shadow, diffuse, specular);
-    return diffuse * groove + specular * mix(1.0, groove, 0.5);
+    vec3 lit = (diffuse * groove + specular * mix(1.0, groove, 0.5)) * (1.0 - scene_dim);
+    // G1: with the lights off a glow slot shines in the colour it is printed in (a split slot per colour).
+    if (scene_dim > 0.0)
+        lit += glow_emission(sc_glow[look], base);
+    return lit;
 }
 
 // What the fragment writes: linear light (alpha 1) into the HDR layer, or tone-mapped sRGB.

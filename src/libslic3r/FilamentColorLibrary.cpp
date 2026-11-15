@@ -1,5 +1,6 @@
 #include "FilamentColorLibrary.hpp"
 #include "Utils.hpp"
+#include "Showcase/MultiColourFilament.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -132,6 +133,29 @@ int JsonMode(const nlohmann::json& j)
     if (it == j.end() || !it->is_number_integer())
         return 0;
     return it->get<int>() == 1 ? 1 : 0;
+}
+
+// The optional "split" field of a colour: a "30|70" string or an array of numbers.
+std::string JsonSplitText(const nlohmann::json& j)
+{
+    nlohmann::json::const_iterator it = j.find("split");
+    if (it == j.end())
+        return std::string();
+    if (it->is_string())
+        return it->get<std::string>();
+    std::string text;
+    if (it->is_array())
+    {
+        for (const nlohmann::json& part : *it)
+        {
+            if (!part.is_number())
+                return std::string();
+            if (!text.empty())
+                text += '|';
+            text += std::to_string(part.get<double>());
+        }
+    }
+    return text;
 }
 
 bool JsonBool(const nlohmann::json& j, const char* key, bool defaultValue)
@@ -667,6 +691,13 @@ bool FilamentColorLibrary::LoadIndex()
                 // Gradient requires at least 2 colors; segment supports at most 2 colors.
                 BOOST_LOG_TRIVIAL(warning) << "Skip color item with invalid color count: " << colorItem.sku;
                 continue;
+            }
+
+            if (colorItem.colorData.colors.size() > 1 && colorItem.colorData.mode == FilamentColorMode::Segment)
+            {
+                // Optional proportions of a coextruded SKU; anything unusable means an equal split.
+                const int count = std::min<int>(int(colorItem.colorData.colors.size()), MultiColour::MAX_COLOURS);
+                colorItem.split = MultiColour::format_split(MultiColour::parse_split(JsonSplitText(colorJson), count), count);
             }
 
             if (skus.find(colorItem.sku) != skus.end())

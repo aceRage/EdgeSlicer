@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <vector>
 #include <string>
 #include <regex>
@@ -408,6 +409,10 @@ void PartPlate::calc_exclude_triangles(const ExPolygon &poly)
 {
     m_exclude_triangles.reset();
 
+    // A plate with no excluded area (most printers) has nothing to draw: that is the normal state, not a failure.
+    // Only a real polygon that cannot be triangulated is an error.
+    if (poly.empty())
+        return;
     if (!init_model_from_poly(m_exclude_triangles, poly, GROUND_Z))
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":Unable to create exclude triangles\n";
 }
@@ -599,7 +604,9 @@ void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int ind
     poly.contour.append({ scale_(p(0) + width), scale_(p(1) + height) });
     poly.contour.append({ scale_(p(0)        ), scale_(p(1) + height) });
 
-    if (!init_model_from_poly(model.model, poly, GROUND_Z))
+    // A plate that has no bed shape yet (a new project's Plater before its printer's bed is applied) gives a zero-size
+    // icon that cannot be triangulated; the icon is rebuilt once the shape is set. Only a failure with a shape is an error.
+    if (!init_model_from_poly(model.model, poly, GROUND_Z) && icon_sz > 0.f)
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 
     init_raycaster_from_model(model);
@@ -1643,7 +1650,26 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, const Dynam
 	auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
 	plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
 
+	if (wxApp::GetInstance() != nullptr) {
 		expand_plate_extruders(plate_extruders);
+	} else {
+		// ImageMap Phase 5a: the CLI has no wxApp, so expand_plate_extruders() is a no-op there and
+		// a mixed (virtual) id - an image row, say - stayed ONE id. estimate_wipe_tower_footprint()
+		// then sized the CLI's tower for one filament instead of the row's three or four. Expand it
+		// from the project's own mixed_filament_definitions, as get_extruders_under_cli() does.
+		// Physical ids are unchanged by this, so a plate with no mixed rows comes out the same.
+		std::vector<std::string> physical_colors;
+		if (const auto *color_opt = project_config.option<ConfigOptionStrings>("filament_colour"))
+			physical_colors = color_opt->values;
+		if (!physical_colors.empty()) {
+			MixedFilamentManager mixed_mgr;
+			populate_cli_mixed_filament_manager(mixed_mgr, project_config, &glb_config, physical_colors, physical_colors.size());
+			mixed_mgr.expand_virtual_extruder_ids(plate_extruders, physical_colors.size());
+			std::sort(plate_extruders.begin(), plate_extruders.end());
+			it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
+			plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+		}
+	}
 
 
 	return plate_extruders;
@@ -1874,9 +1900,11 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 
 bool wipe_tower_rotation_supported()
 {
-    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), plus the printer's
+    // wipe_tower_type (Orca #12781): only WipeTower2 (Type 2) rotates.
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    return bundle != nullptr && !bundle->is_bbl_vendor();
+    return bundle != nullptr && !bundle->is_bbl_vendor() &&
+           resolve_wipe_tower_type(bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
 }
 
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
@@ -2307,6 +2335,32 @@ void PartPlate::invalidate_plate_name_texture()
 	}
 }
 
+// True if a G-code template uses {plate_name}. filename_format is skipped: the file name is
+// built from the current plate name at export time, so it never needs a new export.
+static bool uses_plate_name(const DynamicPrintConfig& config)
+{
+    for (const std::string& key : config.keys()) {
+        if (key == "filename_format")
+            continue;
+        const ConfigOption* opt = config.option(key);
+        if ((opt->type() == coString || opt->type() == coStrings) && opt->serialize().find("plate_name") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+void PartPlate::sync_plate_name_to_print()
+{
+    if (m_print == nullptr || m_print->get_plate_name() == m_name)
+        return;
+    // The G-code may hold the old name. Invalidate first so a running export stops.
+    if (!(m_plater && m_plater->is_loading_project()) && uses_plate_name(m_print->full_print_config())) {
+        m_print->set_gcode_file_invalidated();
+        update_slice_result_valid_state(false);
+    }
+    m_print->set_plate_name(m_name);
+}
+
 void PartPlate::set_plate_name(const std::string& name) 
 { 
 	// compare if name equal to m_name, case sensitive
@@ -2314,8 +2368,7 @@ void PartPlate::set_plate_name(const std::string& name)
         return;
 
 	m_name = name;
-    if (m_print != nullptr)
-        m_print->set_plate_name(name);
+    sync_plate_name_to_print();
 
 	invalidate_plate_name_texture();
 }
@@ -2347,6 +2400,8 @@ void PartPlate::set_print(PrintBase* print, GCodeResult* result, int index)
 		m_print_index = index;
 
 	m_print->set_plate_origin(m_origin);
+    // Undo/redo reattaches Prints that may still carry another name.
+    sync_plate_name_to_print();
 
 	return;
 }
@@ -3658,6 +3713,21 @@ void PartPlate::clear_manual_filament_map()
     clear_filament_map();
 }
 
+bool PartPlate::reset_filament_routing()
+{
+    bool changed = m_config.has("filament_map") || !m_dual_nozzle_confirm.empty();
+    // getInt(): a mode loaded from a 3MF is a ConfigOptionEnumGeneric.
+    if (const ConfigOption *mode = m_config.option("filament_map_mode");
+        mode != nullptr && (mode->getInt() == int(FilamentMapMode::fmmManual) || mode->getInt() == int(FilamentMapMode::fmmNozzleManual))) {
+        m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
+        changed = true;
+    }
+    clear_filament_map();
+    m_dual_nozzle_confirm.clear();
+    clear_dual_nozzle_sliced_for();
+    return changed;
+}
+
 std::vector<int> PartPlate::get_manual_filament_map() const
 {
     // getInt(): a plate config filled by apply() (3MF load) holds the mode as ConfigOptionEnumGeneric.
@@ -4396,8 +4466,12 @@ int PartPlateList::create_plate(bool adjust_position)
 
 int PartPlateList::duplicate_plate(int index)
 {
-    // create a new plate
+    if (index < 0 || index >= int(m_plate_list.size()))
+        return -1;
+    // create a new plate (none when the plate count is at its maximum)
     int new_plate_index = create_plate(true);
+    if (new_plate_index < 0)
+        return -1;
     PartPlate* old_plate = NULL;
     PartPlate* new_plate = NULL;
     old_plate = get_plate(index);
@@ -4406,21 +4480,30 @@ int PartPlateList::duplicate_plate(int index)
     // get the offset between plate centers
     Vec3d plate_to_plate_offset = new_plate->m_origin - old_plate->m_origin;
 
-    // iterate over all the objects in this plate
-    ModelObjectPtrs obj_ptrs = old_plate->get_objects_on_this_plate();
-    for (ModelObject* object : obj_ptrs){
+    // The plate holds (object, instance) pairs: group them per object, so that each object is
+    // copied once, keeping only the instances on this plate. Its instances on other plates are
+    // neither copied nor moved.
+    std::map<int, std::set<int>> instances_per_object;
+    for (const std::pair<int, int>& obj_inst : old_plate->obj_to_instance_set)
+        instances_per_object[obj_inst.first].insert(obj_inst.second);
+    for (const auto& [obj_id, instance_ids] : instances_per_object) {
         // copy and move the object to the same relative position in the new plate
-        ModelObject* object_copy = m_model->add_object(*object);
-        int new_obj_id = new_plate->m_model->objects.size() - 1;
+        ModelObject* object_copy = m_model->add_object(*m_model->objects[obj_id]);
+        for (int instance_id = int(object_copy->instances.size()) - 1; instance_id >= 0; --instance_id)
+            if (instance_ids.count(instance_id) == 0)
+                object_copy->delete_instance(instance_id);
+        int new_obj_id = m_model->objects.size() - 1;
         // go over the instances and pair with the object
         for (size_t new_instance_id = 0; new_instance_id < object_copy->instances.size(); new_instance_id++){
+            ModelInstance* instance = object_copy->instances[new_instance_id];
+            instance->set_offset(instance->get_offset() + plate_to_plate_offset);
             new_plate->obj_to_instance_set.emplace(std::pair(new_obj_id, new_instance_id));
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": duplicate object into plate: index_pair [%1%,%2%], obj_id %3%") % new_obj_id % new_instance_id % object_copy->id().id;
         }
     }
-    new_plate->translate_all_instance(plate_to_plate_offset);
     // update the plates
-    wxGetApp().obj_list()->reload_all_plates();
+    if (m_plater)
+        wxGetApp().obj_list()->reload_all_plates();
     return new_plate_index;
 }
 
@@ -5130,6 +5213,19 @@ int PartPlateList::notify_instance_removed(int obj_id, int instance_id)
 	}
 
 	if (instance_id == -1) {
+		// The object's other instances go with it, and may sit on other plates: left in place,
+		// update_object_index below would renumber them onto the previous object.
+		std::set<int> other_instances;
+		for (PartPlate* p : m_plate_list)
+			for (const std::pair<int, int>& obj_inst : p->obj_to_instance_set)
+				if (obj_inst.first == obj_id)
+					other_instances.insert(obj_inst.second);
+		for (const std::pair<int, int>& obj_inst : unprintable_plate.obj_to_instance_set)
+			if (obj_inst.first == obj_id)
+				other_instances.insert(obj_inst.second);
+		for (int other_instance : other_instances)
+			notify_instance_removed(obj_id, other_instance);
+
 		//update all the obj_ids which is bigger
 		for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 		{
@@ -6187,6 +6283,8 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 						}
 						plate_data_item->is_support_used = print->is_support_used();
 						plate_data_item->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
+						// AdaptiveLayerMerge step 5: the 3MF writer derives Bambu's multi_nozzle_diameter_mode from it.
+						plate_data_item->uses_multiple_nozzle_diameters = print->uses_multiple_nozzle_diameters();
 					} else {
 						BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("print is null!");
 					}
@@ -6282,6 +6380,11 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		if (index < 0) {
+			// create_plate() stops at MAX_PLATES_COUNT. The objects of the remaining plates stay in the model, off the plates.
+			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": the project has %1% plates, only %2% can be loaded") % plate_data_list.size() % MAX_PLATES_COUNT;
+			break;
+		}
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
@@ -6409,6 +6512,10 @@ void PartPlateList::print() const
 	flush_logs();
 	return;
 }
+
+// ODR-used by boost::format in load_from_3mf_structure(); in-class
+// initialization of a static const integral is not a definition.
+const unsigned int PartPlateList::MAX_PLATES_COUNT;
 
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_cali_texture = false;

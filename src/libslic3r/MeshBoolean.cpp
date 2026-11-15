@@ -245,6 +245,12 @@ triangle_mesh_to_cgal(const std::vector<stl_vertex> &V,
 {
     std::unique_ptr<CGALMesh, CGALMeshDeleter> out(new CGALMesh{});
     triangle_mesh_to_cgal(V, F, out->m);
+    // Orca #17080: CGAL's volume predicate (does_bound_a_volume) dereferences an incident halfedge for
+    // every vertex, so a vertex no face uses crashes it. Remove the isolated vertices and compact the
+    // indices so cgal_to_indexed_triangle_set() maps the result back to a valid ITS. Only this CGALMesh
+    // builder does it: parameterize_lscm() calls the template directly and relies on the vertex order.
+    if (CGALProc::remove_isolated_vertices(out->m) != 0)
+        out->m.collect_garbage();
     return out;
 }
 

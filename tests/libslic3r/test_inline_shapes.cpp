@@ -685,7 +685,7 @@ TEST_CASE("Inline shapes: colours become a silhouette", "[InlineShapes]")
     }
 }
 
-TEST_CASE("Inline shapes: SVG limits and hostile input", "[InlineShapes]")
+TEST_CASE("Inline shapes: SVG limits and hostile input", "[InlineShapes][slow]")
 {
     std::string error;
     SECTION("garbage in, nothing out, no crash")

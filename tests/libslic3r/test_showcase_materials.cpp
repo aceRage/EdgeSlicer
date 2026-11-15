@@ -56,15 +56,15 @@ TEST_CASE("Showcase: the filament finish is inferred from the preset name and ty
         { "Prusament PETG HF", "PETG", Finish::Gloss },
         { "Generic PCTG", "PCTG", Finish::Gloss },
         { "Overture High Gloss PLA", "PLA", Finish::Gloss },
-        { "Bambu PETG Translucent", "PETG", Finish::Transparent },
-        { "Clear PETG", "PETG", Finish::Transparent },
+        { "Bambu PETG Translucent", "PETG", Finish::Translucent },   // D-R4 (realism 1e)
+        { "Clear PETG", "PETG", Finish::Translucent },              // D-R4
         { "Crystal PLA", "PLA", Finish::Transparent },
         { "Generic PETG-CF", "PETG-CF", Finish::CarbonFiber },
         { "Bambu PLA-CF", "PLA-CF", Finish::CarbonFiber },
         { "Polymaker PA6-GF", "PA6-GF", Finish::CarbonFiber },
         { "Something PA", "PA-CF10", Finish::CarbonFiber },
         { "Proto-pasta Copper Metal PLA", "PLA", Finish::Metallic },
-        { "Bronzefill", "PLA", Finish::Standard },   // one word: not "bronze"
+        { "Bronzefill", "PLA", Finish::Metallic },   // 1e: a metal fill
     };
     for (const Case &c : cases) {
         INFO(c.name << " / " << c.type);
@@ -78,7 +78,7 @@ TEST_CASE("Showcase: the filament finish is inferred from the preset name and ty
         CHECK(infer_finish("", "") == Finish::Standard);
     }
     SECTION("precedence: transparent over gloss, silk over metallic") {
-        CHECK(infer_finish("PETG Translucent Blue", "PETG") == Finish::Transparent);
+        CHECK(infer_finish("PETG Translucent Blue", "PETG") == Finish::Translucent);
         CHECK(infer_finish("Silk Copper PLA", "PLA") == Finish::Silk);
         CHECK(infer_finish("Matte PETG", "PETG") == Finish::Matte);
     }

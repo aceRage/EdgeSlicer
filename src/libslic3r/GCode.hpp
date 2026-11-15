@@ -12,6 +12,7 @@
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/FanMover.hpp"
 #include "GCode/LayerTimeSpeedSmoothingFilter.hpp"
+#include "GCode/MinLayerTimePause.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -73,13 +74,19 @@ public:
         double retraction_length_after_wipe  = 0.;
     };
 
+    // ZAA (Z contouring): the height of each point of `path`, where the line it goes back along was contoured in
+    // height; empty where the line was laid flat. The wipe keeps to these heights, as the line was laid, rather
+    // than ploughing back through it at the height it ended at.
+    std::vector<double> heights;
+
     Wipe() : enable(false) {}
     bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); }
+    void reset_path() { this->path = Polyline(); this->heights.clear(); }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
     // Orca: rebuild the stored path while deduplicating shared path boundaries.
-    void update_path(const ExtrusionPaths &paths, bool reverse = false);
+    // `base_z` is the nominal Z the paths were laid at, for the heights of contoured paths.
+    void update_path(const ExtrusionPaths &paths, bool reverse = false, double base_z = 0.);
 };
 
 class WipeTowerIntegration {
@@ -108,6 +115,7 @@ public:
         m_final_purge_drop(final_purge_drop),
         m_layer_idx(-1),
         m_tool_change_idx(0),
+        m_layer_joined(false),
         m_local_z_tool_change_idx(local_z_tool_changes.size(), 0),
         m_local_z_reserve_slot_idx(local_z_reserve_boxes.size(), 0),
         m_plate_origin(plate_origin),
@@ -115,6 +123,7 @@ public:
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
         m_is_first_print(true),
         m_last_wipe_tower_print_z(print_config.z_offset.value),
+        m_z_offset(print_config.z_offset.value),
         m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config)),
         m_sparse_layers_combined(wipe_tower_sparse_layers_combined(print_config))
     {
@@ -128,15 +137,27 @@ public:
     void next_layer() {
         ++ m_layer_idx;
         m_tool_change_idx = 0;
+        m_layer_joined = false;
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_tool_change_idx.size())
             m_local_z_tool_change_idx[size_t(m_layer_idx)] = 0;
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
             m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
     }
+    // The next object layer joined the current tower layer, so its purges print down at that layer's z.
+    // Do not increment m_layer_idx: generate() merges same-z plan entries, including local_z_tool_changes.
+    void join_layer() { m_layer_joined = true; }
     std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer,
                             bool local_z_unplanned = false,
                             double local_z_nominal_layer_z = -1.);
     bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
+    // The filament the next planned tool change of this layer starts from, or -1 when none is left.
+    int planned_current_tool() const
+    {
+        if (m_layer_idx < 0 || size_t(m_layer_idx) >= m_tool_changes.size())
+            return -1;
+        const std::vector<WipeTower::ToolChangeResult> &layer = m_tool_changes[size_t(m_layer_idx)];
+        return size_t(m_tool_change_idx) < layer.size() ? int(layer[size_t(m_tool_change_idx)].initial_tool) : -1;
+    }
     std::string finalize(GCode &gcodegen);
     std::vector<float> used_filament_length() const;
 
@@ -148,6 +169,13 @@ public:
     // Orca #15035: the WipeTower2 tower's first-layer envelope (brim included) in tower-local
     // coordinates, which the skip-point entry routing goes around.
     void set_wipe_tower_bbx(const BoundingBoxf &bbx) { m_wipe_tower_bbx = bbx; }
+    // BBS (H2C wipe_tower_center_pos_*): the tower's first-layer box on the plate and the bed every
+    // nozzle reaches, for the per-toolchange "point for nozzle heating" (M620.14 X Y).
+    void set_heating_stop_area(const BoundingBoxf &tower_bbx, const BoundingBoxf &printer_bbx)
+    {
+        m_heating_tower_bbx   = tower_bbx;
+        m_heating_printer_bbx = printer_bbx;
+    }
 
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
@@ -165,6 +193,8 @@ private:
                                             const Vec2f &outward) const;
     BoundingBox printer_travel_bounds(GCode &gcodegen) const;
     std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
+    // The current tower layer's z in the G-code frame, where a joined layer prints its purges.
+    double joined_tower_z() const { return m_tool_changes[m_layer_idx].front().print_z + m_z_offset; }
 
 private:
     const float                                                  m_left;
@@ -183,6 +213,7 @@ private:
     // Current layer index.
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
+    bool                                                         m_layer_joined;
     std::vector<size_t>                                          m_local_z_tool_change_idx;
     std::vector<size_t>                                          m_local_z_reserve_slot_idx;
 
@@ -192,6 +223,7 @@ private:
     bool                                                         m_enable_timelapse_print;
     bool                                                         m_is_first_print;
     double                                                       m_last_wipe_tower_print_z = 0.f;
+    const double                                                 m_z_offset;
     // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
     // option: smooth timelapse keeps a tower on every layer regardless.
     const bool                                                   m_sparse_layers_skipped;
@@ -199,6 +231,9 @@ private:
     // where the tower's height is not the one process_layer already declared.
     const bool                                                   m_sparse_layers_combined;
     BoundingBoxf                                                 m_wipe_tower_bbx;
+    // See set_heating_stop_area(). Undefined: no heating stop point is published per toolchange.
+    BoundingBoxf                                                 m_heating_tower_bbx;
+    BoundingBoxf                                                 m_heating_printer_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
 };
@@ -331,6 +366,8 @@ public:
     // Returns G-code to append right after that PA command (empty outside the layer pipeline).
     std::string     reset_adaptive_pa(double pa);
     bool is_BBL_Printer();
+    // Orca #12781: Print::wipe_tower_type(), Type2 without a print.
+    WipeTowerType wipe_tower_type() const;
 
     // SoftFever
     static void assign_object_and_instance_ids(Print& print);
@@ -446,6 +483,9 @@ private:
         const size_t                     single_object_idx = size_t(-1),
         // BBS
         const bool                       prime_extruder = false);
+    // Edge (min_layer_time_pause): the park-and-return block that ends a layer whose pause target is `target`
+    // seconds (see GCode/MinLayerTimePause.hpp), or empty when there is nowhere to park.
+    std::string min_layer_time_pause_block(const Print &print, const std::vector<LayerToPrint> &layers, size_t single_object_idx, double target);
     // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
     // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
     // and export G-code into file.
@@ -490,10 +530,11 @@ private:
                                    const ConstExtrusionEntitiesPtr& region_perimeters = {},
                                    const WipeInwardSupport* wipe_support = nullptr);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
-    // should be executed
+    // should be executed, and which of them the loop is (loop_in_region), so that it is not taken for its own neighbour
     std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.,
                                  const ConstExtrusionEntitiesPtr& region_perimeters = {},
-                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr);
+                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr,
+                                 const ExtrusionEntity* loop_in_region = nullptr);
     std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
     std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
     
@@ -505,6 +546,9 @@ private:
     // as calculated and stored in the m_multi_segment_path_average_mm3_per_mm value
     double          m_multi_flow_segment_path_average_mm3_per_mm = 0;
     bool            m_multi_flow_segment_path_pa_set = false;
+    // Bambu Studio 2.9.1 (GCode::_extrude use_seperate_speed): while extrude_loop() prints the walls of a
+    // circle under the auto circle compensation, the filament's circle_compensation_speed; else <= 0.
+    double          m_circle_compensation_speed = -1.;
     // Adaptive PA last set flow to enable issuing of PA change commands when adaptive PA for overhangs
     // is enabled
     double          m_last_mm3_mm = 0;
@@ -525,6 +569,9 @@ private:
             struct Region {
             	// Non-owned references to LayerRegion::perimeters::entities
                 ConstExtrusionEntitiesPtr perimeters;
+                // One id per entity of perimeters. Entities with the same id come from one island level collection,
+                // so they hold one wall sequence and have to stay together in their order.
+                std::vector<unsigned int> perimeter_groups;
             	// Non-owned references to LayerRegion::fills::entities
                 ConstExtrusionEntitiesPtr infills;
 
@@ -598,6 +645,15 @@ private:
     // filament options of m_config change during an export).
     ResolvedFilamentFlow                m_filament_flow;
     DynamicConfig                       m_calib_config;
+    // Calib_Temp_Retract_Grid only: the writer's retraction_length is mutated per column
+    // and restored at the end of the print so a later toolchange uses the preset.
+    bool                                m_temp_retract_saved_retract { false };
+    ConfigOptionFloats                  m_temp_retract_original;
+    int                                 m_temp_retract_last_band { -1 };
+    std::string                         apply_temp_retract_grid_layer(const Print &print, double print_z);
+    std::string                         apply_temp_retract_grid_object(const Print &print, const PrintObject &object);
+    std::string                         reset_temp_retract_grid_first_layer(const Print &print);
+    std::string                         restore_temp_retract_grid_retraction(const Print &print);
     // scaled G-code resolution
     double                              m_scaled_resolution;
     GCodeWriter                         m_writer;
@@ -707,6 +763,8 @@ private:
     bool                                m_last_pos_defined;
 
     std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
+    // Edge (min_layer_time_pause): park candidates' obstacles, built on the first pause of an export.
+    std::unique_ptr<MinLayerTimePause::Sites>      m_min_layer_pause_sites;
     // After CoolingBuffer / before FanMover. Null when mode is Off (streaming, no extra buffer).
     std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
     std::unique_ptr<SpiralVase>                    m_spiral_vase;
@@ -779,12 +837,14 @@ private:
         Point       safe_pos{DefaultTimelapsePos};
     };
     // BambuStudio's generate_timelapse_gcode: expands time_lapse_gcode for the active filament, with
-    // the picked safe position (none when skip_pos_pick: the inline farthest-point photo).
-    TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false);
+    // the picked safe position (none when skip_pos_pick: the inline farthest-point photo). curr_filament >= 0
+    // names the filament the photo is taken for when the writer has not switched to it yet (a tool change).
+    TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false,
+                                                  int curr_filament = -1);
     // Orca #16680: the time_lapse_gcode placeholders (layer, extruders, safe spot) for every printer.
     // The picker runs when always_pick or when the template names its results. Requires an active filament.
     DynamicConfig timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
-                                         bool always_pick, Point *safe_pos = nullptr);
+                                         bool always_pick, Point *safe_pos = nullptr, int curr_filament = -1);
     // Inline farthest-point photo: called with the end point of every extrusion move.
     void check_and_insert_inline_timelapse(std::string &gcode, const Point &endpoint_scaled);
 
@@ -799,6 +859,12 @@ private:
     // BBS
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
+    // BBS (new_extruder_retracted_length): the retraction each extruder was left with when the head last
+    // switched away from it, by logical extruder (filament_map - 1), as Bambu Studio's per-extruder retraction
+    // state on its (single-extruder-multi-material) H2C / H2D profiles. Tracked here for the change_filament
+    // template only; the writer's own retract / unretract bookkeeping is unchanged.
+    std::vector<double> m_parked_retracted;
+    double incoming_extruder_retracted_length(int previous_filament, unsigned int new_filament);
     // Ultra (H2C 3MF schema): the order filaments were entered, and the logical nozzle each
     // entry ran on. BambuStudio records these on GCode and copies them to GCodeProcessorResult
     // for Metadata/filament_sequence.json; the H2C reads the nozzle order from there.
@@ -832,16 +898,23 @@ private:
     // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
     // Returns false (and leaves volume alone) when old and new share an extruder.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
+    // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
+    float hotend_flush_volume(int new_filament_id) const;
 
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS
     int get_bed_temperature(const int extruder_id, const bool is_first_layer, const BedType bed_type) const;
-    // BBS: max bed temperature over all used extruders, so that the bed temperature always
-    // accommodates the highest-temperature filament of a compatible mixed print (e.g. PLA + TPU).
+    // BBS: max bed temperature over the first layer's filaments (Orca #16770), so that the bed accommodates
+    // the highest-temperature filament of a compatible mixed first layer (e.g. PLA + TPU).
     int get_bed_temperature_max(const Print& print, const bool is_first_layer) const;
 
     std::string _extrude(const ExtrusionPath &path, const std::string &path_description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
+
+    // The acceleration of first-layer travels: Bambu Studio 2.9.1's initial_layer_travel_acceleration when it is set
+    // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
+    // keeps the initial layer acceleration). Defined after process_flow_value.
+    double first_layer_travel_acceleration_override() const;
 
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>
@@ -849,7 +922,10 @@ private:
     {
         // The slot is resolved once per export (m_filament_flow.process_config_idx); the same
         // slot get_value_at(m_config, opt, ConfigFlowDomain::Process, id) picks.
-        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
+        // Per-nozzle process P1: an option of the extruder-slot layout's length reads the filament's
+        // extruder slot when process_extruder_values is set (process_config_idx).
+        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, opt.values.size(),
+                                                                 m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
     }
 
     void print_machine_envelope(GCodeOutputStream &file, Print &print);

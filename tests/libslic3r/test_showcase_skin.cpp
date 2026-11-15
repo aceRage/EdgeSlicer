@@ -55,7 +55,7 @@ TEST_CASE("Skin lines turn 90 degrees a layer by default", "[Showcase][ShowcaseS
     CHECK_THAT(d[1], WithinAbs(std::sqrt(0.5), 1e-5));
 
     check_angles(skin("monotonic", 0.), { 0.f, 90.f });
-    CHECK_FALSE(skin("monotonic").zigzag);
+    CHECK(skin("monotonic").zigzag);   // joined into a zig-zag; only monotonicline is one-way
     const SkinTangent rect = skin("rectilinear", 10.);
     check_angles(rect, { 10.f, 100.f });
     CHECK(rect.zigzag);

@@ -3,6 +3,7 @@
 #include "libslic3r/Utils.hpp"
 #include "HttpServer.hpp"
 #include "slic3r/Utils/FileDecrypt.hpp"
+#include "libslic3r/UntrustedInput.hpp"
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/log/trivial.hpp>
@@ -252,7 +253,14 @@ void DownloadManager::start_download_impl(std::shared_ptr<DownloadTask> task) {
         try {
             // Step 1: Create Http object
             Http http = Http::get(task->file_url);
-            
+
+            // The URL here comes from outside: a web page (sw_DownloadFile*), the cloud
+            // (downloadOpenProject) or the printer's own upload notification (timelapse). Cap the
+            // redirects when the address itself is a public https one. A printer or another LAN
+            // device serves plain http (and self-signed https) on purpose, and must keep working.
+            if (untrusted::redirect_target_refusal(task->file_url).empty())
+                http.restrict_redirects(10);
+
             http.timeout_max(0);
 
             // Step 2: Set progress callback

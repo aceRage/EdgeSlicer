@@ -63,6 +63,22 @@ TEST_CASE("Favourite toggle adds and removes", "[FavoriteFilaments]")
     CHECK(keys.empty());
 }
 
+TEST_CASE("A renamed user preset keeps its star; a deleted one loses it", "[FavoriteFilaments]")
+{
+    // User presets are keyed by their full name (key_for), so the preset managers move the key.
+    std::set<std::string> keys = {"My PLA @BBL X1C", "Generic PLA"};
+    CHECK(FavoriteFilaments::rename_key(keys, "My PLA @BBL X1C", "Our PLA @BBL X1C"));
+    CHECK(keys == std::set<std::string>{"Our PLA @BBL X1C", "Generic PLA"});
+    CHECK_FALSE(FavoriteFilaments::rename_key(keys, "Not starred", "Anything")); // nothing to move
+    CHECK_FALSE(FavoriteFilaments::rename_key(keys, "Generic PLA", ""));
+    CHECK_FALSE(FavoriteFilaments::rename_key(keys, "Generic PLA", "Generic PLA"));
+    CHECK(keys.size() == 2);
+    CHECK(FavoriteFilaments::remove_key(keys, "Our PLA @BBL X1C"));
+    CHECK(keys == std::set<std::string>{"Generic PLA"});
+    CHECK_FALSE(FavoriteFilaments::remove_key(keys, "Our PLA @BBL X1C"));
+    CHECK_FALSE(FavoriteFilaments::remove_key(keys, ""));
+}
+
 TEST_CASE("Favourite set survives the app config's escaped list", "[FavoriteFilaments]")
 {
     // The set is stored with the same C-style escaping as every other string list.

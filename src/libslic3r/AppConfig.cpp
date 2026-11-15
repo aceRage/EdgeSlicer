@@ -2,6 +2,8 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/InstanceLock.hpp"
 #include "AppConfig.hpp"
+#include "ZipOpen.hpp"
+#include "ZipWorkCleaner.hpp"
 //BBS
 #include "Preset.hpp"
 #include "Exception.hpp"
@@ -55,6 +57,7 @@ static const std::string MODELS_STR = "models";
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
 const std::string AppConfig::SECTION_MATERIALS = "sla_materials";
 const std::string AppConfig::SECTION_EMBOSS_STYLE = "font";
+const std::string AppConfig::SECTION_HIDDEN_PROCESSES = "hidden_process_presets";
 
 std::string AppConfig::get_language_code()
 {
@@ -151,6 +154,11 @@ void AppConfig::set_defaults()
         if (get("model_browser_beta").empty())
             set_bool("model_browser_beta", true);
 #endif // _WIN32 || __APPLE__
+
+        // The Layerling tab (LayerlingPanel): shown by default. It only offers the optional download
+        // until Layerling is installed; Preferences can hide it.
+        if (get("show_layerling_tab").empty())
+            set_bool("show_layerling_tab", true);
 
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
@@ -491,6 +499,27 @@ void AppConfig::set_defaults()
     if (get("download_path").empty()) {
         set("download_path", "");
     }
+
+    // ZIP working folder and hidden extract caps (PR B).
+    if (get(ZIP_WORK_DIR_KEY).empty())
+        set(ZIP_WORK_DIR_KEY, "");
+    if (get(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY).empty())
+        set_bool(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY, true);
+    if (get(ZIP_MAX_ENTRIES_SCANNED_KEY).empty())
+        set(ZIP_MAX_ENTRIES_SCANNED_KEY, "10000");
+    if (get(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY).empty())
+        set(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY, "2147483648");
+    if (get(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY).empty())
+        set(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY, "4294967296");
+    if (get(ZIP_MAX_COMPRESSION_RATIO_KEY).empty())
+        set(ZIP_MAX_COMPRESSION_RATIO_KEY, "200");
+    // ZIP work-folder clean-up (PR C): on by default, sessions older than 30 days.
+    if (get(ZIP_WORK_CLEANUP_KEY).empty())
+        set_bool(ZIP_WORK_CLEANUP_KEY, true);
+    if (get(ZIP_WORK_CLEANUP_DAYS_KEY).empty())
+        set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(ZIP_WORK_CLEANUP_DEFAULT_DAYS));
+    if (get(ZIP_WORK_INSTALL_ID_KEY).empty())
+        set(ZIP_WORK_INSTALL_ID_KEY, generate_zip_install_id());
 
     if (get("mouse_wheel").empty()) {
         set("mouse_wheel", "0");

@@ -359,6 +359,37 @@ def check_obsolete_keys(profiles_dir, vendor_name):
     return error_count
 
 
+# EdgeSlicer: every non-Bambu printer slices with the Type 2 wipe tower unless its owner picks Type 1
+# (Orca #12781, owner decision 2026-10-28). Upstream profile syncs (Qidi, Flashforge Creator 5) set
+# "wipe_tower_type": "type1", which would silently change those printers' G-code. Machine profiles
+# allowed to ship Type 1 go here, as "<vendor>/<file name>"; empty for now.
+WIPE_TOWER_TYPE1_ALLOW = set()
+
+
+def check_wipe_tower_type(profiles_dir, vendor_name):
+    """Error for a non-BBL machine profile that sets wipe_tower_type to type1 (not allow-listed)."""
+    if vendor_name == "BBL":
+        return 0
+    machine_dir = profiles_dir / vendor_name / "machine"
+    if not machine_dir.exists():
+        return 0
+    error_count = 0
+    for file_path in machine_dir.rglob("*.json"):
+        try:
+            with open(file_path, "r", encoding="UTF-8") as fp:
+                data = json.load(fp)
+        except Exception:
+            continue  # unreadable JSON is reported by the other checks
+        if not isinstance(data, dict) or data.get("wipe_tower_type") != "type1":
+            continue
+        if f"{vendor_name}/{file_path.name}" in WIPE_TOWER_TYPE1_ALLOW:
+            continue
+        print_error(f"wipe_tower_type is type1 in a non-Bambu machine profile (EdgeSlicer keeps these on Type 2; "
+                    f"drop the key or add it to WIPE_TOWER_TYPE1_ALLOW): {file_path.relative_to(profiles_dir)}")
+        error_count += 1
+    return error_count
+
+
 def _case_exact_is_file(base_dir, rel_path):
     """
     True only if rel_path exists under base_dir with EXACTLY this spelling.
@@ -593,6 +624,7 @@ def main():
         warnings_found += new_warnings
 
         errors_found += check_filament_id(vendor_name, vendor_path / "filament")
+        errors_found += check_wipe_tower_type(profiles_dir, vendor_name)
         checked_vendor_count += 1
 
     if args.vendor:

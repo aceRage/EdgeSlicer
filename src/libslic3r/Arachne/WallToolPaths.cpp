@@ -27,7 +27,8 @@ WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfi
 {
     WallToolPathsParams input_params;
     {
-        const double min_nozzle_diameter = *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end());
+        // Per-nozzle process P4: rack nozzles (H2C) count too.
+        const double min_nozzle_diameter = min_physical_nozzle_diameter(print_config);
         if (const auto &min_feature_size_opt = print_object_config.min_feature_size)
             input_params.min_feature_size = min_feature_size_opt.value * 0.01 * min_nozzle_diameter;
 

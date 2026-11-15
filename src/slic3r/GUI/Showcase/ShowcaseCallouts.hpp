@@ -108,6 +108,9 @@ private:
         std::string              vendor;
         std::string              type;
         std::vector<std::string> colors;
+        bool                     gradient = false;   // filament_colour_mode = 1: not a coextruded split
+        std::string              split;              // filament_colour_split (visual only)
+        double                   angle_deg = 0.;     // filament_colour_angle
         int                      family = -1;   // index into m_library, -1 = not a library filament
     };
     std::vector<Slot>              m_slots;      // physical filaments, slot - 1

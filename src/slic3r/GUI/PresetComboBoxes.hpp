@@ -7,6 +7,7 @@
 #include <wx/clrpicker.h>
 
 #include "libslic3r/FilamentColorLibrary.hpp"
+#include "FilamentColorUtils.hpp"
 #include "libslic3r/Preset.hpp"
 #include "wxExtensions.hpp"
 #include "BitmapComboBox.hpp"
@@ -200,6 +201,8 @@ public:
     ~PlaterPresetComboBox();
 
     ScalableButton* edit_btn { nullptr };
+    // Per-nozzle process P9 (owner idea 2026-11-02): the toolhead this filament prints on ("T3"), on toolchangers; click cycles.
+    wxWindow* tool_btn { nullptr };
 
     // BBS
     wxButton* clr_picker { nullptr };
@@ -288,7 +291,7 @@ private:
     std::string CurrentFilamentId() const;
 public:
     // Ultra: also used by the phone API (RemoteAccess) to set a slot colour the way the sidebar does.
-    void ApplyFilamentColor(const FilamentColor& colorData);
+    void ApplyFilamentColor(const FilamentColor& colorData, const FilamentColorUtils::ColourMakeUp* makeUp = nullptr);
 };
 
 

@@ -8,6 +8,7 @@
 #include "../wxExtensions.hpp"
 #include "../I18N.hpp"
 #include "../GUI.hpp"
+#include "../SelectMachinePop.hpp"
 
 namespace Slic3r { namespace GUI {
 	SideToolsPanel::SideToolsPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, const wxSize &size)
@@ -274,6 +275,15 @@ SideTools::SideTools(wxWindow *parent, wxWindowID id, const wxPoint &pos, const 
 
     m_hyperlink = new wxHyperlinkCtrl(m_connection_info, wxID_ANY, _L("Failed to connect to the server"), wxT("https://wiki.bambulab.com/en/software/bambu-studio/failed-to-connect-printer"), wxDefaultPosition, wxDefaultSize, wxHL_DEFAULT_STYLE);
     m_hyperlink->SetBackgroundColour(wxColour(255, 111, 0));
+    // A refused access code: the link re-enters it (set_access_code_refused); otherwise the wiki.
+    m_hyperlink->Bind(wxEVT_HYPERLINK, [this](wxHyperlinkEvent& e) {
+        if (m_refused_dev_id.empty()) {
+            e.Skip();
+            return;
+        }
+        const std::string dev_id = m_refused_dev_id;
+        wxGetApp().CallAfter([dev_id]() { open_printer_edit_dialog(dev_id); });
+    });
 
     m_more_err_open = ScalableBitmap(this, "monitir_err_open", 16);
     m_more_err_close = ScalableBitmap(this, "monitir_err_close", 16);
@@ -491,8 +501,30 @@ void SideTools::update_status(MachineObject* obj)
     }
 }
 
+void SideTools::set_access_code_refused(const std::string& dev_id)
+{
+    if (dev_id == m_refused_dev_id)
+        return;
+    m_refused_dev_id = dev_id;
+    if (dev_id.empty()) {
+        m_hyperlink->SetLabel(_L("Failed to connect to the printer"));
+        update_connect_err_info(BAMBU_NETWORK_ERR_CONNECTION_TO_PRINTER_FAILED,
+            _L("Connection to printer failed"),
+            _L("Please check the network connection of the printer and Orca."));
+    } else {
+        m_hyperlink->SetLabel(_L("Access code refused: re-enter it"));
+        update_connect_err_info(BAMBU_NETWORK_ERR_CONNECTION_TO_PRINTER_FAILED,
+            _L("The printer refused the access code"),
+            _L("Click the link above and enter the access code shown on the printer's screen."));
+    }
+    Layout();
+    Fit();
+}
+
 void SideTools::show_status(int status)
 {
+    // A new status labels the bar afresh; Monitor sets the refused state again after it.
+    m_refused_dev_id.clear();
     if (((status & (int)MonitorStatus::MONITOR_DISCONNECTED) != 0) || ((status & (int)MonitorStatus::MONITOR_DISCONNECTED_SERVER) != 0)) {
         if ((status & (int)MonitorStatus::MONITOR_DISCONNECTED_SERVER)) {
             m_hyperlink->SetLabel(_L("Failed to connect to the server"));

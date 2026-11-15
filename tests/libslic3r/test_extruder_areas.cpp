@@ -2,6 +2,7 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtruderAreas.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
@@ -833,6 +834,44 @@ SCENARIO("the geometric unprintables the grouping gets", "[ExtruderAreas][H2D]")
             const auto group = print.get_layered_nozzle_group_result();
             REQUIRE(group);
             CHECK(group->get_extruder_map(false) == std::vector<int>{ 1, 2 });
+        }
+    }
+}
+
+// Upstream Orca #16947 for Edge's mixed filaments: a mixed filament's virtual slot sits above the real filament
+// count, so it used to be dropped and its components were never kept off the nozzle that cannot reach the object.
+SCENARIO("a mixed filament's components are what the grouping keeps off an unreachable nozzle", "[ExtruderAreas][H2D][MixedFilament]")
+{
+    GIVEN("an H2D plate with an object printed in a mix of filaments 1 and 2 in the left strip")
+    {
+        DynamicPrintConfig   cfg = h2d_config("by layer", "Auto For Flush", "1,1");
+        MixedFilamentManager mixed;
+        mixed.add_custom_filament(1, 2, 50, { "#E01919", "#1943E0" });
+        const unsigned int virtual_id = mixed.filament_id_from_mixed_index(0, 2);
+        REQUIRE(virtual_id == 3);
+        cfg.set("mixed_filament_definitions", mixed.serialize_custom_entries());
+        Model model;
+        add_cube(model, 12., int(virtual_id));
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        print.validate();
+        print.set_status_silent();
+        Test::gcode(print);
+        const auto &unprintables = print.get_geometric_unprintable_filaments();
+        REQUIRE(unprintables.size() == 2);
+        THEN("both components are unprintable on the right nozzle, neither on the left")
+        {
+            CHECK(unprintables[1].count(0) == 1);
+            CHECK(unprintables[1].count(1) == 1);
+            CHECK(unprintables[0].empty());
+        }
+        THEN("the grouping puts both components on the left nozzle")
+        {
+            const auto group = print.get_layered_nozzle_group_result();
+            REQUIRE(group);
+            CHECK(group->get_extruder_id(0) == 0);
+            CHECK(group->get_extruder_id(1) == 0);
         }
     }
 }

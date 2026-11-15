@@ -38,6 +38,19 @@ The set of languages and models is taken from the files already in resources/hms
 language there is enough to have it refreshed from then on. Re-run it before a release; the diff
 is reviewable per file and the script is idempotent.
 
+Adding a model (a serial prefix with no table yet)
+--------------------------------------------------
+    python scripts/hms/refresh_hms_snapshot.py --add-models 039 030 00M
+    python scripts/hms/refresh_hms_snapshot.py --add-models all     # every sn_prefix in resources/printers
+
+The key is the first three characters of the printer's serial (HMSQuery::get_dev_id_type), which
+is the "sn_prefix" of its resources/printers/<model>.json - 039 for the A1 (N2S), 030 for the A1
+mini (N1). Sub-series codes such as "O1C2-V2" have no prefix of their own: they share the parent's
+serial prefix and so its table. For each new prefix the text table is fetched in every language
+already shipped (a language the server has nothing for is skipped, not written empty) and the
+action table from hms/GetActionImage.php. A prefix that already has a file is left to the normal
+merge above; a prefix the server answers with no data is reported and gets no file.
+
 The server rate-limits: requests are made one at a time with a short delay, and a 403 or a
 timeout leaves that file untouched rather than half-written.
 """
@@ -182,9 +195,69 @@ def refresh_one(path: Path, lang: str, model: str, dry_run: bool):
     return False, 0, 0
 
 
+def printer_sn_prefixes(printers_dir: Path):
+    """Every distinct "sn_prefix" in resources/printers/*.json, in file-name order."""
+    out = []
+    for path in sorted(printers_dir.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        p = doc.get("sn_prefix") if isinstance(doc, dict) else None
+        if isinstance(p, str) and p and p not in out:
+            out.append(p)
+    return out
+
+
+def fetch_actions(model: str, timeout: int = 30):
+    url = f"https://{HOST}/hms/GetActionImage.php?d={model}"
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "curl/8.0 (EdgeSlicer hms snapshot refresh)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError) as e:
+        print(f"    ! actions/{model}: {e}", file=sys.stderr)
+        return None
+
+
+def add_model(hms_dir: Path, model: str, langs, delay: float, dry_run: bool):
+    """Create hms_<lang>_<model>.json for every language the server has text in, and
+    hms_action_<model>.json. Returns (langs_written, action_written)."""
+    written = []
+    for lang in langs:
+        path = hms_dir / f"hms_{lang}_{model}.json"
+        if path.exists():
+            continue
+        cloud = fetch(lang, model)
+        time.sleep(delay)
+        if not cloud or cloud.get("result") != 0:
+            continue
+        if not any(entries(cloud, t, lang) for t in TABLES):
+            continue  # the server has nothing in this language for this model
+        if not dry_run:
+            path.write_text(json.dumps(cloud, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        written.append(lang)
+    action_written = False
+    apath = hms_dir / f"hms_action_{model}.json"
+    if not apath.exists():
+        acts = fetch_actions(model)
+        time.sleep(delay)
+        if acts and acts.get("result") == 0 and isinstance(acts.get("data"), list) and acts["data"]:
+            if not dry_run:
+                apath.write_text(json.dumps(acts, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            action_written = True
+    return written, action_written
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="report what would change, write nothing")
+    ap.add_argument("--add-models", nargs="*",
+                    help="serial prefixes to add tables for ('all' = every sn_prefix in resources/printers)")
+    ap.add_argument("--printers-dir", type=Path, default=HMS_DIR.parent / "printers")
     ap.add_argument("--models", nargs="*", help="only these models (default: every one in resources/hms)")
     ap.add_argument("--langs", nargs="*", help="only these languages (default: every one in resources/hms)")
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between requests (default 1.0)")
@@ -192,6 +265,26 @@ def main() -> int:
     args = ap.parse_args()
 
     files = shipped_files(args.hms_dir)
+    if args.add_models is not None:
+        langs = sorted({lang for _, lang, _ in files} or {"en"})
+        if args.langs:
+            langs = [l for l in langs if l in set(args.langs)]
+        models = args.add_models
+        if not models or models == ["all"]:
+            models = printer_sn_prefixes(args.printers_dir)
+        have = {m for _, _, m in files}
+        for model in models:
+            if model in have:
+                print(f"  {model}: already shipped, use the merge mode to refresh it")
+                continue
+            written, action = add_model(args.hms_dir, model, langs, args.delay, args.dry_run)
+            if written or action:
+                print(f"  {model}: text in {len(written)} language(s) [{' '.join(written)}], "
+                      f"action table {'yes' if action else 'none'}{' (dry run)' if args.dry_run else ''}")
+            else:
+                print(f"  {model}: the server has no HMS table for this prefix")
+        return 0
+
     if not files:
         print(f"no hms_<lang>_<model>.json under {args.hms_dir}", file=sys.stderr)
         return 1

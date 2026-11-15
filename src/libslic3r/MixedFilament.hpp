@@ -179,6 +179,16 @@ struct MixedFilament
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
 
+    // Mixed color sublayer (design_mixed_color_sublayer.md 3a, D1): how this row splits a layer.
+    // 0 = Auto (the process keys enable_mixed_color_sublayer / dithering_local_z_mode decide),
+    // 1 = Cadence (whole-layer alternation), 2 = Subdivide (Edge Local-Z), 3 = Ratio (Bambu Studio's
+    // mixed color sublayer: one pass per component, height = ratio x layer height). See
+    // MixedSublayer.hpp. Serialized as "sm<n>" only when not Auto, so older rows stay byte-identical.
+    int sublayer_method = 0;
+    // D4: false = alternate the start component every layer (fewer tool changes), true = Bambu Studio's
+    // fixed ascending physical-id order. Serialized as "so1" only when set.
+    bool sublayer_bs_order = false;
+
     static constexpr float k_default_gradient_dominant = 0.8f;  // Dominant component ratio
     static constexpr float k_default_gradient_minority = 0.2f;  // Minority component ratio
     static constexpr float k_min_gradient_difference   = 0.05f; // Minimum difference for valid gradient
@@ -230,6 +240,8 @@ struct MixedFilament
                distribution_mode == rhs.distribution_mode &&
                image_fill_ref == rhs.image_fill_ref &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
+               sublayer_method == rhs.sublayer_method &&
+               sublayer_bs_order == rhs.sublayer_bs_order &&
                gradient_enabled == rhs.gradient_enabled &&
                std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
                std::abs(gradient_end   - rhs.gradient_end)   <= k_gradient_epsilon &&

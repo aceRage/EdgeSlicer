@@ -6,17 +6,11 @@
 #include "../BoundingBox.hpp"
 #include "../Point.hpp"
 #include "../Polygon.hpp"
+#include "../PrintConfig.hpp" // WipeTowerType
 
 namespace Slic3r {
 
 class ConfigBase;
-
-// EdgeSlicer has no wipe_tower_type option: Type1 is the Bambu planner (is_BBL_printer),
-// Type2 is WipeTower2 for everyone else. Resolved from printer_model so GUI/CLI agree.
-enum class WipeTowerType {
-    Type1 = 0,
-    Type2 = 1,
-};
 
 // Pre-slice footprint of the wipe tower, shared by validation (Print), the GUI's placement
 // clamp/preview/arrange and the CLI placement. The arithmetic is shared; the inputs below are

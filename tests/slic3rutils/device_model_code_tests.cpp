@@ -159,7 +159,8 @@ TEST_CASE("A printer that reports no usable model code is identified by its seri
 
     // Every shipped definition carries Bambu's prefix, and no two share one.
     const auto prefixes = Slic3r::GUI::load_model_sn_prefixes(kPrinters);
-    CHECK(prefixes.size() == 14);
+    CHECK(prefixes.size() == 15);
+    CHECK(prefixes.at("32X") == "N10"); // H3C (Bambu Studio 2.9.1)
     CHECK(prefixes.at("20P") == "N6");
     CHECK(prefixes.at("22E") == "N7");
     CHECK(prefixes.at("26A") == "N9");

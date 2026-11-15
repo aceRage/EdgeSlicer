@@ -244,11 +244,13 @@ TEST_CASE("Dowel depth tolerance is split evenly between the two holes (Orca #16
     const BoundingBoxf3 lo = hole_extent(result[1]);
     REQUIRE(up.defined);
     REQUIRE(lo.defined);
-    // The 0.05 mm preview nudge moves each piece towards the other half; take it out.
-    const double up_depth = up.max.z() + 0.05;
-    const double lo_depth = -(lo.min.z() - 0.05);
+    // Orca #16893: each hole keeps its full depth and reaches CONNECTOR_HOLE_OVERLAP out of its face.
+    const double up_depth = up.max.z();
+    const double lo_depth = -lo.min.z();
     CHECK(up_depth == Approx(depth + 0.5 * tolerance).margin(1e-3));
     CHECK(lo_depth == Approx(depth + 0.5 * tolerance).margin(1e-3));
+    CHECK(up.min.z() == Approx(-CONNECTOR_HOLE_OVERLAP).margin(1e-3));
+    CHECK(lo.max.z() == Approx(CONNECTOR_HOLE_OVERLAP).margin(1e-3));
     // The pin itself is not lengthened.
     const ModelObject* dowel = result[2];
     BoundingBoxf3 pin;
@@ -256,4 +258,42 @@ TEST_CASE("Dowel depth tolerance is split evenly between the two holes (Orca #16
         for (const Vec3f& p : vol->mesh().its.vertices)
             pin.merge(vol->get_matrix() * p.cast<double>());
     CHECK(pin.size().z() == Approx(2.0 * depth).margin(1e-3));
+}
+
+// Orca #16893: a plug's hole grows by the tolerance away from the cut face and by the overlap through
+// it, so it spans from CONNECTOR_HOLE_OVERLAP below the face to depth + tolerance above it; the peg on
+// the other half is not changed.
+TEST_CASE("Plug hole breaks through the cut face and keeps its full depth (Orca #16893)", "[CutConnectors][Regression]")
+{
+    const double depth     = 5.0;
+    const double tolerance = 0.4;
+    Model model;
+    ModelObject* obj = make_cube_object(model);
+    ModelVolume* v = obj->add_volume(TriangleMesh(its_make_cylinder(1.0, 1.0)), ModelVolumeType::NEGATIVE_VOLUME);
+    // A plug sits on one side of the plane: centre at half its height.
+    v->set_transformation(Geometry::translation_transform(Vec3d(0., 0., 0.5 * depth)) * Geometry::scale_transform(Vec3d(3.0, 3.0, depth)));
+    v->cut_info = ModelVolume::CutInfo(CutConnectorType::Plug, 0.f, float(tolerance));
+
+    Cut cut(obj, 0, plane_cut_matrix(), ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& result = cut.perform_with_plane();
+    REQUIRE(result.size() == 2);
+
+    auto extent = [](const ModelObject* o, ModelVolumeType type) {
+        BoundingBoxf3 bb;
+        for (const ModelVolume* vol : o->volumes)
+            if (vol->cut_info.is_connector && vol->type() == type) {
+                const Transform3d m = vol->get_matrix();
+                for (const Vec3f& p : vol->mesh().its.vertices)
+                    bb.merge(m * p.cast<double>());
+            }
+        return bb;
+    };
+    const BoundingBoxf3 hole = extent(result[0], ModelVolumeType::NEGATIVE_VOLUME);
+    const BoundingBoxf3 peg  = extent(result[1], ModelVolumeType::MODEL_PART);
+    REQUIRE(hole.defined);
+    REQUIRE(peg.defined);
+    CHECK(hole.min.z() == Approx(-CONNECTOR_HOLE_OVERLAP).margin(1e-3));
+    CHECK(hole.max.z() == Approx(depth + tolerance).margin(1e-3));
+    CHECK(peg.min.z() == Approx(0.).margin(1e-3));
+    CHECK(peg.max.z() == Approx(depth).margin(1e-3));
 }

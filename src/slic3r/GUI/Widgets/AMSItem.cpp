@@ -43,7 +43,8 @@ bool AMSinfo::parse_ams_info(MachineObject *obj, Ams *ams, bool remain_flag, boo
     if (!ams) return false;
     this->ams_id = ams->id;
 
-    if (ams->type == 1 || ams->type == 3 || ams->type == N3S_AMS) {
+    // The AMS 3H reports its humidity per drying zone; the parser gives the unit the dampest zone's.
+    if (ams->type == 1 || ams->type == 3 || ams->type == N3S_AMS || ams->type == GUI::AmsTypes::RACK_A) {
         this->ams_humidity = ams->humidity;
     }
     else{

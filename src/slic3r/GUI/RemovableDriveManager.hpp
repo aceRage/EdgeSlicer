@@ -54,6 +54,9 @@ public:
 	// Start the background thread and register this window as a target for update events.
 	// Register for OSX notifications.
 	void 		init(wxEvtHandler *callback_evt_handler);
+	// Project strip P4 (one Plater per open project): events go to the Plater shown.
+	bool    is_initialized() const { return m_initialized; }
+	void    set_callback_evt_handler(wxEvtHandler *callback_evt_handler) { if (m_initialized) m_callback_evt_handler = callback_evt_handler; }
 	// Stop the background thread of the removable drive manager, so that no new updates will be sent out.
 	// Deregister OSX notifications.
 	void 		shutdown();

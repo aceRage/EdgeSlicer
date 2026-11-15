@@ -6,6 +6,7 @@
 #include "SupportMaterial.hpp"
 #include "SupportOverhangDetect.hpp"
 #include "SupportCommon.hpp"
+#include "SupportMergePlan.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
@@ -578,6 +579,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     }
 */
 
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 SupportMaterial.cpp:516-526):
+    // merge the support areas into slabs a coarse nozzle can extrude. This has to run before
+    // generate_support_layers() installs them, because that is where the Z ladder is frozen. A no-op on every
+    // single-diameter plate and on an object with support groups.
+    SupportMergeResult support_merge;
+    merge_support_layers_multi_diameter(object, m_support_params, m_slicing_params, raft_layers,
+        bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers,
+        support_merge, -1., ! m_group_claims.empty());
+
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 
 // For debugging purposes, one may want to show only some of the support extrusions.
@@ -591,6 +601,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
     generate_support_layers(object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    apply_support_merge_result(object, support_merge);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Generating tool paths";
 
@@ -1310,7 +1321,7 @@ namespace SupportMaterialInternal {
             // Surface supporting this layer, expanded by 0.5 * nozzle_diameter, as we consider this kind of overhang to be sufficiently supported.
             Polygons lower_grown_slices = expand(lower_layer_polygons,
                 //FIXME to mimic the decision in the perimeter generator, we should use half the external perimeter width.
-                0.5f * float(scale_(print_config.nozzle_diameter.get_at(layerm.region().config().wall_filament-1))),
+                0.5f * float(scale_(nozzle_diameter_for_filament(print_config, unsigned(layerm.region().config().wall_filament.value)))),
                 SUPPORT_SURFACES_OFFSET_PARAMETERS);
             // Collect perimeters of this layer.
             //FIXME split_at_first_point() could split a bridge mid-way
@@ -2205,7 +2216,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
 
     // check if the sharp tails should be extended higher
     bool detect_first_sharp_tail_only = false;
-    const coordf_t extrusion_width = m_object_config->line_width.get_abs_value(object.print()->config().nozzle_diameter.get_at(object.config().support_interface_filament-1));
+    const coordf_t extrusion_width = m_object_config->line_width.get_abs_value(nozzle_diameter_for_filament(object.print()->config(), unsigned(object.config().support_interface_filament.value)));
     const coordf_t extrusion_width_scaled = scale_(extrusion_width);
     if (is_auto(m_object_config->support_type.value) && g_config_support_sharp_tails && !detect_first_sharp_tail_only) {
         for (size_t layer_nr = layer_id_start; layer_nr < num_layers; layer_nr++) {
@@ -3208,7 +3219,10 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                 // BOOST_LOG_TRIVIAL(trace) << "Support generator - trim_support_layers_by_object - trimmming non-empty layer " << idx_layer << " of " << nonempty_layers.size();
                 assert(! support_layer.polygons.empty() && support_layer.print_z >= m_slicing_params.raft_contact_top_z + EPSILON);
                 // Find the overlapping object layers including the extra above / below gap.
-                coordf_t z_threshold = support_layer.bottom_print_z() - gap_extra_below + EPSILON;
+                // A bottom contact must not be trimmed by the surface it rests on, even when its gap is rounded down.
+                coordf_t z_threshold = support_layer.layer_type == SupporLayerType::BottomContact
+                    ? support_layer.bottom_z + EPSILON
+                    : support_layer.bottom_print_z() - gap_extra_below + EPSILON;
                 idx_object_layer_overlapping = Layer::idx_higher_or_equal(
                     object.layers().begin(), object.layers().end(), idx_object_layer_overlapping,
                     [z_threshold](const Layer *layer){ return layer->print_z >= z_threshold; });
@@ -3220,16 +3234,23 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                     if (object_layer.bottom_z() > support_layer.print_z + gap_extra_above - EPSILON)
                         break;
 
-                    // Snapmaker #696: skip the object layer directly supported by this top contact layer: its
-                    // lslices cover the overhang itself, so trimming by it would cut away the contact area.
-                    // With variable layer heights the synchronised gap is shorter than the configured gap, so
-                    // this layer used to fall inside the trimming window and removed ~80% of the contact surface.
-                    if (support_layer.layer_type == SupporLayerType::TopContact &&
-                        i == support_layer.idx_object_layer_above)
-                        continue;
-
                     bool is_overlap = is_layers_overlap(support_layer, object_layer);
-                    for (const ExPolygon& expoly : object_layer.lslices) {
+                    // Only relax trimming across the gap to the overhang assigned to this top contact.
+                    // OrcaSlicer #13939, which replaces Snapmaker #696 here: with variable layer heights the
+                    // synchronised gap is shorter than the configured gap, so the supported overhang layer falls
+                    // inside the trimming window and its lslices cut away the contact area. #696 skipped that
+                    // layer outright; trimming by its continuing walls only (the part standing on the layer
+                    // below) keeps the overhang's interface and still clears walls that continue or expand into
+                    // the gap. A layer starting exactly at the contact height keeps its full trimming.
+                    const ExPolygons *trim_source = &object_layer.lslices;
+                    ExPolygons trim_continuous;
+                    if (support_layer.layer_type == SupporLayerType::TopContact && i > 0 &&
+                        i >= support_layer.idx_object_layer_above &&
+                        object_layer.bottom_z() > support_layer.print_z + EPSILON) {
+                        trim_continuous = intersection_ex(object_layer.lslices, object.layers()[i - 1]->lslices);
+                        trim_source = &trim_continuous;
+                    }
+                    for (const ExPolygon& expoly : *trim_source) {
                         // BBS
                         bool is_sharptail = !intersection_ex({ expoly }, object_layer.sharp_tails).empty();
                         coordf_t trimming_offset = is_sharptail ? scale_(sharp_tail_xy_gap) :

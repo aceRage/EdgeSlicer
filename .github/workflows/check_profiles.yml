@@ -1,25 +1,52 @@
 name: Check profiles
-on: 
+
+# Two jobs:
+#  - python_checks (hosted Ubuntu, ~1 min): scripts/orca_extra_profile_check.py. It stays on
+#    Linux on purpose: Path.exists is case-exact there, which is what catches case-only path
+#    mismatches that load fine on Windows/macOS and break Linux builds.
+#  - validate (self-hosted Windows VM, no hosted minutes): EdgeSlicer's own
+#    Snapmaker_Orca_profile_validator, built from THIS commit's libslic3r. It replaces the
+#    prebuilt upstream OrcaSlicer_profile_validator (SoftFever/Orca_tools release 1), which
+#    links upstream's libslic3r and so rejects config values only EdgeSlicer's engine knows
+#    (e.g. the TPU285 nozzle volume type). Design and costs: tests/design_profile_validator_ci.md.
+#
+# The VM validator job runs only for pull requests from branches of this repository (and manual
+# dispatch). This repository is public: a fork's PR must never run code on the VM. Fork PRs get
+# validate_fork instead (hosted Ubuntu, a validator binary published by profile_validator_binary.yml).
+
+on:
   pull_request:
-    branches: 
-    - main 
+    branches:
+    - main
     paths:
     - 'resources/profiles/**'
-    - ".github/workflows/check_profiles.yml"
+    - '.github/workflows/check_profiles.yml'
+    - 'scripts/orca_extra_profile_check.py'
+    # Engine code that decides what a valid profile is: new config keys/enum values, the
+    # loader's validation-mode checks, and the validator itself.
+    - 'src/libslic3r/PrintConfig.cpp'
+    - 'src/libslic3r/PrintConfig.hpp'
+    - 'src/libslic3r/Preset.cpp'
+    - 'src/libslic3r/Preset.hpp'
+    - 'src/libslic3r/PresetBundle.cpp'
+    - 'src/libslic3r/PresetBundle.hpp'
+    - 'src/dev-utils/Snapmaker_Orca_profile_validator.cpp'
 
   workflow_dispatch:
     inputs:
       logLevel:
-        description: 'Log level'     
+        description: 'Validator log level (0-5, 2 = warning)'
         required: true
-        default: 'warning'
+        default: '2'
 
+permissions:
+  contents: read
 
 jobs:
-  check_translation:
-    name: Check profiles
+  python_checks:
+    name: Check profiles (extra JSON checks)
     runs-on: ubuntu-24.04
-    steps:  
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
@@ -27,18 +54,162 @@ jobs:
         run: |
           python3 ./scripts/orca_extra_profile_check.py
 
-      # download
-      - name: Download 
-        working-directory: ${{ github.workspace }}
+  validate:
+    name: Check profiles (EdgeSlicer validator)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, edgeslicer-build]
+    timeout-minutes: 120
+    # A newer push to the same PR replaces the older check. The runner itself runs one job at
+    # a time, so this never overlaps build_windows_selfhosted.yml either.
+    concurrency:
+      group: profile-validator-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    env:
+      # Same tool locations as build_windows_selfhosted.yml (the runner account, NETWORK
+      # SERVICE, has no user PATH of its own).
+      CMAKE_DIR: 'C:\Dev\tools\cmake-3.31.8-windows-x86_64\bin'
+      NINJA_DIR: 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
+      VCVARS: 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+      # The VM's shared, pre-built dependency tree (maintained by build_windows_selfhosted.yml).
+      # Read only here: this job never rebuilds deps.
+      SHARED_DEPS_ROOT: 'C:\Dev\EdgeSlicer\deps\build'
+      # Persistent source and build dirs OUTSIDE the runner workspace. The workspace is shared
+      # with build_windows_selfhosted.yml (which checks out other commits and cleans it), so
+      # an incremental build there would rebuild most of libslic3r every time. Here a checkout
+      # only rewrites the files that changed since the last run, and Ninja recompiles just those.
+      CI_ROOT: 'C:\Dev\ci\profile_validator'
+      LOG_LEVEL: ${{ inputs.logLevel || '2' }}
+    steps:
+      - name: Check out this commit into the persistent source dir
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
-          curl -LJO https://github.com/SoftFever/Orca_tools/releases/download/1/OrcaSlicer_profile_validator
-          chmod +x ./OrcaSlicer_profile_validator
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:CI_ROOT 'src'
+          if (-not (Test-Path -LiteralPath (Join-Path $src '.git'))) {
+            New-Item -ItemType Directory -Path $src -Force | Out-Null
+            git -C $src init -q
+            git -C $src remote add origin "https://github.com/$env:GITHUB_REPOSITORY.git"
+          }
+          # Public repository: no credentials needed or stored. For a pull request GITHUB_SHA is
+          # the PR's merge commit with main, the same tree actions/checkout would give.
+          git -C $src fetch -q --depth=1 origin $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "git fetch $env:GITHUB_SHA failed ($LASTEXITCODE)" }
+          git -C $src checkout -q -f --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git checkout failed ($LASTEXITCODE)" }
+          git -C $src clean -q -ffdx
+          Write-Host "source at $(git -C $src rev-parse HEAD)"
 
-      # validate profiles
-      - name: validate system profiles
+      - name: Check the shared deps tree
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
-          ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:SHARED_DEPS_ROOT 'OrcaSlicer_dep\usr\local'
+          if (-not (Test-Path -LiteralPath $prefix)) {
+            Write-Host "::error::no dependency tree at $prefix - run build_windows_selfhosted.yml once to build it"
+            exit 1
+          }
+          $want = (git -C (Join-Path $env:CI_ROOT 'src') rev-parse 'HEAD:deps').Trim()
+          $stampFile = Join-Path $env:SHARED_DEPS_ROOT '.edgeslicer_deps_stamp'
+          $have = if (Test-Path -LiteralPath $stampFile) { (Get-Content -LiteralPath $stampFile -Raw).Trim() } else { '' }
+          if ($have -ne $want) {
+            # Not fatal: the validator links only libslic3r's deps, which rarely change ABI. A
+            # build_windows_selfhosted.yml run refreshes the tree.
+            Write-Host "::warning::the VM's deps tree was built from deps/ $have, this commit has $want - building against the older tree"
+          }
+          "DEPS_PREFIX=$prefix" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
 
+      - name: Build Snapmaker_Orca_profile_validator
+        shell: cmd
+        run: |
+          call "%VCVARS%" || exit /b 1
+          set "PATH=%CMAKE_DIR%;%NINJA_DIR%;%PATH%"
+          set "SRC=%CI_ROOT%\src"
+          set "BLD=%CI_ROOT%\build"
+          @rem Re-running configure on an existing cache is cheap and picks up CMake changes.
+          cmake -S "%SRC%" -B "%BLD%" -G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
+            -DCMAKE_BUILD_TYPE=Release -DBBL_RELEASE_TO_PUBLIC=1 -DORCA_TOOLS=ON ^
+            -DSLIC3R_UNITY_BUILD=ON -DSLIC3R_UNITY_BUILD_BATCH_SIZE=8 -DSLIC3R_PCH=ON ^
+            -DCMAKE_PREFIX_PATH="%DEPS_PREFIX%" || exit /b 1
+          cmake --build "%BLD%" --target Snapmaker_Orca_profile_validator || exit /b 1
 
+      - name: Validate system profiles
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:CI_ROOT 'build\src\Snapmaker_Orca_profile_validator.exe'
+          # libslic3r's runtime DLLs (OCCT, freetype, ...) live in the deps tree.
+          $env:PATH = "$(Join-Path $env:DEPS_PREFIX 'bin\occt');$(Join-Path $env:DEPS_PREFIX 'bin');$env:PATH"
+          # The validator makes a user/ folder next to the profiles: validate a scratch copy.
+          $profiles = Join-Path $env:RUNNER_TEMP 'profiles'
+          if (Test-Path -LiteralPath $profiles) { Remove-Item -LiteralPath $profiles -Recurse -Force }
+          Copy-Item -LiteralPath (Join-Path $env:CI_ROOT 'src\resources\profiles') -Destination $profiles -Recurse
+          & $exe -p $profiles -l $env:LOG_LEVEL
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::profile validation failed (exit $LASTEXITCODE)"; exit 1 }
 
+  # Fork pull requests never reach the self-hosted VM (this repository is public). They are
+  # checked here, on a hosted runner, with a validator that profile_validator_binary.yml built
+  # from main. Limit: the binary is main's, so a fork PR that adds a new engine enum AND uses it
+  # in a profile is rejected by it (see tests/design_profile_validator_ci.md, "Fork PRs").
+  validate_fork:
+    name: Check profiles (fork PR, published validator)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOG_LEVEL: '2'
+      BINARY_WORKFLOW: profile_validator_binary.yml
+      BINARY_BRANCH: main
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
+      - name: Get the validator (main's published build, else upstream's)
+        id: get
+        run: |
+          set -u
+          dest="$RUNNER_TEMP/validator"
+          rm -rf "$dest"; mkdir -p "$dest"
+          source_kind=none
+          # Newest successful runs first; a run's artifact can have expired (90 days), so try a few.
+          run_ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$BINARY_WORKFLOW" \
+            --branch "$BINARY_BRANCH" --status success --limit 5 --json databaseId \
+            --jq '.[].databaseId' 2>/dev/null || true)
+          for id in $run_ids; do
+            if gh run download "$id" -R "$GITHUB_REPOSITORY" -n edgeslicer-profile-validator-linux -D "$dest"; then
+              chmod +x "$dest/Snapmaker_Orca_profile_validator"
+              echo "Using EdgeSlicer's validator from $BINARY_WORKFLOW run $id on $BINARY_BRANCH:"
+              cat "$dest/BUILD_INFO.txt" || true
+              source_kind=edgeslicer
+              break
+            fi
+            rm -rf "$dest"; mkdir -p "$dest"
+          done
+          if [ "$source_kind" = none ]; then
+            echo "::notice::No published EdgeSlicer validator was available ($BINARY_WORKFLOW has no unexpired successful run on $BINARY_BRANCH). Falling back to the UPSTREAM OrcaSlicer validator: it does not know EdgeSlicer-only config values, so TPU285 is swapped for Standard in a scratch copy and other EdgeSlicer-only values may be reported as errors."
+            curl -fL -o "$dest/Snapmaker_Orca_profile_validator" \
+              https://github.com/SoftFever/Orca_tools/releases/download/1/OrcaSlicer_profile_validator
+            chmod +x "$dest/Snapmaker_Orca_profile_validator"
+            source_kind=upstream
+          fi
+          echo "kind=$source_kind" >> "$GITHUB_OUTPUT"
+          echo "dir=$dest" >> "$GITHUB_OUTPUT"
+
+      - name: Validate system profiles
+        env:
+          VALIDATOR_DIR: ${{ steps.get.outputs.dir }}
+          VALIDATOR_KIND: ${{ steps.get.outputs.kind }}
+        run: |
+          set -eu
+          # The validator makes a user/ folder next to the profiles: validate a scratch copy.
+          profiles="$RUNNER_TEMP/profiles"
+          rm -rf "$profiles"
+          cp -r resources/profiles "$profiles"
+          if [ "$VALIDATOR_KIND" = upstream ]; then
+            grep -rl '"TPU285"' "$profiles" | while read -r f; do sed -i 's/"TPU285"/"Standard"/g' "$f"; done || true
+          fi
+          if [ -d "$VALIDATOR_DIR/lib" ]; then export LD_LIBRARY_PATH="$VALIDATOR_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+          "$VALIDATOR_DIR/Snapmaker_Orca_profile_validator" -p "$profiles" -l "$LOG_LEVEL"

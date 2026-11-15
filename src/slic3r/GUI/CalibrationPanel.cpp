@@ -30,6 +30,8 @@ wxString get_calibration_type_name(CalibMode cali_mode)
         return _L("Temperature");
     case CalibMode::Calib_Retraction_tower:
         return _L("Retraction");
+    case CalibMode::Calib_Temp_Retract_Grid:
+        return _L("Stringing (temp × retraction)");
     default:
         return "";
     }
