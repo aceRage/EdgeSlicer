@@ -2167,7 +2167,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     writer.speed_override_backup();
     writer.speed_override(100);
 
-    const Vec2f initial_position = get_next_pos(cleaning_box, wipe_length, new_tool);
+    const Vec2f initial_position = get_next_pos(cleaning_box, wipe_length, new_tool, solid_toolchange);
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
@@ -2234,15 +2234,30 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     return result;
 }
 
+float WipeTower::wipe_line_spacing(size_t tool, bool solid_toolchange) const
+{
+    if (solid_toolchange || is_first_layer())
+        return tool_line_width(tool);
+    return m_layer_info->extra_spacing * get_block_gap_width(tool, false);
+}
+
 // Orca #15035 (Bambu Studio get_next_pos()): the purge starts on a corner that turns with the layer number, at the
 // bottom of its box on even layers and at the top on odd ones, so the start blobs do not stack.
-Vec2f WipeTower::get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool) const
+// Bambu Studio 2.9.1 (9a209c7a8): the top start is the purge's last row, (rows - 1) pitches up, at the pitch
+// toolchange_wipe_new() steps by; a contact (solid) change fills its whole box, so it starts one line width below the top.
+// Before, a purge of whole rows started a pitch too high (a hole at the bottom of its band) and a contact change on an
+// odd layer started at the purge's row count, leaving the top of its box empty.
+Vec2f WipeTower::get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool, bool solid_toolchange) const
 {
-    const float xl         = cleaning_box.ld.x();
-    const float xr         = cleaning_box.rd.x();
-    const int   line_count = xr - xl > EPSILON ? int(wipe_length / (xr - xl)) : 0;
-    const float dy         = m_layer_info->extra_spacing * get_block_gap_width(tool, false);
-    const float y_offset   = float(line_count) * dy;
+    const float xl        = cleaning_box.ld.x();
+    const float xr        = cleaning_box.rd.x();
+    const float dy        = wipe_line_spacing(tool, solid_toolchange);
+    const float box_depth = cleaning_box.lu.y() - cleaning_box.ld.y();
+    float       y_offset  = std::max(0.f, box_depth - dy);
+    if (!solid_toolchange && xr > xl) {
+        const int line_count = std::max(1, int(std::ceil(wipe_length / (xr - xl))));
+        y_offset             = std::min(float(line_count - 1) * dy, y_offset);
+    }
     switch (m_cur_layer_id % 4) {
     case 0: return cleaning_box.ld;
     case 1: return cleaning_box.rd + Vec2f(0.f, y_offset);
@@ -2805,9 +2820,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     const bool  should_line_ironing = m_line_ironing && !solid_toolchange;
     const bool  should_flat_ironing = m_flat_ironing && should_line_ironing;
     float       x_to_wipe           = solid_toolchange ? std::numeric_limits<float>::max() : wipe_length;
-    float       dy                  = first_layer ? tool_pw : m_layer_info->extra_spacing * get_block_gap_width(m_current_tool, false);
-    if (solid_toolchange)
-        dy = tool_pw;
+    const float dy                  = wipe_line_spacing(m_current_tool, solid_toolchange);
     // Bambu Studio 2.9.1 (WipeTower.cpp:5040-5056): the rows ramp up to the tower speed (calc_tower_feedrate(), on the
     // H3C the volumetric speed times the feedrate factor, not capped at prime_tower_max_speed) along the filament's
     // speed curve, or along the built-in ramp without one; a short curve repeats its last value.

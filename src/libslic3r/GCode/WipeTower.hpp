@@ -850,7 +850,10 @@ private:
     static size_t      layer_end_tool(const WipeTowerInfo &layer, size_t carried);
     void               get_all_wall_skip_points();
     void               get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const std::vector<float> &y_shifts);
-    Vec2f              get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool) const;
+    Vec2f              get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool, bool solid_toolchange) const;
+    // Bambu Studio 2.9.1 wipe_line_spacing(): the row pitch of a purge, the line width on a contact (solid) change and on
+    // the first layer, the block's gap otherwise.
+    float              wipe_line_spacing(size_t tool, bool solid_toolchange) const;
     ToolChangeResult   tool_change_new(size_t new_tool, bool solid_toolchange = false, bool solid_nozzlechange = false);
     ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true);
     ToolChangeResult   finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill = true);
