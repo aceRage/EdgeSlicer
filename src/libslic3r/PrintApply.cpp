@@ -1818,6 +1818,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // The following call may stop the background processing.
     if (! print_diff.empty())
         update_apply_status(this->invalidate_state_by_config_options(new_full_config, print_diff));
+    // Bambu Studio 2.9.1: the Type 1 tower's first layer purges at initial_layer_flow_ratio (here the region option
+    // bottom_solid_infill_flow_ratio, otherwise read at G-code export only), so the tower is generated again.
+    if (std::find(region_diff.begin(), region_diff.end(), "bottom_solid_infill_flow_ratio") != region_diff.end())
+        update_apply_status(this->invalidate_step(psWipeTower));
 
     // Apply variables to placeholder parser. The placeholder parser is used by G-code export,
     // which should be stopped if print_diff is not empty.

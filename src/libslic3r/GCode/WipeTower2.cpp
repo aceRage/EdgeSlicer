@@ -3636,6 +3636,9 @@ void WipeTower2::interface_before_wipe(WipeTowerWriter2 &writer, const WipeTower
     if (m_interface.temp && fp.interface_temperature != fp.temperature &&
         !(m_wait_for_temp_on_wipe_tower && fp.interface_temperature > 0))
         writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, -1, "tower interface temperature"));
+    // Orca #12266: the normal temperature goes back on now, without a wait, so the nozzle cools during the purge.
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && m_interface.cooldown_during_tower)
+        writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, false, -1, "tower interface cool down during tower"));
 
     const Vec2f start  = writer.pos();
     bool        primed = false;
@@ -3670,7 +3673,7 @@ void WipeTower2::interface_after_wipe(WipeTowerWriter2 &writer, const WipeTowerI
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     // Back to the normal temperature; wait only if that means heating up.
-    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && !m_interface.cooldown_during_tower)
         writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, fp.temperature > fp.interface_temperature, -1,
                                                    "tower interface done, normal temperature"));
 }
@@ -3744,7 +3747,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
         // Orca #15035: like WipeTower::plan_tower_new(), extend the ribs instead of the tower when the
         // tower is smaller than the height-based stability minimum (what WipeTower::rib_footprint_side()
         // and so the pre-slice footprint estimate already assume).
-        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height);
+        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height, true);
         if (m_wipe_tower_depth + EPSILON < min_depth)
             m_rib_length = std::max(m_rib_length, min_depth * float(std::sqrt(2.f)));
     }

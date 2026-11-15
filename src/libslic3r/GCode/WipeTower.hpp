@@ -37,9 +37,11 @@ class WipeTower
 public:
     static const std::string never_skip_tag() { return "_GCODE_WIPE_TOWER_NEVER_SKIP_TAG"; }
 
-	// WipeTower height to minimum depth map
+	// WipeTower height to minimum depth map: Bambu Studio 2.9.1's (also Orca's) for this Type 1 tower, and the
+	// older two-point table WipeTower2 (Type 2) keeps so its towers stay as they were.
 	static const std::map<float, float> min_depth_per_height;
-    static float get_limit_depth_by_height(float max_height);
+	static const std::map<float, float> min_depth_per_height_type2;
+    static float get_limit_depth_by_height(float max_height, bool type2 = false);
     static float get_auto_brim_by_height(float max_height);
     // Both generators lay the brim in whole loops one line spacing apart, so the printed width
     // differs from the configured one. WipeTower reports it with half a spacing of line width
@@ -59,6 +61,12 @@ public:
     // filament_prime_volume, filament_prime_volume_nc after a hotend change on one extruder (H2C rack), 15 mm3 in
     // prime_volume_mode Saving.
     static float bambu_prime_volume(const PrintConfig &config, unsigned int filament, bool hotend_change);
+    // Edge (PR-B, decision D5): the purge block a filament goes to. A filament without a
+    // filament_adhesiveness_category (0) gets the category Bambu Studio's own presets give its filament_type
+    // (PLA 100, ABS / ASA 200, PETG / PCTG 300, PA / PPA 400, PC 500, TPU 600, PET-CF 800, PE 901, PP 902,
+    // PVA 704, BVOH 797, HIPS 798, PPS 801; a support filament for PLA 702, for PA / PET 703, for ABS 706), so
+    // an uncategorised PLA and PETG no longer share a block. A type without a Bambu category stays 0.
+    static int   adhesiveness_category(int configured, const std::string &filament_type, bool is_support);
     // One filament's share of a Type1 tower layer, as plan_tower_new() reserves it.
     struct PurgeEstimate
     {
@@ -70,10 +78,12 @@ public:
     // Depth of the Type1 purge stack at the given width (also the rectangle-wall depth): each
     // purge is whole lines at the block infill gap, one block per adhesiveness category sized by
     // its worst layer, stacked behind one perimeter width.
-    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f);
+    // max_height >= 0: a rectangle tower that tall, whose blocks with ramming may lay their purge rows at the ramming
+    // pitch (calc_block_infill_gap()); < 0 leaves that out (a rib tower never does it).
+    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f, float max_height = -1.f);
     // Side of the square bounding a rib-wall tower's first layer, brim excluded: the body plus the
-    // rib bulge, with the ribs extended to the height-based minimum as both generators do.
-    static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height);
+    // rib bulge, with the ribs extended to the height-based minimum as both generators do (type2: WipeTower2's table).
+    static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height, bool type2 = false);
     // Type1 rib tower: plan_tower_new() squares the tower from the depth at the configured width,
     // then re-plans the depth at the squared width.
     static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height, float line_width = 0.f);
@@ -289,6 +299,9 @@ public:
     // Bambu tags) for Bambu Lab printers; false for a non-Bambu printer set to wipe_tower_type
     // Type 1, whose export reads the compatible tags.
     void set_bbl_gcode_tags(bool bbl) { m_bbl_gcode_tags = bbl; }
+    // Bambu Studio 2.9.1 (Print.cpp:4220, set_first_layer_flow_ratio): the process' initial_layer_flow_ratio, which
+    // is bottom_solid_infill_flow_ratio here (Format/BambuKeyAliases.cpp), scales the tower's first-layer purge.
+    void set_first_layer_flow_ratio(float flow_ratio) { m_first_layer_flow_ratio = flow_ratio; }
 
     // Orca #10780 / #14685: the plate's per-layer nozzle grouping. The tower reads the extruder a filament
     // prints from on a layer (is_valid_last_layer(): an extruder's last layer above its printable height).
@@ -630,6 +643,12 @@ private:
     BoundingBoxf    m_shared_bed;                        // printable area every nozzle reaches, plate coordinates
     float           m_run_in_reserve            = 0.f;
     std::vector<std::vector<TowerInterface::GapPoint>> m_interface_gaps;
+    // Bambu Studio 2.9.1 enable_tower_interface_features: contact layers run in from outside the tower through wall
+    // gaps, change_filament_gcode purges for the interface (GCode::append_tcr), a contact block left unfilled is filled
+    // hot. m_interface (the Edge options) is off while it is on.
+    bool            m_enable_tower_interface_features = false;
+    // Orca #12266: the print temperature goes back on at the start of an interface purge or fill, not after it.
+    bool            m_interface_cooldown_during_tower = false;
 
     // Bed properties
     enum {
@@ -682,8 +701,8 @@ private:
     float           m_nozzle_change_perimeter_width = 0.f;
     float           m_tpu_fixed_spacing             = 2.f;      // ramming line gap with a reverse travel
     float           m_contact_speed                 = 20.f * 60.f;
-    // Orca: the tower's first-layer purge flow (Orca reads first_layer_flow_ratio, which this tree does not
-    // have, and Bambu Studio initial_layer_flow_ratio; both default to 1).
+    // The tower's first-layer purge flow: Bambu Studio's initial_layer_flow_ratio (bottom_solid_infill_flow_ratio
+    // here, set_first_layer_flow_ratio), Orca's first_layer_flow_ratio; all default to 1.
     float           m_first_layer_flow_ratio        = 1.f;
     bool            m_tower_framework               = false;    // prime_tower_enable_framework
     bool            m_flat_ironing                  = false;    // prime_tower_flat_ironing (needs the wall gap)
@@ -821,6 +840,13 @@ private:
     // Tower interface steps around a purge; the writer stands at the start of the purge.
     void    interface_before_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
     void    interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
+    // Bambu Studio 2.9.1 contact-layer pre-extrusion (get_next_pos(), finish_block_solid()): the start of a purge or
+    // solid fill moved filament_tower_interface_pre_extrusion_dist outside the tower wall it starts at, kept on the bed.
+    Vec2f   contact_run_in_start(const Vec2f &start, size_t tool) const;
+    // Bambu Studio 2.9.1 WipeTowerWriter::format_line_M109() / format_line_M104(): the nozzle named by T<physical
+    // extruder>, or I<filament> on a hotend_as_extruder printer (H3C); N0 marks a slicer line, W / C heating or cooling.
+    std::string bbs_format_M109(size_t tool, int temperature, const std::string &comment) const;
+    std::string bbs_format_M104(size_t tool, int temperature, bool is_heating, const std::string &comment) const;
 
     // Orca #10780 / #15035 block planner (Bambu Studio's plan_tower_new() / generate_new()).
     void               plan_tower_new();
@@ -845,7 +871,10 @@ private:
     static size_t      layer_end_tool(const WipeTowerInfo &layer, size_t carried);
     void               get_all_wall_skip_points();
     void               get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const std::vector<float> &y_shifts);
-    Vec2f              get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool) const;
+    Vec2f              get_next_pos(const box_coordinates &cleaning_box, float wipe_length, size_t tool, bool solid_toolchange) const;
+    // Bambu Studio 2.9.1 wipe_line_spacing(): the row pitch of a purge, the line width on a contact (solid) change and on
+    // the first layer, the block's gap otherwise.
+    float              wipe_line_spacing(size_t tool, bool solid_toolchange) const;
     ToolChangeResult   tool_change_new(size_t new_tool, bool solid_toolchange = false, bool solid_nozzlechange = false);
     ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true);
     ToolChangeResult   finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill = true);

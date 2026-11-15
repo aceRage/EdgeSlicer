@@ -13,6 +13,7 @@
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "libslic3r/Support/SupportInterfaceRules.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
@@ -1243,13 +1244,26 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     // Tower interface options: both generators, every printer. The run-in only ever enters the tower
     // through a wall gap, so it is greyed out (and ignored by the generators) without them.
+    // Bambu Studio 2.9.1's interface features: the Bambu Lab (Type 1) tower only. While on, that tower does not use the
+    // three options below, so they are greyed out there.
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1096-1102): offered on multi-extruder and hotend-as-extruder printers.
+    const bool bbs_interface_supported = have_prime_tower && !supports_wipe_tower_2 && preset_bundle != nullptr &&
+                                         TowerInterface::bambu_features_supported(preset_bundle->printers.get_edited_preset().config);
+    toggle_line("enable_tower_interface_features", bbs_interface_supported);
+    const bool bbs_interface = bbs_interface_supported && config->opt_bool("enable_tower_interface_features");
     for (auto el : {"wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger"})
         toggle_line(el, have_prime_tower);
-    toggle_field("wipe_tower_interface_run_in", have_prime_tower && config->opt_bool("wipe_tower_wall_gap"));
+    for (auto el : {"wipe_tower_interface_temp", "wipe_tower_interface_extra_prime"})
+        toggle_field(el, have_prime_tower && !bbs_interface);
+    toggle_field("wipe_tower_interface_run_in", have_prime_tower && !bbs_interface && config->opt_bool("wipe_tower_wall_gap"));
     const bool have_tower_interface = config->opt_bool("wipe_tower_interface_temp") ||
                                       (config->opt_bool("wipe_tower_interface_run_in") && config->opt_bool("wipe_tower_wall_gap")) ||
                                       config->opt_bool("wipe_tower_interface_extra_prime");
-    toggle_field("wipe_tower_interface_trigger", have_prime_tower && have_tower_interface);
+    toggle_field("wipe_tower_interface_trigger", have_prime_tower && !bbs_interface && have_tower_interface);
+    // Orca #12266: only where an interface heats the nozzle up.
+    toggle_line("enable_tower_interface_cooldown_during_tower", have_prime_tower);
+    toggle_field("enable_tower_interface_cooldown_during_tower",
+                 have_prime_tower && (bbs_interface || (!bbs_interface && config->opt_bool("wipe_tower_interface_temp"))));
 
     const bool local_z_dithering_enabled =
         config->has("dithering_local_z_mode") && config->option("dithering_local_z_mode") != nullptr &&

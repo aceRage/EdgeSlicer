@@ -1404,6 +1404,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Otherwise, leave control to the user completely.
     std::string        toolchange_gcode_str;
     bool               side_scrape_deretract_pending = false;
+    // The extra unretract of a contact change's pre-extrusion (tower interface features), here or after the side scrape.
+    double             side_scrape_extra_unretract   = 0.;
     const std::string& change_filament_gcode = gcodegen.config().change_filament_gcode.value;
     //        m_max_layer_z = std::max(m_max_layer_z, tcr.print_z);
     if (!change_filament_gcode.empty()) {
@@ -1566,6 +1568,22 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
             flush.set(config);
         }
+        // Bambu Studio 2.9.1 (GCode.cpp append_tcr 1073-1084): with the tower interface features a contact-layer tool
+        // change is a prime tower interface, and the H2 series / H3C change_filament_gcode purges for it
+        // ({if is_prime_tower_interface && filament_tower_interface_purge_volume != 0} G150.1, M620.13 W0 L.. T.. R0.0).
+        // Without the features the print-wide stubs (false, 0, 0) stay in place.
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            new_extruder_id >= 0) {
+            const FullPrintConfig &cfg              = gcodegen.config();
+            const size_t           filament         = size_t(new_extruder_id);
+            int                    interface_temp   = cfg.filament_tower_interface_print_temp.get_at(filament);
+            if (interface_temp == -1)
+                interface_temp = cfg.nozzle_temperature_range_high.get_at(filament);
+            config.set_key_value("is_prime_tower_interface", new ConfigOptionBool(tcr.is_contact));
+            config.set_key_value("filament_tower_interface_purge_volume",
+                                 new ConfigOptionFloat(cfg.filament_tower_interface_purge_volume.get_at(filament)));
+            config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInt(interface_temp));
+        }
         // BBS: the extruder-change retraction pair must be published BEFORE the template is
         // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
         // R{retraction_distance_when_ec}) - and it is keyed by the filament being switched TO.
@@ -1615,11 +1633,16 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
         // unretract before wiping. Bambu Studio 2.9.1 (GCode.cpp append_tcr 1245-1252): with the side scrape only the
         // Z unlift happens here; the E unretract waits for the end of the scrape ([wipe_tower_deretract_gcode]).
+        // Bambu Studio 2.9.1 (GCode.cpp 1237-1244): a contact change with the tower interface features pre-extrudes
+        // filament_tower_interface_pre_extrusion_length more at its start outside the tower.
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            tcr.is_contact && new_extruder_id >= 0)
+            side_scrape_extra_unretract = gcodegen.config().filament_tower_interface_pre_extrusion_length.get_at(size_t(new_extruder_id));
         if (tcr.side_scrape) {
             toolchange_gcode_str += gcodegen.writer().unlift();
             side_scrape_deretract_pending = true;
         } else
-            toolchange_gcode_str += gcodegen.unretract();
+            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract);
         check_add_eol(toolchange_gcode_str);
     }
 
@@ -1708,7 +1731,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // tower's base. Not `z`: an uncompacted tower's `z` may still carry the retract lift here.
     std::string side_scrape_deretract_str;
     if (side_scrape_deretract_pending)
-        side_scrape_deretract_str = gcodegen.writer().unretract();
+        side_scrape_deretract_str = gcodegen.writer().unretract(side_scrape_extra_unretract);
     double scrape_z_top = double(tcr.print_z) + m_z_offset;
     double scrape_z_low = double(tcr.side_scrape_z_low) + m_z_offset;
     if (tcr.side_scrape) {
