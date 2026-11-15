@@ -1449,10 +1449,10 @@ msgstr "フィーチャー1"
 msgid "Reverse rotation"
 msgstr "回転方向を反転"
 
-msgid "Rotate around center:"
+msgid "Orbit"
 msgstr "中心付近で回転"
 
-msgid "Parallel distance:"
+msgid "Parallel distance"
 msgstr ""
 
 msgid "Flip by Face 2"

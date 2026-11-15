@@ -14,6 +14,8 @@
 #include <libslic3r/EmbossBend.hpp>
 #include <libslic3r/ClipperUtils.hpp> // union_ex
 #include <libslic3r/EmbossBendSurface.hpp> // curved text letter by letter on the surface
+#include <libslic3r/EmbossPlacement.hpp> // which side of the surface, how far
+#include <libslic3r/SvgSplit.hpp> // shapes of a split SVG are not projected onto each other
 
 #include "libslic3r/libslic3r.h"
 #include "slic3r/GUI/Plater.hpp"
@@ -65,7 +67,7 @@ struct DataCreateVolume
 };
 
 // Offset of clossed side to model
-constexpr float SAFE_SURFACE_OFFSET = 0.015f; // [in mm]
+constexpr float SAFE_SURFACE_OFFSET = ::Slic3r::Emboss::SURFACE_SAFE_OFFSET; // [in mm]
 
 /// <summary>
 /// Create new TextVolume on the surface of ModelObject
@@ -151,6 +153,8 @@ class CreateSurfaceVolumeJob : public Job
 {
     CreateSurfaceVolumeData m_input;
     TriangleMesh            m_result;
+    // The shape did not fit on the surface and was made flat instead
+    bool                    m_made_flat = false;
 
 public:
     explicit CreateSurfaceVolumeJob(CreateSurfaceVolumeData &&input);
@@ -516,12 +520,27 @@ CreateSurfaceVolumeJob::CreateSurfaceVolumeJob(CreateSurfaceVolumeData &&input)
 void CreateSurfaceVolumeJob::process(Ctl &ctl) {
     if (!check(m_input)) 
         throw JobException("Bad input data for CreateSurfaceVolumeJob.");
-    m_result = cut_surface(*m_input.base, m_input, was_canceled(ctl, *m_input.base));
+    auto cancel = was_canceled(ctl, *m_input.base);
+    try {
+        m_result = cut_surface(*m_input.base, m_input, cancel);
+    } catch (const JobException &) {
+        // e.g. an SVG larger than the side of the object it lands on: make it flat (as the multi-part
+        // creation does) rather than nothing, the user can move it and turn "Use surface" on again
+        if (cancel())
+            return;
+        m_input.base->shape.projection.use_surface = false;
+        m_result    = try_create_mesh(*m_input.base, cancel);
+        m_made_flat = !m_result.empty();
+        if (!m_made_flat)
+            throw;
+    }
 }
 
 void CreateSurfaceVolumeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     if (!::finalize(canceled, eptr, *m_input.base))
         return; 
+    if (m_made_flat)
+        create_notification(_u8L("The shape does not fit on the surface there, so it was made flat. Move it onto the surface and turn on \"Use surface\" again."));
     create_volume(std::move(m_result), m_input.object_id,
         m_input.volume_type, m_input.transform, *m_input.base, m_input.gizmo);
 }
@@ -812,6 +831,15 @@ SurfaceVolumeData::ModelSources create_volume_sources(const ModelVolume &text_vo
     if (std::optional<ImageTraceMeta> meta = read_image_trace_meta(text_volume); meta.has_value())
         for (const ModelVolume *v : get_image_trace_volumes(*object, meta->params.group_id))
             skip.push_back(v->id().id);
+    // And the shapes of a split SVG (they follow the surface too)
+    auto split_group = [](const ModelVolume &v) {
+        return v.emboss_shape.has_value() && v.emboss_shape->svg_file.has_value() ?
+                   svg_split_group_of(v.emboss_shape->svg_file->path_in_3mf) : std::string();
+    };
+    if (const std::string group = split_group(text_volume); !group.empty())
+        for (const ModelVolume *v : volumes)
+            if (v != &text_volume && split_group(*v) == group)
+                skip.push_back(v->id().id);
     return ::create_sources(volumes, skip);
 }
 
@@ -1172,7 +1200,7 @@ template<typename Fnc> TriangleMesh create_mesh_per_glyph(DataBase &input, Fnc w
                 continue;
 
             Vec2d to_zero_vec = letter_bb.center().cast<double>() * shape.scale; // [in mm]
-            float surface_offset = input.is_outside ? -SAFE_SURFACE_OFFSET : (-shape.projection.depth + SAFE_SURFACE_OFFSET);
+            float surface_offset = ::Slic3r::Emboss::flat_back_offset(input.is_outside, float(shape.projection.depth), SAFE_SURFACE_OFFSET);
             
             if (input.from_surface.has_value())
                 surface_offset += *input.from_surface;
@@ -1244,7 +1272,7 @@ TriangleMesh try_create_mesh(DataBase &input, const Fnc& was_canceled)
     double scale = input.shape.scale;
     double depth = input.shape.projection.depth / scale;    
     auto projectZ = std::make_unique<ProjectZ>(depth);    
-    float offset = input.is_outside ? -SAFE_SURFACE_OFFSET : (SAFE_SURFACE_OFFSET - input.shape.projection.depth);
+    float offset = ::Slic3r::Emboss::flat_back_offset(input.is_outside, float(input.shape.projection.depth), SAFE_SURFACE_OFFSET);
     // EdgeSlicer: no "from surface" offset here. For a flat shape that distance is where the volume is
     // (the "From surface" slider, the 3D handles and a new volume all move the volume itself, and the
     // tool measures it back from the volume when it opens), so offsetting the mesh as well put the
@@ -1334,9 +1362,8 @@ void update_volume(TriangleMesh &&mesh, const DataUpdate &data, const Transform3
         return create_message("Empty mesh can't be created.");
 
     Plater *plater = wxGetApp().plater();
-    // Check gizmo is still open otherwise job should be canceled
-    assert(plater->canvas3D()->get_gizmos_manager().get_current_type() == GLGizmosManager::Emboss ||
-           plater->canvas3D()->get_gizmos_manager().get_current_type() == GLGizmosManager::Svg);
+    // Edge: no check that the Text / SVG tool is still open: a type change in the object list remakes
+    // the volume without it (GLGizmoSVG::remake_after_type_change()).
 
     if (data.make_snapshot) {
         // TRN: This is the title of the action appearing in undo/redo stack.
@@ -1498,9 +1525,10 @@ OrthoProject create_projection_for_cut(Transform3d tr, double shape_scale, const
 
 OrthoProject3d create_emboss_projection(bool is_outside, float emboss, Transform3d tr, SurfaceCut &cut)
 {
-    float 
-        front_move = (is_outside) ? emboss : SAFE_SURFACE_OFFSET,
-        back_move  = -((is_outside) ? SAFE_SURFACE_OFFSET : emboss);    
+    // raised: from a hair under the surface to `emboss` above it; sunk (modifier, negative volume):
+    // from a hair above the surface to `emboss` into the object (libslic3r/EmbossPlacement.hpp)
+    const ::Slic3r::Emboss::SurfaceShell shell = ::Slic3r::Emboss::surface_shell(is_outside, emboss, SAFE_SURFACE_OFFSET);
+    const float front_move = shell.front, back_move = shell.back;
     its_transform(cut, tr.pretranslate(Vec3d(0., 0., front_move)));    
     Vec3d from_front_to_back(0., 0., back_move - front_move);
     return OrthoProject3d(from_front_to_back);

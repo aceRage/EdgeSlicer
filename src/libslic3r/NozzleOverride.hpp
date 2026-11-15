@@ -97,8 +97,13 @@ std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<do
 // rack_override_from_reported() (ToolSlots.hpp) turns it into the project's rack texts.
 std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders);
 // The same nozzles with their reported types (owner bug 2026-11-07: an H3C sync must bring each slot's type too).
-// Every RackNozzle has volume_given set.
+// Every RackNozzle has volume_given set. A positional rack (H3C: rack nozzles carry their rack position, none is
+// mounted) lists position n at index n, with a RackNozzle of diameter 0 for a position it did not report (empty or
+// unusable); trailing positions it did not report are left out.
 std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync::PrinterState &state, size_t extruders);
+// "Sync nozzle sizes": each logical extruder's size, the mounted nozzle's (reported_extruder_nozzle_sizes), else the first
+// usable rack position's (H3C: nothing is mounted between prints, every nozzle sits in the rack); 0 where neither.
+std::vector<double> reported_sync_nozzle_sizes(const DualNozzleSync::PrinterState &state, size_t extruders);
 
 } // namespace Slic3r
 
