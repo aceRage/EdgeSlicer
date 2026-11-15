@@ -46,6 +46,9 @@ struct SandboxSpec
     std::vector<SandboxPath> extra_paths;
     bool                     allow_network = false;
     bool                     allow_exec    = false;
+    // Parent-gated EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE. Carried in hello so the child can apply
+    // the labelled probe without honouring raw env (that would be reachable in release).
+    bool dev_seatbelt_probe = false;
 };
 
 struct SandboxReport

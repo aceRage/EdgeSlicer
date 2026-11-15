@@ -130,6 +130,11 @@ struct ScopedPluginManager
 
 bool load_and_wait(PluginManager& manager, const std::string& plugin_key, std::string& error)
 {
+    // Pin happens at the call site. On unsigned macOS also store Run anyway so execute
+    // tests are not fail-closed out of the suite. Untrusted loads still fail Phase 5 first.
+    if (!allow_unsandboxed_for_test_if_needed(plugin_key, error))
+        return false;
+    error.clear();
     manager.load_plugin(plugin_key, /*skip_deps=*/true);
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }
@@ -205,7 +210,7 @@ void plant_unchecked_pyc(const fs::path& py_path, const std::string& tampered_so
     REQUIRE(cached);
     const char* cached_utf8 = PyUnicode_AsUTF8(cached.get());
     REQUIRE(cached_utf8);
-    const fs::path cache_path(cached_utf8);
+    const fs::path            cache_path(cached_utf8);
     boost::system::error_code mk_ec;
     fs::create_directories(cache_path.parent_path(), mk_ec);
 
@@ -497,6 +502,9 @@ TEST_CASE("refusal to enable when untrusted", "[PluginTrust][Python]")
 
 TEST_CASE("enable and run succeed when pinned; removing the pin refuses run", "[PluginTrust][Python]")
 {
+    // The "Script plugin refused; untrusted" log is this test's second launch after unpin, not
+    // sandbox-unavailable. 6d94482616 skipped child-side pin rehash so Landlock cannot hide
+    // trust.json; it did not change parent-side evaluate().
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
@@ -519,7 +527,7 @@ TEST_CASE("enable and run succeed when pinned; removing the pin refuses run", "[
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
     const ScriptCompletion ok = wait_for_script(manager, "Trust_Echo", "Echo");
-    CHECK(ok.error.empty());
+    REQUIRE(ok.error.empty());
     CHECK(ok.result.message == "trust-ok");
 
     REQUIRE(pt::unpin_plugin("Trust_Echo", pin_error));
@@ -839,7 +847,7 @@ TEST_CASE("reload after extract-dir tamper still imports hashed wheel bytes", "[
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
     const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
-    CHECK(first.error.empty());
+    REQUIRE(first.error.empty());
     CHECK(first.result.message == "from-wheel");
 
     const fs::path extracted = root / "__whl_extracted__" / "helper_token-1.0-py3-none-any" / "helper_token.py";
@@ -851,7 +859,7 @@ TEST_CASE("reload after extract-dir tamper still imports hashed wheel bytes", "[
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
     const ScriptCompletion second = wait_for_script(manager, "Trust_Echo", "Echo");
-    CHECK(second.error.empty());
+    REQUIRE(second.error.empty());
     CHECK(second.result.message == "from-wheel");
     CHECK(second.result.message != "tampered");
     CHECK(read_text(extracted) == "TOKEN = \"from-wheel\"");
@@ -882,7 +890,7 @@ TEST_CASE("planted pyc is not used on reload", "[PluginTrust][Python]")
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
     const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
-    CHECK(first.error.empty());
+    REQUIRE(first.error.empty());
     CHECK(first.result.message == "trust-ok");
 
     std::string tampered = k_plugin_source;
@@ -898,7 +906,7 @@ TEST_CASE("planted pyc is not used on reload", "[PluginTrust][Python]")
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
     const ScriptCompletion second = wait_for_script(manager, "Trust_Echo", "Echo");
-    CHECK(second.error.empty());
+    REQUIRE(second.error.empty());
     CHECK(second.result.message == "trust-ok");
     CHECK(second.result.message != "planted-ok");
 }

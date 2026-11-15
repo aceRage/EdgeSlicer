@@ -4,6 +4,7 @@
 
 #include "plugin_test_utils.hpp"
 
+#include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
@@ -255,12 +256,28 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
     REQUIRE(reply.contains("sandbox"));
     const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
     INFO("sandbox kind=" << report.kind << " detail=" << report.detail << " abi=" << report.landlock_abi);
-#ifdef __linux__
     const auto probe = plugin_ipc::probe_os_sandbox();
+#ifdef __linux__
     if (probe.landlock_abi > 0) {
         CHECK(report.applied);
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_landlock_seccomp);
         CHECK(report.landlock_abi == probe.landlock_abi);
+    } else {
+        CHECK_FALSE(report.applied);
+        CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
+    }
+#elif defined(__APPLE__)
+    if (probe.app_sandbox) {
+        CHECK(report.applied);
+        CHECK(report.kind == plugin_ipc::k_sandbox_kind_app_sandbox);
+    } else {
+        CHECK_FALSE(report.applied);
+        CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
+    }
+#elif defined(_WIN32)
+    if (probe.appcontainer) {
+        CHECK(report.applied);
+        CHECK(report.kind == plugin_ipc::k_sandbox_kind_appcontainer);
     } else {
         CHECK_FALSE(report.applied);
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
@@ -286,11 +303,9 @@ TEST_CASE("sandboxed child cannot read a user-home file and can read its plugin 
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-#ifdef __linux__
-    if (plugin_ipc::probe_os_sandbox().landlock_abi <= 0) {
-        SKIP("Landlock unavailable: " + plugin_ipc::probe_os_sandbox().reason);
+    if (!test_os_sandbox_will_apply()) {
+        SKIP("OS sandbox is not applied in this environment: " + plugin_ipc::probe_os_sandbox().reason);
     }
-#endif
 
     ScopedDataDir      data_dir_guard("plugin-sandbox-fs");
     ScopedTemporaryDir fake_home("plugin-sandbox-home");
@@ -336,9 +351,13 @@ TEST_CASE("sandboxed child cannot read a user-home file and can read its plugin 
 
     const auto report = PluginHostClient::instance().last_sandbox_report();
     INFO("host sandbox kind=" << report.kind << " applied=" << report.applied);
-#ifdef __linux__
     CHECK(report.applied);
+#ifdef __linux__
     CHECK(report.kind == plugin_ipc::k_sandbox_kind_landlock_seccomp);
+#elif defined(_WIN32)
+    CHECK(report.kind == plugin_ipc::k_sandbox_kind_appcontainer);
+#elif defined(__APPLE__)
+    CHECK(report.kind == plugin_ipc::k_sandbox_kind_app_sandbox);
 #endif
 }
 
@@ -400,6 +419,88 @@ class Pkg(orca.base):
     std::string clear_error;
     plugin_trust::clear_unsandboxed("Ipc_Echo", clear_error);
 }
+
+TEST_CASE("execute without a stored override refuses when the OS sandbox is unavailable", "[PluginSandbox][fail-closed][Python]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    if (test_os_sandbox_will_apply())
+        SKIP("OS sandbox applies here; refusal is covered by FORCE_UNAVAILABLE");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("plugin-sandbox-refuse");
+    write_plugin(data_dir_guard, "Ipc_Echo", R"PY(# /// script
+# requires-python = ">=3.12"
+# [tool.orcaslicer.plugin]
+# name = "Echo"
+# type = "script"
+# ///
+import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        return orca.ExecutionResult.success("echo")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY");
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    PluginDescriptor descriptor;
+    REQUIRE(manager.try_get_plugin_descriptor("Ipc_Echo", descriptor));
+    std::string       error;
+    const std::string hash = plugin_trust::sha256_plugin_tree(descriptor.plugin_root.empty() ?
+                                                                  boost::filesystem::path(descriptor.entry_path) :
+                                                                  boost::filesystem::path(descriptor.plugin_root),
+                                                              error);
+    REQUIRE_FALSE(hash.empty());
+    REQUIRE(plugin_trust::pin_hash("Ipc_Echo", hash, error));
+    manager.load_plugin("Ipc_Echo", /*skip_deps=*/true);
+    REQUIRE(manager.wait_for_plugin_load("Ipc_Echo", std::chrono::seconds(120), error));
+
+    const ScriptCompletion denied = wait_for_script(manager, "Ipc_Echo", "Echo");
+    CHECK_FALSE(denied.error.empty());
+    CHECK(denied.error.find("OS sandbox unavailable") != std::string::npos);
+    CHECK_FALSE(plugin_trust::is_unsandboxed("Ipc_Echo"));
+}
+
+#ifdef __APPLE__
+TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handshake][macos-sdk]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedDataDir           data_dir_guard("plugin-sandbox-seatbelt");
+    plugin_ipc::SpawnedHost host;
+    std::string             error;
+    REQUIRE(plugin_ipc::spawn_host(host, error));
+    plugin_ipc::SandboxSpec spec;
+    spec.python_home        = PythonInterpreter::bundled_python_home();
+    spec.plugin_root        = data_dir_guard.plugins_dir().string();
+    spec.dev_seatbelt_probe = true;
+    nlohmann::json hello    = {
+        {"type", plugin_ipc::k_type_hello}, {"protocol_version", plugin_ipc::k_protocol_version}, {"data_dir", data_dir()},
+        {"resources_dir", resources_dir()}, {"sandbox", plugin_ipc::sandbox_spec_to_json(spec)},
+    };
+    REQUIRE(host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
+    nlohmann::json reply;
+    REQUIRE(host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
+    REQUIRE(reply.contains("sandbox"));
+    const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
+    INFO("sandbox kind=" << report.kind << " detail=" << report.detail);
+    CHECK(report.applied);
+    CHECK(report.kind == plugin_ipc::k_sandbox_kind_seatbelt_probe);
+    CHECK(report.detail.find("DEV/TEST") != std::string::npos);
+    plugin_ipc::kill_host(host);
+    plugin_ipc::close_host(host);
+}
+#endif
 
 #ifdef __linux__
 TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landlock]")

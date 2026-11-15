@@ -24,13 +24,21 @@ bubblewrap is optional for **native** Linux packages only and is off unless
 **Flatpak must never nest bwrap** (`running_inside_flatpak()` / `/.flatpak-info` / `FLATPAK_ID`).
 Inside Flatpak the child still uses Landlock+seccomp.
 
-`sandbox-exec` / Seatbelt is a **dev/test probe only**, labelled `seatbelt-probe` and enabled
-with `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` through the same test-only gate. It is not the
-shipping macOS design. The probe `dlsym`s `sandbox_init` and applies the named profiles
-`"no-internet"` / `"no-write"` (`SANDBOX_NAMED`), falling back to a tiny SBPL string. It does
-not use `kSBXProfileNoInternet` / `kSBXProfileNoWrite` (removed in current MacOSX.sdk). A missing
-symbol or failed `sandbox_init` is fail-closed (`kind=none`). `scripts/check_macos_sandbox_sdk.sh`
-syntax-checks this against a stub SDK so Linux CI can catch the Xcode 27.2 break.
+`sandbox-exec` / Seatbelt is a **dev/test probe only**, labelled `seatbelt-probe`. The parent
+honours `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` through the Phase 7 test-only env gate and copies
+`dev_seatbelt_probe` into the hello spec. The child applies the probe from that field, not from
+raw environment (so a release helper cannot be switched by exporting the variable). It is not
+the shipping macOS design and is **not** auto-enabled for unsigned dev builds: named profiles
+`"no-internet"` / `"no-write"` are not grant-aware, so they cannot stand in for App Sandbox.
+Unsigned macOS execute tests store a per-plugin `trust.json` `unsandboxed` override instead
+(the same Run anyway record the prompt writes). Isolation tests skip when the shipping sandbox
+is not applied.
+
+The probe `dlsym`s `sandbox_init` and applies those named profiles (`SANDBOX_NAMED`), falling
+back to a tiny SBPL string. It does not use `kSBXProfileNoInternet` / `kSBXProfileNoWrite`
+(removed in current MacOSX.sdk). A missing symbol or failed `sandbox_init` is fail-closed
+(`kind=none`). `scripts/check_macos_sandbox_sdk.sh` syntax-checks this against a stub SDK
+(bash 3.2-safe) so Linux CI can catch the Xcode 27.2 break.
 
 ## Handshake
 
@@ -48,6 +56,9 @@ write root), so Landlock rules never have to be loosened.
 The child does not re-hash the plugin tree on `load`. Edge already evaluated Phase 5 trust
 in-process before sending `load`, and host RPC still rechecks p5 on the Edge side. Re-hashing
 under Landlock missed `trust.json` or picked up execute-time files the pin did not include.
+A sandbox-unavailable execute is reported as `OS sandbox unavailable; plugin did not run`, not
+as untrusted. The Trust_Echo "untrusted" log on unsigned macOS was the existing unpin-and-refuse
+path after Catch2 `CHECK` continued past a refused execute.
 
 ## Fail-closed policy
 

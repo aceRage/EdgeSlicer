@@ -7,8 +7,11 @@
 #include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "test_utils.hpp"
 
@@ -16,11 +19,16 @@
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
+#include <slic3r/plugin/ipc/PluginSandbox.hpp>
 #endif
 
 // Catch2 v2 has no SKIP(); keep the Orca tests' SKIP("...") calls compiling.
 #ifndef SKIP
-#define SKIP(msg) do { WARN(msg); return; } while (0)
+#define SKIP(msg) \
+    do { \
+        WARN(msg); \
+        return; \
+    } while (0)
 #endif
 
 namespace Slic3r {
@@ -34,8 +42,7 @@ struct ScopedTemporaryDir
     explicit ScopedTemporaryDir(const std::string& tag)
     {
         boost::system::error_code ec;
-        m_path = boost::filesystem::temp_directory_path() /
-                 boost::filesystem::unique_path("orca-" + tag + "-%%%%-%%%%");
+        m_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orca-" + tag + "-%%%%-%%%%");
         boost::filesystem::create_directories(m_path, ec);
     }
 
@@ -58,8 +65,7 @@ struct ScopedTemporaryFile
     boost::filesystem::path m_path;
 
     explicit ScopedTemporaryFile(const std::string& extension = ".tmp")
-        : m_path(boost::filesystem::temp_directory_path() /
-                 boost::filesystem::unique_path("orca-%%%%-%%%%-%%%%" + extension))
+        : m_path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orca-%%%%-%%%%-%%%%" + extension))
     {}
 
     ~ScopedTemporaryFile()
@@ -130,12 +136,11 @@ struct ScopedUnsetEnv
 // disposable tree and tests don't leak state into each other.
 struct ScopedDataDir
 {
-    ScopedTemporaryDir        tmp;   // owns the temp dir (create + recursive remove)
-    boost::filesystem::path   dir;   // = tmp.path(); kept as a member for callers
-    std::string               previous;
+    ScopedTemporaryDir      tmp; // owns the temp dir (create + recursive remove)
+    boost::filesystem::path dir; // = tmp.path(); kept as a member for callers
+    std::string             previous;
 
-    explicit ScopedDataDir(const std::string& tag)
-        : tmp("orca-" + tag), dir(tmp.path()), previous(data_dir())
+    explicit ScopedDataDir(const std::string& tag) : tmp("orca-" + tag), dir(tmp.path()), previous(data_dir())
     {
         set_data_dir(dir.string());
     }
@@ -157,8 +162,7 @@ struct ScopedResourcesDir
     boost::filesystem::path dir;
     std::string             previous;
 
-    explicit ScopedResourcesDir(const std::string& tag)
-        : tmp("orca-" + tag), dir(tmp.path()), previous(resources_dir())
+    explicit ScopedResourcesDir(const std::string& tag) : tmp("orca-" + tag), dir(tmp.path()), previous(resources_dir())
     {
         set_resources_dir(dir.string());
     }
@@ -170,8 +174,23 @@ struct ScopedResourcesDir
 };
 
 #ifdef EDGE_PYTHON_PLUGINS
+// Unsigned macOS helpers and missing AppContainer report kind=none. Isolation tests skip;
+// execute tests still need IPC/trust/script coverage via the stored Run anyway override.
+inline bool test_os_sandbox_will_apply() { return plugin_ipc::os_sandbox_available() && !plugin_ipc::sandbox_env_force_unavailable(); }
+
+// Writes trust.json unsandboxed[] when this environment cannot apply the shipping OS sandbox.
+// FORCE_UNAVAILABLE tests leave the override off so they still hit the fail-closed prompt.
+// Production never calls this; env overrides stay behind helper_env_overrides_allowed().
+inline bool allow_unsandboxed_for_test_if_needed(const std::string& plugin_key, std::string& error)
+{
+    if (test_os_sandbox_will_apply() || plugin_ipc::sandbox_env_force_unavailable())
+        return true;
+    return plugin_trust::allow_unsandboxed(plugin_key, error);
+}
+
 // Phase 5: enable/run refuse an unpinned local package. Existing Catch2 loads pin the discovered
-// entry so they still exercise Python, not the trust prompt.
+// entry so they still exercise Python, not the trust prompt. On unsigned macOS / no AppContainer
+// this also stores Run anyway so execute tests are not fail-closed out of the suite.
 inline bool approve_plugin_for_test(const std::string& plugin_key, std::string& error)
 {
     PluginDescriptor descriptor;
@@ -180,11 +199,29 @@ inline bool approve_plugin_for_test(const std::string& plugin_key, std::string& 
         return false;
     }
     const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
-                                                                         boost::filesystem::path(descriptor.plugin_root);
-    const std::string hash = plugin_trust::sha256_plugin_tree(root, error);
+                                                                          boost::filesystem::path(descriptor.plugin_root);
+    const std::string             hash = plugin_trust::sha256_plugin_tree(root, error);
     if (hash.empty())
         return false;
-    return plugin_trust::pin_hash(descriptor.plugin_key, hash, error);
+    if (!plugin_trust::pin_hash(descriptor.plugin_key, hash, error))
+        return false;
+    return allow_unsandboxed_for_test_if_needed(descriptor.plugin_key, error);
+}
+
+// Abort early when `aborted` becomes true (execute already refused) instead of waiting out timeout.
+inline bool wait_for_path(const boost::filesystem::path& path, std::chrono::milliseconds timeout, const std::function<bool()>& aborted = {})
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(path, ec) && !ec)
+            return true;
+        if (aborted && aborted())
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    boost::system::error_code ec;
+    return boost::filesystem::exists(path, ec) && !ec;
 }
 #endif
 

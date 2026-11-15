@@ -68,9 +68,10 @@ nlohmann::json sandbox_spec_to_json(const SandboxSpec& spec)
     for (const SandboxPath& p : spec.extra_paths)
         extra.push_back({{"path", p.path}, {"write", p.write}});
     return {
-        {"plugin_key", spec.plugin_key}, {"python_home", spec.python_home}, {"plugin_root", spec.plugin_root},
-        {"write_root", spec.write_root}, {"extra_paths", std::move(extra)}, {"allow_network", spec.allow_network},
-        {"allow_exec", spec.allow_exec},
+        {"plugin_key", spec.plugin_key},   {"python_home", spec.python_home},
+        {"plugin_root", spec.plugin_root}, {"write_root", spec.write_root},
+        {"extra_paths", std::move(extra)}, {"allow_network", spec.allow_network},
+        {"allow_exec", spec.allow_exec},   {"dev_seatbelt_probe", spec.dev_seatbelt_probe},
     };
 }
 
@@ -81,12 +82,13 @@ bool sandbox_spec_from_json(const nlohmann::json& json, SandboxSpec& spec, std::
         error = "sandbox spec is not an object";
         return false;
     }
-    spec.plugin_key    = json.value("plugin_key", std::string());
-    spec.python_home   = json.value("python_home", std::string());
-    spec.plugin_root   = json.value("plugin_root", std::string());
-    spec.write_root    = json.value("write_root", std::string());
-    spec.allow_network = json.value("allow_network", false);
-    spec.allow_exec    = json.value("allow_exec", false);
+    spec.plugin_key         = json.value("plugin_key", std::string());
+    spec.python_home        = json.value("python_home", std::string());
+    spec.plugin_root        = json.value("plugin_root", std::string());
+    spec.write_root         = json.value("write_root", std::string());
+    spec.allow_network      = json.value("allow_network", false);
+    spec.allow_exec         = json.value("allow_exec", false);
+    spec.dev_seatbelt_probe = json.value("dev_seatbelt_probe", false);
     if (json.contains("extra_paths") && json["extra_paths"].is_array()) {
         for (const auto& item : json["extra_paths"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
@@ -124,7 +126,7 @@ SandboxReport sandbox_report_from_json(const nlohmann::json& json)
 bool sandbox_specs_equal(const SandboxSpec& a, const SandboxSpec& b)
 {
     if (a.plugin_key != b.plugin_key || a.python_home != b.python_home || a.plugin_root != b.plugin_root || a.write_root != b.write_root ||
-        a.allow_network != b.allow_network || a.allow_exec != b.allow_exec)
+        a.allow_network != b.allow_network || a.allow_exec != b.allow_exec || a.dev_seatbelt_probe != b.dev_seatbelt_probe)
         return false;
     if (a.extra_paths.size() != b.extra_paths.size())
         return false;
@@ -202,9 +204,10 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
         if (!ec && boost::filesystem::is_regular_file(st))
             spec.plugin_root = boost::filesystem::path(spec.plugin_root).parent_path().string();
     }
-    spec.write_root    = strip_tree_wildcard(write_root);
-    spec.allow_network = !permissions.network_http.empty() || !permissions.network_socket.empty();
-    spec.allow_exec    = !permissions.process.empty();
+    spec.write_root         = strip_tree_wildcard(write_root);
+    spec.allow_network      = !permissions.network_http.empty() || !permissions.network_socket.empty();
+    spec.allow_exec         = !permissions.process.empty();
+    spec.dev_seatbelt_probe = sandbox_env_seatbelt_probe();
 
     const boost::filesystem::path helper_dir = helper_path().parent_path();
     if (!helper_dir.empty())

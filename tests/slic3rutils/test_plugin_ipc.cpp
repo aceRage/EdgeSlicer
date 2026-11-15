@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -246,15 +247,9 @@ ScriptCompletion wait_for_script(PluginManager&       manager,
     return completion;
 }
 
-bool wait_for_file(const fs::path& path, std::chrono::milliseconds timeout)
+bool wait_for_file(const fs::path& path, std::chrono::milliseconds timeout, const std::function<bool()>& aborted = {})
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (fs::exists(path))
-            return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return fs::exists(path);
+    return wait_for_path(path, timeout, aborted);
 }
 
 std::string read_file(const fs::path& path)
@@ -444,7 +439,12 @@ TEST_CASE("Killing the host mid-execute fails the run and a later run respawns",
         cv.notify_all();
     });
     REQUIRE(launch.launched_async);
-    REQUIRE(wait_for_file(marker, std::chrono::seconds(15)));
+    if (!wait_for_file(marker, std::chrono::seconds(15), [&] { return done; })) {
+        if (done)
+            FAIL("execute ended before marker: " + first.error);
+        else
+            FAIL("timed out waiting for marker");
+    }
     REQUIRE(PluginHostClient::instance().child_pid_for_testing() > 0);
     REQUIRE(PluginHostClient::instance().kill_child_for_testing());
     {
@@ -759,7 +759,12 @@ TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[Plug
         cv.notify_all();
     });
     REQUIRE(launch.launched_async);
-    REQUIRE(wait_for_file(marker, std::chrono::seconds(15)));
+    if (!wait_for_file(marker, std::chrono::seconds(15), [&] { return done; })) {
+        if (done)
+            FAIL("execute ended before marker: " + completion.error);
+        else
+            FAIL("timed out waiting for marker");
+    }
     REQUIRE(PluginHostClient::instance().has_active_run("Ipc_Hang"));
     REQUIRE(PluginHostClient::instance().child_pid_for_testing() > 0);
     const auto start = std::chrono::steady_clock::now();
@@ -964,7 +969,12 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
         cv.notify_all();
     });
     REQUIRE(launch.launched_async);
-    REQUIRE(wait_for_file(script_started, std::chrono::seconds(15)));
+    if (!wait_for_file(script_started, std::chrono::seconds(15), [&] { return done; })) {
+        if (done)
+            FAIL("execute ended before marker: " + script.error);
+        else
+            FAIL("timed out waiting for script_started");
+    }
 
     DynamicPrintConfig config  = pipeline_config("Stamp", "PipelineStamp");
     std::string        path    = gcode.string();

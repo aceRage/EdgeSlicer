@@ -80,7 +80,7 @@ bool apply_mac_sandbox(const SandboxSpec& spec, SandboxReport& report, std::stri
     report.network = spec.allow_network;
     report.exec    = spec.allow_exec;
 
-    if (sandbox_env_seatbelt_probe())
+    if (spec.dev_seatbelt_probe)
         return apply_seatbelt_probe(spec, report, error);
 
     if (!containerized()) {
