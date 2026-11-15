@@ -586,6 +586,16 @@ void ArrangeJob::prepare()
         prepare_partplate();
     }
 
+    // EdgeSlicer "Avoid nozzle reach zones": process() clips the bed to what every nozzle reaches.
+    // Only a shape that cannot be clipped gets the one-nozzle strips as fixed items on every bed
+    // (finalize() skips virtual objects, like the exclusion areas).
+    m_reach_areas = nozzle_reach_areas(m_plater);
+    const Points full_bed = get_bed_shape(*m_plater->config());
+    for (arrangement::ArrangePolygon &ap : nozzle_reach_fallback_blockers(m_reach_areas, full_bed, MAX_NUM_PLATES))
+        m_unselected.emplace_back(std::move(ap));
+    // The same for the big-item retry of the packer (params.excluded_regions, filled in process()).
+    m_reach_regions = nozzle_reach_fallback_blockers(m_reach_areas, full_bed, 1, scale_(1));
+
 
 #if SAVE_ARRANGE_POLY
     if (1)
@@ -666,8 +676,12 @@ void ArrangeJob::process(Ctl &ctl)
     update_selected_items_axis_align(m_selected, m_plater->config(), params);
 
     Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
+    // EdgeSlicer "Avoid nozzle reach zones": arrange on the part of the bed every nozzle reaches.
+    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas);
 
     partplate_list.preprocess_exclude_areas(params.excluded_regions, 1, scale_(1));
+    for (arrangement::ArrangePolygon &ap : m_reach_regions)
+        params.excluded_regions.emplace_back(std::move(ap));
 
     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << bedpts[0].transpose() << ", " << bedpts[1].transpose() << ", " << bedpts[2].transpose() << ", " << bedpts[3].transpose();
 
@@ -913,6 +927,24 @@ double bed_stride_x(const Plater* plater) {
 double bed_stride_y(const Plater* plater) {
     double beddepth = plater->build_volume().bounding_box().size().y();
     return (1. + LOGICAL_BED_GAP) * beddepth;
+}
+
+ExtruderAreas nozzle_reach_areas(Plater *p)
+{
+    if (p == nullptr || p->canvas3D() == nullptr || p->printer_technology() != ptFFF)
+        return {};
+    if (!p->canvas3D()->get_arrange_settings().avoid_nozzle_reach_zones)
+        return {};
+    // Plater sets these only for a printer with two or more nozzles (nozzle_diameter).
+    return p->get_partplate_list().get_extruder_areas();
+}
+
+arrangement::ArrangePolygons nozzle_reach_fallback_blockers(const ExtruderAreas &areas, const Points &bed, int num_beds, coord_t inflation)
+{
+    Points clipped = bed;
+    if (arrangement::clip_bed_to_nozzle_reach(clipped, areas))
+        return {};
+    return arrangement::nozzle_reach_blockers(areas, num_beds, inflation);
 }
 
 // call before get selected and unselected

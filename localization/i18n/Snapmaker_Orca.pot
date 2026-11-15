@@ -4247,6 +4247,14 @@ msgstr ""
 msgid "Avoid extrusion calibration region"
 msgstr ""
 
+msgid "Avoid nozzle reach zones"
+msgstr ""
+
+msgid ""
+"Keep arranged objects out of the hatched strips that only one nozzle can "
+"reach, so every object can be printed with either nozzle."
+msgstr ""
+
 msgid "Align to Y axis"
 msgstr ""
 
