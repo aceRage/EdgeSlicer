@@ -2168,8 +2168,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
     ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (Bambu Lab Type 1 towers)
     ((ConfigOptionFloats,              filament_prime_volume_nc))   // Orca #14800: the prime after a hotend change on one extruder
-    // Bambu Studio 2.9.1: per-row speed multipliers of the tower purge ("" = the built-in ramp).
-    ((ConfigOptionStrings,             filament_prime_tower_speed_factor_curve))
     // Orca #10780: the Type 1 tower purges each adhesiveness category into its own block.
     ((ConfigOptionInts,                filament_adhesiveness_category))
     ((ConfigOptionBools,               filament_is_high_temperature))
@@ -2426,10 +2424,34 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_nozzle_map))
 )
 
+// Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintTowerConfig,
+
+    // Bambu Studio 2.9.1 (H3C): tower speed on hotend_as_extruder printers, slowdown at the end of a tower
+    // visit, the purge-start line ironing and its speed, the side scrape after a tool change.
+    ((ConfigOptionFloat,              prime_tower_feedrate_factor))
+    ((ConfigOptionPercent,            prime_tower_tail_speed_factor))
+    ((ConfigOptionFloat,              prime_tower_tail_slowdown_volume))
+    ((ConfigOptionBool,               prime_tower_line_ironing))
+    ((ConfigOptionFloat,              prime_tower_ironing_speed))
+    ((ConfigOptionBool,               prime_tower_side_scrape))
+    ((ConfigOptionEnum<SideScrapeFace>, prime_tower_side_scrape_face))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_length))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_height))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_speed))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_wall_gap))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_point_spacing))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
+    // Per-row speed multipliers of the tower purge ("" = the built-in ramp), per filament.
+    ((ConfigOptionStrings,            filament_prime_tower_speed_factor_curve))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
@@ -2600,21 +2622,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercent,            prime_tower_infill_gap))
     ((ConfigOptionBool,               prime_tower_enable_framework))
     ((ConfigOptionBool,               prime_tower_flat_ironing))
-    // Bambu Studio 2.9.1 (H3C): tower speed on hotend_as_extruder printers, slowdown at the end of a tower
-    // visit, the purge-start line ironing and its speed, the side scrape after a tool change.
-    ((ConfigOptionFloat,              prime_tower_feedrate_factor))
-    ((ConfigOptionPercent,            prime_tower_tail_speed_factor))
-    ((ConfigOptionFloat,              prime_tower_tail_slowdown_volume))
-    ((ConfigOptionBool,               prime_tower_line_ironing))
-    ((ConfigOptionFloat,              prime_tower_ironing_speed))
-    ((ConfigOptionBool,               prime_tower_side_scrape))
-    ((ConfigOptionEnum<SideScrapeFace>, prime_tower_side_scrape_face))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_length))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_height))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_speed))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_wall_gap))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_point_spacing))
-    ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
