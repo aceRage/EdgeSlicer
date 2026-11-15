@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -61,6 +62,8 @@ struct Machine
 
 const Machine X1C_PLA_PETG{ "Bambu Lab X1 Carbon 0.4 nozzle", "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C", "Bambu PETG HF @BBL X1C" };
 const Machine H2C_PLA_PETG{ "Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C", "Bambu PLA Basic @BBL H2C", "Bambu PETG HF @BBL H2C" };
+// Bambu Studio offers the tower interface features on multi-extruder and hotend-as-extruder printers only.
+const Machine H2D_PLA_PETG{ "Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D", "Bambu PLA Basic @BBL H2D", "Bambu PETG HF @BBL H2D 0.4 nozzle" };
 const Machine H3C_PLA_PETG{ "Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C", "Bambu PETG HF @BBL H3C" };
 
 DynamicPrintConfig machine_config(const Machine &m)
@@ -97,12 +100,14 @@ struct DirectTower
 };
 
 std::unique_ptr<DirectTower> direct_tower(const DynamicPrintConfig &cfg, const std::vector<std::pair<int, int>> &layers,
-                                          float first_layer_flow_ratio = 1.f)
+                                          float first_layer_flow_ratio = 1.f, bool bbl_gcode = true,
+                                          const WipeTower::NozzleChangePlan &plan = WipeTower::NozzleChangePlan())
 {
     auto t = std::make_unique<DirectTower>();
     t->config.apply(cfg, true);
     t->tower = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, size_t(layers.front().first), 0.2f * layers.size());
     t->tower->set_first_layer_flow_ratio(first_layer_flow_ratio);
+    t->tower->set_bbl_gcode_tags(bbl_gcode);
     t->tower->set_extruder(0, t->config);
     t->tower->set_extruder(1, t->config);
     for (size_t layer = 0; layer < layers.size(); ++layer) {
@@ -110,7 +115,7 @@ std::unique_ptr<DirectTower> direct_tower(const DynamicPrintConfig &cfg, const s
         const auto [from, to] = layers[layer];
         t->tower->plan_toolchange(z, 0.2f, from, from);
         if (from != to)
-            t->tower->plan_toolchange(z, 0.2f, from, to, 100.f, 0.f, WipeTower::NozzleChangePlan());
+            t->tower->plan_toolchange(z, 0.2f, from, to, 100.f, 0.f, plan);
     }
     t->tower->generate(t->result);
     return t;
@@ -181,6 +186,27 @@ double total_extrusion(const std::string &gcode)
     return sum;
 }
 
+bool ends_with(const std::string &s, const std::string &suffix)
+{
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// The first line starting with `prefix` and ending with `suffix` (the temperature in between follows the flow variant).
+std::vector<std::string>::const_iterator find_line(const std::vector<std::string> &lines, const std::string &prefix, const std::string &suffix)
+{
+    return std::find_if(lines.begin(), lines.end(),
+                        [&](const std::string &l) { return l.rfind(prefix, 0) == 0 && ends_with(l, suffix); });
+}
+
+size_t count_matching_suffix(const std::string &gcode, const std::string &prefix, const std::string &suffix)
+{
+    size_t n = 0;
+    for (const std::string &line : split_lines(gcode))
+        if (line.rfind(prefix, 0) == 0 && ends_with(line, suffix))
+            ++n;
+    return n;
+}
+
 size_t count_prefix(const std::string &gcode, const std::string &prefix)
 {
     size_t n = 0;
@@ -245,8 +271,8 @@ std::string all_layers(const DirectTower &t)
 
 TEST_CASE("Tower interface features: a contact tool change starts its purge outside the tower", "[BBSTowerLeftovers][TowerInterfaceBBS]")
 {
-    const auto  on    = direct_tower(interface_config(X1C_PLA_PETG, true), contact_layers);
-    const auto  off   = direct_tower(interface_config(X1C_PLA_PETG, false), contact_layers);
+    const auto  on    = direct_tower(interface_config(H2D_PLA_PETG, true), contact_layers);
+    const auto  off   = direct_tower(interface_config(H2D_PLA_PETG, false), contact_layers);
     const auto *c_on  = change_on_layer(*on, 3);
     const auto *c_off = change_on_layer(*off, 3);
     REQUIRE(c_on != nullptr);
@@ -275,18 +301,18 @@ TEST_CASE("Tower interface features: a contact tool change starts its purge outs
 TEST_CASE("Tower interface features: an unfilled contact block is filled hot, from outside the tower", "[BBSTowerLeftovers][TowerInterfaceBBS]")
 {
     // Layer 1: the PLA block's contact layer (PLA stops), filled solid by the PETG left loaded.
-    const auto        on   = direct_tower(interface_config(X1C_PLA_PETG, true), contact_layers);
-    const auto        off  = direct_tower(interface_config(X1C_PLA_PETG, false), contact_layers);
+    const auto        on   = direct_tower(interface_config(H2D_PLA_PETG, true), contact_layers);
+    const auto        off  = direct_tower(interface_config(H2D_PLA_PETG, false), contact_layers);
     const std::string g_on = layer_gcode(*on, 1), g_off = layer_gcode(*off, 1);
     // Bambu Studio's forms: M109 T<physical extruder> S<t> N0, a 2 mm prime, the rows, then M400 + M104 ... C.
     CHECK(count_prefix(g_on, "M109 T0 S260 N0 ;Wipe tower interface layer enter") == 1);
-    CHECK(count_prefix(g_on, "M104 T0 S240 N0 C ;Wipe tower interface layer leave restore") == 1);
+    CHECK(count_matching_suffix(g_on, "M104 T0 S", " N0 C ;Wipe tower interface layer leave restore") == 1);
     CHECK(count_prefix(g_on, "G1 E2.0000 F100") == 1);
     CHECK(g_off.find("Wipe tower interface layer") == std::string::npos);
     CHECK(count_prefix(g_off, "G1 E2.0000 F100") == 0);
     const std::vector<std::string> lines = split_lines(g_on);
     const auto enter = std::find(lines.begin(), lines.end(), std::string("M109 T0 S260 N0 ;Wipe tower interface layer enter"));
-    const auto leave = std::find(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface layer leave restore"));
+    const auto leave = find_line(lines, "M104 T0 S", " N0 C ;Wipe tower interface layer leave restore");
     REQUIRE(enter != lines.end());
     REQUIRE(leave != lines.end());
     CHECK(enter < leave);
@@ -305,7 +331,7 @@ TEST_CASE("Tower interface features: H3C names the hotend by filament", "[BBSTow
 
 TEST_CASE("Tower interface features turn the Edge interface options off on the Bambu tower", "[BBSTowerLeftovers][TowerInterfaceBBS]")
 {
-    DynamicPrintConfig cfg = interface_config(X1C_PLA_PETG, true);
+    DynamicPrintConfig cfg = interface_config(H2D_PLA_PETG, true);
     cfg.set_deserialize_strict({ { "wipe_tower_interface_temp", "1" },
                                  { "wipe_tower_interface_extra_prime", "1" },
                                  { "wipe_tower_interface_trigger", "every_toolchange" } });
@@ -392,19 +418,19 @@ TEST_CASE("H2C G-code: a contact tool change runs the firmware interface purge",
 
 TEST_CASE("Cool down during the tower: the print temperature goes back on before the contact fill", "[BBSTowerLeftovers][TowerInterfaceBBS]")
 {
-    DynamicPrintConfig cfg = interface_config(X1C_PLA_PETG, true);
+    DynamicPrintConfig cfg = interface_config(H2D_PLA_PETG, true);
     cfg.set_deserialize_strict({ { "enable_tower_interface_cooldown_during_tower", "1" } });
     const auto                     on    = direct_tower(cfg, contact_layers);
     const std::vector<std::string> lines = split_lines(layer_gcode(*on, 1));
     const auto enter = std::find(lines.begin(), lines.end(), std::string("M109 T0 S260 N0 ;Wipe tower interface layer enter"));
-    const auto cool  = std::find(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface cool down during tower"));
+    const auto cool  = find_line(lines, "M104 T0 S", " N0 C ;Wipe tower interface cool down during tower");
     REQUIRE(enter != lines.end());
     REQUIRE(cool != lines.end());
     CHECK(enter < cool);
     // Before the first row of the fill: no extrusion with X or Y between the heat-up and the cool-down.
     for (auto it = enter; it != cool; ++it)
         CHECK_FALSE((it->rfind("G1 X", 0) == 0 || it->rfind("G1 Y", 0) == 0));
-    CHECK(std::count(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface layer leave restore")) == 0);
+    CHECK(find_line(lines, "M104", "Wipe tower interface layer leave restore") == lines.end());
 }
 
 TEST_CASE("Cool down during the tower with Edge's interface heat-up", "[BBSTowerLeftovers][TowerInterface]")
@@ -476,3 +502,140 @@ TEST_CASE("An uncategorised PLA and PETG purge into separate blocks", "[BBSTower
     CHECK(categories == std::vector<int>{ 100, 300 });
 }
 
+
+// Review #1062 (d): Bambu Studio offers the switch on multi-extruder and hotend-as-extruder printers only; elsewhere it
+// does nothing.
+TEST_CASE("Tower interface features do nothing on a single-extruder printer", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    const DynamicPrintConfig on_cfg = interface_config(X1C_PLA_PETG, true);
+    REQUIRE_FALSE(TowerInterface::bambu_features_supported(on_cfg));
+    REQUIRE(TowerInterface::bambu_features_supported(interface_config(H2D_PLA_PETG, true)));
+    REQUIRE(TowerInterface::bambu_features_supported(interface_config(H3C_PLA_PETG, true)));
+    const auto  on  = direct_tower(on_cfg, contact_layers);
+    const auto  off = direct_tower(interface_config(X1C_PLA_PETG, false), contact_layers);
+    const auto *c_on = change_on_layer(*on, 3), *c_off = change_on_layer(*off, 3);
+    REQUIRE(c_on != nullptr);
+    REQUIRE(c_off != nullptr);
+    CHECK_THAT(c_on->tool_change_start_pos.x(), WithinAbs(c_off->tool_change_start_pos.x(), 1e-4));
+    CHECK(all_layers(*on) == all_layers(*off));
+}
+
+// Review #1062 (d): a non-Bambu printer on this tower gets its flavour's temperature lines, never Bambu's N0 / C / W.
+TEST_CASE("Tower interface features: no Bambu temperature forms outside Bambu G-code", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    const auto                     plain = direct_tower(interface_config(H2D_PLA_PETG, true), contact_layers, 1.f, false);
+    const std::vector<std::string> lines = split_lines(layer_gcode(*plain, 1));
+    const auto enter = find_line(lines, "M109 S260", "Wipe tower interface layer enter");
+    const auto leave = find_line(lines, "M104 S", "Wipe tower interface layer leave restore");
+    REQUIRE(enter != lines.end());
+    REQUIRE(leave != lines.end());
+    for (const std::string &l : lines)
+        if (l.find("Wipe tower interface layer") != std::string::npos) {
+            INFO(l);
+            CHECK(l.find(" N0") == std::string::npos);
+        }
+}
+
+// Review #1062 (i): the run-in start stays on the bed: shortened at the bed edge, also through the tower's rotation.
+TEST_CASE("Tower interface features: the run-in start is clamped to the bed", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    SECTION("tower beside the left bed edge")
+    {
+        DynamicPrintConfig cfg = interface_config(H2D_PLA_PETG, true);
+        const double       bed_min_x = TowerInterface::shared_printable_box(cfg).min.x();
+        cfg.set_deserialize_strict({ { "wipe_tower_x", bed_min_x + 4. } });
+        const auto  t   = direct_tower(cfg, contact_layers);
+        const auto  off = direct_tower(interface_config(H2D_PLA_PETG, false), contact_layers);
+        const auto *c   = change_on_layer(*t, 3);
+        const auto *c0  = change_on_layer(*off, 3);
+        REQUIRE(c != nullptr);
+        REQUIRE(c0 != nullptr);
+        // On the bed's left edge (tower-local x = bed min - tower x), 4 mm plus the wall offset instead of 10 mm out.
+        CHECK_THAT(c->tool_change_start_pos.x(), WithinAbs(-4.f, 1e-3));
+        CHECK(c0->tool_change_start_pos.x() + 4.f < 10.f);
+    }
+    SECTION("tower turned 90 degrees, its left wall facing the front bed edge")
+    {
+        DynamicPrintConfig cfg = interface_config(H2D_PLA_PETG, true);
+        const double       bed_min_y = TowerInterface::shared_printable_box(cfg).min.y();
+        cfg.set_deserialize_strict({ { "wipe_tower_rotation_angle", 90 }, { "wipe_tower_x", 200. }, { "wipe_tower_y", bed_min_y + 3. } });
+        const auto  t = direct_tower(cfg, contact_layers);
+        const auto *c = change_on_layer(*t, 3);
+        REQUIRE(c != nullptr);
+        // Tower-local -X is the bed's -Y: the start is moved only as far as the bed allows, 3 mm minus the wall offset.
+        CHECK(c->tool_change_start_pos.x() < 0.f);
+        CHECK(c->tool_change_start_pos.x() > -3.01f);
+    }
+}
+
+// Review #1062 (i): the wall gaps for a contact run-in are cut on the contact layer's three layers below.
+TEST_CASE("Tower interface features: wall gaps on the three layers below a contact change", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    // PLA stops after layer 0 and starts again on layer 5: the run-in of layer 5 needs gaps on layers 2, 3 and 4.
+    const std::vector<std::pair<int, int>> layers{ { 0, 1 }, { 1, 1 }, { 1, 1 }, { 1, 1 }, { 1, 1 }, { 1, 0 }, { 0, 1 } };
+    const auto on  = direct_tower(interface_config(H2D_PLA_PETG, true), layers);
+    const auto off = direct_tower(interface_config(H2D_PLA_PETG, false), layers);
+    auto travels = [](const std::string &gcode) {
+        size_t n = 0;
+        for (const std::string &l : split_lines(gcode))
+            if (l.rfind("G1 ", 0) == 0 && (has_token(l, 'X') || has_token(l, 'Y')) && !has_token(l, 'E'))
+                ++n;
+        return n;
+    };
+    for (size_t layer : { size_t(2), size_t(3), size_t(4) }) {
+        INFO("layer " << layer);
+        CHECK(travels(layer_gcode(*on, layer)) > travels(layer_gcode(*off, layer)));
+    }
+    // Layer 6 (above the contact) is not cut for it.
+    CHECK(travels(layer_gcode(*on, 6)) == travels(layer_gcode(*off, 6)));
+}
+
+// Review #1062 (i): a contact change onto another nozzle rams the outgoing filament and still runs in from outside.
+TEST_CASE("Tower interface features: run-in together with ramming", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    WipeTower::NozzleChangePlan plan;
+    plan.need_ramming    = true;
+    plan.extruder_change = true;
+    const auto  on  = direct_tower(interface_config(H2D_PLA_PETG, true), contact_layers, 1.f, true, plan);
+    const auto  off = direct_tower(interface_config(H2D_PLA_PETG, false), contact_layers, 1.f, true, plan);
+    const auto *c   = change_on_layer(*on, 3);
+    const auto *c0  = change_on_layer(*off, 3);
+    REQUIRE(c != nullptr);
+    REQUIRE(c0 != nullptr);
+    CHECK(c->is_contact);
+    CHECK(c->nozzle_change_result.has_action());
+    CHECK(c0->nozzle_change_result.has_action());
+    CHECK_THAT(c->tool_change_start_pos.x(), WithinAbs(c0->tool_change_start_pos.x() - 10.f, 1e-3));
+}
+
+// Review #1062 (a): Bambu reserves no room for the run-in; Print::validate() warns when a part is within it.
+TEST_CASE("A part within the contact run-in beside the tower is warned about", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    auto warns = [](bool features, double part_max_x) {
+        DynamicPrintConfig cfg = machine_config(H2C_PLA_PETG);
+        cfg.set_deserialize_strict({ { "enable_tower_interface_features", features ? "1" : "0" },
+                                     { "curr_bed_type", "Textured PEI Plate" },
+                                     { "prime_tower_brim_width", "0" },
+                                     { "wipe_tower_wall_type", "rectangle" } });
+        Model model;
+        for (int i = 0; i < 2; ++i) {
+            ModelObject *object = model.add_object();
+            object->name        = "cube" + std::to_string(i);
+            object->add_volume(TriangleMesh(its_make_cube(10., 10., 4.)));
+            object->config.set("extruder", i + 1);
+            // The tower is at X160 Y180: the first cube ends part_max_x left of its wall, the second is far away.
+            object->add_instance()->set_offset(i == 0 ? Vec3d(160. - part_max_x - 10., 182., 0.) : Vec3d(60., 60., 0.));
+            object->ensure_on_bed();
+        }
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        std::vector<StringObjectException> warnings;
+        print.validate(&warnings);
+        return std::any_of(warnings.begin(), warnings.end(),
+                           [](const StringObjectException &w) { return w.string.find("tower interface features") != std::string::npos; });
+    };
+    CHECK(warns(true, 5.));
+    CHECK_FALSE(warns(false, 5.));
+    CHECK_FALSE(warns(true, 15.));
+}
