@@ -81,18 +81,24 @@ TEST_CASE("A rectangle wall tower is sized by the purge volume", "[WipeTowerEsti
 }
 
 TEST_CASE("Each planner spaces its purge lines by its own option", "[WipeTowerEstimate]") {
-    // Type2 reads wipe_tower_extra_spacing. Type1 uses prime_tower_infill_gap only when the
-    // caller set that Orca key; otherwise it falls back to wipe_tower_extra_spacing.
+    // Type2 reads wipe_tower_extra_spacing, Type1 prime_tower_infill_gap (Orca #10780, 150 % by default).
     DynamicPrintConfig config = make_config();
     config.set_key_value("wipe_tower_extra_flow", new ConfigOptionPercent(250.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(20., 1e-9));
     const std::vector<WipeTower::PurgeEstimate> type1_purges{{100.f, 0}, {100.f, 0}, {100.f, 0}};
-    const double type1_plain_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.f);
+    const double type1_default_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.5f);
     CHECK_THAT(estimate(config, 3, 0.2, 5., WipeTowerType::Type1).depth,
-               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_plain_blocks), 1e-6));
+               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_default_blocks), 1e-6));
+    {
+        DynamicPrintConfig plain = config;
+        plain.set_key_value("prime_tower_infill_gap", new ConfigOptionPercent(100.));
+        const double type1_plain_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.f);
+        CHECK_THAT(estimate(plain, 3, 0.2, 5., WipeTowerType::Type1).depth,
+                   WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_plain_blocks), 1e-6));
+    }
     config.set_key_value("wipe_tower_extra_spacing", new ConfigOptionPercent(150.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(30., 1e-9));
-    // Type1 only sees the Orca key when the caller set it; 150 % stretches the block stack.
+    // Type2 ignores the Type1 key; 150 % stretches the Type1 block stack.
     config.set_key_value("prime_tower_infill_gap", new ConfigOptionPercent(150.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(30., 1e-9));
     const double type1_spaced_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.5f);

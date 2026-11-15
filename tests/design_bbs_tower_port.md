@@ -264,3 +264,17 @@ BBS 2.9.1 code stays the source either way.
   printers (H3C) and `filament_change_length_nc` per filament on a rack extruder (H2C right).
 - `test_bambu_idle_precool`: H2D with pre-heating off asserts the markers are there (count > 0).
 
+## 11. Block planner port (PR #1052) - review notes kept for later
+
+- **Stability table (review N3).** Orca's Type 1 table is `{5,5},{100,20},{250,40},{350,60}`; Edge keeps
+  `{100,20},{250,40}` because WipeTower2 and the estimate share it and the Type 2 tower must stay identical. Below
+  100 mm Edge's minimum (20 mm) is larger than Orca's, so towers are never less stable than upstream; above 250 mm Edge
+  stops at 40 mm where Orca reaches 60 mm at 350 mm (tall H2D / H2C / H3C prints). A Type 1-only table would close it.
+- **Bridged purge rows on two-category towers (review S3).** Upstream design: with one change per layer each band is
+  purged on one layer and sparse-filled (`finish_block()`, lines `m_bridging` = 10 mm apart) on the next, so the next
+  purge rows bridge 6-8 mm. Cheapest upstream-compatible mitigation: in `finish_block()`, print the solid fill (the
+  existing `solid_infill` branch, 1.5 x line spacing) when the next layer purges into that block's category, the same
+  way the block already goes solid under a soluble change. G-code cost: only the finish blocks of multi-category
+  towers whose band is purged on the next layer change (sparse grid -> solid grid: the fill of those blocks
+  takes several times its sparse filament, up to about 10 x for a deep block); single-category towers and Type 2 are untouched. A denser `m_bridging` instead would
+  change every Bambu tower's sparse fill. Not done in #1052 (upstream behaviour; owner decision after the prints).

@@ -1102,6 +1102,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_sparse_layers_combination"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"
+            || opt_key == "filament_prime_volume"
+            || opt_key == "filament_prime_volume_nc"
             || opt_key == "prime_tower_brim_chamfer"
             || opt_key == "prime_tower_brim_chamfer_max_width"
             || opt_key == "flush_into_infill"
@@ -1134,6 +1136,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_max_purge_speed"
             || opt_key == "prime_tower_acceleration"
             || opt_key == "prime_tower_line_width"
+            // Orca #10780 / #15035: the block planner (purge line gap, internal ribs, flat ironing, categories).
+            || opt_key == "prime_tower_infill_gap"
+            || opt_key == "prime_tower_enable_framework"
+            || opt_key == "prime_tower_flat_ironing"
+            || opt_key == "filament_adhesiveness_category"
             || opt_key == "wipe_tower_wall_type"
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
@@ -7476,6 +7483,9 @@ void Print::_make_wipe_tower()
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
         // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
         wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
+        // Orca #10780 / #14685: the plate's per-layer nozzle grouping, for an extruder's last tower layer and its
+        // printable height (extruder_printable_height).
+        wipe_tower.set_nozzle_group_result(get_layered_nozzle_group_result());
         // Bambu Studio 2.9.1 prime_tower_acceleration: travels inside the tower go back to the travel
         // acceleration (an object setting in this fork, read like the G-code writer does).
         wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
@@ -7582,14 +7592,6 @@ void Print::_make_wipe_tower()
                         // add back the minimal amount toforce on the wipe tower:
                         // volume_to_purge += (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
-                        // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                        // Bambu Studio 2.9.1 primes each filament's own filament_prime_volume (15 mm3 in saving mode);
-                        // Edge does so on hotend_as_extruder printers (H3C) and keeps prime_volume elsewhere.
-                        float prime_volume = float(m_config.prime_volume);
-                        if (hotends.active())
-                            prime_volume = m_config.prime_volume_mode == PrimeVolumeMode::pvmSaving ?
-                                               15.f :
-                                               float(m_config.filament_prime_volume.get_at(extruder_id));
                         // Bambu Studio 2.9.1 (is_need_ramming): a change onto another nozzle of a Bambu printer rams the
                         // outgoing filament on the tower first. The grouping says which nozzle and extruder each
                         // filament prints from on this layer; on hotend_as_extruder printers (H3C) every hotend
@@ -7610,6 +7612,20 @@ void Print::_make_wipe_tower()
                                 if (nozzle_change.old_extruder >= 0 && nozzle_change.old_extruder < int(m_config.physical_extruder_map.size()))
                                     nozzle_change.old_physical_extruder = m_config.physical_extruder_map.get_at(nozzle_change.old_extruder);
                             }
+                        }
+                        // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
+                        // Bambu Studio 2.9.1 / Orca #14800 prime each filament's own filament_prime_volume, or
+                        // filament_prime_volume_nc after a hotend change on one extruder (H2C rack); 15 mm3 in saving
+                        // mode. Edge: on Bambu Lab printers, whose filament presets carry them; others keep prime_volume.
+                        float prime_volume = float(m_config.prime_volume);
+                        if (is_BBL_printer()) {
+                            prime_volume = WipeTower::bambu_prime_volume(m_config, extruder_id,
+                                                                         nozzle_change.need_ramming && !nozzle_change.extruder_change);
+                            // Orca #14685 (Bambu Studio, A2L): the filament change extrudes grab_length for its detection,
+                            // which the flush can count.
+                            const int grab_extruder = extruder_id < m_config.filament_map.values.size() ? m_config.filament_map.values[extruder_id] - 1 : 0;
+                            if (grab_extruder >= 0 && size_t(grab_extruder) < m_config.grab_length.values.size())
+                                volume_to_purge = std::max(0.f, volume_to_purge - float(m_config.grab_length.get_at(grab_extruder)) * 2.4f); // (1.75 / 2)^2 * PI
                         }
                         wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
                                                    current_extruder_id, extruder_id, prime_volume, volume_to_purge, nozzle_change);

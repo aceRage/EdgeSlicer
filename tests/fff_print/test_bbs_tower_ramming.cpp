@@ -11,14 +11,18 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 // Bambu Studio 2.9.1's nozzle-change ramming on the Type1 prime tower (tests/design_bbs_tower_port.md): on a change
 // onto another nozzle the outgoing filament rams filament_change_length(_nc) on the tower before the swap
@@ -244,16 +248,16 @@ TEST_CASE("The ramming length is filament_change_length over a ramming line's ex
     tower.set_extruder(1, config);
 
     // 0.4 nozzle: Bambu Studio's ramming line is 1.0 mm wide.
-    CHECK(tower.nozzle_change_width(0) == Approx(1.0f));
+    CHECK_THAT(tower.nozzle_change_width(0), WithinAbs(1.0, 1e-6));
     // Bambu Studio set_toolchange(): mm of filament per mm of line = h * (w - h * (1 - pi/4)) / filament area.
     const double area   = M_PI * 1.75 * 1.75 / 4.;
     const double e_flow = 0.2 * (1.0 - 0.2 * (1. - M_PI / 4.)) / area;
-    CHECK(tower.nozzle_change_length(0, true, 0.2f) == Approx(4. / e_flow).epsilon(1e-4));
-    CHECK(tower.nozzle_change_length(0, false, 0.2f) == Approx(10. / e_flow).epsilon(1e-4));
+    CHECK_THAT(tower.nozzle_change_length(0, true, 0.2f), WithinRel(4. / e_flow, 1e-4));
+    CHECK_THAT(tower.nozzle_change_length(0, false, 0.2f), WithinRel(10. / e_flow, 1e-4));
     // Whole lines across the tower between the outgoing filament's purge lines: 35 - (1.0 + 0.5) per line.
     const float length = tower.nozzle_change_length(0, true, 0.2f);
     const float line   = 35.f - (1.0f + tower.tool_line_width(0));
-    CHECK(tower.nozzle_change_depth(0, length) == Approx(std::ceil(length / line) * 1.0f));
+    CHECK_THAT(tower.nozzle_change_depth(0, length), WithinAbs(std::ceil(length / line) * 1.0, 1e-5));
     CHECK(tower.nozzle_change_depth(0, 0.f) == 0.f);
 }
 
@@ -269,9 +273,12 @@ TEST_CASE("A nozzle change makes the tower deeper by its ramming lines", "[BBSTo
     ram.old_extruder    = 0;
     const auto plain  = direct_tower(cfg, WipeTower::NozzleChangePlan());
     const auto rammed = direct_tower(cfg, ram);
-    const float depth = rammed->tower->nozzle_change_depth(0, rammed->tower->nozzle_change_length(0, true, 0.2f));
-    REQUIRE(depth > 0.f);
-    CHECK(rammed->tower->get_depth() == Approx(plain->tower->get_depth() + depth).margin(0.01));
+    // Whole ramming lines (nozzle_change_depth() at the 1.0 mm ramming width), laid in the block at the ramming
+    // gap: the line width plus prime_tower_infill_gap's extra (150 %: 0.25 mm on 0.5 mm lines), Orca #10780
+    // calc_block_infill_gap().
+    const float lines = rammed->tower->nozzle_change_depth(0, rammed->tower->nozzle_change_length(0, true, 0.2f)) / 1.0f;
+    REQUIRE(lines > 0.f);
+    CHECK_THAT(rammed->tower->get_depth(), WithinAbs(plain->tower->get_depth() + lines * 1.25f, 0.01));
     // Without a plan the tower writes no nozzle change at all.
     CHECK_FALSE(change_on_layer(*plain, 1).nozzle_change_result.has_action());
 }
@@ -452,7 +459,7 @@ TEST_CASE("H3C: a filament without a ramming length turns its hotend off, or coo
         CHECK(idle.gcode.find(" E") == std::string::npos);
         // The idle travel takes no tower depth.
         const auto plain = direct_tower(cfg, WipeTower::NozzleChangePlan());
-        CHECK(t->tower->get_depth() == Approx(plain->tower->get_depth()).margin(0.01));
+        CHECK_THAT(t->tower->get_depth(), WithinAbs(plain->tower->get_depth(), 0.01));
     }
 }
 
@@ -513,7 +520,10 @@ TEST_CASE("X1C G-code: a single-nozzle printer has no nozzle change", "[BBSTower
     CHECK(gcode.find("CP TOOLCHANGE START") != std::string::npos);
 }
 
-TEST_CASE("The ramming rows sit behind the layer's purge rows, so the purge rows keep one grid", "[BBSTowerRamming]")
+// Orca #10780 (Bambu Studio): the outgoing filament rams in its own category's block, at the block's next free row,
+// ahead of what purges there next. (This replaces #1049's "ramming band behind the purges", review S1: the block
+// gaps keep the rows of a block on one grid instead.)
+TEST_CASE("The ramming rows go into the outgoing filament's block, ahead of the purge", "[BBSTowerRamming][TowerBlocks]")
 {
     DynamicPrintConfig cfg = machine_config(H2D);
     cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_change_length", "4,4" } });
@@ -523,26 +533,443 @@ TEST_CASE("The ramming rows sit behind the layer's purge rows, so the purge rows
     ram.old_nozzle      = 0;
     ram.new_nozzle      = 1;
     ram.old_extruder    = 0;
-    const auto rammed = direct_tower(cfg, ram);
-    for (size_t layer = 0; layer < 2; ++layer) {
-        INFO("layer " << layer);
-        const WipeTower::ToolChangeResult &tc = change_on_layer(*rammed, layer);
-        REQUIRE(tc.nozzle_change_result.has_action());
-        // The purge rows: every Y the tool change prints at between "CP TOOLCHANGE WIPE" and "CP TOOLCHANGE END".
-        static const std::regex y_re(R"(^G1 .*Y([-\d.]+))");
-        float purge_max_y = -1e9f;
-        bool  in_wipe     = false;
-        for (const std::string &line : split_lines(tc.gcode)) {
-            if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
+    static const std::regex y_re(R"(^G1 .*Y([-\d.]+))");
+    static const std::regex e_re(R"( E[0-9.]+)");
+    auto y_range = [](const std::string &gcode, bool wipe_only) {
+        float lo = 1e9f, hi = -1e9f;
+        bool  in_wipe = !wipe_only;
+        for (const std::string &line : split_lines(gcode)) {
+            if (wipe_only && line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
                 in_wipe = true;
-            else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
+            else if (wipe_only && line.find("; CP TOOLCHANGE END") != std::string::npos)
                 in_wipe = false;
             std::smatch m;
-            if (in_wipe && std::regex_search(line, m, y_re))
-                purge_max_y = std::max(purge_max_y, std::stof(m[1].str()));
+            // Extrusions only: the flat ironing at the purge start travels around it.
+            if (in_wipe && std::regex_search(line, m, y_re) && std::regex_search(line, e_re)) {
+                lo = std::min(lo, std::stof(m[1].str()));
+                hi = std::max(hi, std::stof(m[1].str()));
+            }
         }
-        REQUIRE(purge_max_y > -1e9f);
-        // Review S1: the ramming band starts behind the last purge row.
-        CHECK(tc.nozzle_change_result.start_pos.y() > purge_max_y);
+        return std::make_pair(lo, hi);
+    };
+
+    SECTION("one category: ramming, then the purge, in the same block")
+    {
+        const auto rammed = direct_tower(cfg, ram);
+        REQUIRE(rammed->tower->blocks().size() == 1);
+        for (size_t layer = 0; layer < 2; ++layer) {
+            INFO("layer " << layer);
+            const WipeTower::ToolChangeResult &tc = change_on_layer(*rammed, layer);
+            REQUIRE(tc.nozzle_change_result.has_action());
+            const auto ramming = y_range(tc.nozzle_change_result.gcode, false);
+            const auto purge   = y_range(tc.gcode, true);
+            REQUIRE(purge.first < 1e9f);
+            // The block starts one 0.5 mm line in; the 1.0 mm ramming lines are centred half a line further.
+            CHECK_THAT(tc.nozzle_change_result.start_pos.y(), WithinAbs(0.5 + 0.25, 1e-3));
+            CHECK(purge.first > ramming.second);
+        }
     }
+    SECTION("two categories: each in its own block")
+    {
+        cfg.set_deserialize_strict({ { "filament_adhesiveness_category", "100,300" } });
+        const auto t = direct_tower(cfg, ram);
+        REQUIRE(t->tower->blocks().size() == 2);
+        auto band_of = [&t](int category) {
+            for (const WipeTower::WipeTowerBlock &b : t->tower->blocks())
+                if (b.filament_adhesiveness_category == category)
+                    return std::make_pair(b.start_depth, b.start_depth + b.depth);
+            FAIL("no block of category " << category);
+            return std::make_pair(0.f, 0.f);
+        };
+        for (size_t layer = 0; layer < 2; ++layer) {
+            INFO("layer " << layer);
+            const WipeTower::ToolChangeResult &tc       = change_on_layer(*t, layer);
+            const int                          old_cat  = tc.initial_tool == 0 ? 100 : 300;
+            const int                          new_cat  = tc.new_tool == 0 ? 100 : 300;
+            const auto                         ramming  = y_range(tc.nozzle_change_result.gcode, false);
+            const auto                         purge    = y_range(tc.gcode, true);
+            const auto                         old_band = band_of(old_cat);
+            const auto                         new_band = band_of(new_cat);
+            CHECK(ramming.first >= old_band.first - 1e-3f);
+            CHECK(ramming.second <= old_band.second + 1e-3f);
+            CHECK(purge.first >= new_band.first - 1e-3f);
+            CHECK(purge.second <= new_band.second + 1e-3f);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Orca #10780 / #15035: the material-category block planner (filament_adhesiveness_category).
+// ---------------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// An X1C tower planned directly: every layer changes 0 -> 1 -> 0. `start_tool[layer]` >= 0 makes that layer start
+// with the filament Local-Z passes left loaded (#937) and plan no tower change of its own.
+std::unique_ptr<DirectTower> block_tower(const DynamicPrintConfig &cfg, int layers, const std::vector<int> &start_tool = {})
+{
+    auto t = std::make_unique<DirectTower>();
+    t->config.apply(cfg, true);
+    t->tower = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 0.2f * layers);
+    t->tower->set_extruder(0, t->config);
+    t->tower->set_extruder(1, t->config);
+    unsigned int loaded = 0;
+    for (int layer = 0; layer < layers; ++layer) {
+        const float z = 0.2f * (layer + 1);
+        t->tower->plan_toolchange(z, 0.2f, loaded, loaded);
+        if (layer < int(start_tool.size()) && start_tool[layer] >= 0) {
+            t->tower->set_last_layer_start_tool(loaded, unsigned(start_tool[layer]));
+            loaded = unsigned(start_tool[layer]);
+            continue;
+        }
+        t->tower->plan_toolchange(z, 0.2f, loaded, 1 - loaded, 300.f, 0.f);
+        t->tower->plan_toolchange(z, 0.2f, 1 - loaded, loaded, 300.f, 0.f);
+    }
+    t->tower->generate(t->result);
+    return t;
+}
+
+std::pair<float, float> band_of(const WipeTower &tower, int category)
+{
+    for (const WipeTower::WipeTowerBlock &b : tower.blocks())
+        if (b.filament_adhesiveness_category == category)
+            return { b.start_depth, b.start_depth + b.depth };
+    FAIL("no block of category " << category);
+    return { 0.f, 0.f };
+}
+
+// The extrusions inside the tower's wall, as (tool, y low, y high).
+std::vector<std::tuple<unsigned, float, float>> inner_extrusions(const WipeTower &tower, const std::vector<WipeTower::ToolChangeResult> &layer)
+{
+    const float w = tower.width(), d = tower.get_depth(), m = 0.3f;
+    std::vector<std::tuple<unsigned, float, float>> out;
+    for (const WipeTower::ToolChangeResult &tcr : layer)
+        for (size_t i = 1; i < tcr.extrusions.size(); ++i) {
+            const WipeTower::Extrusion &e = tcr.extrusions[i];
+            if (e.width <= 0.f)
+                continue;
+            const Vec2f a = tcr.extrusions[i - 1].pos, b = e.pos;
+            auto on = [m](float u, float v, float line) { return std::abs(u - line) < m && std::abs(v - line) < m; };
+            const bool outside = std::min(a.x(), b.x()) < -m || std::max(a.x(), b.x()) > w + m || std::min(a.y(), b.y()) < -m ||
+                                 std::max(a.y(), b.y()) > d + m;
+            if (outside || on(a.x(), b.x(), 0.f) || on(a.x(), b.x(), w) || on(a.y(), b.y(), 0.f) || on(a.y(), b.y(), d))
+                continue; // the wall and the brim
+            out.emplace_back(e.tool, std::min(a.y(), b.y()), std::max(a.y(), b.y()));
+        }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Filaments of different adhesiveness categories purge into separate blocks", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,300" } });
+    const auto t = block_tower(cfg, 4);
+    REQUIRE(t->tower->blocks().size() == 2);
+    const auto pla  = band_of(*t->tower, 100);
+    const auto petg = band_of(*t->tower, 300);
+    CHECK((pla.second <= petg.first + 1e-3f || petg.second <= pla.first + 1e-3f));
+    // Every purge and every block fill stays in the band of its own filament's category.
+    const float pw = 0.5f;
+    for (size_t layer = 0; layer < t->result.size(); ++layer)
+        for (const auto &[tool, lo, hi] : inner_extrusions(*t->tower, t->result[layer])) {
+            INFO("layer " << layer << " tool " << tool << " y " << lo << " .. " << hi);
+            const auto band = tool == 0 ? pla : petg;
+            CHECK(lo >= band.first - pw);
+            CHECK(hi <= band.second + pw);
+        }
+}
+
+TEST_CASE("Filaments of one adhesiveness category share one block", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,100" } });
+    const auto t = block_tower(cfg, 4);
+    REQUIRE(t->tower->blocks().size() == 1);
+    CHECK(t->tower->blocks().front().filament_adhesiveness_category == 100);
+    CHECK_THAT(t->tower->blocks().front().start_depth, WithinAbs(0.5, 1e-5));
+}
+
+TEST_CASE("The block tower stays stacked: no layer prints beyond the layer below it", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,300" } });
+    // Less to purge towards the top: the upper layers are shallower than the first.
+    auto t = std::make_unique<DirectTower>();
+    t->config.apply(cfg, true);
+    t->tower = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 1.2f);
+    t->tower->set_extruder(0, t->config);
+    t->tower->set_extruder(1, t->config);
+    for (int layer = 0; layer < 6; ++layer) {
+        const float z = 0.2f * (layer + 1);
+        const float v = layer < 3 ? 400.f : 150.f;
+        t->tower->plan_toolchange(z, 0.2f, 0, 0);
+        t->tower->plan_toolchange(z, 0.2f, 0, 1, v, 0.f);
+        t->tower->plan_toolchange(z, 0.2f, 1, 0, v, 0.f);
+    }
+    t->tower->generate(t->result);
+    for (const WipeTower::WipeTowerBlock &b : t->tower->blocks())
+        for (size_t l = 1; l < b.layer_depths.size(); ++l)
+            CHECK(b.layer_depths[l] <= b.layer_depths[l - 1] + 1e-4f);
+    // Per category, the highest row of a layer is supported by the layer below.
+    auto top_of = [&t](size_t layer, unsigned tool) {
+        float top = -1.f;
+        for (const auto &[x_tool, lo, hi] : inner_extrusions(*t->tower, t->result[layer]))
+            if (x_tool == tool)
+                top = std::max(top, hi);
+        return top;
+    };
+    for (size_t layer = 1; layer < t->result.size(); ++layer)
+        for (unsigned tool : { 0u, 1u }) {
+            INFO("layer " << layer << " tool " << tool);
+            CHECK(top_of(layer, tool) <= top_of(layer - 1, tool) + 1e-3f);
+        }
+}
+
+TEST_CASE("#937: a layer its Local-Z passes start with another filament prints the tower with that one", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,300" } });
+    // Layer 1: the passes leave filament 1 loaded and the layer plans no tower change; layer 2 changes from it.
+    const auto t = block_tower(cfg, 3, { -1, 1, -1 });
+    REQUIRE(t->result.size() == 3);
+    for (const WipeTower::ToolChangeResult &tcr : t->result[1]) {
+        CHECK(tcr.initial_tool == 1);
+        CHECK(tcr.new_tool == 1);
+    }
+    REQUIRE_FALSE(t->result[2].empty());
+    bool found_change = false;
+    for (const WipeTower::ToolChangeResult &tcr : t->result[2])
+        if (tcr.is_tool_change) {
+            CHECK(tcr.initial_tool == 1);
+            found_change = true;
+            break;
+        }
+    CHECK(found_change);
+}
+
+TEST_CASE("X1C G-code: a PLA and PETG plate slices through the block planner", "[TowerBlocks][PrintGCode]")
+{
+    Machine pla_petg = X1C;
+    pla_petg.filament_2 = "Bambu PETG Basic @BBL X1C";
+    const DynamicPrintConfig cfg = machine_config(pla_petg, nullptr);
+    REQUIRE(cfg.option<ConfigOptionInts>("filament_adhesiveness_category")->get_at(0) == 100);
+    REQUIRE(cfg.option<ConfigOptionInts>("filament_adhesiveness_category")->get_at(1) == 300);
+    Print             print;
+    Model             model;
+    const std::string gcode = slice(print, model, cfg);
+    REQUIRE(print.has_wipe_tower());
+    // One tower visit per change, each carrying its change template.
+    size_t changes = 0, templates = 0;
+    for (const std::string &line : lines_of(gcode)) {
+        if (line == "; CP TOOLCHANGE START")
+            ++changes;
+        if (line.rfind("M620 S", 0) == 0)
+            ++templates;
+    }
+    CHECK(changes >= 10);
+    // The start and end G-code have their own too.
+    CHECK(templates >= changes);
+}
+
+// Review S4 (#1052): the H2C rack hotend change no gate plate reaches (the grouping puts two filaments of one
+// extruder on one nozzle): the prime volume rule, and the ramming inside the M632 / M633 interlock of a change planned
+// with it.
+TEST_CASE("H2C rack hotend change: filament_prime_volume_nc primes it, the ramming sits inside M632 / M633", "[TowerBlocks][BBSTowerRamming]")
+{
+    DynamicPrintConfig cfg = machine_config(H2C, "2,2");
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" },
+                                 { "filament_prime_volume", "45,300" },
+                                 { "filament_prime_volume_nc", "60,600" },
+                                 { "filament_change_length_nc", "4,4" },
+                                 { "prime_volume_mode", "Default" } });
+    PrintConfig config;
+    config.apply(cfg, true);
+    CHECK_THAT(WipeTower::bambu_prime_volume(config, 1, false), WithinAbs(300., 1e-6));
+    CHECK_THAT(WipeTower::bambu_prime_volume(config, 1, true), WithinAbs(600., 1e-6));
+    {
+        PrintConfig saving = config;
+        saving.prime_volume_mode.value = PrimeVolumeMode::pvmSaving;
+        CHECK_THAT(WipeTower::bambu_prime_volume(saving, 1, true), WithinAbs(15., 1e-6));
+    }
+
+    WipeTower::NozzleChangePlan hotend;
+    hotend.need_ramming          = true;
+    hotend.extruder_change       = false;
+    hotend.old_nozzle            = 1;
+    hotend.new_nozzle            = 2;
+    hotend.old_extruder          = 1;
+    hotend.old_physical_extruder = 0;
+    // Two layers, 0 -> 1 then 1 -> 0, each primed with what Print hands the tower for a hotend change or for an extruder change.
+    auto tower_with = [&config, &hotend](bool use_nc) {
+        auto t = std::make_unique<DirectTower>();
+        t->config = config;
+        t->tower  = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 0.4f);
+        t->tower->set_extruder(0, t->config);
+        t->tower->set_extruder(1, t->config);
+        for (int layer = 0; layer < 2; ++layer) {
+            const float z = 0.2f * (layer + 1);
+            const unsigned int from = unsigned(layer % 2);
+            t->tower->plan_toolchange(z, 0.2f, from, from);
+            t->tower->plan_toolchange(z, 0.2f, from, 1 - from, WipeTower::bambu_prime_volume(t->config, 1 - from, use_nc), 0.f, hotend);
+        }
+        t->tower->generate(t->result);
+        return t;
+    };
+    const auto nc = tower_with(true);
+    const auto ec = tower_with(false);
+    // Twice the prime: a deeper tower.
+    CHECK(nc->tower->get_depth() > ec->tower->get_depth() + 5.f);
+
+    const WipeTower::NozzleChangeResult &ncr = change_on_layer(*nc, 0).nozzle_change_result;
+    REQUIRE(ncr.has_action());
+    CHECK_FALSE(ncr.is_extruder_change);
+    const std::vector<std::string> lines = split_lines(ncr.gcode);
+    static const std::regex        extrude_re(R"(^G1 .*E[\d.]+)");
+    size_t first_m632 = std::string::npos, first_ram = std::string::npos, last_ram = 0, last_m633 = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].rfind("M632 S1", 0) == 0 && first_m632 == std::string::npos)
+            first_m632 = i;
+        if (std::regex_search(lines[i], extrude_re)) {
+            if (first_ram == std::string::npos)
+                first_ram = i;
+            last_ram = i;
+        }
+        if (lines[i] == "M633")
+            last_m633 = i;
+    }
+    REQUIRE(first_m632 != std::string::npos);
+    REQUIRE(first_ram != std::string::npos);
+    CHECK(first_m632 < first_ram);
+    CHECK(last_ram < last_m633);
+}
+
+// Review S1 (#1052): a Polymaker PLA preset of a P2S sits in Bambu PLA's band.
+TEST_CASE("A Polymaker PLA and a Bambu PLA share the PLA adhesiveness category", "[TowerBlocks][BBLProfiles]")
+{
+    PresetBundle &b = ramming_bundle();
+    for (const char *name : { "Bambu PLA Basic @BBL P2S", "Panchroma PLA @BBL P2S", "Polymaker PLA @BBL H2S" }) {
+        INFO(name);
+        const Preset *preset = b.filaments.find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        const auto *category = preset->config.option<ConfigOptionInts>("filament_adhesiveness_category");
+        REQUIRE(category != nullptr);
+        CHECK(category->get_at(0) == 100);
+    }
+}
+
+// #1052 review S3: on a two-category tower each band is purged on one layer and block-filled on the next; the fill
+// under the next layer's purge is solid (Edge), so the purge rows are not bridges over a sparse grid. A single-block
+// tower keeps Orca's sparse fill.
+namespace {
+
+struct Segment2
+{
+    Vec2f a, b;
+};
+
+// The extrusions inside the tower wall of every layer (wall and brim left out, as inner_extrusions() does).
+std::vector<std::vector<Segment2>> inner_segments(const DirectTower &t)
+{
+    const float w = t.tower->width(), d = t.tower->get_depth(), m = 0.3f;
+    std::vector<std::vector<Segment2>> out;
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : t.result) {
+        std::vector<Segment2> segs;
+        for (const WipeTower::ToolChangeResult &tcr : layer)
+            for (size_t i = 1; i < tcr.extrusions.size(); ++i) {
+                if (tcr.extrusions[i].width <= 0.f)
+                    continue;
+                const Vec2f a = tcr.extrusions[i - 1].pos, b = tcr.extrusions[i].pos;
+                auto on = [m](float u, float v, float line) { return std::abs(u - line) < m && std::abs(v - line) < m; };
+                const bool outside = std::min(a.x(), b.x()) < -m || std::max(a.x(), b.x()) > w + m || std::min(a.y(), b.y()) < -m ||
+                                     std::max(a.y(), b.y()) > d + m;
+                if (!outside && !on(a.x(), b.x(), 0.f) && !on(a.x(), b.x(), w) && !on(a.y(), b.y(), 0.f) && !on(a.y(), b.y(), d))
+                    segs.push_back({ a, b });
+            }
+        out.push_back(std::move(segs));
+    }
+    return out;
+}
+
+float distance_to_segment(const Vec2f &p, const Segment2 &s)
+{
+    const Vec2f ab = s.b - s.a;
+    const float l2 = ab.squaredNorm();
+    const float t  = l2 > 0.f ? std::clamp((p - s.a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+    return (p - (s.a + t * ab)).norm();
+}
+
+// Share of the horizontal rows of layers 2.. with no extrusion of the layer below within 0.5 mm (the review's measure),
+// sampled every 0.25 mm. The tower wall counts as support (it is under every row end).
+float unsupported_share(const DirectTower &t)
+{
+    const std::vector<std::vector<Segment2>> layers = inner_segments(t);
+    const float w = t.tower->width();
+    float total = 0.f, unsupported = 0.f;
+    for (size_t l = 2; l < layers.size(); ++l)
+        for (const Segment2 &s : layers[l]) {
+            if (std::abs(s.a.y() - s.b.y()) > 1e-3f)
+                continue;
+            const float len = (s.b - s.a).norm();
+            for (float u = 0.f; u <= len; u += 0.25f) {
+                const Vec2f p = s.a + (len > 0.f ? u / len : 0.f) * (s.b - s.a);
+                total += 0.25f;
+                if (p.x() < 0.5f || p.x() > w - 0.5f)
+                    continue;
+                bool supported = false;
+                for (const Segment2 &below : layers[l - 1])
+                    if (distance_to_segment(p, below) <= 0.5f) {
+                        supported = true;
+                        break;
+                    }
+                if (!supported)
+                    unsupported += 0.25f;
+            }
+        }
+    return total > 0.f ? unsupported / total : 0.f;
+}
+
+// layers layers, one change per layer between filaments 0 and 1, alternating, with the given prime volumes.
+std::unique_ptr<DirectTower> alternating_tower(const DynamicPrintConfig &cfg, int layers, float even_volume, float odd_volume)
+{
+    auto t = std::make_unique<DirectTower>();
+    t->config.apply(cfg, true);
+    t->tower = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 0.2f * layers);
+    t->tower->set_extruder(0, t->config);
+    t->tower->set_extruder(1, t->config);
+    for (int layer = 0; layer < layers; ++layer) {
+        const float        z    = 0.2f * (layer + 1);
+        const unsigned int from = unsigned(layer % 2);
+        t->tower->plan_toolchange(z, 0.2f, from, from);
+        t->tower->plan_toolchange(z, 0.2f, from, 1 - from, layer % 2 ? odd_volume : even_volume, 0.f);
+    }
+    t->tower->generate(t->result);
+    return t;
+}
+
+} // namespace
+
+TEST_CASE("Two-category tower: a band the next layer purges into is filled solid under it", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,300" } });
+    const auto t = alternating_tower(cfg, 8, 300.f, 300.f);
+    REQUIRE(t->tower->blocks().size() == 2);
+    const float share = unsupported_share(*t);
+    INFO("unsupported share of the row length " << share);
+    // Before: about 0.4 (rows over fill lines 8 mm apart). Left: the row ends past the solid fill's last line.
+    CHECK(share < 0.15f);
+}
+
+TEST_CASE("Single-category tower: the block fill under a deeper purge stays sparse, as upstream", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,100" } });
+    // Even layers purge little, odd layers much: the odd layers' upper rows lie over the even layers' sparse fill.
+    const auto t = alternating_tower(cfg, 8, 100.f, 600.f);
+    REQUIRE(t->tower->blocks().size() == 1);
+    const float share = unsupported_share(*t);
+    INFO("unsupported share of the row length " << share);
+    CHECK(share > 0.15f);
 }

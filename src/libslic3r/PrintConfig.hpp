@@ -2159,7 +2159,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
-    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (read on H3C only)
+    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (Bambu Lab Type 1 towers)
+    ((ConfigOptionFloats,              filament_prime_volume_nc))   // Orca #14800: the prime after a hotend change on one extruder
+    // Orca #10780: the Type 1 tower purges each adhesiveness category into its own block.
+    ((ConfigOptionInts,                filament_adhesiveness_category))
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2584,6 +2587,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              prime_tower_line_width))
     ((ConfigOptionFloat,              prime_tower_wipe_speed))
     ((ConfigOptionFloat,              prime_tower_wipe_distance))
+    // Orca #10780 / #15035: Type 1 tower block planner (purge line gap, internal ribs, flat ironing).
+    ((ConfigOptionPercent,            prime_tower_infill_gap))
+    ((ConfigOptionBool,               prime_tower_enable_framework))
+    ((ConfigOptionBool,               prime_tower_flat_ironing))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
