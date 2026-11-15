@@ -44,10 +44,11 @@ bool containerized()
 
 // DEV/TEST PROBE ONLY. Not the shipping sandbox (that is a signed helper with
 // com.apple.security.app-sandbox). sandbox-exec(1) is the CLI equivalent of this
-// named-profile / SBPL sandbox_init probe. Honoured only when
-// EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE is set through the Phase 7 test env-override gate.
-// Current MacOSX.sdk headers dropped the old named-profile string constants;
-// the probe never names those identifiers.
+// SBPL sandbox_init probe. Honoured only when EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE
+// is set through the Phase 7 test env-override gate. Named no-internet / no-write
+// are not applied (they block the handshake unix socket). Current MacOSX.sdk
+// headers dropped the old named-profile string constants; the probe never names
+// those identifiers.
 bool apply_seatbelt_probe(const SandboxSpec& spec, SandboxReport& report, std::string& error)
 {
     if (!mac_seatbelt::apply_probe(spec.allow_network, error)) {

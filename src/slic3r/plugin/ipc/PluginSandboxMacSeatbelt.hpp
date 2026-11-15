@@ -84,16 +84,22 @@ inline void consume_sandbox_error(char* sandbox_error, std::string& error, const
     }
 }
 
-// Named profiles historically selected via the sandbox.h string constants (no-internet / no-write).
+// Historical named-profile strings. The probe does not apply them: no-internet
+// treats AF_UNIX as network, and no-write denies writes on the handshake socket,
+// so hello_ok never arrived. Kept so the stub-SDK compile check still names them.
 inline const char* named_profile(bool allow_network) { return allow_network ? "no-write" : "no-internet"; }
 
 inline const char* sbpl_profile(bool allow_network)
 {
-    // Minimal labelled probe. Shipping confinement is App Sandbox, not this SBPL.
-    return allow_network ? "(version 1)\n(allow default)\n(deny file-write*)\n" : "(version 1)\n(allow default)\n(deny network*)\n";
+    (void) allow_network;
+    // IPC-safe labelled probe. (allow default) keeps the unix socketpair, Boost.Log,
+    // and already-open FDs usable. Deny a path the helper never writes so sandbox_init
+    // is still observable. Shipping confinement is App Sandbox, not this SBPL.
+    return "(version 1)\n(allow default)\n(deny file-write* (subpath \"/var/empty\"))\n";
 }
 
 // Returns true only when a Seatbelt profile was applied. Any miss is fail-closed.
+// Named no-internet / no-write are never applied (they block hello_ok).
 inline bool apply_probe(bool allow_network, std::string& error)
 {
     sandbox_init_fn init_fn = resolve_sandbox_init();
@@ -103,22 +109,13 @@ inline bool apply_probe(bool allow_network, std::string& error)
     }
 
     char*     sandbox_error = nullptr;
-    const int named_rc      = init_fn(named_profile(allow_network), SANDBOX_NAMED, &sandbox_error);
-    if (named_rc == 0)
-        return true;
-
-    consume_sandbox_error(sandbox_error, error, "sandbox_init named profile (Seatbelt probe) failed");
-    sandbox_error = nullptr;
-
-    const int sbpl_rc = init_fn(sbpl_profile(allow_network), 0, &sandbox_error);
-    if (sbpl_rc == 0) {
+    const int rc            = init_fn(sbpl_profile(allow_network), 0, &sandbox_error);
+    if (rc == 0) {
         error.clear();
         return true;
     }
 
-    std::string sbpl_error;
-    consume_sandbox_error(sandbox_error, sbpl_error, "sandbox_init SBPL (Seatbelt probe) failed");
-    error += "; " + sbpl_error;
+    consume_sandbox_error(sandbox_error, error, "sandbox_init SBPL (Seatbelt probe) failed");
     return false;
 }
 

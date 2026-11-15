@@ -263,9 +263,20 @@ int run_child(Channel& channel)
     // plugin import cannot observe the unsandboxed filesystem. Landlock is inherited.
     SandboxReport report;
     std::string   sandbox_error;
-    const bool    sandboxed = apply_os_sandbox(spec, report, sandbox_error);
-    if (!sandboxed)
-        BOOST_LOG_TRIVIAL(error) << "edge-plugin-host OS sandbox not applied: " << sandbox_error;
+#ifdef __APPLE__
+    if (spec.dev_seatbelt_probe) {
+        // Always reply. A failed or restrictive probe used to die/block inside
+        // sandbox_init and leave the parent hanging until handshake timeout.
+        // hello_ok.sandbox carries the result; do not log after apply (that write
+        // was one of the hang hypotheses).
+        (void) apply_os_sandbox(spec, report, sandbox_error);
+    } else
+#endif
+    {
+        const bool sandboxed = apply_os_sandbox(spec, report, sandbox_error);
+        if (!sandboxed)
+            BOOST_LOG_TRIVIAL(error) << "edge-plugin-host OS sandbox not applied: " << sandbox_error;
+    }
 
     nlohmann::json hello_ok = {{"type", k_type_hello_ok},
                                {"protocol_version", k_protocol_version},

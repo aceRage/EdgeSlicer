@@ -34,11 +34,15 @@ Unsigned macOS execute tests store a per-plugin `trust.json` `unsandboxed` overr
 (the same Run anyway record the prompt writes). Isolation tests skip when the shipping sandbox
 is not applied.
 
-The probe `dlsym`s `sandbox_init` and applies those named profiles (`SANDBOX_NAMED`), falling
-back to a tiny SBPL string. It does not use `kSBXProfileNoInternet` / `kSBXProfileNoWrite`
-(removed in current MacOSX.sdk). A missing symbol or failed `sandbox_init` is fail-closed
-(`kind=none`). `scripts/check_macos_sandbox_sdk.sh` syntax-checks this against a stub SDK
-(bash 3.2-safe) so Linux CI can catch the Xcode 27.2 break.
+The probe `dlsym`s `sandbox_init` and applies an IPC-safe SBPL (`(allow default)` plus a
+deny of `/var/empty`). It does **not** apply named `"no-internet"` / `"no-write"`: those
+deny AF_UNIX or writes on the handshake socket, so `hello_ok` never arrived. It does not
+use `kSBXProfileNoInternet` / `kSBXProfileNoWrite` (removed in current MacOSX.sdk). A
+missing symbol or failed `sandbox_init` is fail-closed (`kind=none` in `hello_ok`; the child
+does not abort the handshake). The Catch2 probe case captures child stderr/exit and SKIPs
+when the probe cannot be confirmed, instead of REQUIREing a reply that never comes.
+`scripts/check_macos_sandbox_sdk.sh` syntax-checks this against a stub SDK (bash 3.2-safe)
+so Linux CI can catch the Xcode 27.2 break.
 
 ## Handshake
 
@@ -128,7 +132,7 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 ## Smoke tests owed at merge
 
 Linux `[PluginSandbox]` (probe, handshake, fs/net/exec isolation, fail-closed prompt +
-`trust.json` override, Seatbelt named-profile / fail-closed helpers). Existing `[PluginIpc]`,
+`trust.json` override, Seatbelt IPC-safe SBPL / fail-closed helpers). Existing `[PluginIpc]`,
 `[PluginTrust]`, Home plugin-filter tests. `scripts/check_macos_sandbox_sdk.sh` (stub
 `<sandbox.h>`, `clang -fsyntax-only -Werror=deprecated-declarations`). Spawn+handshake timing
 next to Phase 7 r5 (~0.275 s on Linux). U1 prints are still required for pipeline plugins.

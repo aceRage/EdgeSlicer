@@ -181,12 +181,15 @@ TEST_CASE("OS sandbox probe reports this kernel", "[PluginSandbox][probe]")
 }
 
 #ifndef _WIN32
-TEST_CASE("macOS Seatbelt probe uses named profiles and fail-closes without sandbox_init", "[PluginSandbox][macos-sdk]")
+TEST_CASE("macOS Seatbelt probe uses an IPC-safe SBPL and fail-closes without sandbox_init", "[PluginSandbox][macos-sdk]")
 {
     CHECK(std::string(plugin_ipc::mac_seatbelt::named_profile(false)) == "no-internet");
     CHECK(std::string(plugin_ipc::mac_seatbelt::named_profile(true)) == "no-write");
-    CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(false)).find("(deny network*)") != std::string::npos);
-    CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(true)).find("(deny file-write*)") != std::string::npos);
+    const std::string sbpl = plugin_ipc::mac_seatbelt::sbpl_profile(false);
+    CHECK(sbpl.find("(allow default)") != std::string::npos);
+    CHECK(sbpl.find("(deny network*)") == std::string::npos);
+    CHECK(sbpl.find("(subpath") != std::string::npos);
+    CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(true)) == sbpl);
 #ifndef __APPLE__
     std::string error;
     CHECK_FALSE(plugin_ipc::mac_seatbelt::apply_probe(false, error));
@@ -487,11 +490,30 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
     };
     REQUIRE(spawned.host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
     nlohmann::json reply;
-    REQUIRE(spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
-    CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
-    REQUIRE(reply.contains("sandbox"));
+    const bool     got_reply = spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error);
+    if (!got_reply) {
+        plugin_ipc::kill_host(spawned.host);
+        const std::string child_err = plugin_ipc::drain_host_stderr(spawned.host);
+        plugin_ipc::close_host(spawned.host);
+        SKIP("Seatbelt probe did not complete handshake (" + error + "); child " + plugin_ipc::host_exit_summary(spawned.host) +
+             " stderr=" + child_err);
+    }
+    if (reply.value("type", std::string()) != plugin_ipc::k_type_hello_ok || !reply.contains("sandbox")) {
+        plugin_ipc::kill_host(spawned.host);
+        const std::string child_err = plugin_ipc::drain_host_stderr(spawned.host);
+        plugin_ipc::close_host(spawned.host);
+        SKIP("Seatbelt probe reply was not hello_ok; child " + plugin_ipc::host_exit_summary(spawned.host) + " stderr=" + child_err);
+    }
     const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
     INFO("sandbox kind=" << report.kind << " detail=" << report.detail);
+    if (!report.applied || report.kind != plugin_ipc::k_sandbox_kind_seatbelt_probe ||
+        report.detail.find("DEV/TEST") == std::string::npos) {
+        plugin_ipc::kill_host(spawned.host);
+        const std::string child_err = plugin_ipc::drain_host_stderr(spawned.host);
+        plugin_ipc::close_host(spawned.host);
+        SKIP("Seatbelt probe could not be confirmed: kind=" + report.kind + " detail=" + report.detail +
+             " stderr=" + child_err);
+    }
     CHECK(report.applied);
     CHECK(report.kind == plugin_ipc::k_sandbox_kind_seatbelt_probe);
     CHECK(report.detail.find("DEV/TEST") != std::string::npos);

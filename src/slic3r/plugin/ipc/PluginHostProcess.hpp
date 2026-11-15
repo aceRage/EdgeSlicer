@@ -20,7 +20,10 @@ struct SpawnedHost
 #endif
 #ifndef _WIN32
     int watchdog_write_fd = -1;
+    int stderr_read_fd    = -1;
 #endif
+    int  last_wait_status = 0;
+    bool wait_reaped      = false;
 
     bool valid() const { return channel.valid() && pid > 0; }
 };
@@ -52,5 +55,10 @@ void kill_host_pid(std::int64_t pid);
 void kill_host_handle(void* process);
 #endif
 void close_host(SpawnedHost& host);
+
+// Drain the child's captured stderr (POSIX spawn redirects fd 2 to a pipe). Empty on Windows.
+std::string drain_host_stderr(SpawnedHost& host);
+// Human-readable waitpid / GetExitCodeProcess result after close_host.
+std::string host_exit_summary(const SpawnedHost& host);
 
 } // namespace Slic3r::plugin_ipc

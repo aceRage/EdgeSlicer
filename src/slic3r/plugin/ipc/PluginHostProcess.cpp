@@ -297,9 +297,11 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     }
 
     out.channel = Channel::from_windows_handle(pipe);
-    out.pid     = static_cast<std::int64_t>(pi.dwProcessId);
-    out.process = pi.hProcess;
-    out.job     = job;
+    out.pid               = static_cast<std::int64_t>(pi.dwProcessId);
+    out.process           = pi.hProcess;
+    out.job               = job;
+    out.last_wait_status  = 0;
+    out.wait_reaped       = false;
     return true;
 }
 
@@ -332,6 +334,11 @@ void close_host(SpawnedHost& host)
     host.channel.close();
     if (host.process) {
         ::WaitForSingleObject(static_cast<HANDLE>(host.process), 2000);
+        DWORD code = 0;
+        if (::GetExitCodeProcess(static_cast<HANDLE>(host.process), &code)) {
+            host.last_wait_status = static_cast<int>(code);
+            host.wait_reaped      = true;
+        }
         ::CloseHandle(static_cast<HANDLE>(host.process));
         host.process = nullptr;
     }
@@ -363,7 +370,8 @@ void close_fd(int& fd)
 }
 
 bool spawn_host_fork(
-    SpawnedHost& out, const boost::filesystem::path& helper, int sv[2], int watchdog[2], int errp[2], long maxfd, std::string& error)
+    SpawnedHost& out, const boost::filesystem::path& helper, int sv[2], int watchdog[2], int errp[2], int stderrp[2], long maxfd,
+    std::string& error)
 {
     // argv lives in the parent so the child does not allocate after fork.
     const std::string helper_str = helper.string();
@@ -391,13 +399,15 @@ bool spawn_host_fork(
         ::close(sv[0]);
         ::close(errp[0]);
         ::close(watchdog[1]);
+        ::close(stderrp[0]);
         // Move the kept fds above 10 first so dup2(3)/dup2(4) cannot clobber
         // watchdog[0] or errp[1], and so a CLOEXEC fd that already is 3 or 4 still
         // gets a real dup2 (dup2 clears FD_CLOEXEC; skipping it left CLOEXEC set).
-        int ipc = move_fd_ge(sv[1], 11);
-        int wd  = move_fd_ge(watchdog[0], 11);
-        int err = move_fd_ge(errp[1], 11);
-        if (ipc < 0 || wd < 0 || err < 0)
+        int ipc     = move_fd_ge(sv[1], 11);
+        int wd      = move_fd_ge(watchdog[0], 11);
+        int err     = move_fd_ge(errp[1], 11);
+        int stderrw = move_fd_ge(stderrp[1], 11);
+        if (ipc < 0 || wd < 0 || err < 0 || stderrw < 0)
             ::_exit(127);
         if (::dup2(ipc, 3) < 0)
             ::_exit(127);
@@ -407,6 +417,10 @@ bool spawn_host_fork(
             ::_exit(127);
         if (wd != 4)
             ::close(wd);
+        if (::dup2(stderrw, STDERR_FILENO) < 0)
+            ::_exit(127);
+        if (stderrw != STDERR_FILENO)
+            ::close(stderrw);
         clear_cloexec(3);
         clear_cloexec(4);
         // Error pipe must stay CLOEXEC so execv closes it and the parent's
@@ -437,6 +451,7 @@ bool spawn_host_fork(
     close_fd(sv[1]);
     close_fd(errp[1]);
     close_fd(watchdog[0]);
+    close_fd(stderrp[1]);
     int    exec_err = 0;
     pollfd p{errp[0], POLLIN, 0};
     int    r;
@@ -461,8 +476,17 @@ bool spawn_host_fork(
     out.channel           = Channel::from_posix_fd(sv[0]);
     out.pid               = static_cast<std::int64_t>(pid);
     out.watchdog_write_fd = watchdog[1];
-    sv[0]                 = -1;
-    watchdog[1]           = -1;
+    out.last_wait_status  = 0;
+    out.wait_reaped       = false;
+    out.stderr_read_fd    = stderrp[0];
+    if (out.stderr_read_fd >= 0) {
+        const int fl = ::fcntl(out.stderr_read_fd, F_GETFL);
+        if (fl >= 0)
+            ::fcntl(out.stderr_read_fd, F_SETFL, fl | O_NONBLOCK);
+    }
+    sv[0]       = -1;
+    watchdog[1] = -1;
+    stderrp[0]  = -1;
     return true;
 }
 
@@ -513,17 +537,31 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 
+    int stderrp[2] = {-1, -1};
+    if (pipe_cloexec(stderrp) != 0) {
+        ::close(sv[0]);
+        ::close(sv[1]);
+        ::close(watchdog[0]);
+        ::close(watchdog[1]);
+        ::close(errp[0]);
+        ::close(errp[1]);
+        error = "stderr pipe failed";
+        return false;
+    }
+
     long maxfd = ::sysconf(_SC_OPEN_MAX);
     if (maxfd < 0 || maxfd > 4096)
         maxfd = 4096;
 
-    if (!spawn_host_fork(out, helper, sv, watchdog, errp, maxfd, error)) {
+    if (!spawn_host_fork(out, helper, sv, watchdog, errp, stderrp, maxfd, error)) {
         close_fd(sv[0]);
         close_fd(sv[1]);
         close_fd(watchdog[0]);
         close_fd(watchdog[1]);
         close_fd(errp[0]);
         close_fd(errp[1]);
+        close_fd(stderrp[0]);
+        close_fd(stderrp[1]);
         return false;
     }
     return true;
@@ -545,21 +583,68 @@ void close_host(SpawnedHost& host)
     host.channel.close();
     close_watchdog(host);
     if (host.pid > 0) {
-        int status = 0;
+        int   status = 0;
+        pid_t w      = 0;
         for (int i = 0; i < 50; ++i) {
-            const pid_t w = ::waitpid(static_cast<pid_t>(host.pid), &status, WNOHANG);
+            w = ::waitpid(static_cast<pid_t>(host.pid), &status, WNOHANG);
             if (w != 0)
                 break;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        if (::waitpid(static_cast<pid_t>(host.pid), &status, WNOHANG) == 0) {
+        if (w == 0) {
             ::kill(static_cast<pid_t>(host.pid), SIGKILL);
-            while (::waitpid(static_cast<pid_t>(host.pid), &status, 0) < 0 && errno == EINTR) {}
+            do {
+                w = ::waitpid(static_cast<pid_t>(host.pid), &status, 0);
+            } while (w < 0 && errno == EINTR);
+        }
+        if (w > 0) {
+            host.last_wait_status = status;
+            host.wait_reaped      = true;
         }
         host.pid = 0;
     }
+    close_fd(host.stderr_read_fd);
 }
 
 #endif
+
+std::string drain_host_stderr(SpawnedHost& host)
+{
+#ifdef _WIN32
+    (void) host;
+    return {};
+#else
+    if (host.stderr_read_fd < 0)
+        return {};
+    std::string out;
+    char        buf[1024];
+    for (;;) {
+        const ssize_t n = ::read(host.stderr_read_fd, buf, sizeof(buf));
+        if (n > 0) {
+            out.append(buf, static_cast<size_t>(n));
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        break;
+    }
+    return out;
+#endif
+}
+
+std::string host_exit_summary(const SpawnedHost& host)
+{
+    if (!host.wait_reaped)
+        return "not reaped";
+#ifdef _WIN32
+    return "exit-code " + std::to_string(host.last_wait_status);
+#else
+    if (WIFEXITED(host.last_wait_status))
+        return "exited " + std::to_string(WEXITSTATUS(host.last_wait_status));
+    if (WIFSIGNALED(host.last_wait_status))
+        return "signal " + std::to_string(WTERMSIG(host.last_wait_status));
+    return "wait-status " + std::to_string(host.last_wait_status);
+#endif
+}
 
 } // namespace Slic3r::plugin_ipc
