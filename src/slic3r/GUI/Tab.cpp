@@ -6354,6 +6354,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
+        // #1052 review S2 (owner): what a Bambu Lab prime tower primes after a change to this filament (the
+        // process "Prime volume" is greyed out there); the hotend-change value only on a hotend rack (H2C).
+        optgroup->append_single_option_line("filament_prime_volume");
+        optgroup->append_single_option_line("filament_prime_volume_nc");
         // BBS: flush settings and extruder-change long retraction (BBL machines such as H2D). Upstream
         // shows these on its own "Multi Filament" page, in this order; this group is the fork's nearest
         // equivalent. Only one flush temperature line shows: the Fast one when the project's
@@ -6991,6 +6995,19 @@ void TabFilament::toggle_options()
         const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
+
+        // #1052 review S2: shown where they are used, the mirror of the process "Prime volume" grey-out
+        // (WipeTower::bambu_prime_volume() on Bambu Lab printers). The hotend-change prime needs a hotend change on
+        // one extruder: a rack that is not driven as separate extruders (H2C, not H3C).
+        const auto *rack_counts = cfg.option<ConfigOptionInts>("extruder_max_nozzle_count");
+        const auto *nozzles     = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+        const auto *as_extruder = cfg.option<ConfigOptionBool>("handle_hotend_as_extruder");
+        const bool  rack        = rack_counts != nullptr &&
+                          std::any_of(rack_counts->values.begin(), rack_counts->values.end(), [](int c) { return c > 1; });
+        const bool  hotend_as_extruder = (as_extruder != nullptr && as_extruder->value) ||
+                                        (rack && nozzles != nullptr && nozzles->values.size() == 1 && rack_counts->values.size() == 1);
+        toggle_line("filament_prime_volume", is_BBL_printer);
+        toggle_line("filament_prime_volume_nc", is_BBL_printer && rack && !hotend_as_extruder);
     }
 
     // Per-nozzle process P5: with a nozzle size selected, only the values that can differ per nozzle are editable.

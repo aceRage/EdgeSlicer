@@ -3478,21 +3478,25 @@ void PrintConfigDef::init_fff_params()
     // every Type 1 tower; Edge reads it on Bambu Lab printers and keeps the process prime_volume elsewhere.
     def = this->add("filament_prime_volume", coFloats);
     def->label = L("Prime volume on filament change");
-    def->tooltip = L("The volume of material required to prime the extruder on the tower, excluding a hotend change. "
-                     "Used by the prime tower of Bambu Lab printers.");
+    def->tooltip = L("The volume of this filament primed on the prime tower after a change to it, excluding a hotend "
+                     "change. Used by the prime tower of Bambu Lab printers, in place of the process's prime volume. "
+                     "The Saving prime volume mode primes 15 mm³ instead.");
     def->sidetext = L("mm³");
     def->min = 1.0;
-    def->mode = comDevelop;
+    def->max = 1000.;
+    // #1052 review S2 (owner): editable on the filament page of Bambu Lab printers (Tab: Multimaterial).
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloats{ 45. });
 
     // Orca #14800 (Bambu Studio): the prime after a hotend change on one extruder (H2C rack).
     def = this->add("filament_prime_volume_nc", coFloats);
     def->label = L("Prime volume on hotend change");
-    def->tooltip = L("The volume of material required to prime the extruder for a hotend change on the tower. "
-                     "Used by the prime tower of Bambu Lab printers with a hotend rack.");
+    def->tooltip = L("The volume of this filament primed on the prime tower after a hotend change on one extruder "
+                     "(a printer with a hotend rack). The Saving prime volume mode primes 15 mm³ instead.");
     def->sidetext = L("mm³");
     def->min = 1.0;
-    def->mode = comDevelop;
+    def->max = 1000.;
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloats{ 60. });
 
     // Orca #10780 (Bambu Studio): filaments of one category bond to each other. The Type 1 prime tower purges
@@ -9503,7 +9507,7 @@ void PrintConfigDef::init_fff_params()
     // Review S2 (#1052): greyed out on Bambu Lab printers (ConfigManipulation), whose tower primes the filament value.
     def->tooltip = L("The volume of material to prime extruder on tower.\n\n"
                      "Not used on Bambu Lab printers: their prime tower primes each filament's own volume, "
-                     "\"Prime volume on filament change\" in the filament preset.");
+                     "\"Prime volume on filament change\" on the filament's Multimaterial page.");
     def->sidetext = u8"mm³";	// cubic milimeters, don't need translation
     def->min = 1.0;
     def->mode = comSimple;
