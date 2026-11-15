@@ -285,6 +285,7 @@ if (EDGE_PYTHON_PLUGINS AND UNIX AND NOT APPLE AND NOT SLIC3R_ASAN)
             -DCMAKE_COMMAND=${CMAKE_COMMAND}
             -DBUILD_DIR=${CMAKE_BINARY_DIR}
             -DBINDIR=${CMAKE_INSTALL_BINDIR}
+            -DCONFIG=$<CONFIG>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/check_plugin_host_install.cmake)
     set_tests_properties(plugin_host_install_rpath PROPERTIES
         TIMEOUT 180

@@ -13,8 +13,12 @@ set(PREFIX "${BUILD_DIR}/plugin-host-install-prefix")
 file(REMOVE_RECURSE "${PREFIX}")
 file(MAKE_DIRECTORY "${PREFIX}")
 
+set(_install_cmd ${CMAKE_COMMAND} --install "${BUILD_DIR}" --prefix "${PREFIX}" --component plugin-host)
+if (CONFIG)
+    list(APPEND _install_cmd --config "${CONFIG}")
+endif ()
 execute_process(
-    COMMAND ${CMAKE_COMMAND} --install "${BUILD_DIR}" --prefix "${PREFIX}" --component plugin-host
+    COMMAND ${_install_cmd}
     RESULT_VARIABLE install_rc
     OUTPUT_VARIABLE install_out
     ERROR_VARIABLE install_err)
