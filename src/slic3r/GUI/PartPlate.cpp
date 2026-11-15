@@ -4466,8 +4466,12 @@ int PartPlateList::create_plate(bool adjust_position)
 
 int PartPlateList::duplicate_plate(int index)
 {
-    // create a new plate
+    if (index < 0 || index >= int(m_plate_list.size()))
+        return -1;
+    // create a new plate (none when the plate count is at its maximum)
     int new_plate_index = create_plate(true);
+    if (new_plate_index < 0)
+        return -1;
     PartPlate* old_plate = NULL;
     PartPlate* new_plate = NULL;
     old_plate = get_plate(index);
@@ -4476,21 +4480,30 @@ int PartPlateList::duplicate_plate(int index)
     // get the offset between plate centers
     Vec3d plate_to_plate_offset = new_plate->m_origin - old_plate->m_origin;
 
-    // iterate over all the objects in this plate
-    ModelObjectPtrs obj_ptrs = old_plate->get_objects_on_this_plate();
-    for (ModelObject* object : obj_ptrs){
+    // The plate holds (object, instance) pairs: group them per object, so that each object is
+    // copied once, keeping only the instances on this plate. Its instances on other plates are
+    // neither copied nor moved.
+    std::map<int, std::set<int>> instances_per_object;
+    for (const std::pair<int, int>& obj_inst : old_plate->obj_to_instance_set)
+        instances_per_object[obj_inst.first].insert(obj_inst.second);
+    for (const auto& [obj_id, instance_ids] : instances_per_object) {
         // copy and move the object to the same relative position in the new plate
-        ModelObject* object_copy = m_model->add_object(*object);
-        int new_obj_id = new_plate->m_model->objects.size() - 1;
+        ModelObject* object_copy = m_model->add_object(*m_model->objects[obj_id]);
+        for (int instance_id = int(object_copy->instances.size()) - 1; instance_id >= 0; --instance_id)
+            if (instance_ids.count(instance_id) == 0)
+                object_copy->delete_instance(instance_id);
+        int new_obj_id = m_model->objects.size() - 1;
         // go over the instances and pair with the object
         for (size_t new_instance_id = 0; new_instance_id < object_copy->instances.size(); new_instance_id++){
+            ModelInstance* instance = object_copy->instances[new_instance_id];
+            instance->set_offset(instance->get_offset() + plate_to_plate_offset);
             new_plate->obj_to_instance_set.emplace(std::pair(new_obj_id, new_instance_id));
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": duplicate object into plate: index_pair [%1%,%2%], obj_id %3%") % new_obj_id % new_instance_id % object_copy->id().id;
         }
     }
-    new_plate->translate_all_instance(plate_to_plate_offset);
     // update the plates
-    wxGetApp().obj_list()->reload_all_plates();
+    if (m_plater)
+        wxGetApp().obj_list()->reload_all_plates();
     return new_plate_index;
 }
 

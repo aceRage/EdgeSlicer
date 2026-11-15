@@ -840,6 +840,13 @@ private:
     // Under Time cost: which machine rate slicing uses (yours from Costs, or the preset's) and why.
     wxStaticText*       m_rate_note                     {nullptr};
     wxSizer*            rate_note_create_widget(wxWindow* parent);
+    // Under Machine start / end G-code: the "Startup sound" / "Ending sound" buttons, each shown when
+    // that G-code has an M1006 tune. Index 0 = start, 1 = end.
+    wxWindow*           m_sound_btn[2]                  {nullptr, nullptr};
+    wxStaticText*       m_sound_note[2]                 {nullptr, nullptr};
+    wxSizer*            sound_create_widget(wxWindow* parent, bool end);
+    void                update_sound_widgets();
+    void                edit_sound(bool end);
     // Per-nozzle process P5: under each extruder's Rack nozzle diameters, what is wrong with the text (or nothing).
     std::map<size_t, std::pair<wxWeakRef<wxTextCtrl>, wxWeakRef<wxStaticText>>> m_rack_controls; // extruder -> (text box, problem)
     void                update_rack_error(size_t extruder, const std::string& text);

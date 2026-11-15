@@ -969,8 +969,13 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
         return false;
 
     // Edge (Spread paint): a leaf painted in another state is kept as it is.
-    auto protected_leaf = [protect_painted, type](const Triangle &t) {
-        return protect_painted && ! t.is_split() && t.get_state() != EnforcerBlockerType::NONE && t.get_state() != type;
+    auto protected_leaf = [this, protect_painted, type](const Triangle &t) {
+        if (! protect_painted || t.is_split() || t.get_state() == EnforcerBlockerType::NONE || t.get_state() == type)
+            return false;
+        if (m_protected_states == nullptr)
+            return true;
+        const size_t state = size_t(t.get_state());
+        return state < m_protected_states->size() && (*m_protected_states)[state];
     };
 
     if (num_of_inside_vertices == 3 && protect_painted && tr->is_split()) {
@@ -1047,6 +1052,17 @@ void TriangleSelector::select_triangles_with_cursor(const std::vector<int>  &fac
 
     m_edge_limit_sqr = old_edge_limit_sqr;
     std::swap(m_cursor, cursor);
+}
+
+void TriangleSelector::select_triangles_with_cursor(const std::vector<int>  &facets,
+                                                    std::unique_ptr<Cursor> &&cursor,
+                                                    EnforcerBlockerType       new_state,
+                                                    float                     edge_limit,
+                                                    const std::vector<bool>  &protected_states)
+{
+    m_protected_states = &protected_states;
+    select_triangles_with_cursor(facets, std::move(cursor), new_state, edge_limit, true);
+    m_protected_states = nullptr;
 }
 
 void TriangleSelector::set_facet(int facet_idx, EnforcerBlockerType state)

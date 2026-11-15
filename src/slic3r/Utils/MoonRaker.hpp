@@ -53,6 +53,11 @@ public:
     std::string get_host() const override { return m_host; }
     const std::string& get_apikey() const { return m_apikey; }
     const std::string& get_cafile() const { return m_cafile; }
+    // `path` on port 8080 of the host in `host` (a print_host value: "ip", "ip:7125",
+    // "http://ip:7125/", ...), keeping its scheme and any user:password@.
+    static std::string url_on_port_8080(const std::string& host, const std::string& path);
+    // Whether an upload that failed with HTTP `status` (0: no HTTP answer) is tried again on port 8080.
+    static bool retry_on_port_8080(unsigned status);
 
     // set auth info
     virtual void set_auth_info(const nlohmann::json& info) override {};

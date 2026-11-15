@@ -211,11 +211,11 @@ void ConfigManipulation::check_chamber_temperature(DynamicPrintConfig* config)
         {"PETG-CF",55}
     };
    bool support_chamber_temp_control=GUI::wxGetApp().preset_bundle->printers.get_selected_preset().config.opt_bool("support_chamber_temp_control");
-    if (support_chamber_temp_control&&config->has("chamber_temperatures")) {
+    if (support_chamber_temp_control&&config->has("chamber_temperature")) {
         std::string filament_type = config->option<ConfigOptionStrings>("filament_type")->get_at(0);
         auto iter = recommend_temp_map.find(filament_type);
         if (iter!=recommend_temp_map.end()) {
-            if (iter->second < config->option<ConfigOptionInts>("chamber_temperatures")->get_at(0)) {
+            if (iter->second < config->option<ConfigOptionInts>("chamber_temperature")->get_at(0)) {
                 wxString msg_text = wxString::Format(_L("Current chamber temperature is higher than the material's safe temperature, this may result in material softening and clogging. "
                                                         "The maximum safe temperature for the material is %d"), iter->second);
                 MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
@@ -1093,6 +1093,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_interface_loop_pattern", "support_bottom_interface_spacing" })
         toggle_field(el, have_support_material && have_support_interface);
 
+    // EdgeSlicer: the interface temperature needs one interface filament (not "current filament"); filament
+    // matching picks the interface filament per wall, so the temperature is not used then (Print::validate says so).
+    if (config->has("support_interface_nozzle_temperature")) {
+        toggle_line("support_interface_nozzle_temperature", config->opt_int("support_interface_filament") != 0);
+        toggle_field("support_interface_nozzle_temperature",
+                     have_support_material && have_support_interface &&
+                         !(config->has("support_filament_matching") && config->opt_bool("support_filament_matching")));
+    }
+
     // Ultra (over-support surfaces): only reachable with support on and a non-zero top Z distance -
     // at a zero gap the surface is already a plain bottom shell and there is nothing to reclassify.
     bool can_over_support = have_support_material && config->opt_float("support_top_z_distance") > 0;
@@ -1198,8 +1207,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && supports_wipe_tower_2);
     // Bambu Studio 2.9.1 options only the Type 1 tower honours; the tool change wipe applies to both.
-    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width"})
+    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width", "prime_tower_infill_gap", "prime_tower_enable_framework",
+                    "prime_tower_flat_ironing"})
       toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    // Flat ironing irons the start of a purge behind its wall gap.
+    toggle_field("prime_tower_flat_ironing", have_prime_tower && config->opt_bool("wipe_tower_wall_gap"));
     for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
       toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
@@ -1247,6 +1259,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("toolchange_cyclic_first_layer", use_cyclic_ordering);
 
     toggle_line("prime_volume",have_prime_tower && (!purge_in_primetower || !bSEMM));
+    // Review S2 (#1052): a Bambu Lab tower primes filament_prime_volume instead (Print::_make_wipe_tower and
+    // WipeTower::bambu_prime_volume() on the same is_bbl_vendor() flag); the field stays visible, greyed out.
+    toggle_field("prime_volume", have_prime_tower && !is_BBL_Printer);
 
     for (auto el : {"flush_into_infill", "flush_into_support", "flush_into_objects"})
         toggle_field(el, have_prime_tower);

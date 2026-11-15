@@ -860,6 +860,40 @@ static std::string join_int_list_comma(const std::vector<int>& values)
     return stream.str();
 }
 
+// Mixed color sublayer P3 (D12): the highest 1-based filament id the project uses - painted states, object, part and
+// height-range filaments and every *_filament feature setting of the project, objects, parts and ranges. The Bambu
+// export writes mixed slots up to it only.
+static unsigned int bambu_mixed_max_used_filament_id(const Model &model, const DynamicPrintConfig &project)
+{
+    unsigned int max_id = 0;
+    auto from_config = [&max_id](const ConfigBase &config) {
+        for (const std::string &key : config.keys()) {
+            if (key != "extruder" && !boost::algorithm::ends_with(key, "_filament"))
+                continue;
+            if (const auto *opt = dynamic_cast<const ConfigOptionInt *>(config.option(key)); opt != nullptr && opt->value > 0)
+                max_id = std::max(max_id, unsigned(opt->value));
+        }
+    };
+    from_config(project);
+    for (const ModelObject *object : model.objects) {
+        from_config(object->config.get());
+        for (const ModelVolume *volume : object->volumes) {
+            from_config(volume->config.get());
+            for (int id : volume->get_extruders())
+                if (id > 0)
+                    max_id = std::max(max_id, unsigned(id));
+        }
+        for (const auto &range : object->layer_config_ranges)
+            from_config(range.second.get());
+    }
+    // Per-plate custom G-code: a tool change can name a mixed filament.
+    for (const auto &plate : model.plates_custom_gcodes)
+        for (const CustomGCode::Item &item : plate.second.gcodes)
+            if (item.type == CustomGCode::ToolChange && item.extruder > 0)
+                max_id = std::max(max_id, unsigned(item.extruder));
+    return max_id;
+}
+
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
 {
     if (!result) return;
@@ -6106,7 +6140,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             Transform3d volume_matrix_to_object = Transform3d::Identity();
-            bool        has_transform 		    = false;
+            bool        has_matrix              = false;
             int         shared_mesh_id          = object_id.second;
             if (volume_data)
             {
@@ -6115,7 +6149,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 for (const Metadata& metadata : volume_data->metadata) {
                     if (metadata.key == MATRIX_KEY) {
                         volume_matrix_to_object = Slic3r::Geometry::transform3d_from_string(metadata.value);
-                        has_transform 			= ! volume_matrix_to_object.isApprox(Transform3d::Identity(), 1e-10);
+                        has_matrix              = true;
                         found_count++;
                     }
                     else if (metadata.key == MESH_SHARED_KEY){
@@ -6215,10 +6249,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume = object.add_volume_with_shared_mesh(*shared_volume);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": line %1%, create volume using shared_mesh %2%")%__LINE__%shared_volume;
             }
-            // stores the volume matrix taken from the metadata, if present
-            if (has_transform)
-                volume->source.transform = Slic3r::Geometry::Transformation(volume_matrix_to_object);
-
             volume->calculate_convex_hull();
 
             //set transform from 3mf
@@ -6229,6 +6259,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 Vec3d shift = trangle_mesh.get_init_shift();
                 if (!shift.isApprox(Vec3d::Zero()))
                     volume->translate(shift);
+            }
+
+            // The "matrix" metadata is written as the volume's placement times its source transform (see the
+            // exporter); the mesh of this format is stored in the volume's own frame, so the source transform is
+            // the matrix with the placement just read taken back out. Stored whole, each save and open multiplied
+            // the placement into it once more.
+            if (has_matrix) {
+                const Transform3d source_transform = volume->get_matrix().inverse() * volume_matrix_to_object;
+                if (! source_transform.isApprox(Transform3d::Identity(), 1e-10))
+                    volume->source.transform = Slic3r::Geometry::Transformation(source_transform);
             }
 
             // recreate custom supports, seam and mmu segmentation from previously loaded attribute
@@ -7290,15 +7330,70 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_bambu_report = BambuExport::Report();
         m_bambu_project.clear();
         if (m_bambu_compat && store_params.config != nullptr) {
-            m_bambu_ctx     = BambuExport::Context::from_project(*store_params.config);
-            m_bambu_project = BambuExport::convert_project(*store_params.config, m_bambu_ctx, m_bambu_report);
+            // Mixed color sublayer P3 (D12): the project's mixed rows become Bambu Studio mixed filament slots, appended
+            // after the physical ones in virtual id order, so the model's ids need no remap (MixedSublayer.hpp).
+            std::unique_ptr<DynamicPrintConfig> expanded;
+            BambuMixedExport                    mixed;
+            if (const auto *defs = store_params.config->option<ConfigOptionString>("mixed_filament_definitions");
+                defs != nullptr && !defs->value.empty() && store_params.model != nullptr) {
+                const unsigned int max_used = bambu_mixed_max_used_filament_id(*store_params.model, *store_params.config);
+                expanded = std::make_unique<DynamicPrintConfig>(*store_params.config);
+                mixed    = expand_bambu_mixed_slots(*expanded, max_used);
+                if (!mixed.any) {
+                    expanded.reset();
+                    const auto *colours = store_params.config->option<ConfigOptionStrings>("filament_colour");
+                    if (colours != nullptr && max_used > colours->values.size())
+                        m_bambu_report.notes.push_back("project: filament " + std::to_string(max_used) +
+                                                       " is a mixed filament that could not be written as a Bambu Studio slot");
+                    for (const std::string &note : mixed.notes)
+                        m_bambu_report.notes.push_back("project: " + note);
+                }
+            }
+            const DynamicPrintConfig &project = expanded ? *expanded : *store_params.config;
+            m_bambu_ctx     = BambuExport::Context::from_project(project);
+            m_bambu_project = BambuExport::convert_project(project, m_bambu_ctx, m_bambu_report);
+            if (mixed.any) {
+                auto bools = [](const std::vector<bool> &v) {
+                    BambuExport::Value out;
+                    out.vector = true;
+                    for (bool b : v)
+                        out.values.push_back(b ? "1" : "0");
+                    return out;
+                };
+                auto strings = [](const std::vector<std::string> &v) {
+                    BambuExport::Value out;
+                    out.vector  = true;
+                    out.strings = true;
+                    out.values  = v;
+                    return out;
+                };
+                m_bambu_project["filament_is_mixed"]                = bools(mixed.slots.is_mixed);
+                m_bambu_project["filament_mixed_components"]        = strings(mixed.slots.components);
+                m_bambu_project["filament_mixed_sublayer_ratios"]   = strings(mixed.slots.ratios);
+                m_bambu_project["filament_mixed_gradient"]          = bools(mixed.slots.gradient);
+                m_bambu_project["filament_mixed_gradient_range"]    = strings(mixed.slots.gradient_range);
+                m_bambu_project["filament_mixed_gradient_curve"]    = strings(mixed.slots.gradient_curve);
+                m_bambu_project["filament_mixed_gradient_per_part"] = bools(mixed.slots.gradient_per_part);
+                BambuExport::Value sublayer;
+                sublayer.values = { mixed.sublayer ? "1" : "0" };
+                m_bambu_project["enable_mixed_color_sublayer"] = sublayer;
+                m_bambu_report.converted.insert("filament_is_mixed");
+                m_bambu_report.notes.push_back("project: " + std::to_string(mixed.mixed_count) +
+                                               " EdgeSlicer mixed filament(s) written as Bambu Studio mixed filament slots");
+                for (const std::string &note : mixed.notes)
+                    m_bambu_report.notes.push_back("project: " + note);
+                // Bambu Studio's AMS layouts take at most 16 filaments on most printers; the slots are still written.
+                if (mixed.physical_count + mixed.mixed_count > 16)
+                    m_bambu_report.notes.push_back("project: " + std::to_string(mixed.physical_count + mixed.mixed_count) +
+                                                   " filaments including mixed slots; Bambu Studio may not load more than 16");
+            }
             if (m_bambu_multi_diameter) {
                 BambuExport::Value mode;
                 mode.values = { "1" };
                 BambuExport::Value map;
                 map.vector  = true;
                 map.strings = true;
-                map.values  = BambuMultiDiameter::filament_diameter_map(*store_params.config);
+                map.values  = BambuMultiDiameter::filament_diameter_map(project);
                 m_bambu_project[BambuMultiDiameter::MODE_KEY]         = mode;
                 m_bambu_project[BambuMultiDiameter::DIAMETER_MAP_KEY] = map;
             }
@@ -7342,6 +7437,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     // backup mesh-only
+    // An object's name made fit for the name of its file in the package (and in the backup folder): the name is
+    // the user's, and a '/' or '\\' in it made a folder of it, ".." among them one level up. The name itself is
+    // kept as it is in the metadata.
+    static std::string object_file_name(const std::string &name)
+    {
+        return sanitize_filename(name);
+    }
+
     bool _BBS_3MF_Exporter::save_object_mesh(const std::string& temp_path, ModelObject const & object, int obj_id)
     {
         m_production_ext = true;
@@ -7351,7 +7454,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
 
-        auto filename = boost::format("3D/Objects/%s_%d.model") % object.name % obj_id;
+        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(object.name) % obj_id;
         std::string filepath = temp_path + "/" + filename.str();
         std::string filepath_tmp = filepath + ".tmp";
         boost::system::error_code ec;
@@ -8006,20 +8109,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             a += (int)thumbnail_data.pixels[4 * ((i + m) * thumbnail_data.width + j + n) + 3];
                         }
                     }
-                    r = std::clamp(0, r / sw / sh, 255);
-                    g = std::clamp(0, g / sw / sh, 255);
-                    b = std::clamp(0, b / sw / sh, 255);
-                    a = std::clamp(0, a / sw / sh, 255);
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 0] = (unsigned char)r;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 1] = (unsigned char)g;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 2] = (unsigned char)b;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 3] = (unsigned char)a;
+                    r = std::clamp(r / sw / sh, 0, 255);
+                    g = std::clamp(g / sw / sh, 0, 255);
+                    b = std::clamp(b / sw / sh, 0, 255);
+                    a = std::clamp(a / sw / sh, 0, 255);
+                    // Row i / sh (i steps by the step height), column j / sw.
+                    const size_t small_idx = 4 * (size_t(i / sh) * PLATE_THUMBNAIL_SMALL_WIDTH + size_t(j / sw));
+                    small_pixels[small_idx + 0] = (unsigned char)r;
+                    small_pixels[small_idx + 1] = (unsigned char)g;
+                    small_pixels[small_idx + 2] = (unsigned char)b;
+                    small_pixels[small_idx + 3] = (unsigned char)a;
                     //memcpy((void*)&small_pixels[4*(i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh)], thumbnail_data.pixels.data() + 4*(i * thumbnail_data.width + j), 4);
                 }
             }
             size_t small_png_size = 0;
             void* small_png_data = tdefl_write_image_to_png_file_in_memory_ex((const void*)small_pixels.data(), PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT, 4, &small_png_size, MZ_DEFAULT_COMPRESSION, 1);
-            if (png_data != nullptr) {
+            res = false;
+            if (small_png_data != nullptr) {
                 std::string thumbnail_name = (boost::format("%1%_%2%_small.png") % local_path % (index + 1)).str();
                 res = mz_zip_writer_add_mem(&archive, thumbnail_name.c_str(), (const void*)small_png_data, small_png_size, MZ_NO_COMPRESSION);
                 mz_free(small_png_data);
@@ -8104,7 +8210,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 if (data._3mf_printer_thumbnail_small.empty()) {
                     if (plate_small_thumbnail_written)
-                        stream << "<Relationship Target=\"/Metadata/plate_1_small.png"
+                        stream << " <Relationship Target=\"/Metadata/plate_1_small.png"
                                << "\" Id=\"rel-5\" Type=\"http://schemas.bambulab.com/package/2021/cover-thumbnail-small\"/>\n";
                 } else {
                     stream << " <Relationship Target=\"/" << xml_escape(data._3mf_printer_thumbnail_small)
@@ -8367,7 +8473,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     auto & object_data = object_it->second;
 
                     if (m_split_model) {
-                        auto filename = boost::format("3D/Objects/%s_%d.model") % obj->name % backup_id;
+                        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(obj->name) % backup_id;
                         object_data.sub_path = "/" + filename.str();
                         object_paths.push_back(filename.str());
                     }
@@ -9339,9 +9445,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add project embedded preset files
     bool _BBS_3MF_Exporter::_add_project_embedded_presets_to_archive(mz_zip_archive& archive, Model& model, std::vector<Preset*> project_presets)
     {
-        char buffer[1024];
-        snprintf(buffer, 1024, "; %s\n\n", header_slic3r_generated().c_str());
-        std::string out = buffer;
         int print_count = 0, filament_count = 0, printer_count = 0;
         const std::string& temp_path = model.get_backup_path();
 
@@ -10318,7 +10421,7 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << OUTSIDE_ATTR      << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->toolpath_outside << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_USED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_support_used << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LABEL_OBJECT_ENABLED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_label_object_enabled << "\"/>\n";
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->support_material_on_wipe_tower << "\"/>\n";
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << false << "\"/>\n"; // always false, as BambuStudio 24f90c04e (the H3C rejects true: HMS 0502-4010)
                 if (plate_data->nozzle_group_result)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ENABLE_FILAMENT_DYNAMIC_MAP_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->nozzle_group_result->is_support_dynamic_nozzle_map() << "\"/>\n";
                 else

@@ -4,6 +4,9 @@
 	"inherits": "fdm_filament_common",
 	"from": "system",
 	"instantiation": "false",
+	"fins_extrude_safe_temp": [
+		"100"
+	],
 	"activate_air_filtration": [
 		"0"
 	],

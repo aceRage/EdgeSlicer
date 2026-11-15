@@ -7,9 +7,16 @@
 #include "slic3r/GUI/AmsDualLayout.hpp"
 #include "slic3r/GUI/AmsTypes.hpp"
 #include "slic3r/GUI/BambuSendMapping.hpp"
+#include "slic3r/GUI/BambuReprint.hpp"
+#include "slic3r/GUI/FilamentCommands.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
+#include "slic3r/GUI/DualNozzleState.hpp"
+#include "libslic3r/BambuDualNozzleSync.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 using namespace Slic3r;
@@ -416,53 +423,156 @@ static FilamentInfo picked(int id, const std::string& ams, const std::string& sl
     return f;
 }
 
-TEST_CASE("No send mapping can name an AMS 3H slot or a rack spool holder", "[BambuAmsReport]")
+// What the send dialog, the phone send and the reprint all write for the printer
+// (SelectMachineDialog::get_ams_mapping_result, RemoteSend, BambuReprint: BambuSendMapping::compose).
+static void compose_for(const MachineObject& obj, const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& job,
+                        std::string& v0, std::string& v1, std::string& info)
+{
+    BambuSendMapping::ComposeInput in;
+    in.project_filament_count = job.size();
+    for (size_t i = 0; i < job.size(); ++i)
+        in.filament_ids.push_back("GFA00");
+    in.blocked_ams_ids = obj.mapping_blocked_ams_ids();
+    BambuSendMapping::compose(result, job, in, v0, v1, info);
+}
+
+TEST_CASE("Each H3C rack nozzle is fed from its AMS 3H slot or its spool holder", "[BambuAmsReport]")
 {
     MachineObject obj { nullptr, "fake-h3c", "FAKEN100000004", "127.0.0.1" };
     parse_h3c(obj);
+    REQUIRE(obj.is_rack_printer());
 
-    CHECK(obj.mapping_blocked_ams_id("32"));
-    CHECK(obj.mapping_blocked_ams_id("255"));
-    CHECK(obj.mapping_blocked_ams_id("247"));
-    CHECK_FALSE(obj.mapping_blocked_ams_id("0"));
-    CHECK(obj.slot_actions_blocked("32"));
+    // Nozzles 1 and 2 report feeding AMS 3H slots 1 and 2 (snow 0x2000 / 0x2001); nozzles 3..9 their
+    // spool holders 253..247 (Bambu Studio sTraverseBindAmsSlot, its get_tray ignoring a holder's slot).
+    const std::vector<std::pair<int, int>> bound = obj.rack_bound_slots();
+    const std::vector<std::pair<int, int>> want { { 32, 0 }, { 32, 1 }, { 253, 0 }, { 252, 0 }, { 251, 0 },
+                                                  { 250, 0 }, { 249, 0 }, { 248, 0 }, { 247, 0 } };
+    CHECK(bound == want);
 
-    // The automatic mapping: the black and the red PLA match slots 1 and 2 exactly, and still
-    // nothing is mapped to them.
+    // Without a snow, a nozzle falls back to its own AMS 3H slot, or, for a TPU-flow nozzle, its holder.
+    auto exists = [&obj](int a, int s) { return obj.slot_reported(a, s); };
+    GUI::AmsTypes::RackNozzle plain;
+    plain.addr = 4;
+    CHECK(GUI::AmsTypes::bound_slot(plain, 32, 9, 9, exists).ams_id == 32);
+    CHECK(GUI::AmsTypes::bound_slot(plain, 32, 9, 9, exists).slot_id == 4);
+    GUI::AmsTypes::RackNozzle tpu = plain;
+    tpu.tpu_flow = true;
+    CHECK(GUI::AmsTypes::bound_slot(tpu, 32, 9, 9, exists).ams_id == 251);
+
+    // The numbering: 28 + slot on the AMS 3H, the holder's id for a holder; and back.
+    CHECK(obj.tray_index_of("32", "0") == 28);
+    CHECK(obj.tray_index_of("32", "8") == 36);
+    CHECK(obj.tray_index_of("253", "0") == 253);
+    std::string a, s;
+    CHECK(obj.decode_tray_index(29, a, s));
+    CHECK(a == "32");
+    CHECK(s == "1");
+    CHECK(obj.decode_tray_index(250, a, s));
+    CHECK(a == "250");
+    CHECK(s == "0");
+    CHECK(GUI::AmsTypes::rack_tray_label(29) == "2");
+    CHECK(GUI::AmsTypes::rack_tray_label(253) == "3-Ext");
+    CHECK(obj.mapping_blocked_ams_ids().empty());
+}
+
+TEST_CASE("A two-colour job on AMS 3H slots 1 and 2 is sent as 28 / 29 and {32, 0} / {32, 1}", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000005", "127.0.0.1" };
+    parse_h3c(obj);
+
     const std::vector<FilamentInfo> job { job_filament(0, "#000000FF"), job_filament(1, "#DE4343FF") };
     std::vector<FilamentInfo>       result;
-    BambuSendMapping::auto_map(&obj, job, {}, {}, result);
-    for (const FilamentInfo& r : result) {
-        CHECK(r.ams_id != "32");
-        CHECK((r.tray_id < 128 || r.tray_id > 136));
-    }
+    CHECK(BambuSendMapping::auto_map(&obj, job, {}, {}, result) == 0);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].tray_id == 28);
+    CHECK(result[0].ams_id == "32");
+    CHECK(result[0].slot_id == "0");
+    CHECK(result[1].tray_id == 29);
+    CHECK(result[1].ams_id == "32");
+    CHECK(result[1].slot_id == "1");
+    CHECK(obj.is_valid_mapping_result(result, true));
 
-    // A pick made any other way (the popup, the phone, a reprint): refused and taken out.
-    std::vector<FilamentInfo> manual { picked(0, "32", "0", 128), picked(1, "", "", 130), picked(2, "250", "0", 250) };
-    CHECK_FALSE(obj.is_valid_mapping_result(manual, false));
-    for (const FilamentInfo& r : manual) {
-        CHECK(r.tray_id == -1);
-        CHECK(r.ams_id.empty());
-    }
-
-    // The last gate: what compose writes for the printer never names the AMS 3H.
-    BambuSendMapping::ComposeInput in;
-    in.project_filament_count = 2;
-    in.filament_ids           = { "GFA00", "GFA00" };
-    in.blocked_ams_ids        = obj.mapping_blocked_ams_ids();
     std::string v0, v1, info;
-    // Both on the AMS 3H: nothing is written at all.
-    const std::vector<FilamentInfo> both { picked(0, "32", "0", 128), picked(1, "32", "1", 129) };
-    CHECK_FALSE(BambuSendMapping::compose(both, job, in, v0, v1, info));
-    CHECK(v0.empty());
-    CHECK(v1.empty());
-    // One on another unit, one on the AMS 3H: the strings are written, the AMS 3H entry as "none".
-    const std::vector<FilamentInfo> mixed { picked(0, "0", "0", 0), picked(1, "32", "1", 129) };
-    CHECK_FALSE(BambuSendMapping::compose(mixed, job, in, v0, v1, info)); // not every filament mapped
-    CHECK(v0 == "[0,-1]");
-    CHECK(v1.find("\"ams_id\":32") == std::string::npos);
-    CHECK(v1.find("\"ams_id\":255") != std::string::npos);
-    CHECK(info.find("129") == std::string::npos);
+    compose_for(obj, result, job, v0, v1, info);
+    CHECK(v0 == "[28,29]");
+    CHECK(v1 == "[{\"ams_id\":32,\"slot_id\":0},{\"ams_id\":32,\"slot_id\":1}]");
+    CHECK(info.find("\"ams\":28") != std::string::npos);
+    CHECK(info.find("\"ams\":29") != std::string::npos);
+    CHECK(info.find("nozzleId") == std::string::npos); // a one-nozzle printer's payload carries none
+
+    // Never the AMS HT's numbers (the old ams_id * 4 + slot would have been 128 / 129): a result that
+    // names the AMS 3H with one is given the slot's own number.
+    std::vector<FilamentInfo> stale = result;
+    stale[0].tray_id = 128;
+    stale[1].tray_id = 129;
+    CHECK(obj.is_valid_mapping_result(stale, true));
+    CHECK(stale[0].tray_id == 28);
+    CHECK(stale[1].tray_id == 29);
+
+    // A slot no rack nozzle is fed from now (slot 3: loaded, nozzle 3 is on its holder) is refused.
+    std::vector<FilamentInfo> unfed { picked(0, "32", "2", 30) };
+    CHECK_FALSE(obj.is_valid_mapping_result(unfed, true));
+    CHECK(unfed[0].tray_id == -1);
+
+    // The reprint offers the same slots under the same numbers, so its choices compose alike.
+    const std::vector<BambuReprint::Tray> trays = BambuReprint::trays_of(&obj, {});
+    std::vector<int> ids;
+    for (const BambuReprint::Tray& t : trays)
+        ids.push_back(t.tray_id);
+    CHECK(ids == std::vector<int>({ 28, 29, 247, 248, 249, 250, 251, 252, 253 }));
+    CHECK(trays[0].name == "1");
+    CHECK(trays[0].ready);
+    CHECK(trays.back().name == "3-Ext");
+    CHECK_FALSE(trays.back().ready); // no spool on the holder
+}
+
+TEST_CASE("AMS 3H slot 1 and a rack spool holder: 28 and the holder's id", "[BambuAmsReport]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000006", "127.0.0.1" };
+    parse_h3c(obj);
+    // A green PLA on holder 253, the one rack nozzle 3 is fed from.
+    for (AmsTray& t : obj.vir_slots)
+        if (t.id == "253") {
+            t.type       = "PLA";
+            t.setting_id = "GFA00";
+            t.color      = "00AE42FF";
+            t.is_exists  = true;
+        }
+
+    const std::vector<FilamentInfo> job { job_filament(0, "#000000FF"), job_filament(1, "#00AE42FF") };
+    std::vector<FilamentInfo>       result;
+    CHECK(BambuSendMapping::auto_map(&obj, job, {}, {}, result) == 0);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].tray_id == 28);
+    CHECK(result[1].tray_id == 253);
+    CHECK(result[1].ams_id == "253");
+    CHECK(result[1].slot_id == "0");
+    CHECK(obj.is_valid_mapping_result(result, true));
+
+    // Bambu Studio's get_ams_mapping_result: only 254 / 255 go out as -1 in the tray list; holder 253
+    // keeps its id there and is {253, 0} in the ams / slot list.
+    std::string v0, v1, info;
+    compose_for(obj, result, job, v0, v1, info);
+    CHECK(v0 == "[28,253]");
+    CHECK(v1 == "[{\"ams_id\":32,\"slot_id\":0},{\"ams_id\":253,\"slot_id\":0}]");
+}
+
+TEST_CASE("Load, unload and RFID on the H3C are Bambu Studio's hotend-page commands", "[BambuAmsReport]")
+{
+    using FilamentCommands::rack_change_filament_json;
+    CHECK(rack_change_filament_json(true, "32", "1", 215, 220, false).dump() ==
+          "{\"ams_id\":32,\"command\":\"ams_change_filament\",\"curr_temp\":215,\"extruder_id\":0,\"slot_id\":1,\"tar_temp\":220,\"target\":32}");
+    CHECK(rack_change_filament_json(false, "32", "1", 215, 220, false).dump() ==
+          "{\"ams_id\":32,\"command\":\"ams_change_filament\",\"curr_temp\":215,\"extruder_id\":0,\"slot_id\":254,\"tar_temp\":220,\"target\":255}");
+    CHECK(rack_change_filament_json(true, "253", "0", -1, 215, true).dump() ==
+          "{\"ams_id\":253,\"command\":\"ams_change_filament\",\"curr_temp\":-1,\"extruder_id\":0,\"slot_id\":0,\"tar_temp\":215,\"target\":253}");
+    CHECK(rack_change_filament_json(false, "253", "0", -1, 215, true).dump() ==
+          "{\"ams_id\":253,\"command\":\"ams_change_filament\",\"curr_temp\":-1,\"extruder_id\":0,\"slot_id\":255,\"tar_temp\":215,\"target\":255}");
+    // Other printers keep their command exactly (an H2D AMS slot, the X1C's one spool holder).
+    CHECK(FilamentCommands::ams_change_filament_json(true, "0", "2", 210, 220, true).dump() ==
+          "{\"ams_id\":0,\"command\":\"ams_change_filament\",\"curr_temp\":210,\"slot_id\":2,\"tar_temp\":220,\"target\":2}");
+    CHECK(FilamentCommands::ams_change_filament_json(true, "254", "0", 210, 220, false).dump() ==
+          "{\"ams_id\":255,\"command\":\"ams_change_filament\",\"curr_temp\":210,\"slot_id\":0,\"tar_temp\":220,\"target\":255}");
 }
 
 TEST_CASE("A printer without a rack AMS maps as before", "[BambuAmsReport]")
@@ -553,4 +663,180 @@ TEST_CASE("A report without an ams block leaves the AMS state alone", "[BambuAms
     REQUIRE_NOTHROW(obj.parse_ams_report(json::object(), false));
     REQUIRE_NOTHROW(obj.parse_ams_report(json { { "ams", "x" } }, false));
     CHECK(obj.ams_exist_bits == 1);
+}
+
+// ---- Sync nozzle sizes on the H3C (owner bug 2026-11-13) -------------------------------------------------------
+// The H3C mounts no nozzle between prints: its extruder's hnow (0) names none of the reported nozzles, which all sit
+// in the rack (ids 0x10..0x18, addr_id 0..8). "Sync nozzle sizes" said "The printer did not report its nozzle sizes."
+// because it read only the mounted nozzle's size; the rack's sizes now give the extruder's size and the nine slots.
+
+static DualNozzleSync::PrinterState reported_nozzles(const MachineObject& obj)
+{
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = { 0 }; // the H3C profile's
+    DualNozzle::add_reported_nozzles(s, &obj);
+    return s;
+}
+
+TEST_CASE("H3C: Sync nozzle sizes reads the extruder's size and the nine rack slots", "[BambuAmsReport][NozzleSync]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000010", "127.0.0.1" };
+    parse_h3c(obj);
+
+    REQUIRE(obj.m_extder_data.extders.size() == 1);
+    CHECK(obj.m_extder_data.extders[0].current_nozzle_diameter == Approx(0.f)); // nothing mounted
+    REQUIRE(obj.m_nozzle_data.nozzles.size() == 9);
+    for (const Nozzle& n : obj.m_nozzle_data.nozzles) {
+        CHECK(n.on_rack());
+        CHECK(n.exist);
+        CHECK(n.addr_id == n.id - 0x10);
+    }
+
+    const DualNozzleSync::PrinterState s = reported_nozzles(obj);
+    REQUIRE(s.nozzles.size() == 9);
+    // What the old sync read: no mounted nozzle, so nothing.
+    CHECK(reported_extruder_nozzle_sizes(s, 1) == std::vector<double>{ 0. });
+    // Now: the first rack position's size.
+    CHECK(reported_sync_nozzle_sizes(s, 1) == std::vector<double>{ 0.4 });
+
+    // The nine slots in rack order, slot 8 the TPU 2.85 nozzle ("HT01"), as the H3C profile's default.
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 1);
+    REQUIRE(layout.size() == 1);
+    REQUIRE(layout[0].size() == 9);
+    CHECK(layout[0][7].volume_type == nvtTPU285);
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4" });
+}
+
+TEST_CASE("H3C: rack nozzles stay at their rack positions", "[BambuAmsReport][NozzleSync]")
+{
+    json print = n10_print();
+    json& info = print["device"]["nozzle"]["info"];
+    // Report order is not rack order, and sizes differ per position.
+    for (json& n : info) {
+        const int addr = n["addr_id"].get<int>();
+        if (addr == 0) n["diameter"] = 0.6;
+        if (addr == 1) n["diameter"] = 0.2;
+        if (addr == 2) n["type"] = "HH01"; // High Flow
+    }
+    std::reverse(info.begin(), info.end());
+    // Position 4 is empty: its "exist" bit (id 0x14 = 20) is clear.
+    print["device"]["nozzle"]["exist"] = 33488896 & ~(1 << 20);
+
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000011", "127.0.0.1" };
+    obj.printer_type = "N10";
+    obj.parse_ams_report(print, false);
+    obj.parse_new_info(print);
+
+    const DualNozzleSync::PrinterState s = reported_nozzles(obj);
+    CHECK(s.nozzles.size() == 8); // the empty position is not a nozzle
+    CHECK(reported_sync_nozzle_sizes(s, 1) == std::vector<double>{ 0.6 });
+
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 1);
+    REQUIRE(layout.size() == 1);
+    REQUIRE(layout[0].size() == 9);
+    CHECK(layout[0][4].diameter == Approx(0.)); // a gap, not the next nozzle moved up
+    CHECK(layout[0][5].diameter == Approx(0.4));
+    // The empty position keeps the slot the project has there; the rest come from the printer.
+    CHECK(rack_override_from_reported(layout, { "0.4,0.4,0.4,0.4,0.8,0.4,0.4,0.4,0.4" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.6,0.2,0.4:high_flow,0.4,0.8,0.4,0.4,0.4:tpu285,0.4" });
+    // With no slot there yet it takes the first reported size.
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 9 }) ==
+          std::vector<std::string>{ "0.6,0.2,0.4:high_flow,0.4,0.6,0.4,0.4,0.4:tpu285,0.4" });
+    // reported_rack_layout leaves the gap out.
+    CHECK(reported_rack_layout(s, 1)[0].size() == 8);
+}
+
+TEST_CASE("H2C-style racks without addr_id read as before", "[BambuAmsReport][NozzleSync]")
+{
+    // Two mounted nozzles (ids 0, 1) and rack ids 0x11..0x15 without addr_id: the mounted nozzle first, then the rack
+    // nozzles in id order, no gaps (the H2C path is unchanged).
+    json print = n10_print();
+    json& dev  = print["device"];
+    dev["extruder"] = json::parse(R"({"info":[{"hnow":0,"hpre":0,"htar":0,"id":0,"info":1545,"snow":65535,"spre":65535,
+        "star":65535,"stat":2048,"temp":33},{"hnow":1,"hpre":1,"htar":1,"id":1,"info":1048,"snow":65279,"spre":65279,
+        "star":65279,"stat":0,"temp":29}],"state":32770})");
+    json nozzles = json::array();
+    auto add = [&nozzles](int id, double d, const char* type) {
+        nozzles.push_back({ { "id", id }, { "diameter", d }, { "type", type }, { "stat", 0 }, { "tm", 350 }, { "wear", 0 } });
+    };
+    add(18, 0.6, "HS01");
+    add(0, 0.4, "HS01");
+    add(1, 0.4, "HS01");
+    add(17, 0.2, "HS01");
+    add(21, 0.8, "HH01");
+    dev["nozzle"] = { { "exist", 4063235 }, { "info", nozzles }, { "src_id", 16 }, { "state", 0 }, { "tar_id", 16 } };
+
+    MachineObject obj { nullptr, "fake-h2c", "FAKEO1C000001", "127.0.0.1" };
+    obj.printer_type = "O1C2";
+    obj.parse_new_info(print);
+    REQUIRE(obj.m_extder_data.extders.size() == 2);
+    CHECK(obj.m_extder_data.extders[0].current_nozzle_diameter == Approx(0.4f));
+
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = { 1, 0 };
+    DualNozzle::add_reported_nozzles(s, &obj);
+    CHECK(s.nozzles.size() == 5);
+    // Rack nozzles belong to physical 0 = logical 1 here; the mounted size wins over the rack.
+    CHECK(reported_sync_nozzle_sizes(s, 2) == reported_extruder_nozzle_sizes(s, 2));
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(s, 2);
+    REQUIRE(layout.size() == 2);
+    CHECK(layout[0].empty());
+    REQUIRE(layout[1].size() == 4);
+    CHECK(reported_rack_layout(s, 2)[1] == std::vector<double>{ 0.4, 0.2, 0.6, 0.8 });
+}
+
+TEST_CASE("AMS Slots picker: a nine-slot AMS 3H row is wide enough for all nine slots", "[BambuAmsReport][MappingPopup]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    // Four-slot units, the AMS HT and the external holders keep the old 230 DIP row.
+    CHECK(mapping_container_width_dip(1) == 230);
+    CHECK(mapping_container_width_dip(4) == 230);
+    // Bambu Studio MappingContainer: 54 per slot + 20.
+    CHECK(mapping_container_width_dip(9) == 506);
+    CHECK(mapping_container_width_dip(5) == 290);
+    // add_ams_mapping lays out a 6 DIP lead and 6 + 47.6 DIP per slot: all nine fit.
+    const double nine_items = 6 + 9 * (6 + 68 * 0.7);
+    CHECK(nine_items <= mapping_container_width_dip(9));
+    // ... which the old fixed 230 DIP row cut off after four and a half slots.
+    CHECK((230 - 6) / (6 + 68 * 0.7) < 5.0);
+}
+
+TEST_CASE("AMS Slots picker stays on the screen", "[BambuAmsReport][MappingPopup]")
+{
+    using namespace Slic3r::GUI::AmsTypes;
+    const ScreenRect work{0, 0, 1920, 1040}; // 1080p minus the taskbar
+    SECTION("below the filament when it fits")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 200, 60, 40}, 520, 260, work);
+        CHECK(p.x == 100);
+        CHECK(p.y == 240);
+    }
+    SECTION("moved left from the right edge")
+    {
+        const ScreenPoint p = mapping_popup_origin({1800, 200, 60, 40}, 520, 260, work);
+        CHECK(p.x == 1920 - 520);
+        CHECK(p.y == 240);
+    }
+    SECTION("flipped above near the bottom")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 900, 60, 40}, 520, 260, work);
+        CHECK(p.y == 900 - 260);
+    }
+    SECTION("kept on the work area when it fits neither above nor below")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 100, 60, 40}, 520, 1000, work);
+        CHECK(p.y == 40);
+        CHECK(p.y + 1000 <= 1040);
+    }
+    SECTION("a second monitor's offset work area")
+    {
+        const ScreenPoint p = mapping_popup_origin({3800, 200, 60, 40}, 520, 260, {1920, 0, 1920, 1040});
+        CHECK(p.x == 3840 - 520);
+    }
+    SECTION("wider than the work area starts at its left edge")
+    {
+        const ScreenPoint p = mapping_popup_origin({100, 200, 60, 40}, 2000, 260, work);
+        CHECK(p.x == 0);
+    }
 }

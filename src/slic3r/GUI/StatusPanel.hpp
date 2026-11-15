@@ -597,6 +597,7 @@ protected:
     void on_ams_load_curr();
     void on_ams_load_vams(wxCommandEvent& event);
     void on_ams_unload(SimpleEvent &event);
+    bool rack_slot_action(bool load, const std::string &ams_id, const std::string &slot_id);
     void on_ams_filament_backup(SimpleEvent& event);
     void on_ams_setting_click(SimpleEvent& event);
     void on_filament_edit(wxCommandEvent &event);
