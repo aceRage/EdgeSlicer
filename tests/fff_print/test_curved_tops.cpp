@@ -9,6 +9,7 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <memory>
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -22,11 +23,16 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_data.hpp"
+
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -142,13 +148,14 @@ struct CurvedTravels
     size_t travels       = 0;
     size_t slanted       = 0;   // XY travel that also moves Z
     size_t under_margin  = 0;   // clearance below the margin somewhere along the travel
-    size_t arcs          = 0;   // G2/G3 (spiral lift) inside the block
+    size_t arcs          = 0;   // G2/G3 inside the block: a spiral lift, or an arc-fitted curved line
+    double max_travel_z  = 0.;
     double min_clearance = 1e9;
 };
 
 CurvedTravels check_curved_travels(const std::string &gcode, double radius, double margin)
 {
-    struct Move { char kind; double x0, y0, z0, x1, y1, z1; };   // kind: 'e' extrude, 't' travel, 'w' wipe, 'a' arc, 'z' other
+    struct Move { char kind; double x0, y0, z0, x1, y1, z1; };   // kind: 'e' extrude, 'A' arc extrude, 't' travel, 'w' wipe, 'a' arc, 'z' other
     std::vector<Move> moves;
     {
         std::istringstream in(gcode);
@@ -177,15 +184,16 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
             word('Z', nz);
             word('E', e);
             const bool xy = nx != x || ny != y;
-            const char kind = arc ? 'a' : (e > 0. && xy) ? 'e' : ((e < 0. || in_wipe) && xy) ? 'w' : xy ? 't' : 'z';
+            const char kind = arc ? (e > 0. ? 'A' : 'a') : (e > 0. && xy) ? 'e' : ((e < 0. || in_wipe) && xy) ? 'w' : xy ? 't' : 'z';
             moves.push_back({ kind, x, y, z, nx, ny, nz });
             x = nx; y = ny; z = nz;
         }
     }
     size_t first_curved = moves.size(), last_ext = 0;
     double highest = -1e9;
+    auto extrudes = [](char kind) { return kind == 'e' || kind == 'A'; };
     for (size_t i = 0; i < moves.size(); ++i) {
-        if (moves[i].kind != 'e')
+        if (!extrudes(moves[i].kind))
             continue;
         last_ext = i;
         if (first_curved == moves.size() && (std::abs(moves[i].z1 - moves[i].z0) > 1e-6 || moves[i].z1 < highest - 1e-3))
@@ -194,8 +202,16 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
     }
     size_t start = 0;
     for (size_t i = 0; i < first_curved && i < moves.size(); ++i)
-        if (moves[i].kind == 'e')
+        if (extrudes(moves[i].kind))
             start = i + 1;
+    // The layer change's own G-code (a Bambu timelapse / safe-position move) runs before the first
+    // curved path is reached and is no curved-tops travel: start at the lift into the block, the
+    // last Z-only move up before the first curved extrusion.
+    for (size_t i = first_curved; i > start && i < moves.size(); --i)
+        if (moves[i - 1].kind == 'z' && moves[i - 1].z1 > moves[i - 1].z0 + 1e-6) {
+            start = i - 1;
+            break;
+        }
 
     // Extruded points, 0.1 mm apart, in a 0.5 mm grid.
     const double cell = 0.5;
@@ -222,7 +238,9 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
         const Move &m = moves[i];
         const double len = std::hypot(m.x1 - m.x0, m.y1 - m.y0);
         const int    n   = std::max(1, int(std::ceil(len / 0.1)));
-        if (m.kind == 'e') {
+        if (i >= start && (m.kind == 'A' || m.kind == 'a'))
+            ++out.arcs;
+        if (extrudes(m.kind)) {
             for (int j = 0; j <= n; ++j) {
                 const double t = double(j) / n;
                 const Vec3d  p(m.x0 + (m.x1 - m.x0) * t, m.y0 + (m.y1 - m.y0) * t, m.z0 + (m.z1 - m.z0) * t);
@@ -232,13 +250,10 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
         }
         if (i < start)
             continue;
-        if (m.kind == 'a') {
-            ++out.arcs;
-            continue;
-        }
         if (m.kind != 't')
             continue;
         ++out.travels;
+        out.max_travel_z = std::max({ out.max_travel_z, m.z0, m.z1 });
         if (std::abs(m.z1 - m.z0) > 1e-6)
             ++out.slanted;
         double worst = 1e9;
@@ -328,6 +343,93 @@ TEST_CASE("Curved tops: travels in the curved block clear the printed surface", 
     CHECK(t.min_clearance >= 0.5);
 }
 
+namespace {
+
+PresetBundle &bbl_bundle_for_curved_tops()
+{
+    static std::unique_ptr<PresetBundle> bundle;
+    if (bundle)
+        return *bundle;
+    const std::string             saved_data_dir = data_dir();
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("curvedtops_bbl_%%%%-%%%%");
+    boost::filesystem::create_directories(scratch);
+    set_data_dir(scratch.string());
+    const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    auto              library  = std::make_unique<PresetBundle>();
+    library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                           ForwardCompatibilitySubstitutionRule::EnableSilent);
+    bundle = std::make_unique<PresetBundle>();
+    bundle->load_vendor_configs_from_json(profiles, "BBL", PresetBundle::LoadSystem, ForwardCompatibilitySubstitutionRule::EnableSilent,
+                                          library.get());
+    set_data_dir(saved_data_dir);
+    return *bundle;
+}
+
+} // namespace
+
+// The stock X1C process (spiral z-hop, arc fitting, wipe, Bambu layer-change G-code) with curved tops
+// on: the X1C's measured head clearance lets a 1.2 mm cap through, the travels in the curved block
+// are level and clear, no arc or spiral lift in the block, and the layer bookkeeping the printer and
+// the viewer read is intact (one "; CHANGE_LAYER" / "; Z_HEIGHT" per layer, progress lines).
+TEST_CASE("Curved tops: the stock X1C process keeps its travels clear and its G-code intact", "[CurvedTops][X1C]")
+{
+    PresetBundle &b = bbl_bundle_for_curved_tops();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab X1 Carbon 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X1C", true));
+    REQUIRE(b.filaments.select_preset_by_name("Bambu PLA Basic @BBL X1C", true));
+    b.filament_presets = { "Bambu PLA Basic @BBL X1C" };
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "curved_tops_enabled",   "1" },
+        { "curved_tops_layers",    "3" },
+        { "curved_tops_max_angle", "15" },
+        { "gcode_comments",        "0" },
+    });
+
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "dome";
+    object->add_volume(make_capped_puck(15., 4., 1.2))->name = "dome";
+    object->add_instance();
+    object->center_around_origin();
+    object->instances.front()->set_offset(Vec3d(128., 128., 0.));
+    object->ensure_on_bed();
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    size_t curved = 0;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        curved += count_curved_paths(&region->fills);
+    REQUIRE(curved >= 6);
+
+    const CurvedTravels t = check_curved_travels(gcode, 0.2, 0.5);
+    INFO("travels " << t.travels << ", slanted " << t.slanted << ", under margin " << t.under_margin << ", arcs " << t.arcs
+                    << ", min clearance " << t.min_clearance << " mm, max travel Z " << t.max_travel_z);
+    CHECK(t.travels >= 5);
+    CHECK(t.slanted == 0);
+    CHECK(t.arcs == 0);
+    CHECK(t.under_margin == 0);
+    CHECK(t.min_clearance >= 0.5);
+    CHECK(t.max_travel_z < cfg.opt_float("printable_height"));
+
+    // One layer change and one Z_HEIGHT per layer; progress lines still there.
+    const size_t layers = print.objects().front()->layers().size();
+    size_t change_layer = 0, z_height = 0, m73 = 0;
+    std::istringstream in(gcode);
+    for (std::string line; std::getline(in, line);) {
+        change_layer += line.rfind("; CHANGE_LAYER", 0) == 0 || line.rfind(";LAYER_CHANGE", 0) == 0;
+        z_height     += line.rfind("; Z_HEIGHT:", 0) == 0;
+        m73          += line.rfind("M73 ", 0) == 0;
+    }
+    CHECK(change_layer == layers);
+    CHECK(z_height == layers);
+    CHECK(m73 > 0);
+}
+
 TEST_CASE("Curved tops: head clearance and flow helpers", "[CurvedTops]")
 {
     PrintConfig cfg;
@@ -336,10 +438,18 @@ TEST_CASE("Curved tops: head clearance and flow helpers", "[CurvedTops]")
     const CurvedTopsHeadClearance cc1 = curved_tops_head_clearance(cfg);
     cfg.printer_model.value = "Elegoo Centauri Carbon 2";
     const CurvedTopsHeadClearance cc2 = curved_tops_head_clearance(cfg);
+    cfg.printer_model.value = "Bambu Lab X1 Carbon";
+    const CurvedTopsHeadClearance x1c = curved_tops_head_clearance(cfg);
+    cfg.printer_model.value = "Bambu Lab X1E";
+    const CurvedTopsHeadClearance x1e = curved_tops_head_clearance(cfg);
 
     CHECK_THAT(cc1.nozzle_height_mm, WithinAbs(2.0, 1e-9));
     CHECK_THAT(cc1.max_slope_deg, WithinAbs(20.0, 1e-9));
     CHECK_THAT(cc2.nozzle_height_mm, WithinAbs(generic.nozzle_height_mm, 1e-9));
+    // X1 Carbon: owner measured 2.5 mm tip to sock, 0.5 mm margin; slope unmeasured (20). Not the X1E.
+    CHECK_THAT(x1c.nozzle_height_mm, WithinAbs(2.0, 1e-9));
+    CHECK_THAT(x1c.max_slope_deg, WithinAbs(20.0, 1e-9));
+    CHECK_THAT(x1e.nozzle_height_mm, WithinAbs(generic.nozzle_height_mm, 1e-9));
 
     CHECK_THAT(curved_tops_effective_max_angle(15., cc1), WithinAbs(15., 1e-9));
     CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(20., 1e-9));

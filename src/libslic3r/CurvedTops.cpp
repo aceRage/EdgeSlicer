@@ -64,6 +64,15 @@ CurvedTopsHeadClearance curved_tops_head_clearance(const PrintConfig &config)
         head.max_slope_deg    = 20.0;
         head.source           = "Elegoo Centauri Carbon (hard-coded, conservative, unmeasured)";
     }
+    // Bambu Lab X1 Carbon: owner measured 2.5 mm tip to sock, 2026-11-15. The lead's choice is that
+    // minus a 0.5 mm margin. The cone is not measured: the CC1's conservative 20 degrees. Only the X1
+    // Carbon (printer_model exactly as the BBL profiles write it); the X1, X1E, P1S and P1P keep the
+    // generic values until someone measures them.
+    if (config.printer_model.value == "Bambu Lab X1 Carbon") {
+        head.nozzle_height_mm = 2.0;
+        head.max_slope_deg    = 20.0;
+        head.source           = "Bambu Lab X1 Carbon (owner measured 2.5 mm tip to sock, 2026-11-15; 0.5 mm margin; slope unmeasured)";
+    }
     return head;
 }
 
