@@ -111,6 +111,14 @@ FilamentKind filament_kind(const ConfigBase &config, unsigned int filament)
     return kind;
 }
 
+bool bambu_features_supported(const ConfigBase &config)
+{
+    if (opt_bool(config, "handle_hotend_as_extruder"))
+        return true;
+    const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(option_of(config, "nozzle_diameter"));
+    return nozzles != nullptr && nozzles->values.size() > 1;
+}
+
 float run_in_distance(const ConfigBase &config, unsigned int filament)
 {
     const auto *dist = dynamic_cast<const ConfigOptionFloats *>(option_of(config, "filament_tower_interface_pre_extrusion_dist"));

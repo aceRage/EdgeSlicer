@@ -1572,7 +1572,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // change is a prime tower interface, and the H2 series / H3C change_filament_gcode purges for it
         // ({if is_prime_tower_interface && filament_tower_interface_purge_volume != 0} G150.1, M620.13 W0 L.. T.. R0.0).
         // Without the features the print-wide stubs (false, 0, 0) stay in place.
-        if (gcodegen.config().enable_tower_interface_features.value && new_extruder_id >= 0) {
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            new_extruder_id >= 0) {
             const FullPrintConfig &cfg              = gcodegen.config();
             const size_t           filament         = size_t(new_extruder_id);
             int                    interface_temp   = cfg.filament_tower_interface_print_temp.get_at(filament);
@@ -1634,7 +1635,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // Z unlift happens here; the E unretract waits for the end of the scrape ([wipe_tower_deretract_gcode]).
         // Bambu Studio 2.9.1 (GCode.cpp 1237-1244): a contact change with the tower interface features pre-extrudes
         // filament_tower_interface_pre_extrusion_length more at its start outside the tower.
-        if (gcodegen.config().enable_tower_interface_features.value && tcr.is_contact && new_extruder_id >= 0)
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            tcr.is_contact && new_extruder_id >= 0)
             side_scrape_extra_unretract = gcodegen.config().filament_tower_interface_pre_extrusion_length.get_at(size_t(new_extruder_id));
         if (tcr.side_scrape) {
             toolchange_gcode_str += gcodegen.writer().unlift();

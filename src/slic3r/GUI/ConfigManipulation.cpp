@@ -13,6 +13,7 @@
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "libslic3r/Support/SupportInterfaceRules.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
@@ -1245,8 +1246,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // through a wall gap, so it is greyed out (and ignored by the generators) without them.
     // Bambu Studio 2.9.1's interface features: the Bambu Lab (Type 1) tower only. While on, that tower does not use the
     // three options below, so they are greyed out there.
-    toggle_line("enable_tower_interface_features", have_prime_tower && !supports_wipe_tower_2);
-    const bool bbs_interface = have_prime_tower && !supports_wipe_tower_2 && config->opt_bool("enable_tower_interface_features");
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1096-1102): offered on multi-extruder and hotend-as-extruder printers.
+    const bool bbs_interface_supported = have_prime_tower && !supports_wipe_tower_2 && preset_bundle != nullptr &&
+                                         TowerInterface::bambu_features_supported(preset_bundle->printers.get_edited_preset().config);
+    toggle_line("enable_tower_interface_features", bbs_interface_supported);
+    const bool bbs_interface = bbs_interface_supported && config->opt_bool("enable_tower_interface_features");
     for (auto el : {"wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger"})
         toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_interface_temp", "wipe_tower_interface_extra_prime"})

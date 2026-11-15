@@ -84,6 +84,10 @@ struct Settings
 };
 
 FilamentKind filament_kind(const ConfigBase &config, unsigned int filament);
+// Bambu Studio 2.9.1 offers enable_tower_interface_features (ConfigManipulation.cpp:1096-1102, Tab.cpp:5276-5281) on
+// printers that handle hotends as extruders (H3C) or have more than one extruder (H2D, H2C, X2D); here it also only
+// takes effect there.
+bool         bambu_features_supported(const ConfigBase &config);
 float        run_in_distance(const ConfigBase &config, unsigned int filament);
 
 // Room the run-in needs beyond the tower body on every side: the longest run-in distance of a

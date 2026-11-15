@@ -9,6 +9,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "WipeTowerDialog.hpp"
 
 #include "Search.hpp"
@@ -7014,6 +7015,10 @@ void TabFilament::toggle_options()
         const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
+        // Bambu Studio 2.9.1 (Tab.cpp:5276-5281): the firmware interface purge exists where Bambu offers the tower
+        // interface features, multi-extruder and hotend-as-extruder printers. The other interface rows also serve
+        // the Edge interface options on every printer and stay.
+        toggle_line("filament_tower_interface_purge_volume", TowerInterface::bambu_features_supported(cfg));
 
         // #1052 review S2: shown where they are used, the mirror of the process "Prime volume" grey-out
         // (WipeTower::bambu_prime_volume() on Bambu Lab printers). The hotend-change prime needs a hotend change on

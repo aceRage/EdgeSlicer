@@ -1969,7 +1969,8 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_shared_bed   = TowerInterface::shared_printable_box(config);
     // Bambu Studio 2.9.1 (WipeTower.cpp:1925): its interface features on the contact layers. Edge's own interface
     // options approximate the same bundle on a tool change trigger; with Bambu's switch on they are not used here.
-    m_enable_tower_interface_features = config.enable_tower_interface_features.value;
+    // Like Bambu Studio's GUI, only on multi-extruder and hotend-as-extruder printers (review #1062 d).
+    m_enable_tower_interface_features = config.enable_tower_interface_features.value && TowerInterface::bambu_features_supported(config);
     m_interface_cooldown_during_tower = m_interface.cooldown_during_tower;
     if (m_enable_tower_interface_features)
         m_interface = TowerInterface::Settings();
@@ -4989,6 +4990,10 @@ Vec2f WipeTower::contact_run_in_start(const Vec2f &start, size_t tool) const
 std::string WipeTower::bbs_format_M109(size_t tool, int temperature, const std::string &comment) const
 {
     const FilamentParameters &fp = m_filpar[tool];
+    // The N0 / I forms are Bambu firmware's; a non-Bambu printer on this tower gets the flavour's own wait (on Marlin N
+    // is a line number).
+    if (!m_bbl_gcode_tags)
+        return GCodeWriter::set_temperature(temperature, m_gcode_flavor, true, fp.physical_extruder, comment);
     std::string out = "M109";
     out += m_handle_hotend_as_extruder ? " I" + std::to_string(tool) : " T" + std::to_string(fp.reheat_extruder);
     out += " S" + std::to_string(temperature) + " N0";
@@ -5000,6 +5005,9 @@ std::string WipeTower::bbs_format_M109(size_t tool, int temperature, const std::
 std::string WipeTower::bbs_format_M104(size_t tool, int temperature, bool is_heating, const std::string &comment) const
 {
     const FilamentParameters &fp = m_filpar[tool];
+    // Non-Bambu printers: the flavour's own set-temperature line, no wait (see bbs_format_M109()).
+    if (!m_bbl_gcode_tags)
+        return GCodeWriter::set_temperature(temperature, m_gcode_flavor, false, fp.physical_extruder, comment);
     // Cooling waits for the moves (G1 is non-blocking); heating may start early.
     std::string out = is_heating ? "" : "M400\n";
     out += "M104";
