@@ -277,6 +277,14 @@ catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
 # add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "${CATCH_EXTRA_ARGS} exclude:[NotWorking]")
 
 # ASan helpers are multi-gigabyte; skip the install copy on those builds.
+if (EDGE_PYTHON_PLUGINS AND NOT WIN32)
+    add_test(NAME macos_seatbelt_sdk_syntax
+        COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/check_macos_sandbox_sdk.sh")
+    set_tests_properties(macos_seatbelt_sdk_syntax PROPERTIES
+        TIMEOUT 60
+        LABELS "PluginSandbox")
+endif ()
+
 if (EDGE_PYTHON_PLUGINS AND UNIX AND NOT APPLE AND NOT SLIC3R_ASAN)
     if (NOT CMAKE_INSTALL_BINDIR)
         set(CMAKE_INSTALL_BINDIR bin)

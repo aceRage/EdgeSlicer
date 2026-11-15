@@ -25,15 +25,13 @@ bool probe_mac_sandbox(SandboxProbe& probe)
 
 #else
 
+#include "PluginSandboxMacSeatbelt.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <unistd.h>
-
-// sandbox_init is the in-process Seatbelt API. The shipping helper is a signed binary with
-// com.apple.security.app-sandbox entitlements; sandbox-exec(1) and this probe are test-only.
-#include <sandbox.h>
 
 namespace Slic3r::plugin_ipc {
 namespace {
@@ -44,22 +42,15 @@ bool containerized()
     return id != nullptr && id[0] != '\0';
 }
 
-#ifndef SANDBOX_NAMED
-#define SANDBOX_NAMED 0x0001
-#endif
-
 // DEV/TEST PROBE ONLY. Not the shipping sandbox (that is a signed helper with
 // com.apple.security.app-sandbox). sandbox-exec(1) is the CLI equivalent of this
-// sandbox_init(kSBXProfileNoInternet) call. Honoured only when
+// named-profile / SBPL sandbox_init probe. Honoured only when
 // EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE is set through the Phase 7 test env-override gate.
+// Current MacOSX.sdk headers dropped the old named-profile string constants;
+// the probe never names those identifiers.
 bool apply_seatbelt_probe(const SandboxSpec& spec, SandboxReport& report, std::string& error)
 {
-    char*       sandbox_error = nullptr;
-    const char* profile       = spec.allow_network ? kSBXProfileNoWrite : kSBXProfileNoInternet;
-    if (sandbox_init(profile, SANDBOX_NAMED, &sandbox_error) != 0) {
-        error = sandbox_error ? sandbox_error : "sandbox_init (Seatbelt probe) failed";
-        if (sandbox_error)
-            sandbox_free_error(sandbox_error);
+    if (!mac_seatbelt::apply_probe(spec.allow_network, error)) {
         report.kind   = k_sandbox_kind_none;
         report.detail = error;
         return false;

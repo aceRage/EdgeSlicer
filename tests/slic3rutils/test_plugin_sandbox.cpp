@@ -11,6 +11,9 @@
 #include <slic3r/plugin/ipc/PluginHostProcess.hpp>
 #include <slic3r/plugin/ipc/PluginIpcProtocol.hpp>
 #include <slic3r/plugin/ipc/PluginSandbox.hpp>
+#ifndef _WIN32
+#include <slic3r/plugin/ipc/PluginSandboxMacSeatbelt.hpp>
+#endif
 #include <slic3r/Utils/HomePluginsLogic.hpp>
 
 #include <chrono>
@@ -175,6 +178,23 @@ TEST_CASE("OS sandbox probe reports this kernel", "[PluginSandbox][probe]")
     CHECK_FALSE((plugin_ipc::sandbox_env_bwrap_requested() && plugin_ipc::running_inside_flatpak()));
 #endif
 }
+
+#ifndef _WIN32
+TEST_CASE("macOS Seatbelt probe uses named profiles and fail-closes without sandbox_init", "[PluginSandbox][macos-sdk]")
+{
+    CHECK(std::string(plugin_ipc::mac_seatbelt::named_profile(false)) == "no-internet");
+    CHECK(std::string(plugin_ipc::mac_seatbelt::named_profile(true)) == "no-write");
+    CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(false)).find("(deny network*)") != std::string::npos);
+    CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(true)).find("(deny file-write*)") != std::string::npos);
+#ifndef __APPLE__
+    std::string error;
+    CHECK_FALSE(plugin_ipc::mac_seatbelt::apply_probe(false, error));
+    CHECK(error.find("unavailable") != std::string::npos);
+    CHECK_FALSE(plugin_ipc::mac_seatbelt::apply_probe(true, error));
+    CHECK(error.find("unavailable") != std::string::npos);
+#endif
+}
+#endif
 
 TEST_CASE("fail-closed prompt defaults to Don't run and records Run anyway on trust.json", "[PluginSandbox][fail-closed][PluginTrust]")
 {

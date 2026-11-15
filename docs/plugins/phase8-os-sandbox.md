@@ -24,9 +24,13 @@ bubblewrap is optional for **native** Linux packages only and is off unless
 **Flatpak must never nest bwrap** (`running_inside_flatpak()` / `/.flatpak-info` / `FLATPAK_ID`).
 Inside Flatpak the child still uses Landlock+seccomp.
 
-`sandbox-exec` / Seatbelt (`sandbox_init` with `kSBXProfileNoInternet`) is a **dev/test probe
-only**, labelled `seatbelt-probe` and enabled with `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` through
-the same test-only gate. It is not the shipping macOS design.
+`sandbox-exec` / Seatbelt is a **dev/test probe only**, labelled `seatbelt-probe` and enabled
+with `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` through the same test-only gate. It is not the
+shipping macOS design. The probe `dlsym`s `sandbox_init` and applies the named profiles
+`"no-internet"` / `"no-write"` (`SANDBOX_NAMED`), falling back to a tiny SBPL string. It does
+not use `kSBXProfileNoInternet` / `kSBXProfileNoWrite` (removed in current MacOSX.sdk). A missing
+symbol or failed `sandbox_init` is fail-closed (`kind=none`). `scripts/check_macos_sandbox_sdk.sh`
+syntax-checks this against a stub SDK so Linux CI can catch the Xcode 27.2 break.
 
 ## Handshake
 
@@ -63,7 +67,7 @@ Test-only env overrides, ignored in production (same gate as Phase 7's `EDGE_PLU
 |---|---|
 | `EDGE_PLUGIN_SANDBOX=0` | Do not apply the OS sandbox; report `kind=none`. |
 | `EDGE_PLUGIN_SANDBOX_FORCE_UNAVAILABLE=1` | Pretend the OS cannot sandbox, so the prompt path runs. |
-| `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` | macOS: `sandbox_init` probe instead of requiring a signed container. |
+| `EDGE_PLUGIN_SANDBOX_SEATBELT_PROBE=1` | macOS: labelled Seatbelt probe (`sandbox_init` via `dlsym`) instead of requiring a signed container. |
 | `EDGE_PLUGIN_SANDBOX_BWRAP=1` | Native Linux only; ignored inside Flatpak. Shipping path remains Landlock+seccomp. |
 
 ## Grants mapped into the sandbox
@@ -113,6 +117,8 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 ## Smoke tests owed at merge
 
 Linux `[PluginSandbox]` (probe, handshake, fs/net/exec isolation, fail-closed prompt +
-`trust.json` override). Existing `[PluginIpc]`, `[PluginTrust]`, Home plugin-filter tests.
-Spawn+handshake timing next to Phase 7 r5 (~0.275 s on Linux). U1 prints are still required
-for pipeline plugins.
+`trust.json` override, Seatbelt named-profile / fail-closed helpers). Existing `[PluginIpc]`,
+`[PluginTrust]`, Home plugin-filter tests. `scripts/check_macos_sandbox_sdk.sh` (stub
+`<sandbox.h>`, `clang -fsyntax-only -Werror=deprecated-declarations`). Spawn+handshake timing
+next to Phase 7 r5 (~0.275 s on Linux). U1 prints are still required for pipeline plugins.
+A real Xcode 27.2 link is still owed; this VM cannot build macOS.

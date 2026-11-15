@@ -1298,6 +1298,7 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/ipc/PluginSandboxLinux.cpp
         plugin/ipc/PluginSandboxWin.cpp
         plugin/ipc/PluginSandboxMac.cpp
+        plugin/ipc/PluginSandboxMacSeatbelt.hpp
         Utils/BoostProcessCompat.hpp
         GUI/HomePlugins.cpp
         GUI/HomePlugins.hpp
