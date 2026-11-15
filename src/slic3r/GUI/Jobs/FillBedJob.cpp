@@ -136,6 +136,12 @@ void FillBedJob::prepare()
     double scaled_exclusion_gap = scale_(1);
     plate_list.preprocess_exclude_areas(params.excluded_regions, 1, scaled_exclusion_gap);
     plate_list.preprocess_exclude_areas(m_unselected);
+    // EdgeSlicer "Avoid nozzle reach zones": the one-nozzle strips, as the exclusion areas above
+    // (the Grid layout reads them from m_unselected too, through grid_obstacles()).
+    for (arrangement::ArrangePolygon &ap : nozzle_reach_blockers(m_plater, 1, coord_t(scaled_exclusion_gap)))
+        params.excluded_regions.emplace_back(std::move(ap));
+    for (arrangement::ArrangePolygon &ap : nozzle_reach_blockers(m_plater, 16))
+        m_unselected.emplace_back(std::move(ap));
 
     m_bedpts = get_bed_shape(*m_plater->config());
 

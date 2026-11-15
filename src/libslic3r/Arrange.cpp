@@ -1199,5 +1199,31 @@ template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, c
 template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const Polygon &bed, const ArrangeParams &params);
 template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const InfiniteBed &bed, const ArrangeParams &params);
 
+ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, coord_t inflation)
+{
+    ArrangePolygons out;
+    if (!areas.multi() || !areas.has_exclusive_regions())
+        return out;
+    for (size_t e = 0; e < areas.only.size(); ++e)
+        for (size_t i = 0; i < areas.only[e].size(); ++i) {
+            const Polygon &strip = areas.only[e][i];
+            if (strip.size() < 3 || std::abs(strip.area()) <= 0.)
+                continue;
+            for (int bed = 0; bed < num_beds; ++bed) {
+                ArrangePolygon ap;
+                ap.poly.contour   = strip;
+                ap.translation    = Vec2crd(0, 0);
+                ap.rotation       = 0.;
+                ap.is_virt_object = true;
+                ap.bed_idx        = bed;
+                ap.height         = 1;
+                ap.name           = "NozzleReachRegion" + std::to_string(e) + "_" + std::to_string(i);
+                ap.inflation      = inflation;
+                out.emplace_back(std::move(ap));
+            }
+        }
+    return out;
+}
+
 } // namespace arr
 } // namespace Slic3r

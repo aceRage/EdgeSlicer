@@ -586,6 +586,13 @@ void ArrangeJob::prepare()
         prepare_partplate();
     }
 
+    // EdgeSlicer "Avoid nozzle reach zones": the one-nozzle strips join the bed exclusion areas as
+    // fixed items on every bed (finalize() skips virtual objects, like the exclusion areas).
+    for (arrangement::ArrangePolygon &ap : nozzle_reach_blockers(m_plater, MAX_NUM_PLATES))
+        m_unselected.emplace_back(std::move(ap));
+    // The same for the big-item retry of the packer (params.excluded_regions, filled in process()).
+    m_reach_regions = nozzle_reach_blockers(m_plater, 1, scale_(1));
+
 
 #if SAVE_ARRANGE_POLY
     if (1)
@@ -668,6 +675,8 @@ void ArrangeJob::process(Ctl &ctl)
     Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
 
     partplate_list.preprocess_exclude_areas(params.excluded_regions, 1, scale_(1));
+    for (arrangement::ArrangePolygon &ap : m_reach_regions)
+        params.excluded_regions.emplace_back(std::move(ap));
 
     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << bedpts[0].transpose() << ", " << bedpts[1].transpose() << ", " << bedpts[2].transpose() << ", " << bedpts[3].transpose();
 
@@ -913,6 +922,16 @@ double bed_stride_x(const Plater* plater) {
 double bed_stride_y(const Plater* plater) {
     double beddepth = plater->build_volume().bounding_box().size().y();
     return (1. + LOGICAL_BED_GAP) * beddepth;
+}
+
+arrangement::ArrangePolygons nozzle_reach_blockers(Plater *p, int num_beds, coord_t inflation)
+{
+    if (p == nullptr || p->canvas3D() == nullptr || p->printer_technology() != ptFFF)
+        return {};
+    if (!p->canvas3D()->get_arrange_settings().avoid_nozzle_reach_zones)
+        return {};
+    // Plater sets these only for a printer with two or more nozzles (nozzle_diameter).
+    return arrangement::nozzle_reach_blockers(p->get_partplate_list().get_extruder_areas(), num_beds, inflation);
 }
 
 // call before get selected and unselected

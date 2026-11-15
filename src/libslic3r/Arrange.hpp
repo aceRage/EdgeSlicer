@@ -4,6 +4,7 @@
 #include "ExPolygon.hpp"
 #include "PrintConfig.hpp"
 #include "Print.hpp"
+#include "ExtruderAreas.hpp"
 
 #define BED_SHRINK_SEQ_PRINT 5
 
@@ -211,6 +212,13 @@ extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excl
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const CircleBed &bed, const ArrangeParams &params);
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const Polygon &bed, const ArrangeParams &params);
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const InfiniteBed &bed, const ArrangeParams &params);
+
+// EdgeSlicer "Avoid nozzle reach zones": the strips of the bed only one nozzle reaches
+// (ExtruderAreas::only, from extruder_printable_area; H2D, H2C, X2D) as fixed virtual items on beds
+// 0 .. num_beds - 1, in the same form as PartPlateList::preprocess_exclude_areas() gives the bed
+// exclusion areas, so the arranged objects stay in the area every nozzle reaches. Empty for a
+// printer with fewer than two nozzle areas or no strip of its own.
+ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, coord_t inflation = 0);
 
 inline void arrange(ArrangePolygons &items, const Points &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
 inline void arrange(ArrangePolygons &items, const BoundingBox &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }

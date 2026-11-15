@@ -22,6 +22,7 @@ class ArrangeJob : public Job
 
     //BBS: add locked logic
     ArrangePolygons m_selected, m_unselected, m_unprintable, m_locked;
+    ArrangePolygons m_reach_regions; // EdgeSlicer: one-nozzle strips for params.excluded_regions
     std::vector<ModelInstance*> m_unarranged;
     std::map<int, ArrangePolygons> m_selected_groups;   // groups of selected items for sequential printing
     std::vector<int> m_uncompatible_plates;  // plate indices with different printing sequence than global
@@ -92,6 +93,10 @@ double bed_stride_x(const Plater* plater);
 double bed_stride_y(const Plater* plater);
 
 arrangement::ArrangeParams init_arrange_params(Plater *p);
+
+// EdgeSlicer: the one-nozzle strips as fixed items on beds 0 .. num_beds - 1 when the arrange
+// option "Avoid nozzle reach zones" is on and the printer has such strips; empty otherwise.
+arrangement::ArrangePolygons nozzle_reach_blockers(Plater *p, int num_beds, coord_t inflation = 0);
 
 }} // namespace Slic3r::GUI
 
