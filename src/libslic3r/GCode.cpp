@@ -1396,6 +1396,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Process the custom change_filament_gcode. If it is empty, provide a simple Tn command to change the filament.
     // Otherwise, leave control to the user completely.
     std::string        toolchange_gcode_str;
+    bool               side_scrape_deretract_pending = false;
     const std::string& change_filament_gcode = gcodegen.config().change_filament_gcode.value;
     //        m_max_layer_z = std::max(m_max_layer_z, tcr.print_z);
     if (!change_filament_gcode.empty()) {
@@ -1605,8 +1606,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         check_add_eol(start_pos_str);
         toolchange_gcode_str += start_pos_str;
 
-        // unretract before wiping
-        toolchange_gcode_str += gcodegen.unretract();
+        // unretract before wiping. Bambu Studio 2.9.1 (GCode.cpp append_tcr 1245-1252): with the side scrape only the
+        // Z unlift happens here; the E unretract waits for the end of the scrape ([wipe_tower_deretract_gcode]).
+        if (tcr.side_scrape) {
+            toolchange_gcode_str += gcodegen.writer().unlift();
+            side_scrape_deretract_pending = true;
+        } else
+            toolchange_gcode_str += gcodegen.unretract();
         check_add_eol(toolchange_gcode_str);
     }
 
@@ -1689,6 +1695,29 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     if (compacted_below_object)
         start_filament_gcode_str += descend_to_tower(z, "Descend to compacted wipe tower z (no sparse layers)", false);
 
+    // Bambu Studio 2.9.1 side scrape: the unretract held back above, written after the scrape, and the scrape's Z. The
+    // tower planned the scrape at the layer's planned Z; wipe_tower_no_sparse_layers prints the layer at a compacted
+    // Z, where the scrape descends its depth below the compacted top but stays above the brim chamfer at the compacted
+    // tower's base. Not `z`: an uncompacted tower's `z` may still carry the retract lift here.
+    std::string side_scrape_deretract_str;
+    if (side_scrape_deretract_pending)
+        side_scrape_deretract_str = gcodegen.writer().unretract();
+    double scrape_z_top = double(tcr.print_z) + m_z_offset;
+    double scrape_z_low = double(tcr.side_scrape_z_low) + m_z_offset;
+    if (tcr.side_scrape) {
+        if (m_sparse_layers_skipped && m_layer_idx >= 0 && size_t(m_layer_idx) < m_compacted_tower_z.size()) {
+            double base_z = m_z_offset;
+            for (float tz : m_compacted_tower_z)
+                if (double(tz) > m_z_offset + EPSILON) {
+                    base_z = tz;
+                    break;
+                }
+            scrape_z_top = m_compacted_tower_z[m_layer_idx];
+            scrape_z_low = std::max(scrape_z_top - double(tcr.side_scrape_depth), base_z + double(tcr.side_scrape_min_height_above_base));
+        }
+        scrape_z_low = std::min(scrape_z_low, scrape_z_top);
+    }
+
     // Insert the end filament, toolchange, and start filament gcode into the generated gcode.
     DynamicConfig config;
     config.set_key_value("filament_end_gcode", new ConfigOptionString(end_filament_gcode_str));
@@ -1696,6 +1725,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     config.set_key_value("change_filament_gcode", new ConfigOptionString(toolchange_gcode_str));
     config.set_key_value("deretraction_from_wipe_tower_generator", new ConfigOptionString(deretraction_str));
     config.set_key_value("filament_start_gcode", new ConfigOptionString(start_filament_gcode_str));
+    config.set_key_value("wipe_tower_deretract_gcode", new ConfigOptionString(side_scrape_deretract_str));
+    config.set_key_value("wipe_tower_scrape_z_top", new ConfigOptionString(float_to_string_decimal_point(scrape_z_top, 3)));
+    config.set_key_value("wipe_tower_scrape_z_low", new ConfigOptionString(float_to_string_decimal_point(scrape_z_low, 3)));
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);

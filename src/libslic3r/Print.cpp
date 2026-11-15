@@ -16,6 +16,7 @@
 #include "Flow.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
+#include "LocalesUtils.hpp"
 #include "LocalZOrderOptimizer.hpp"
 #include "MixedSublayer.hpp"
 #include "ShortestPath.hpp"
@@ -1990,7 +1991,10 @@ double compacted_tower_footprint_padding(const PrintConfig &config, double brim_
     // deposited material reaches half a line width further still. Allowing a line width per side
     // covers both, which is what keeps an estimated footprint enclosing the real one and the
     // pre-slice check stricter than the precise one.
-    return std::max(0., brim_width) + 2. * config.nozzle_diameter.get_at(0);
+    //
+    // Bambu Studio 2.9.1: the side scrape prints nothing, but takes the nozzle outside the wall, so it enlarges the
+    // space the tower needs just like the brim does.
+    return std::max(0., brim_width) + 2. * config.nozzle_diameter.get_at(0) + prime_tower_side_scrape_margin(config);
 }
 
 Polygons compacted_wipe_tower_rings(const CompactedTowerZone &zone, bool any_body_tier)
@@ -2128,7 +2132,16 @@ static CompactedTowerZone compacted_tower_zone_from_tool_changes(const Print &pr
     }
     if (tower_pts.empty())
         return CompactedTowerZone();
-    return compacted_wipe_tower_zone(config, Geometry::convex_hull(tower_pts));
+    // Travels were dropped above; the side scrape is the one that matters (Bambu Studio 2.9.1 Print.cpp:4100): it
+    // descends beside the wall at tower height, so the nozzle really occupies that ring.
+    Polygon      tower_hull         = Geometry::convex_hull(tower_pts);
+    const double side_scrape_margin = prime_tower_side_scrape_margin(config);
+    if (side_scrape_margin > 0.) {
+        const Polygons grown = offset(tower_hull, float(scaled(side_scrape_margin)));
+        if (! grown.empty())
+            tower_hull = grown.front();
+    }
+    return compacted_wipe_tower_zone(config, tower_hull);
 }
 
 bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
@@ -2598,7 +2611,11 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     //BBS: add the wipe tower check logic
     const PrintConfig &       config   = print.config();
     const Vec3d         plate_origin = print.get_plate_origin();
-    const Polygons      convex_hulls_temp = estimated_prime_tower_outline(print);
+    Polygons            convex_hulls_temp = estimated_prime_tower_outline(print);
+    // Bambu Studio 2.9.1 (Print.cpp:1215-1221): the side scrape takes the nozzle outside the tower wall, so the object
+    // and exclusion area checks reserve that ring too (grown in every direction, independent of the rotation).
+    if (const double side_scrape_margin = prime_tower_side_scrape_margin(config); side_scrape_margin > 0. && !convex_hulls_temp.empty())
+        convex_hulls_temp = offset(convex_hulls_temp, float(scaled(side_scrape_margin)));
     if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {
         if (warning) {
             if (!warning->string.empty() && warning->string.back() != '\n')

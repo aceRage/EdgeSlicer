@@ -10,6 +10,10 @@
 #include <unordered_set>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <stdexcept>
+
+#include <boost/log/trivial.hpp>
 
 #include "GCodeProcessor.hpp"
 #include "GCodeWriter.hpp"
@@ -133,8 +137,217 @@ std::vector<char> combine_sparse_wipe_tower_layers(std::vector<float>       &lay
 }
 
 static const double wipe_tower_wall_infill_overlap = 0.0;
-// Orca #15035 (Bambu Studio): the flat spiral ironing at a wall gap (prime_tower_flat_ironing).
-static constexpr float flat_iron_speed = 10.f * 60.f;
+
+double prime_tower_side_scrape_margin(const PrintConfig &config)
+{
+    // Bambu Studio 2.9.1 (WipeTower.cpp:52): the diagonal starts one scrape length outside the line that already
+    // sits the wall gap outside the wall, so that sum is the outermost point the nozzle reaches.
+    if (! config.prime_tower_side_scrape.value)
+        return 0.;
+    return std::max(0., config.prime_tower_side_scrape_wall_gap.value + config.prime_tower_side_scrape_length.value);
+}
+
+// Bambu Studio 2.9.1 parseDoubles() (WipeTower.cpp:78): a comma-separated speed curve, every value clamped to
+// 0.01 .. 5; empty, or anything that does not parse, is the built-in ramp. Read with a decimal point whatever the
+// locale.
+static std::vector<float> parse_speed_factor_curve(const std::string &str)
+{
+    std::vector<float> result;
+    if (str.empty())
+        return result;
+    auto to_double = [](const std::string &token) {
+        const size_t first = token.find_first_not_of(" \t");
+        size_t       pos   = 0;
+        const double value = first == std::string::npos ? 0. : string_to_double_decimal_point(std::string_view(token).substr(first), &pos);
+        if (pos == 0)
+            throw std::invalid_argument(token);
+        return value;
+    };
+    try {
+        size_t start = 0, end;
+        while ((end = str.find(',', start)) != std::string::npos) {
+            result.push_back(float(to_double(str.substr(start, end - start))));
+            start = end + 1;
+        }
+        result.push_back(float(to_double(str.substr(start))));
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "Failed to parse prime_tower_speed_factor_curve: \"" << str << "\", using built-in default";
+        return {};
+    }
+    for (float &v : result)
+        v = std::clamp(v, 0.01f, 5.f);
+    return result;
+}
+
+// Bambu Studio 2.9.1 apply_wipe_tower_tail_slowdown() (WipeTower.cpp:7589-7758). The tower writer emits relative E,
+// so a move's extruded volume is E * filament_area.
+void wipe_tower_tail_slowdown(std::string &gcode, float tail_volume, float speed_factor, float filament_area,
+                              const Vec2f *initial_position, const Vec2f *tool_change_start_position)
+{
+    if (gcode.empty() || filament_area <= 0.f || speed_factor >= 1.f - 1e-4f)
+        return;
+    speed_factor = std::clamp(speed_factor, 0.05f, 1.f);
+
+    // Split into lines (content only). Rejoining with '\n' reproduces the original exactly.
+    std::vector<std::string> lines;
+    {
+        size_t start = 0;
+        while (true) {
+            size_t nl = gcode.find('\n', start);
+            if (nl == std::string::npos) { lines.emplace_back(gcode.substr(start)); break; }
+            lines.emplace_back(gcode.substr(start, nl - start));
+            start = nl + 1;
+        }
+    }
+
+    // The numeric value of the token starting with `key` on a G-code move line.
+    auto get_param = [](const std::string &line, char key, float &out) -> bool {
+        size_t i = 0, n = line.size();
+        while (i < n) {
+            while (i < n && line[i] == ' ') ++i;
+            if (i >= n) break;
+            size_t tok = i;
+            while (i < n && line[i] != ' ') ++i;
+            if (line[tok] == key && i - tok >= 2) {
+                out = (float) string_to_double_decimal_point(std::string_view(line).substr(tok + 1, i - tok - 1));
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Replace the F value of a move line, or append one if the line has no explicit feedrate.
+    auto set_feedrate = [](std::string &line, float f) {
+        int fi = std::max(1, (int) std::floor(f + 0.5f));
+        size_t i = 0, n = line.size();
+        while (i < n) {
+            while (i < n && line[i] == ' ') ++i;
+            size_t tok = i;
+            while (i < n && line[i] != ' ') ++i;
+            if (tok < n && line[tok] == 'F') {
+                line = line.substr(0, tok) + "F" + std::to_string(fi) + line.substr(i);
+                return;
+            }
+        }
+        line += " F" + std::to_string(fi);
+    };
+
+    // A plain linear move made of G1/X/Y/E/F tokens only, which can be split in two.
+    auto is_plain_linear = [](const std::string &line) {
+        size_t i = 0, n = line.size();
+        bool first = true;
+        while (i < n) {
+            while (i < n && line[i] == ' ') ++i;
+            if (i >= n) break;
+            size_t tok = i;
+            while (i < n && line[i] != ' ') ++i;
+            if (first) {
+                if (line.compare(tok, i - tok, "G1") != 0)
+                    return false;
+                first = false;
+            } else if (std::string_view("XYEF").find(line[tok]) == std::string_view::npos)
+                return false;
+        }
+        return true;
+    };
+
+    struct Move { int line_idx; float e; float feedrate; bool splittable; Vec2f from; Vec2f to; };
+    std::vector<Move> moves;
+    float current_feedrate = 0.f;
+    // Mirror post_process_wipe_tower_moves(): the placeholder resets local XY to the tool-change start.
+    Vec2f position    = initial_position != nullptr ? *initial_position : Vec2f::Zero();
+    bool  has_x_known = initial_position != nullptr, has_y_known = initial_position != nullptr;
+    for (int idx = 0; idx < (int) lines.size(); ++idx) {
+        const std::string &line = lines[idx];
+        if (line == "[change_filament_gcode]") {
+            if (tool_change_start_position != nullptr) {
+                position    = *tool_change_start_position;
+                has_x_known = has_y_known = true;
+            } else
+                has_x_known = has_y_known = false;
+            continue;
+        }
+        size_t p = line.find_first_not_of(' ');
+        if (p == std::string::npos || line[p] != 'G') continue;
+        size_t q = line.find(' ', p);
+        std::string cmd = line.substr(p, (q == std::string::npos ? line.size() : q) - p);
+        bool is_arc = (cmd == "G2" || cmd == "G3");
+        if (cmd != "G1" && !is_arc) continue;
+
+        float fval = 0.f, eval = 0.f, xval = 0.f, yval = 0.f;
+        bool has_f = get_param(line, 'F', fval);
+        bool has_e = get_param(line, 'E', eval);
+        bool has_x = get_param(line, 'X', xval);
+        bool has_y = get_param(line, 'Y', yval);
+        bool is_motion = has_x || has_y || is_arc;
+        // Track the running print feedrate from motion moves and standalone "G1 F" lines,
+        // but ignore pure retract/de-retract moves (E only) so retract speeds don't leak in.
+        if (has_f && (is_motion || (!has_e && !has_x && !has_y)))
+            current_feedrate = fval;
+        const Vec2f from       = position;
+        const bool  from_known = has_x_known && has_y_known;
+        if (has_x) { position.x() = xval; has_x_known = true; }
+        if (has_y) { position.y() = yval; has_y_known = true; }
+        if (has_e && eval > 0.f && is_motion && current_feedrate > 0.f)
+            moves.push_back({idx, eval, current_feedrate, from_known && !is_arc && is_plain_linear(line), from, position});
+    }
+    if (moves.empty())
+        return;
+
+    float tail_len = (tail_volume <= 0.f) ? std::numeric_limits<float>::max() : tail_volume / filament_area;
+    float acc = 0.f;
+    for (int m = (int) moves.size() - 1; m >= 0; --m) {
+        if (acc >= tail_len - 1e-6f)
+            break;
+        const Move &move      = moves[m];
+        const float remaining = tail_len - acc;
+        acc += move.e;
+        if (move.splittable && move.e > remaining + 1e-5f) {
+            const float  t_head = 1.f - remaining / move.e;
+            const Vec2f  mid    = move.from + (move.to - move.from) * t_head;
+            const std::string mid_x = float_to_string_decimal_point(mid.x(), 3);
+            const std::string mid_y = float_to_string_decimal_point(mid.y(), 3);
+            // post_process_wipe_tower_moves() rewrites X/Y only when the position changes, so a split
+            // point that prints identical to either end would leave raw tower coordinates in the G-code.
+            const auto prints_as = [&mid_x, &mid_y](const Vec2f &p) {
+                return mid_x == float_to_string_decimal_point(p.x(), 3) && mid_y == float_to_string_decimal_point(p.y(), 3);
+            };
+            // Tail too short to print on its own: keep this move at its original feedrate.
+            if (prints_as(move.to))
+                break;
+            // Head too short to print on its own: slow the whole move below.
+            if (prints_as(move.from)) {
+                set_feedrate(lines[move.line_idx], move.feedrate * speed_factor);
+                break;
+            }
+            // Only the end of this move is in the tail: its head keeps the original feedrate.
+            std::string &line   = lines[move.line_idx];
+            const std::string e_head = float_to_string_decimal_point(move.e * t_head, 5);
+            const float  e_tail = move.e - float(string_to_double_decimal_point(e_head));
+            float f_head = 0.f;
+            const bool has_f_head = get_param(line, 'F', f_head);
+            std::string head = "G1 X" + mid_x + " Y" + mid_y + " E" + e_head;
+            if (has_f_head)
+                head += " F" + float_to_string_decimal_point(f_head, 3);
+            std::string tail = "G1 X" + float_to_string_decimal_point(move.to.x(), 3) + " Y" +
+                               float_to_string_decimal_point(move.to.y(), 3) + " E" +
+                               float_to_string_decimal_point(e_tail, 5);
+            set_feedrate(tail, move.feedrate * speed_factor);
+            line = head + "\n" + tail;
+            break;
+        }
+        set_feedrate(lines[move.line_idx], move.feedrate * speed_factor);
+    }
+
+    std::string out;
+    out.reserve(gcode.size() + 16);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        if (i + 1 < lines.size())
+            out += '\n';
+    }
+    gcode = std::move(out);
+}
 // Rib wall path resolution and fillet sampling, as in Bambu Studio's WipeTower.cpp.
 static constexpr double WIPE_TOWER_RESOLUTION         = 0.1;
 static const double     SCALED_WIPE_TOWER_RESOLUTION  = WIPE_TOWER_RESOLUTION / SCALING_FACTOR;
@@ -385,6 +598,33 @@ public:
 	const Vec2f& 		 pos()   const { return m_current_pos; }
 	const Vec2f	 		 start_pos_rotated() const { return m_start_pos; }
 	const Vec2f  		 pos_rotated() const { return this->rotate(m_current_pos); }
+	// Bambu Studio 2.9.1: the layer's y shift, and a tower-local point in the frame the G-code is written in.
+	float                y_shift() const { return m_y_shift; }
+	Vec2f                point_rotated(const Vec2f &pt) const { return this->rotate(pt); }
+
+	// Bambu Studio 2.9.1 travel_xyz() (WipeTower.cpp:986): a travel to an XY position (tower-local) and an absolute Z
+	// written verbatim, so the side scrape can hand over a placeholder ([wipe_tower_scrape_z_low] / _top) that
+	// GCode::append_tcr fills in. No extrusion, and the writer's Z does not change.
+	WipeTowerWriter& travel_xyz(const Vec2f &dest, const std::string &z, float f = 0.f)
+	{
+		Vec2f rotated_current_pos(this->pos_rotated());
+		Vec2f rot(this->rotate(dest));
+		m_gcode += acceleration_for(0.f);
+		m_gcode += "G1";
+		if (std::abs(rot.x() - rotated_current_pos.x()) > (float) EPSILON)
+			m_gcode += set_format_X(rot.x());
+		if (std::abs(rot.y() - rotated_current_pos.y()) > (float) EPSILON)
+			m_gcode += set_format_Y(rot.y());
+		m_gcode += " Z" + z;
+		if (f != 0.f && f != m_current_feedrate)
+			m_gcode += set_format_F(f);
+		m_current_pos = dest;
+		const float len = (rot - rotated_current_pos).norm();
+		if (m_current_feedrate > 0.f)
+			m_elapsed_time += len / m_current_feedrate * 60.f;
+		m_gcode += "\n";
+		return *this;
+	}
 	float 				 elapsed_time() const { return m_elapsed_time; }
     float                get_and_reset_used_filament_length() { float temp = m_used_filament_length; m_used_filament_length = 0.f; return temp; }
 
@@ -1503,11 +1743,33 @@ void WipeTower::record_outer_wall(const Polygon &wall)
     m_outer_wall[m_z_pos].push_back(std::move(pl));
 }
 
-float WipeTower::wall_feedrate(size_t tool) const
+void WipeTower::record_scrape_wall(const Polygon &wall)
 {
-    // Bambu Studio WipeTower.cpp:3591 (finish_layer_new): the wall speed, capped by prime_tower_max_speed.
-    return is_first_layer() ? std::min(m_first_layer_speed * 60.f, m_max_speed) :
-                              std::min(60.0f * m_filpar[tool].max_e_speed / m_extrusion_flow, m_max_speed);
+    if (! m_enable_side_scrape)
+        return;
+    // Bambu Studio finish_layer_new(): the footprint frame is the writer frame with the layer's y shift applied.
+    Polyline pl = to_polyline(wall);
+    pl.translate(0, scaled(m_y_shift));
+    m_scrape_walls[m_z_pos].push_back(std::move(pl));
+}
+
+void WipeTower::apply_tail_slowdown(ToolChangeResult &tcr) const
+{
+    const size_t tail_tool = tcr.new_tool >= 0 && size_t(tcr.new_tool) < m_filpar.size() ? size_t(tcr.new_tool) : m_current_tool;
+    const float  area      = tail_tool < m_filpar.size() ? m_filpar[tail_tool].filament_area : 0.f;
+    wipe_tower_tail_slowdown(tcr.gcode, m_tail_slowdown_volume, m_tail_speed_factor, area, &tcr.start_pos, &tcr.tool_change_start_pos);
+}
+
+float WipeTower::calc_tower_feedrate(size_t tool, bool first_layer) const
+{
+    // Bambu Studio 2.9.1 calc_tower_feedrate() (WipeTower.hpp:829). This tree computes every tower speed at the
+    // tower-wide flow (m_extrusion_flow), as it did before.
+    if (first_layer)
+        return std::min(m_first_layer_speed * 60.f, m_max_speed);
+    const float volumetric = 60.0f * m_filpar[tool].max_e_speed / m_extrusion_flow;
+    if (m_handle_hotend_as_extruder)
+        return std::min(volumetric * m_filpar[tool].feedrate_factor, m_machine_max_speed);
+    return std::min(volumetric, m_max_speed);
 }
 
 WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height) :
@@ -1549,6 +1811,25 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_extra_spacing   = float(config.prime_tower_infill_gap.value) / 100.f;
     m_tower_framework = config.prime_tower_enable_framework.value;
     m_flat_ironing    = config.prime_tower_flat_ironing.value && config.wipe_tower_wall_gap.value;
+    // Bambu Studio 2.9.1 (WipeTower.cpp:1909-1924, 1937-1941): the tail slowdown, the line ironing and its speed,
+    // the side scrape, and the machine XY limit that caps the H3C tower speed.
+    m_tail_speed_factor         = std::clamp(float(config.prime_tower_tail_speed_factor.value) / 100.f, 0.1f, 1.f);
+    m_tail_slowdown_volume      = std::max(0.f, float(config.prime_tower_tail_slowdown_volume.value));
+    m_line_ironing              = config.prime_tower_line_ironing.value;
+    m_ironing_speed             = float(config.prime_tower_ironing_speed.value) * 60.f;
+    m_enable_side_scrape        = config.prime_tower_side_scrape.value;
+    m_side_scrape_on_left_right = config.prime_tower_side_scrape_face.value == sssfLeftRight;
+    m_side_scrape_length        = float(config.prime_tower_side_scrape_length.value);
+    m_side_scrape_height        = float(config.prime_tower_side_scrape_height.value);
+    m_side_scrape_speed         = float(config.prime_tower_side_scrape_speed.value) * 60.f;
+    m_side_scrape_wall_gap      = float(config.prime_tower_side_scrape_wall_gap.value);
+    m_side_scrape_point_spacing = float(config.prime_tower_side_scrape_point_spacing.value);
+    m_side_scrape_along_length  = float(config.prime_tower_side_scrape_along_length.value);
+    {
+        const float max_x   = config.machine_max_speed_x.values.empty() ? 500.f : float(config.machine_max_speed_x.values.front());
+        const float max_y   = config.machine_max_speed_y.values.empty() ? 500.f : float(config.machine_max_speed_y.values.front());
+        m_machine_max_speed = std::min(max_x, max_y) * 60.f;
+    }
     // is_valid_last_layer(): Bambu Studio leaves extruder_printable_height empty on printers without a limit;
     // this tree's default is 0, which is read as no limit as well.
     m_printable_height = config.extruder_printable_height.values;
@@ -1660,6 +1941,12 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].retract_length = config.retraction_length.values.empty() ? 0.f : float(config.retraction_length.get_at(idx));
     m_filpar[idx].retract_speed  = config.retraction_speed.values.empty() ? 0.f : float(config.retraction_speed.get_at(idx));
     m_filpar[idx].flat_iron_area = config.filament_tower_ironing_area.values.empty() ? 0.f : float(config.filament_tower_ironing_area.get_at(idx));
+    // Bambu Studio 2.9.1 (WipeTower.cpp:2060-2066, 2137-2138): the purge speed curve, on every printer whose filament
+    // carries one, and the process feedrate factor (read on hotend_as_extruder printers only).
+    m_filpar[idx].speed_factor_curve = config.filament_prime_tower_speed_factor_curve.values.empty() ?
+                                           std::vector<float>() :
+                                           parse_speed_factor_curve(config.filament_prime_tower_speed_factor_curve.get_at(idx));
+    m_filpar[idx].feedrate_factor    = std::max(0.01f, float(config.prime_tower_feedrate_factor.value));
 
     m_filpar[idx].kind                  = TowerInterface::filament_kind(config, (unsigned int) idx);
     m_filpar[idx].interface_temperature = TowerInterface::interface_temperature(config.filament_tower_interface_print_temp.get_at(idx),
@@ -1882,6 +2169,17 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     toolchange_Change(writer, new_tool, m_filpar[new_tool].material); // Change the tool, set a speed override for soluble and flex materials.
     toolchange_Load(writer, cleaning_box);
 
+    // Bambu Studio 2.9.1 (tool_change_new(), WipeTower.cpp:3677-3686): the side scrape, not on the first layer. The
+    // unretract moves behind it ([wipe_tower_deretract_gcode], filled in by GCode::append_tcr).
+    bool        did_side_scrape    = false;
+    Vec2f       scrape_start_local = Vec2f::Zero();
+    SideScrapeZ scrape_z;
+    if (m_enable_side_scrape && !is_first_layer() &&
+        toolchange_side_scrape(writer, initial_position, &scrape_start_local, &scrape_z)) {
+        writer.append("[wipe_tower_deretract_gcode]\n");
+        did_side_scrape = true;
+    }
+
     // BBS: Bambu Studio's "Wipe tower reheat before wipe" (toolchange_wipe_new(), add_M104_by_requirement):
     // change_filament_gcode left the nozzle filament_cooling_before_tower below the print temperature (M620.15 C);
     // the purge heats back up. Not on the tower's first layer, an interface or a contact (solid) change: GCode
@@ -1912,9 +2210,20 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     if (m_current_tool < m_used_filament_length.size())
         m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
+    const Vec2f      writer_scrape_start = writer.point_rotated(scrape_start_local);
     ToolChangeResult result      = construct_tcr(writer, false, old_tool, false, true, purge_volume, solid_toolchange);
     result.reheats_after_cooling = reheats_after_cooling;
     result.nozzle_change_result  = std::move(nozzle_change_result);
+    if (did_side_scrape) {
+        result.side_scrape                       = true;
+        result.side_scrape_z_low                 = scrape_z.z_low;
+        result.side_scrape_depth                 = scrape_z.depth;
+        result.side_scrape_min_height_above_base = scrape_z.min_height_above_base;
+        // Every travel that brings the nozzle to the tower (append_tcr, a merge travel) goes to the scrape start; the
+        // scrape ends at the purge start.
+        result.start_pos             = writer_scrape_start;
+        result.tool_change_start_pos = writer_scrape_start;
+    }
     return result;
 }
 
@@ -2485,25 +2794,42 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     const float xl                  = cleaning_box.ld.x();
     const float xr                  = cleaning_box.rd.x();
     // A contact change neither irons nor stops early: it fills its box solid.
-    const bool  should_flat_ironing = m_flat_ironing && !solid_toolchange;
-    const bool  should_line_ironing = !solid_toolchange;
+    // Bambu Studio 2.9.1: prime_tower_line_ironing off (the H3C presets) skips the start ironing and its flat spiral.
+    const bool  should_line_ironing = m_line_ironing && !solid_toolchange;
+    const bool  should_flat_ironing = m_flat_ironing && should_line_ironing;
     float       x_to_wipe           = solid_toolchange ? std::numeric_limits<float>::max() : wipe_length;
     float       dy                  = first_layer ? tool_pw : m_layer_info->extra_spacing * get_block_gap_width(m_current_tool, false);
     if (solid_toolchange)
         dy = tool_pw;
-    float target_speed = first_layer ? std::min(m_first_layer_speed * 60.f, m_max_speed) : m_max_speed;
+    // Bambu Studio 2.9.1 (WipeTower.cpp:5040-5056): the rows ramp up to the tower speed (calc_tower_feedrate(), on the
+    // H3C the volumetric speed times the feedrate factor, not capped at prime_tower_max_speed) along the filament's
+    // speed curve, or along the built-in ramp without one; a short curve repeats its last value.
+    float target_speed = first_layer ? std::min(m_first_layer_speed * 60.f, m_max_speed) : calc_tower_feedrate(m_current_tool, false);
     target_speed       = solid_toolchange ? m_contact_speed : target_speed;
-    const std::vector<float> wipe_speed_map{ 0.33f * target_speed, 0.375f * target_speed, 0.458f * target_speed, 0.875f * target_speed,
-                                             std::min(target_speed, 0.875f * target_speed + 50.f) };
+    std::vector<float> wipe_speed_map;
+    const std::vector<float> &speed_curve = m_filpar[m_current_tool].speed_factor_curve;
+    if (! speed_curve.empty()) {
+        for (float v : speed_curve)
+            wipe_speed_map.push_back(v * target_speed);
+        if (wipe_speed_map.size() < 5)
+            wipe_speed_map.resize(5, wipe_speed_map.back());
+    } else
+        wipe_speed_map = { 0.33f * target_speed, 0.375f * target_speed, 0.458f * target_speed, 0.875f * target_speed,
+                           std::min(target_speed, 0.875f * target_speed + 50.f) };
     float wipe_speed = wipe_speed_map[0];
 
     m_left_to_right       = ((m_cur_layer_id + 3) % 4 >= 2);
     const bool is_from_up = (m_cur_layer_id % 2 == 1);
 
+    // Bambu Studio 2.9.1 add_M104_by_requirement() (WipeTower.cpp:5087): format_line_M104(..., is_heating = true), i.e.
+    // "M104 T<physical extruder> S<t> N0 W" (H3C: "M104 I<filament> ..."), no M400 before a heating line. Never on
+    // the first layer (reheats_after_cooling), so the first-layer temperature branch of Bambu's is not needed.
     auto reheat_before_wipe = [&writer, reheat, this]() {
         if (reheat && m_filpar[m_current_tool].cooling_before_tower > EPSILON)
-            writer.append("M104 T" + std::to_string(m_filpar[m_current_tool].reheat_extruder) + " S" +
-                          std::to_string(m_filpar[m_current_tool].nozzle_temperature) + " N0 ;Wipe tower reheat before wipe\n");
+            writer.append(std::string("M104") +
+                          (m_handle_hotend_as_extruder ? " I" + std::to_string(m_current_tool) :
+                                                         " T" + std::to_string(m_filpar[m_current_tool].reheat_extruder)) +
+                          " S" + std::to_string(m_filpar[m_current_tool].nozzle_temperature) + " N0 W ;Wipe tower reheat before wipe\n");
     };
 
     for (int i = 0; true; ++i) {
@@ -2537,7 +2863,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
                 if (should_flat_ironing) {
                     writer.travel(writer.x() + sign * 0.5f * ironing_length, writer.y(), 240.f);
                     const Vec2f pos{ writer.x() + sign * 1.f * ironing_length, writer.y() };
-                    writer.spiral_flat_ironing(writer.pos(), m_filpar[m_current_tool].flat_iron_area, m_perimeter_width, flat_iron_speed);
+                    writer.spiral_flat_ironing(writer.pos(), m_filpar[m_current_tool].flat_iron_area, m_perimeter_width, m_ironing_speed);
                     writer.travel(pos, wipe_speed);
                 } else
                     writer.travel(writer.x() + sign * 1.5f * ironing_length, writer.y(), 240.f);
@@ -2581,6 +2907,316 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     // BBS: add the note for gcode-check when the flow changed
     if (first_layer || tool_width || after_nozzle_change)
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_perimeter_width) + "\n");
+}
+
+// Bambu Studio 2.9.1 polylines_extreme_at() (WipeTower.cpp:4660): cut the polylines with the line "along == const"
+// and keep the extreme coordinate on the requested side.
+static bool scrape_polylines_extreme_at(const Polylines &pls, bool across_is_x, bool positive_side, float along, float &out_across)
+{
+    const int i_across = across_is_x ? 0 : 1;
+    const int i_along  = across_is_x ? 1 : 0;
+
+    bool  found   = false;
+    float extreme = positive_side ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+    for (const Polyline &pl : pls) {
+        const Points &pts = pl.points;
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            Vec2f a = unscaled<float>(pts[i]);
+            Vec2f b = unscaled<float>(pts[i + 1]);
+            if ((a[i_along] - along) * (b[i_along] - along) > 0.f) // segment does not straddle the cut
+                continue;
+            if (std::abs(b[i_along] - a[i_along]) < (float) EPSILON) // segment parallel to the cut, ignore
+                continue;
+            float t = (along - a[i_along]) / (b[i_along] - a[i_along]);
+            float c = a[i_across] + t * (b[i_across] - a[i_across]);
+            extreme = positive_side ? std::max(extreme, c) : std::min(extreme, c);
+            found   = true;
+        }
+    }
+    if (found)
+        out_across = extreme;
+    return found;
+}
+
+// Bambu Studio 2.9.1 outer_wall_extreme_at() (WipeTower.cpp:4687): the stored layer whose Z is closest to z (within
+// half a layer height).
+bool WipeTower::outer_wall_extreme_at(float z, bool across_is_x, bool positive_side, float along, float &out_across) const
+{
+    if (m_scrape_walls.empty())
+        return false;
+    const float      tol     = m_layer_height * 0.5f + (float) EPSILON;
+    const Polylines *pls     = nullptr;
+    float            best_dz = tol;
+    for (auto it = m_scrape_walls.lower_bound(z - tol); it != m_scrape_walls.end() && it->first <= z + tol; ++it) {
+        const float dz = std::abs(it->first - z);
+        if (dz <= best_dz) {
+            best_dz = dz;
+            pls     = &it->second;
+        }
+    }
+    if (pls == nullptr)
+        return false;
+    return scrape_polylines_extreme_at(*pls, across_is_x, positive_side, along, out_across);
+}
+
+// Bambu Studio 2.9.1 side_wall_straight_along_range() (WipeTower.cpp:4710): the straight span of the wall, grown from
+// its middle (ribs and fillets only reach a wall near its ends); collapses to the middle where nothing runs straight.
+bool WipeTower::side_wall_straight_along_range(bool across_is_x, bool positive_side, float &along_begin, float &along_end) const
+{
+    const float along_extent = across_is_x ? m_wipe_tower_depth : m_wipe_tower_width;
+    if (along_extent <= (float) EPSILON)
+        return false;
+
+    const int   n    = std::max(32, int(std::lround(double(along_extent) / 0.25)));
+    const float step = along_extent / float(n);
+
+    std::vector<float> wall(n + 1, 0.f);
+    std::vector<char>  wall_valid(n + 1, 0);
+    for (int i = 0; i <= n; ++i) {
+        float along = step * float(i);
+        float q     = 0.f;
+        for (float z : {m_z_pos - m_layer_height, m_z_pos}) {
+            if (! outer_wall_extreme_at(z, across_is_x, positive_side, along, q))
+                continue;
+            wall[i]       = wall_valid[i] ? (positive_side ? std::max(wall[i], q) : std::min(wall[i], q)) : q;
+            wall_valid[i] = 1;
+        }
+    }
+
+    const int mid  = n / 2;
+    int       seed = -1;
+    for (int d = 0; d <= n && seed < 0; ++d) {
+        if (mid - d >= 0 && wall_valid[mid - d])
+            seed = mid - d;
+        else if (mid + d <= n && wall_valid[mid + d])
+            seed = mid + d;
+    }
+    if (seed < 0)
+        return false;
+    const float edge = wall[seed];
+
+    // Deviation from the seed that still counts as straight: fillets pull the wall inwards and the
+    // diagonal ribs push it outwards, both of which show up as a deviation from edge.
+    const float tol = std::max(0.02f, 0.05f * m_perimeter_width);
+
+    int lo = seed, hi = seed;
+    while (lo > 0 && wall_valid[lo - 1] && std::abs(wall[lo - 1] - edge) <= tol)
+        --lo;
+    while (hi < n && wall_valid[hi + 1] && std::abs(wall[hi + 1] - edge) <= tol)
+        ++hi;
+
+    // Pull in by one sample step: the true fillet/rib boundary lies somewhere between two samples.
+    along_begin = std::min(step * float(lo) + step, step * float(seed));
+    along_end   = std::max(step * float(hi) - step, step * float(seed));
+    return true;
+}
+
+int WipeTower::brim_chamfer_loops_num(size_t layer) const
+{
+    // finish_layer_new()'s brim chamfer: the full brim on the tower's first layer, then one loop less per printed layer,
+    // at most 3 mm, and none once the layer depth differs from the first layer's.
+    if (layer >= m_plan.size())
+        return 0;
+    const float spacing   = m_perimeter_width - m_plan[layer].height * float(1. - M_PI_4);
+    int         loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
+    if (layer == m_first_layer_idx)
+        return loops_num;
+    if (m_plan[layer].depth != m_plan.front().depth)
+        return 0;
+    const float max_chamfer_width = 3.f;
+    const int   chamfer_loops_num = (int) (max_chamfer_width / spacing);
+    const int   dist_to_1st       = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer);
+    return dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
+}
+
+float WipeTower::side_scrape_z_floor() const
+{
+    // Bambu Studio 2.9.1 side_scrape_z_floor() (WipeTower.cpp:4769): stay a clearance above the highest layer that
+    // still carries a brim chamfer loop (the tower's own first layer without a brim, which also keeps the nozzle off
+    // the bed). keeps_outer_walls_unshrunk() holds every other wall on the same footprint.
+    const float clearance = 0.4f;
+    if (m_plan.empty())
+        return m_layer_height + clearance;
+    const size_t first      = m_first_layer_idx < m_plan.size() ? m_first_layer_idx : 0;
+    size_t       flared_top = first;
+    for (size_t i = first; i < m_plan.size(); ++i) {
+        // A layer folded into a later one prints no loops of its own.
+        if (m_plan[i].combined_away)
+            continue;
+        if (brim_chamfer_loops_num(i) <= 0)
+            break;
+        flared_top = i;
+    }
+    return m_plan[flared_top].z + clearance;
+}
+
+// Bambu Studio 2.9.1 toolchange_side_scrape() (WipeTower.cpp:4813-4995): after the tool change, before the purge, the
+// nozzle travels outside one of the two scraped walls, drops below the tower top (to the floor above the brim
+// chamfer at most) and runs diagonally up and in to the wall gap outside the wall, then along the wall, and on to
+// the purge start. Travel only. The Z values are placeholders GCode::append_tcr fills in.
+bool WipeTower::toolchange_side_scrape(WipeTowerWriter &writer, const Vec2f &initial_position, Vec2f *out_scrape_start, SideScrapeZ *out_z)
+{
+    const bool  across_is_x   = m_side_scrape_on_left_right;
+    const float across_extent = across_is_x ? m_wipe_tower_width : m_wipe_tower_depth;
+
+    // Advance the sequence up front, so a layer on which the scrape turns out to be impossible hands the next attempt
+    // over to the opposite wall and the next slot.
+    const unsigned int slot = m_side_scrape_seq++;
+
+    float length = std::min(m_side_scrape_length, across_extent / 2.f - m_perimeter_width);
+    if (length <= (float) EPSILON || m_side_scrape_height <= (float) EPSILON)
+        return false;
+
+    // Starts alternate between the two walls of the pair: positive@slot0, negative@slot0, positive@slot1, ...
+    const bool  positive_side = (slot % 2u) == 0u;
+    const float outward       = positive_side ? 1.f : -1.f;
+
+    const float y_shift   = writer.y_shift();
+    auto        to_writer = [across_is_x, y_shift](float across, float along) {
+        Vec2f p = across_is_x ? Vec2f(across, along) : Vec2f(along, across);
+        p.y() -= y_shift;
+        return p;
+    };
+
+    // Keep the start and the along-wall move on the straight part of the wall.
+    float straight_lo = 0.f, straight_hi = 0.f;
+    if (! side_wall_straight_along_range(across_is_x, positive_side, straight_lo, straight_hi))
+        return false;
+    const float margin   = std::min(m_perimeter_width, 0.25f * (straight_hi - straight_lo));
+    const float along_lo = straight_lo + margin;
+    const float along_hi = std::max(along_lo, straight_hi - margin);
+    const float span            = along_hi - along_lo;
+    const float spacing         = std::max(0.1f, m_side_scrape_point_spacing);
+    const int   points_per_side = std::clamp(int(std::lround(double(span) / double(spacing))), 1, 64);
+    const int   along_slot      = int((slot / 2u) % unsigned(points_per_side));
+
+    float along0       = along_lo + (float(along_slot) + 0.5f) * span / float(points_per_side);
+    float scrape_speed = m_side_scrape_speed;
+
+    float z_top  = m_z_pos;
+    // Top of the tower's own first layer, the base the floor is expressed relative to.
+    float z_base = m_layer_height;
+    if (m_first_layer_idx != size_t(-1) && m_first_layer_idx < m_plan.size())
+        z_base = m_plan[m_first_layer_idx].z;
+    else if (! m_plan.empty())
+        z_base = m_plan.front().z;
+    const float z_floor = side_scrape_z_floor();
+    float       z_low   = std::max(m_z_pos - m_side_scrape_height, z_floor);
+    // No vertical room left close to the tower base: no scrape rather than a flat move.
+    if (z_top - z_low <= (float) EPSILON)
+        return false;
+
+    // After the diagonal, a short travel along the wall towards the purge start, inside the straight span.
+    const float initial_along = across_is_x ? initial_position.y() + y_shift : initial_position.x();
+    float smear     = std::min(m_side_scrape_along_length, span);
+    float smear_dir = (initial_along >= along0) ? 1.f : -1.f;
+    float along1    = std::clamp(along0 + smear_dir * smear, along_lo, along_hi);
+    if (std::abs(along1 - along0) <= (float) EPSILON) {
+        smear_dir = -smear_dir;
+        along1    = std::clamp(along0 + smear_dir * smear, along_lo, along_hi);
+    }
+
+    // The wall to place the scrape against: the outermost of the previous and the current layer's wall over the whole
+    // stretch the nozzle covers.
+    bool  wall_found  = false;
+    float wall_across = 0.f;
+    {
+        const float a  = std::min(along0, along1);
+        const float b  = std::max(along0, along1);
+        const int   ns = std::max(2, int(std::lround(double(b - a) / 0.25)));
+        for (int i = 0; i <= ns; ++i) {
+            const float at = a + (b - a) * float(i) / float(ns);
+            for (float z : {m_z_pos - m_layer_height, m_z_pos}) {
+                float q = 0.f;
+                if (! outer_wall_extreme_at(z, across_is_x, positive_side, at, q))
+                    continue;
+                wall_across = wall_found ? (positive_side ? std::max(wall_across, q) : std::min(wall_across, q)) : q;
+                wall_found  = true;
+            }
+        }
+    }
+    if (! wall_found)
+        return false;
+
+    const float scrape_across = wall_across + outward * m_side_scrape_wall_gap;
+    const float start_across  = scrape_across + outward * length;
+
+    if (out_scrape_start)
+        *out_scrape_start = to_writer(start_across, along0);
+    if (out_z) {
+        out_z->z_low                 = z_low;
+        out_z->depth                 = z_top - z_low;
+        out_z->min_height_above_base = std::max(0.f, z_floor - z_base);
+    }
+
+    writer.append(";--------------------\n"
+                  "; CP TOOLCHANGE SIDE SCRAPE\n");
+    // 1) Outside the wall at the layer top (also where the tool change lands).
+    writer.travel(to_writer(start_across, along0), scrape_speed);
+    // 2) Down below the printed top, outside the wall.
+    writer.travel_xyz(to_writer(start_across, along0), "[wipe_tower_scrape_z_low]", scrape_speed);
+    // 3) The diagonal: back up to the layer top while approaching the wall, ending the wall gap outside it.
+    writer.travel_xyz(to_writer(scrape_across, along0), "[wipe_tower_scrape_z_top]", scrape_speed);
+    // 4) Along the wall, following its contour the wall gap outside it.
+    if (std::abs(along1 - along0) > (float) EPSILON) {
+        auto hug_across = [&](float at) -> float {
+            bool  found = false;
+            float q     = positive_side ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+            for (float z : {m_z_pos - m_layer_height, m_z_pos}) {
+                float w = 0.f;
+                if (! outer_wall_extreme_at(z, across_is_x, positive_side, at, w))
+                    continue;
+                q     = positive_side ? std::max(q, w) : std::min(q, w);
+                found = true;
+            }
+            if (! found)
+                return scrape_across;
+            return q + outward * m_side_scrape_wall_gap;
+        };
+        const int ns = std::max(1, int(std::lround(double(std::abs(along1 - along0)) / 0.5)));
+        for (int i = 1; i <= ns; ++i) {
+            const float at = along0 + (along1 - along0) * float(i) / float(ns);
+            writer.travel(to_writer(hug_across(at), at), scrape_speed);
+        }
+    }
+    // 5) To the purge start.
+    writer.travel(initial_position, scrape_speed);
+    writer.append(";--------------------\n");
+    return true;
+}
+
+// Bambu Studio 2.9.1 finish_layer_new() (WipeTower.cpp:4287-4339), side scrape on, first layer: concentric loops fill
+// the inside of the outer wall the purge bands leave empty (a rib wall's arms and pockets, the ring inside the wall).
+void WipeTower::fill_first_layer_voids(WipeTowerWriter &writer, const Polygon &outer_wall, const std::vector<std::pair<float, float>> &purge_bands,
+                                       float feedrate)
+{
+    const float step = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
+    if (step <= EPSILON)
+        return;
+    Polygons purged;
+    for (const auto &band : purge_bands) {
+        if (band.second - band.first <= WT_EPSILON)
+            continue;
+        const box_coordinates b(Vec2f(m_perimeter_width, band.first), m_wipe_tower_width - 2 * m_perimeter_width, band.second - band.first);
+        Polygon p;
+        p.points = { Point::new_scale(b.ld), Point::new_scale(b.rd), Point::new_scale(b.ru), Point::new_scale(b.lu) };
+        purged.emplace_back(std::move(p));
+    }
+    // The band edges are the outermost purge axes: grown by one line spacing, the loops just touch the purge.
+    const Polygons purged_grown = purged.empty() ? Polygons{} : offset(purged, scaled(step));
+    ExPolygons voids = diff_ex(offset(outer_wall, -scaled(step)), purged_grown);
+    // Anything narrower than one extrusion would only be a blob.
+    const double min_island_area = scaled<double>(step) * scaled<double>(step);
+    remove_small_and_small_holes(voids, min_island_area);
+    for (int guard = 0; guard < 200 && ! voids.empty(); ++guard) {
+        for (const ExPolygon &island : voids) {
+            writer.polygon(island.contour, feedrate, false);
+            for (const Polygon &hole : island.holes)
+                writer.polygon(hole, feedrate, false);
+        }
+        voids = union_ex(offset_ex(voids, -scaled(step)));
+        remove_small_and_small_holes(voids, min_island_area);
+    }
 }
 
 
@@ -2725,12 +3361,31 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         }
     }
 
-    // outer perimeter (always): a single block narrows with the layer, several keep the tower's full depth.
-    const float     wipe_tower_depth = m_wipe_tower_blocks.size() == 1 ? m_layer_info->depth + m_perimeter_width : m_wipe_tower_depth;
+    // outer perimeter (always): a single block narrows with the layer, several keep the tower's full depth. With the
+    // side scrape every layer keeps the full depth (Bambu Studio 2.9.1 keeps_outer_walls_unshrunk()).
+    const float     wipe_tower_depth = m_wipe_tower_blocks.size() == 1 && !keeps_outer_walls_unshrunk() ? m_layer_info->depth + m_perimeter_width :
+                                                                                                         m_wipe_tower_depth;
     box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, wipe_tower_depth);
     wt_box = align_perimeter(wt_box);
     // Bambu Studio finish_layer_new(): the rib wall is needed for the brim loops even when not printed here.
     Polygon outer_wall = print_outer_wall(writer, wt_box, feedrate, extrude_perimeter);
+    if (extrude_perimeter)
+        record_scrape_wall(outer_wall);
+
+    // Bambu Studio 2.9.1: with the side scrape on, the first layer fills the inside of its wall where no purge lies, so
+    // the tower base the scrape pushes against sticks to the bed everywhere.
+    if (extrude_perimeter && first_layer && m_enable_side_scrape) {
+        std::vector<std::pair<float, float>> purge_bands;
+        if (m_wipe_tower_blocks.size() > 1) {
+            for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
+                const float depth = m_cur_layer_id < block.layer_depths.size() ? block.layer_depths[m_cur_layer_id] : block.depth;
+                purge_bands.emplace_back(block.start_depth, block.start_depth + depth - m_perimeter_width);
+            }
+        } else
+            for (const box_coordinates &fb : fill_boxes)
+                purge_bands.emplace_back(fb.ld.y(), fb.lu.y());
+        fill_first_layer_voids(writer, outer_wall, purge_bands, feedrate);
+    }
 
     // A tower interface run-in also crosses the brim loops (the chamfer above the first layer).
     const size_t layer_id = size_t(m_layer_info - m_plan.begin());
@@ -2745,25 +3400,11 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         }
     };
 
-    // brim chamfer
-    float spacing = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
-    // How many perimeters shall the brim have?
-    int         loops_num         = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
-    const float max_chamfer_width = 3.f;
-    if (!first_layer) {
-        // stop print chamfer if depth changes
-        if (m_layer_info->depth != m_plan.front().depth) {
-            loops_num = 0;
-        } else {
-            // limit max chamfer width to 3 mm
-            int chamfer_loops_num = (int) (max_chamfer_width / spacing);
-            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer_id);
-            // A layer below the tower's first real layer gets no chamfer (no sparse layers: those layers are
-            // never printed, but their walls still go to the conflict checker).
-            loops_num = dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
-        }
-    }
+    // brim chamfer: the full brim on the first layer, then at most 3 mm, one loop less per printed layer (Edge OD16
+    // review: printed layers, so a combined tower steps one loop per printed layer), none on a layer below the tower's
+    // first real layer and none once the depth changes. brim_chamfer_loops_num() is also the side scrape's floor.
+    const float spacing   = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
+    const int   loops_num = brim_chamfer_loops_num(layer_id);
 
     if (loops_num > 0 && m_use_rib_wall) {
         // Bambu Studio finish_layer_new(): the brim follows the rib wall.
@@ -2774,6 +3415,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             outer_wall = std::move(grown.front());
             print_loop(outer_wall, true);
             record_outer_wall(outer_wall);
+            record_scrape_wall(outer_wall);
         }
         if (first_layer)
             m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;
@@ -2786,6 +3428,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                 writer.rectangle(box, feedrate);
             else
                 print_loop(generate_rectange_polygon(box.ld, box.ru), false);
+            if (m_enable_side_scrape)
+                record_scrape_wall(generate_rectange_polygon(box.ld, box.ru));
         }
         if (first_layer) {
             // Save actual brim width to be later passed to the Print object, which will use it
@@ -3450,7 +4094,9 @@ void WipeTower::update_all_layer_depth(float idle_depth)
     if (m_wipe_tower_depth > 0.f)
         m_wipe_tower_depth += start_offset;
 
-    if (m_enable_timelapse_print) {
+    // Smooth timelapse prints the tower on every layer; the side scrape (Bambu Studio 2.9.1) needs every wall at the full
+    // depth so the scrape can descend outside it.
+    if (m_enable_timelapse_print || keeps_outer_walls_unshrunk()) {
         if (is_approx(m_wipe_tower_depth, 0.f))
             m_wipe_tower_depth = idle_depth;
         for (WipeTowerInfo &plan_info : m_plan)
@@ -3552,7 +4198,7 @@ std::vector<float> WipeTower::layer_y_shifts() const
     for (size_t i = 0; i < m_plan.size(); ++i) {
         const float depth = m_plan[i].depth;
         // A single block narrows with the layers above; centre it on the tower (aligned to the line spacing).
-        if (m_wipe_tower_blocks.size() == 1 && depth >= m_perimeter_width && depth < m_wipe_tower_depth - m_perimeter_width)
+        if (m_wipe_tower_blocks.size() == 1 && !keeps_outer_walls_unshrunk() && depth >= m_perimeter_width && depth < m_wipe_tower_depth - m_perimeter_width)
             shift = align_round((m_wipe_tower_depth - depth) / 2.f, m_extra_spacing * m_perimeter_width);
         shifts[i] = shift;
     }
@@ -3676,6 +4322,14 @@ WipeTower::ToolChangeResult WipeTower::merge_tcr(ToolChangeResult &first, ToolCh
     out.initial_tool = first.initial_tool;
     out.new_tool     = second.new_tool;
     out.is_contact   = first.is_contact || second.is_contact;
+    // Bambu Studio 2.9.1 merge_tcr (WipeTower.cpp:3387-3400): the side scrape and its Z travel with the part that
+    // scraped (only a tool change does; a visit holds at most one).
+    out.side_scrape = first.side_scrape || second.side_scrape;
+    if (! first.side_scrape && second.side_scrape) {
+        out.side_scrape_z_low                 = second.side_scrape_z_low;
+        out.side_scrape_depth                 = second.side_scrape_depth;
+        out.side_scrape_min_height_above_base = second.side_scrape_min_height_above_base;
+    }
     // Bambu Studio merge_tcr: the nozzle change travels with whichever part carries one.
     if (first.nozzle_change_result.has_action())
         out.nozzle_change_result = first.nozzle_change_result;
@@ -3797,6 +4451,8 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     mark_interfaces();
 	plan_tower_new();
     m_outer_wall.clear();
+    m_scrape_walls.clear();
+    m_side_scrape_seq = 0;
     if (m_use_rib_wall)
         set_rib_offset();
 
@@ -3959,6 +4615,13 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
         if (only_generate_wall && !timelapse_wall.gcode.empty())
             layer_result.insert(layer_result.begin(), std::move(timelapse_wall));
 
+        // Bambu Studio 2.9.1 (generate_new(), WipeTower.cpp:8075-8100): slow the end of every tower visit down on
+        // hotend_as_extruder printers, whatever comes last (wall, purge or fill). Single nozzle diameter rule; the
+        // mixed-diameter tower (per-nozzle slab heights) is not ported.
+        if (tail_slowdown_applies())
+            for (ToolChangeResult &tcr : layer_result)
+                apply_tail_slowdown(tcr);
+
         if (layer.combined_away)
             for (WipeTower::ToolChangeResult &tcr : layer_result)
                 tcr.combined_away = true;
@@ -3992,10 +4655,12 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
     // outer perimeter (always): a smooth timelapse tower keeps its full depth (Orca #15035).
-    const float     wipe_tower_depth = m_enable_timelapse_print ? m_wipe_tower_depth : m_layer_info->depth + m_perimeter_width;
+    const float     wipe_tower_depth = m_enable_timelapse_print || keeps_outer_walls_unshrunk() ? m_wipe_tower_depth :
+                                                                                                m_layer_info->depth + m_perimeter_width;
     box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, wipe_tower_depth);
     wt_box = align_perimeter(wt_box);
     const Polygon wall = print_outer_wall(writer, wt_box, feedrate, true);
+    record_scrape_wall(wall);
     if (m_use_rib_wall) {
         writer.add_wipe_path(wall, m_filpar[m_current_tool].wipe_dist);
     } else {
@@ -4079,8 +4744,15 @@ void WipeTower::interface_before_wipe(WipeTowerWriter &writer, const WipeTowerIn
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     writer.append("; tower interface\n");
-    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature)
-        writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, fp.physical_extruder, "tower interface temperature"));
+    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature) {
+        // Bambu Studio 2.9.1 format_line_M109() (WipeTower.cpp:1482): on a hotend_as_extruder printer (H3C) the
+        // nozzle is named by the filament, "M109 I<filament> S<t> N0".
+        if (m_handle_hotend_as_extruder)
+            writer.append("M109 I" + std::to_string(tool_change.new_tool) + " S" + std::to_string(fp.interface_temperature) +
+                          " N0 ;tower interface temperature\n");
+        else
+            writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, fp.physical_extruder, "tower interface temperature"));
+    }
 
     const Vec2f start  = writer.pos();
     bool        primed = false;
@@ -4127,9 +4799,18 @@ void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInf
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     // Back to the normal temperature; wait only if that means heating up.
-    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature)
-        writer.append(GCodeWriter::set_temperature(fp.nozzle_temperature, m_gcode_flavor, fp.nozzle_temperature > fp.interface_temperature,
-                                                   fp.physical_extruder, "tower interface done, normal temperature"));
+    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature) {
+        const bool heating = fp.nozzle_temperature > fp.interface_temperature;
+        // Bambu Studio 2.9.1 format_line_M104() / format_line_M109() on a hotend_as_extruder printer (H3C): the
+        // filament names the nozzle (I), N0 marks a slicer line, a cooling M104 waits for the moves and carries C.
+        if (m_handle_hotend_as_extruder) {
+            const std::string nozzle = " I" + std::to_string(tool_change.new_tool) + " S" + std::to_string(fp.nozzle_temperature) + " N0";
+            writer.append(heating ? "M109" + nozzle + " ;tower interface done, normal temperature\n" :
+                                    "M400\nM104" + nozzle + " C ;tower interface done, normal temperature\n");
+        } else
+            writer.append(GCodeWriter::set_temperature(fp.nozzle_temperature, m_gcode_flavor, heating, fp.physical_extruder,
+                                                       "tower interface done, normal temperature"));
+    }
 }
 
 // Orca #10780 (Bambu Studio get_floating_area()): the part of the current block the previous layer left sparse, which
