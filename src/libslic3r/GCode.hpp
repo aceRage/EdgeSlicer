@@ -74,13 +74,19 @@ public:
         double retraction_length_after_wipe  = 0.;
     };
 
+    // ZAA (Z contouring): the height of each point of `path`, where the line it goes back along was contoured in
+    // height; empty where the line was laid flat. The wipe keeps to these heights, as the line was laid, rather
+    // than ploughing back through it at the height it ended at.
+    std::vector<double> heights;
+
     Wipe() : enable(false) {}
     bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); }
+    void reset_path() { this->path = Polyline(); this->heights.clear(); }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
     // Orca: rebuild the stored path while deduplicating shared path boundaries.
-    void update_path(const ExtrusionPaths &paths, bool reverse = false);
+    // `base_z` is the nominal Z the paths were laid at, for the heights of contoured paths.
+    void update_path(const ExtrusionPaths &paths, bool reverse = false, double base_z = 0.);
 };
 
 class WipeTowerIntegration {
@@ -892,6 +898,8 @@ private:
     // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
     // Returns false (and leaves volume alone) when old and new share an extruder.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
+    // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
+    float hotend_flush_volume(int new_filament_id) const;
 
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS

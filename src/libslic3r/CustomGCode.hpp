@@ -125,6 +125,11 @@ extern void check_mode_for_custom_gcode_per_print_z(Info& info);
 // filaments in addition to physical ones.
 std::vector<std::pair<double, unsigned int>> custom_tool_changes(const Info& custom_gcode_per_print_z, size_t num_filaments);
 
+// A filament was deleted (0-based `filament_id`): the layer filament changes to it go to
+// `replace_filament_id` (0-based, numbered after the deletion) when it was merged into another
+// filament, or are removed when it is -1; the changes to the filaments after it are numbered down.
+void update_tool_changes_when_delete_filament(Info& custom_gcode_per_print_z, size_t filament_id, int replace_filament_id);
+
 } // namespace CustomGCode
 
 } // namespace Slic3r

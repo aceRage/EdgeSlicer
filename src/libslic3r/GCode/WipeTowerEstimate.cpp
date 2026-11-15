@@ -118,8 +118,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const bool   type1            = tower_type == WipeTowerType::Type1;
     const double width            = opt_float("prime_tower_width");
     const double prime_volume     = opt_float("prime_volume");
-    // Type1 spaces its purge lines by prime_tower_infill_gap, Type2 by wipe_tower_extra_spacing.
-    // EdgeSlicer does not declare the Orca Type1 key: use it only when the caller set it.
+    // Type1 spaces its purge lines by prime_tower_infill_gap (Orca #10780), Type2 by wipe_tower_extra_spacing.
     const double extra_spacing    = opt_float((type1 && config.option("prime_tower_infill_gap") != nullptr) ?
                                                   "prime_tower_infill_gap" :
                                                   "wipe_tower_extra_spacing") /
@@ -129,6 +128,14 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     const auto  *nozzle_opt       = floats_of("nozzle_diameter");
     const double nozzle_diameter  = (nozzle_opt != nullptr && !nozzle_opt->values.empty()) ? nozzle_opt->values.front() : 0.4;
     const bool   dual_nozzle      = nozzle_opt != nullptr && nozzle_opt->values.size() == 2;
+    // filament_prime_volume (Bambu Studio 2.9.1, Orca #10780) is read on Bambu Lab printers, as the planner does
+    // (Print::_make_wipe_tower; the H3C is one); other printers prime the process prime_volume.
+    const auto  *printer_model    = dynamic_cast<const ConfigOptionString *>(config.option("printer_model"));
+    const bool   bbl_printer      = printer_model != nullptr && printer_model->value.compare(0, 9, "Bambu Lab") == 0;
+    const auto  *rack_counts      = dynamic_cast<const ConfigOptionInts *>(option_of(config, "extruder_max_nozzle_count"));
+    const bool   hotend_rack      = opt_bool("handle_hotend_as_extruder") ||
+                                 (nozzle_opt != nullptr && nozzle_opt->values.size() == 1 && rack_counts != nullptr &&
+                                  rack_counts->values.size() == 1 && rack_counts->values.front() > 1);
     const bool   rib_wall         = opt_enum("wipe_tower_wall_type", int(WipeTowerWallType::wtwRectangle)) == int(WipeTowerWallType::wtwRib);
     const bool   smooth_timelapse = opt_enum("timelapse_type", int(TimelapseType::tlTraditional)) == int(TimelapseType::tlSmooth);
     const bool   wrapping         = opt_bool("enable_wrapping_detection");
@@ -172,7 +179,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         for (size_t i = 0; i < filaments_cnt; ++i) {
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
-            purge.prime_volume      = saving_mode ? 15.f : float(float_at("filament_prime_volume", id, prime_volume));
+            purge.prime_volume      = saving_mode ? 15.f : (bbl_printer || hotend_rack) ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
             purge.category          = int_at("filament_adhesiveness_category", id, 0);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);
@@ -184,6 +191,20 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         }
         if (nozzles.size() > 1)
             purges[longest_ramming].filament_change_length = float(float_at("filament_change_length", filament_ids[longest_ramming], 0.) * double(nozzles.size() - 1));
+        // Bambu Studio 2.9.1 ramming on hotend changes too (review S5): on a hotend_as_extruder printer (H3C) every
+        // filament leaves its own hotend once a layer and rams filament_change_length; on a rack extruder of a
+        // two-nozzle printer (H2C right) a filament leaving its rack hotend rams filament_change_length_nc.
+        // Charged once per filament and layer, which over- rather than under-states the tower.
+        for (size_t i = 0; i < filaments_cnt; ++i) {
+            const unsigned int id = filament_ids[i];
+            if (hotend_rack) {
+                purges[i].filament_change_length = float(float_at("filament_change_length", id, 0.));
+            } else if (dual_nozzle && rack_counts != nullptr) {
+                const int extruder = int_at("filament_map", id, 1) - 1;
+                if (extruder >= 0 && size_t(extruder) < rack_counts->values.size() && rack_counts->values[extruder] > 1)
+                    purges[i].filament_change_length += float(float_at("filament_change_length_nc", id, 0.));
+            }
+        }
     }
 
     const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height));

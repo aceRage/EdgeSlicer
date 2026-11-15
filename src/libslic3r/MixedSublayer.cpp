@@ -1,6 +1,7 @@
 #include "MixedSublayer.hpp"
 
 #include "MixedFilament.hpp"
+#include "LocalZOrderOptimizer.hpp"
 #include "MixedFilamentConfigRemap.hpp"
 #include "PrintConfig.hpp"
 #include "Preset.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <numeric>
 #include <set>
@@ -179,6 +181,75 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
     if (!passes.empty())
         state.last_extruder = passes.back().extruder;
     return passes;
+}
+
+bool reorder_mixed_ratio_passes_to_start(std::vector<MixedRatioPass> &passes, unsigned int first_extruder, MixedRatioRowState &state)
+{
+    if (passes.size() < 2 || first_extruder == 0 || passes.front().extruder == first_extruder)
+        return false;
+    std::vector<unsigned int> extruders;
+    for (const MixedRatioPass &p : passes)
+        extruders.push_back(p.extruder);
+    const std::vector<unsigned int> ordered = LocalZOrderOptimizer::order_bucket_extruders(extruders, int(first_extruder));
+    if (ordered.size() != passes.size() || ordered.front() != first_extruder)
+        return false;
+    std::vector<MixedRatioPass> out;
+    out.reserve(passes.size());
+    for (unsigned int e : ordered)
+        for (const MixedRatioPass &p : passes)
+            if (p.extruder == e) {
+                out.push_back(p);
+                break;
+            }
+    if (out.size() != passes.size())
+        return false;
+    passes              = std::move(out);
+    state.last_extruder = passes.back().extruder;
+    return true;
+}
+
+MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,
+                                         double                                   band_height,
+                                         double                                   swallowed_height,
+                                         bool                                     ascending_order,
+                                         MixedRatioRowState                      &state)
+{
+    MixedRatioBandPlan out;
+    const MixedRatioRowState saved = state;
+    out.passes = plan_mixed_ratio_layer(components, band_height, ascending_order, state);
+    if (out.passes.empty())
+        return out;
+    if (swallowed_height <= k_mixsub_eps || out.passes.front().height + k_mixsub_eps >= swallowed_height) {
+        out.split = out.passes.size() > 1;
+        return out;
+    }
+    // Start with the first pass, in the planned (cyclic) order, that reaches above the swallowed layers.
+    for (size_t k = 1; k < out.passes.size(); ++k)
+        if (out.passes[k].height + k_mixsub_eps >= swallowed_height) {
+            std::rotate(out.passes.begin(), out.passes.begin() + std::ptrdiff_t(k), out.passes.end());
+            state.last_extruder = out.passes.back().extruder;
+            out.split           = true;
+            out.rotated         = true;
+            return out;
+        }
+    // No pass is tall enough: the band prints whole, by the component owed the most.
+    state = saved;
+    const size_t n = components.size();
+    if (state.carry.size() != n)
+        state.carry.assign(n, 0.);
+    size_t              best = 0;
+    std::vector<double> want(n);
+    for (size_t i = 0; i < n; ++i) {
+        want[i] = components[i].ratio * band_height + state.carry[i];
+        if (want[i] > want[best] + k_mixsub_eps)
+            best = i;
+    }
+    for (size_t i = 0; i < n; ++i)
+        state.carry[i] = want[i] - (i == best ? band_height : 0.);
+    state.last_extruder = components[best].extruder;
+    out.passes          = { MixedRatioPass{ components[best].extruder, band_height } };
+    out.split           = false;
+    return out;
 }
 
 MixedDiameterMismatch mixed_ratio_diameter_mismatch(const std::vector<unsigned int> &components, const std::vector<double> &nozzle_by_filament)
@@ -473,6 +544,21 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
 
     // 3. Remove the mixed slots from every per-filament array.
     std::vector<size_t> keep = physical_slots;
+    // Per extruder-variant arrays (Bambu Studio's filament_extruder_variant layout) hold one entry per (filament,
+    // variant); filament_self_index names the 1-based filament of each entry (P3, P1 review follow-up).
+    std::vector<size_t> keep_by_self;
+    size_t              self_size = 0;
+    if (const auto *self = config.option<ConfigOptionInts>("filament_self_index"); self != nullptr && self->values.size() != n) {
+        bool valid = !self->values.empty();
+        for (int v : self->values)
+            valid &= v >= 1 && size_t(v) <= n;
+        if (valid) {
+            self_size = self->values.size();
+            for (size_t i = 0; i < self_size; ++i)
+                if (!slots.is_mixed[size_t(self->values[i] - 1)])
+                    keep_by_self.push_back(i);
+        }
+    }
     for (const std::string &key : config.keys()) {
         ConfigOption *raw = config.optptr(key);
         auto         *vec = dynamic_cast<ConfigOptionVectorBase *>(raw);
@@ -509,8 +595,17 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
             mixsub_keep_vector_entries(*vec, keep_presets);
         } else if (size == n && mixsub_is_per_filament_key(key)) {
             mixsub_keep_vector_entries(*vec, keep);
+        } else if (self_size > 0 && size == self_size && mixsub_is_per_filament_key(key)) {
+            mixsub_keep_vector_entries(*vec, keep_by_self);
         }
+        // Other per-variant arrays are left alone without a valid filament_self_index to name their filaments.
     }
+    // filament_self_index names filaments by their 1-based id: renumber it to the new physical ids.
+    if (auto *self = config.option<ConfigOptionInts>("filament_self_index"))
+        for (int &v : self->values)
+            if (v >= 1 && size_t(v) < result.id_remap.size() && result.id_remap[size_t(v)] != 0 &&
+                result.id_remap[size_t(v)] <= result.new_physical_count)
+                v = int(result.id_remap[size_t(v)]);
 
     config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
     // Process-level feature filaments (wall_filament, support_filament, ...) follow the same remap.
@@ -529,6 +624,199 @@ unsigned int bambu_mixed_remap_id(const BambuMixedImportResult &result, int old_
     if (old_id <= 0 || size_t(old_id) >= result.id_remap.size())
         return 0;
     return result.id_remap[size_t(old_id)];
+}
+
+// ---- Bambu Studio 3MF export --------------------------------------------------------------------------------
+
+// A share as Bambu Studio writes it: up to four decimals, no trailing zeros ("0.7", "0.25", "1").
+static std::string mixsub_format_share(double v)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.4f", std::clamp(v, 0., 1.));
+    std::string s(buf);
+    while (!s.empty() && s.back() == '0')
+        s.pop_back();
+    if (!s.empty() && s.back() == '.')
+        s.pop_back();
+    return s.empty() ? std::string("0") : s;
+}
+
+static bool mixsub_config_bool(const DynamicPrintConfig &config, const char *key)
+{
+    const auto *opt = config.option<ConfigOptionBool>(key);
+    return opt != nullptr && opt->value;
+}
+
+BambuMixedExport expand_bambu_mixed_slots(DynamicPrintConfig &config, unsigned int max_used_id)
+{
+    BambuMixedExport out;
+    auto *colours_opt = config.option<ConfigOptionStrings>("filament_colour");
+    if (colours_opt == nullptr || colours_opt->values.size() < 2)
+        return out;
+    const std::vector<std::string> colours = colours_opt->values;
+    const size_t                   n       = colours.size();
+
+    MixedFilamentManager mgr;
+    mgr.auto_generate(colours);
+    if (const auto *defs = config.option<ConfigOptionString>("mixed_filament_definitions"); defs != nullptr && !defs->value.empty())
+        mgr.load_custom_entries(defs->value, colours);
+
+    const bool enable_sublayer = mixsub_config_bool(config, "enable_mixed_color_sublayer");
+    const bool local_z_mode    = mixsub_config_bool(config, "dithering_local_z_mode");
+
+    // The enabled rows in virtual id order, with the source slot of their per-filament entries (component A).
+    struct Slot
+    {
+        const MixedFilament *row;
+        unsigned int         source; // 1-based physical id the slot copies
+    };
+    std::vector<Slot> mixed;
+    for (size_t idx = 0; idx < mgr.mixed_filaments().size(); ++idx) {
+        const unsigned int vid = mgr.filament_id_from_mixed_index(idx, n);
+        if (vid == 0)
+            continue;
+        if (vid > max_used_id)
+            break;
+        if (vid != n + mixed.size() + 1) { // virtual ids enumerate enabled rows in order; never write a shifted slot
+            BOOST_LOG_TRIVIAL(warning) << "Bambu export: mixed row " << idx << " has virtual id " << vid << ", expected " << (n + mixed.size() + 1);
+            return BambuMixedExport();
+        }
+        const MixedFilament &row = mgr.mixed_filaments()[idx];
+        // A row Bambu Studio cannot take (a damaged two-colour row, or fewer than two usable components) ends the
+        // export of mixed slots: the rows after it would land on the wrong slot ids.
+        const bool multi = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, n).size() >= 3;
+        const bool valid = multi ? mixed_ratio_components(row, n).size() >= 2
+                                 : (row.component_a >= 1 && row.component_a <= n && row.component_b >= 1 && row.component_b <= n &&
+                                    row.component_a != row.component_b);
+        if (!valid) {
+            out.notes.push_back("mixed filament " + std::to_string(vid) +
+                                " has no valid filament pair; it and the mixed filaments after it are not written");
+            break;
+        }
+        mixed.push_back({ &row, row.component_a });
+    }
+    if (mixed.empty())
+        return out;
+    const size_t m     = mixed.size();
+    const size_t total = n + m;
+
+    out.any            = true;
+    out.physical_count = n;
+    out.mixed_count    = m;
+    out.slots.is_mixed.assign(total, false);
+    out.slots.components.assign(total, std::string());
+    out.slots.ratios.assign(total, std::string());
+    out.slots.gradient.assign(total, false);
+    out.slots.gradient_range.assign(total, std::string());
+    out.slots.gradient_curve.assign(total, std::string());
+    out.slots.gradient_per_part.assign(total, false);
+
+    size_t ratio_rows = 0, other_rows = 0;
+    for (size_t k = 0; k < m; ++k) {
+        const MixedFilament &row  = *mixed[k].row;
+        const size_t         slot = n + k;
+        const unsigned int   vid  = unsigned(slot + 1);
+        out.slots.is_mixed[slot]  = true;
+
+        std::vector<unsigned int> ids = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, n);
+        std::string               components, ratios;
+        if (ids.size() >= 3) {
+            // The components as the planner sees them: repeated ids merged, zero shares dropped.
+            const std::vector<MixedRatioComponent> comps = mixed_ratio_components(row, n);
+            for (size_t i = 0; i < comps.size(); ++i) {
+                components += (i ? "," : "") + std::to_string(comps[i].extruder);
+                ratios += (i ? "," : "") + mixsub_format_share(comps[i].ratio);
+            }
+        } else {
+            const int mix_b = std::clamp(row.mix_b_percent, 0, 100);
+            components      = std::to_string(row.component_a) + "," + std::to_string(row.component_b);
+            ratios          = mixsub_format_share(double(100 - mix_b) / 100.) + "," + mixsub_format_share(double(mix_b) / 100.);
+        }
+        out.slots.components[slot] = components;
+        out.slots.ratios[slot]     = ratios;
+
+        const bool gradient = row.gradient_enabled && row.component_a != row.component_b && ids.size() < 3;
+        if (gradient) {
+            out.slots.gradient[slot]       = true;
+            out.slots.gradient_range[slot] = mixsub_format_share(double(row.gradient_start)) + "," + mixsub_format_share(double(row.gradient_end));
+        }
+
+        const MixedSublayerMethod method = mixed_sublayer_effective_method(row.sublayer_method, enable_sublayer, local_z_mode, gradient);
+        const bool exact_mix = row.manual_pattern.empty() && row.distribution_mode != int(MixedFilament::SameLayerPointillisme) &&
+                               row.distribution_mode != int(MixedFilament::ImageWeighted);
+        if (method == MixedSublayerMethod::Ratio)
+            ++ratio_rows;
+        else
+            ++other_rows;
+        if (method == MixedSublayerMethod::Subdivide)
+            out.notes.push_back("mixed filament " + std::to_string(vid) + ": Subdivide Mix Layer has no Bambu Studio equivalent, exported as " +
+                                std::string(enable_sublayer ? "a mixed color sublayer" : "whole-layer cadence"));
+        if (!exact_mix)
+            out.notes.push_back("mixed filament " + std::to_string(vid) +
+                                ": its pattern, pointillism or image distribution has no Bambu Studio equivalent, exported as its mix ratio");
+    }
+    out.sublayer = ratio_rows > 0;
+    if (ratio_rows > 0 && other_rows > 0)
+        out.notes.push_back("Bambu Studio splits every mixed filament or none: rows that print whole layers in EdgeSlicer are split there too");
+
+    // The per-filament arrays gain one entry per mixed slot (a copy of its first component's), the flush matrix a
+    // row and a column.
+    std::vector<size_t> source_of(total);
+    for (size_t s = 0; s < n; ++s)
+        source_of[s] = s;
+    for (size_t k = 0; k < m; ++k)
+        source_of[n + k] = size_t(mixed[k].source - 1);
+    for (const std::string &key : config.keys()) {
+        auto *vec = dynamic_cast<ConfigOptionVectorBase *>(config.optptr(key));
+        if (vec == nullptr || vec->size() == 0)
+            continue;
+        const size_t        size = vec->size();
+        std::vector<size_t> take;
+        if (key == "flush_volumes_matrix") {
+            if (size % (n * n) != 0)
+                continue;
+            for (size_t block = 0; block < size / (n * n); ++block)
+                for (size_t r = 0; r < total; ++r)
+                    for (size_t c = 0; c < total; ++c)
+                        take.push_back(block * n * n + source_of[r] * n + source_of[c]);
+            mixsub_keep_vector_entries(*vec, take);
+            // A slot never flushes into itself.
+            if (auto *floats = dynamic_cast<ConfigOptionFloats *>(vec))
+                for (size_t block = 0; block < size / (n * n); ++block)
+                    for (size_t r = n; r < total; ++r)
+                        floats->values[block * total * total + r * total + r] = 0.;
+            continue;
+        }
+        if (key == "flush_volumes_vector") {
+            if (size != 2 * n)
+                continue;
+            for (size_t s = 0; s < total; ++s) {
+                take.push_back(2 * source_of[s]);
+                take.push_back(2 * source_of[s] + 1);
+            }
+        } else if (key == "different_settings_to_system" || key == "inherits_group") {
+            if (size != n + 2)
+                continue;
+            take.push_back(0);
+            for (size_t s = 0; s < total; ++s)
+                take.push_back(source_of[s] + 1);
+            take.push_back(n + 1);
+        } else if (mixsub_is_per_filament_key(key) && size % n == 0) {
+            const size_t g = size / n; // entries per filament (extruder variants)
+            for (size_t s = 0; s < total; ++s)
+                for (size_t j = 0; j < g; ++j)
+                    take.push_back(source_of[s] * g + j);
+        } else
+            continue;
+        mixsub_keep_vector_entries(*vec, take);
+    }
+    if (auto *col = config.option<ConfigOptionStrings>("filament_colour"); col != nullptr && col->values.size() == total)
+        for (size_t k = 0; k < m; ++k)
+            if (!mixed[k].row->display_color.empty())
+                col->values[n + k] = mixed[k].row->display_color;
+    // Edge keeps its rows in mixed_filament_definitions; Bambu Studio reads the slots instead.
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(""));
+    return out;
 }
 
 } // namespace Slic3r

@@ -3279,10 +3279,19 @@ DynamicPrintConfig PresetBundle::nozzle_tool_config() const
                              "single_extruder_multi_material", "extruder_max_nozzle_count" })
         if (const ConfigOption *opt = printer.option(key))
             out.set_key_value(key, opt->clone());
-    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override" })
+    // H3C slot process groups: the per-slot nozzle types of the default rack (the TPU285 slot) and the filaments' slot pins decide
+    // which rack slots are tools of their own (split_rack_slots).
+    if (const ConfigOption *opt = printer.option("default_nozzle_volume_type"))
+        out.set_key_value("default_nozzle_volume_type", opt->clone());
+    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override", "filament_rack_nozzle_slot", "nozzle_volume_type" })
         if (const ConfigOption *opt = this->project_config.option(key))
             out.set_key_value(key, opt->clone());
     return out;
+}
+
+std::vector<int> PresetBundle::nozzle_split_rack_slots(size_t extruder) const
+{
+    return split_rack_slots(this->nozzle_tool_config(), extruder);
 }
 
 size_t PresetBundle::nozzle_tool_count() const
@@ -3311,6 +3320,7 @@ PresetBundle::NozzleToolRef PresetBundle::nozzle_tool_ref(size_t tool) const
         ref.slot     = entry.slot;
         ref.diameter = entry.diameter;
         ref.id       = nozzle_tool_entry_id(entry);
+        ref.rack_slot = entry.rack_slot;
     }
     return ref;
 }
@@ -3344,6 +3354,8 @@ std::string PresetBundle::nozzle_tool_name(size_t tool) const
     if (!ref.valid)
         return std::string();
     const DynamicPrintConfig cfg = this->nozzle_tool_config();
+    if (ref.rack_slot > 0)
+        return rack_slot_name(cfg, ref.extruder, ref.rack_slot);
     return ref.slot > 0 ? rack_size_name(cfg, ref.extruder, ref.diameter) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
 }
 
@@ -3506,9 +3518,7 @@ bool PresetBundle::prune_nozzle_processes()
         bool               dropped = false;
         for (auto it = edits.begin(); it != edits.end();) {
             const int e = nozzle_tool_id_extruder(it->first);
-            size_t    se = 0;
-            double    sd = 0.;
-            const bool slot_id = parse_nozzle_size_group_id(it->first, se, sd);
+            const bool slot_id = is_nozzle_rack_tool_id(it->first); // P9 size tools, H3C slot tools
             if ((e >= 0 && size_t(e) >= selection.size()) || (slot_id && this->nozzle_tool_index(it->first) < 0) ||
                 dropped_slot_ids.count(it->first) > 0) {
                 it      = edits.erase(it);
@@ -6373,6 +6383,12 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     if (num_filaments != old_number_of_filaments) {
         // First verify if purging volumes presets for each extruder matches number of extruders
         std::vector<double>& filaments = this->project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values;
+        // A deleted filament takes its own pair of volumes and its own row and column of the matrix
+        // along, not the last ones.
+        const size_t deleted = (deleting_filament && old_number_of_filaments == num_filaments + 1 && to_delete_filament_id < old_number_of_filaments) ?
+            to_delete_filament_id : size_t(-1);
+        if (deleted != size_t(-1) && filaments.size() == 2 * old_number_of_filaments)
+            filaments.erase(filaments.begin() + 2 * deleted, filaments.begin() + 2 * deleted + 2);
         while (filaments.size() < 2* num_filaments) {
             filaments.push_back(filaments.size()>1 ? filaments[0] : 140.);  // copy the values from the first extruder
             filaments.push_back(filaments.size()>1 ? filaments[1] : 140.);
@@ -6385,9 +6401,11 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
         std::vector<double> new_matrix;
         for (unsigned int i=0;i< num_filaments;++i)
             for (unsigned int j=0;j< num_filaments;++j) {
+                const size_t old_i = i >= deleted ? i + 1 : i;
+                const size_t old_j = j >= deleted ? j + 1 : j;
                 // append the value for this pair from the old matrix (if it's there):
-                if (i < old_number_of_filaments && j < old_number_of_filaments)
-                    new_matrix.push_back(old_matrix[i* old_number_of_filaments + j]);
+                if (old_i < old_number_of_filaments && old_j < old_number_of_filaments)
+                    new_matrix.push_back(old_matrix[old_i * old_number_of_filaments + old_j]);
                 else
                     new_matrix.push_back( i == j ? 0. : filaments[2 * i] + filaments[2 * j + 1]); // so it matches new extruder volumes
             }

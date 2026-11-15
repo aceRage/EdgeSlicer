@@ -3651,6 +3651,11 @@ int CLI::run(int argc, char **argv)
     //set the filament settings into print config
     if ((load_filament_count > 0) || (up_config_to_date))
     {
+        // The project's lists one value per filament, the one each filament reads, so that a preset's value written
+        // below at the filament's index is the one read for it (a project saved by the application keeps a
+        // filament's flow variants side by side).
+        if (!load_filaments_config.empty())
+            cli_flatten_filament_flow_variants(m_print_config, size_t(filament_count));
         for (int index = 0; index < load_filaments_config.size(); index++) {
             DynamicPrintConfig&  config = load_filaments_config[index];
             int filament_index = load_filaments_index[index];
@@ -3754,9 +3759,10 @@ int CLI::run(int argc, char **argv)
                         record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
                         flush_and_exit(CLI_CONFIG_FILE_ERROR);
                     }
-                    ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt);
-                    const ConfigOptionVectorBase* opt_vec_src = static_cast<const ConfigOptionVectorBase*>(source_opt);
-                    opt_vec_dst->set_at(opt_vec_src, filament_index-1, 0);
+                    // The preset's value for the filament's flow type (filament_volume_type), the list cut to the
+                    // filament count. Taking entry 0 printed a high-flow filament at its standard values, and a
+                    // project's longer list kept its old values past the filaments.
+                    cli_set_filament_preset_value(m_print_config, opt_key, config, size_t(filament_index - 1), size_t(filament_count));
                 }
             }
 

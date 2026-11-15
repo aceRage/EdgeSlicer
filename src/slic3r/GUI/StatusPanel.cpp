@@ -1,4 +1,5 @@
 #include "StatusPanel.hpp"
+#include "FilamentCommands.hpp"
 
 #include "I18N.hpp"
 #include "Widgets/Label.hpp"
@@ -3017,7 +3018,11 @@ void StatusPanel::update_ams(MachineObject *obj)
                 std::string tray_id     = tray_it->first;
                 int         tray_id_int = atoi(tray_id.c_str());
                 // new protocol
-                if (MachineObject::hex_bit_set(obj->tray_reading_bits, ams_id_int * 4 + tray_id_int)) {
+                // ams_id * 4 + slot for an AMS, 28 + slot for the AMS 3H (GUI::AmsTypes::tray_bit).
+                const int reading_bit = ams_it->second && ams_it->second->is_rack()
+                                            ? GUI::AmsTypes::tray_bit(ams_it->second->type, ams_id_int, tray_id_int)
+                                            : ams_id_int * 4 + tray_id_int;
+                if (MachineObject::hex_bit_set(obj->tray_reading_bits, reading_bit)) {
                     m_ams_control->PlayRridLoading(ams_id, tray_id);
                 } else {
                     m_ams_control->StopRridLoading(ams_id, tray_id);
@@ -3784,11 +3789,9 @@ void StatusPanel::on_ams_load_curr()
         std::string                            curr_ams_id = m_ams_control->GetCurentAms();
         std::string                            curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
 
-        // The H3C's AMS 3H and its rack spool holders are shown but not loaded from here yet.
-        if (obj->slot_actions_blocked(curr_ams_id)) {
-            BOOST_LOG_TRIVIAL(info) << "on_ams_load: rack AMS slot, load not supported yet";
+        // The H3C's AMS 3H and its rack spool holders: Bambu Studio's hotend-page load.
+        if (rack_slot_action(true, curr_ams_id, curr_can_id))
             return;
-        }
 
 
         update_filament_step();
@@ -3879,15 +3882,45 @@ void StatusPanel::on_ams_load_vams(wxCommandEvent& event) {
     }
 }
 
+// Load / unload on the H3C's AMS 3H slot or rack spool holder, as Bambu Studio's hotend filament
+// page sends them (MachineObject::command_rack_change_filament). False when the selection is not one.
+bool StatusPanel::rack_slot_action(bool load, const std::string &ams_id, const std::string &slot_id)
+{
+    if (!obj || !obj->is_rack_printer())
+        return false;
+    const int  ams    = std::atoi(ams_id.c_str());
+    const bool holder = GUI::AmsTypes::is_rack_virtual_slot(ams);
+    if (!obj->is_rack_ams_id(ams_id) && !holder)
+        return false;
+    if (!holder && slot_id.empty())
+        return true; // nothing selected in the unit
+
+    auto mid_temp = [](const AmsTray *t) {
+        return t ? GUI::FilamentCommands::tray_mid_temp(t->nozzle_temp_min, t->nozzle_temp_max) : -1;
+    };
+    const AmsTray *target = nullptr;
+    if (holder) {
+        for (const AmsTray &t : obj->vir_slots)
+            if (t.id == ams_id)
+                target = &t;
+    } else {
+        target = obj->get_ams_tray(ams_id, slot_id);
+    }
+    const int new_temp = mid_temp(target);
+    const int old_temp = mid_temp(obj->get_curr_tray());
+    BOOST_LOG_TRIVIAL(info) << (load ? "on_ams_load" : "on_ams_unload") << ": rack slot ams " << ams_id << " slot " << (holder ? "0" : slot_id);
+    obj->command_rack_change_filament(load, ams_id, holder ? "0" : slot_id, old_temp, new_temp);
+    return true;
+}
+
 void StatusPanel::on_ams_unload(SimpleEvent &event)
 {
     if (obj) {
         std::string curr_ams_id = m_ams_control->GetCurentAms();
         std::string curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
-        if (obj->slot_actions_blocked(curr_ams_id)) {
-            BOOST_LOG_TRIVIAL(info) << "on_ams_unload: rack AMS slot, unload not supported yet";
+        // The H3C's AMS 3H and its rack spool holders: Bambu Studio's hotend-page unload.
+        if (rack_slot_action(false, curr_ams_id, curr_can_id))
             return;
-        }
 
         if (obj->is_enable_np) {
             try {
@@ -4136,10 +4169,14 @@ void StatusPanel::on_ams_refresh_rfid(wxCommandEvent &event)
         if (curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0) {
             return;
         }
-        // nor, yet, for the H3C's AMS 3H
-        if (obj->slot_actions_blocked(curr_ams_id))
-            return;
         std::string curr_can_id = event.GetString().ToStdString();
+        // The H3C's AMS 3H: Bambu Studio's ams_get_rfid (its spool holders have no tag to read here).
+        if (obj->is_rack_printer()) {
+            if (obj->is_rack_ams_id(curr_ams_id) && !curr_can_id.empty())
+                obj->command_ams_get_rfid(std::atoi(curr_ams_id.c_str()), std::atoi(curr_can_id.c_str()));
+            if (obj->is_rack_ams_id(curr_ams_id) || GUI::AmsTypes::is_rack_virtual_slot(std::atoi(curr_ams_id.c_str())))
+                return;
+        }
 
         std::map<std::string, Ams *>::iterator it = obj->amsList.find(curr_ams_id);
         if (it == obj->amsList.end()) {
@@ -4170,6 +4207,9 @@ void StatusPanel::on_ams_selected(wxCommandEvent &event)
             return;
         } else {
             std::string curr_can_id = event.GetString().ToStdString();
+            // Selecting an AMS 3H slot sends nothing (Bambu Studio's hotend page has no "select tray").
+            if (obj->is_rack_ams_id(curr_ams_id))
+                return;
             std::map<std::string, Ams *>::iterator it = obj->amsList.find(curr_ams_id);
             if (it == obj->amsList.end()) {
                 BOOST_LOG_TRIVIAL(trace) << "ams: find " << curr_ams_id << " failed";

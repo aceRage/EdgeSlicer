@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <stdexcept>
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
@@ -64,12 +65,54 @@ public:
         ws_.write(net::buffer(message));
     }
 
+    // Thrown by receive() when no frame came in time. The connection is closed by then.
+    struct Timeout : std::runtime_error
+    {
+        Timeout() : std::runtime_error("the printer did not answer in time") {}
+    };
+
+    // Every receive() from now on gives up at `deadline`, whatever timeout it is given.
+    void set_deadline(std::chrono::steady_clock::time_point deadline) { deadline_ = deadline; has_deadline_ = true; }
+
+    // The next frame. Waits at most `timeout` ms (0: no limit of its own) and never past the
+    // deadline, then throws Timeout. A synchronous beast read has no time-out at all, so it is only
+    // used when there is no limit; otherwise the read runs on ioc_ for the time left.
     std::string receive(int timeout = 0){
         // This buffer will hold the incoming message
         beast::flat_buffer buffer;
 
-        // Read a message into our buffer
-        ws_.read(buffer);
+        auto limit = std::chrono::steady_clock::time_point::max();
+        if (timeout > 0)
+            limit = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+        if (has_deadline_ && deadline_ < limit)
+            limit = deadline_;
+        if (limit == std::chrono::steady_clock::time_point::max()) {
+            // Read a message into our buffer
+            ws_.read(buffer);
+        } else {
+            boost::system::error_code ec;
+            bool                      done = false;
+            ws_.async_read(buffer, [&](const boost::system::error_code& e, std::size_t) {
+                ec   = e;
+                done = true;
+            });
+            ioc_.restart();
+            const auto now = std::chrono::steady_clock::now();
+            if (limit > now)
+                ioc_.run_for(limit - now);
+            if (!done) {
+                // Out of time: cancel the read, and let its handler run before `buffer` goes.
+                boost::system::error_code ignore;
+                ws_.next_layer().cancel(ignore);
+                ws_.next_layer().close(ignore);
+                ioc_.restart();
+                ioc_.run();
+                is_connect = false;
+                throw Timeout();
+            }
+            if (ec)
+                throw beast::system_error(ec);
+        }
 
         // Return the message as a string
         return beast::buffers_to_string(buffer.data());
@@ -81,6 +124,8 @@ private:
     tcp::resolver resolver_;
     websocket::stream<tcp::socket> ws_;
     bool is_connect;
+    std::chrono::steady_clock::time_point deadline_;
+    bool has_deadline_ { false };
 };
 
 // int main() {
