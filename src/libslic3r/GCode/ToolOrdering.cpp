@@ -1336,9 +1336,13 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
         if (!lt_next.has_wipe_tower && (lt_next.extruders.front() != lt.extruders.back() || lt_next.extruders.size() > 1))
             lt_next.has_wipe_tower = true;
         // We should also check that the next wipe tower layer is no further than max_layer_height:
+        // Only up to the tower's top (the last layer with wipe_tower_partitions > 0, which propagate
+        // downwards). Above it no tower layer follows, the tower plans nothing there, and a layer
+        // marked anyway waits for tower work that never comes (an i3 Bambu printer then took no
+        // timelapse photo on it).
         unsigned int j = i+1;
         double last_wipe_tower_print_z = lt_next.print_z;
-        while (++j < m_layer_tools.size()-1 && !m_layer_tools[j].has_wipe_tower)
+        while (++j < m_layer_tools.size()-1 && !m_layer_tools[j].has_wipe_tower && m_layer_tools[j].wipe_tower_partitions > 0)
             if (m_layer_tools[j+1].print_z - last_wipe_tower_print_z > max_layer_height + EPSILON) {
                 m_layer_tools[j].has_wipe_tower = true;
                 last_wipe_tower_print_z = m_layer_tools[j].print_z;
