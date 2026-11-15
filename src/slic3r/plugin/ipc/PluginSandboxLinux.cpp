@@ -4,7 +4,10 @@
 
 #include "PluginSandboxPriv.hpp"
 
+#include <slic3r/plugin/PluginTrust.hpp>
+
 #include <boost/filesystem/operations.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdlib.hpp>
 
 #ifndef __linux__
@@ -41,6 +44,7 @@ bool probe_linux_sandbox(SandboxProbe& probe)
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -179,10 +183,19 @@ bool add_path_rule(int ruleset, const std::string& path, __u64 access, bool requ
         return !required;
     const int fd = ::open(path.c_str(), O_PATH | O_CLOEXEC);
     if (fd < 0) {
-        if (!required)
+        if (!required) {
+            BOOST_LOG_TRIVIAL(warning) << "Landlock: skipped unreadable path " << path << ": " << std::strerror(errno);
             return true;
+        }
         error = "Landlock: cannot open " + path + ": " + std::strerror(errno);
         return false;
+    }
+    struct stat st
+    {};
+    if (::fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        // Directory-only bits (READ_DIR, MAKE_*, REMOVE_*, REFER) EINVAL on a file.
+        access &= LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE |
+                  LANDLOCK_ACCESS_FS_IOCTL_DEV;
     }
     landlock_path_beneath_attr_min beneath{};
     beneath.allowed_access = access;
@@ -191,8 +204,10 @@ bool add_path_rule(int ruleset, const std::string& path, __u64 access, bool requ
     const int  saved       = errno;
     ::close(fd);
     if (rc < 0) {
-        if (!required)
+        if (!required) {
+            BOOST_LOG_TRIVIAL(warning) << "Landlock: skipped add_rule(" << path << "): " << std::strerror(saved);
             return true;
+        }
         error = "Landlock: add_rule(" + path + ") failed: " + std::strerror(saved);
         return false;
     }
@@ -432,6 +447,20 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
     // System trees CPython and libpython need. Read+execute only.
     for (const char* p : {"/usr", "/lib", "/lib64", "/lib32", "/opt", "/etc", "/dev", "/proc", "/sys", "/run"})
         add_opt(p, false);
+
+    auto add_req_if_exists = [&](const std::string& path, bool write) {
+        if (path.empty() || ::access(path.c_str(), F_OK) != 0)
+            return true;
+        return add_req(path, write);
+    };
+
+    // trust.json must stay readable so a child-side pin check can run. Grant the sidecar
+    // file, not all of data_dir. Skip if the path is gone (fork fixtures, empty hello).
+    if (!add_req_if_exists(plugin_trust::trust_sidecar_path().string(), false)) {
+        ::close(ruleset);
+        report.detail = error;
+        return false;
+    }
 
     if (!spec.python_home.empty() && !add_req(spec.python_home, false)) {
         ::close(ruleset);

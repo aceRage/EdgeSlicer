@@ -20,6 +20,7 @@
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
 #include "ipc/PluginHostClient.hpp"
+#include "ipc/PluginIpcProtocol.hpp"
 
 #include "libslic3r/Semver.hpp"
 #include "pybind11/pytypes.h"
@@ -987,7 +988,10 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
         return;
     }
 
-    {
+    // Edge already evaluated Phase 5 trust before sending load. Re-hashing under Landlock
+    // can miss trust.json or see execute-time files the pin did not include. Host RPC still
+    // rechecks p5 on the Edge side.
+    if (!plugin_ipc::in_child_process()) {
         const plugin_trust::TrustState trust = plugin_trust::evaluate(snapshot);
         if (!trust.allowed()) {
             const std::string message = trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error;
@@ -1072,7 +1076,7 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
         return;
     }
 
-    {
+    if (!plugin_ipc::in_child_process()) {
         const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
         if (!trust.allowed()) {
             fail(trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error);

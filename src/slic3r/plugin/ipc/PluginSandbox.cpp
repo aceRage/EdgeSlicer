@@ -218,6 +218,12 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     if (!resources.empty())
         add_unique_path(spec.extra_paths, resources, false);
 
+    // Grant the trust sidecar file, not all of data_dir (presets, printer state).
+    // The plugin's own directory is granted write separately via plugin_root.
+    const boost::filesystem::path sidecar = plugin_trust::trust_sidecar_path();
+    if (!sidecar.empty())
+        add_unique_path(spec.extra_paths, sidecar.string(), false);
+
     if (!descriptor.plugin_key.empty()) {
         try {
             add_unique_path(spec.extra_paths, PluginManager::instance().get_storage_dir(descriptor.plugin_key), true);

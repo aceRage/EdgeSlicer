@@ -163,10 +163,9 @@ class Pkg(orca.base):
         orca.register_capability(Hold)
 )PY";
 
-const char* const STAMP_BLOCK =
-    "; EDGE_PIPELINE_STAMP begin\n"
-    "; EdgeSlicer pipeline plugin stamp v1\n"
-    "; EDGE_PIPELINE_STAMP end\n";
+const char* const STAMP_BLOCK = "; EDGE_PIPELINE_STAMP begin\n"
+                                "; EdgeSlicer pipeline plugin stamp v1\n"
+                                "; EDGE_PIPELINE_STAMP end\n";
 
 const char* const STAMP_SOURCE = R"PY(# /// script
 # requires-python = ">=3.12"
@@ -224,7 +223,9 @@ bool load_and_wait(PluginManager& manager, const std::string& plugin_key, std::s
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }
 
-ScriptCompletion wait_for_script(PluginManager& manager, const std::string& plugin_key, const std::string& cap_name,
+ScriptCompletion wait_for_script(PluginManager&       manager,
+                                 const std::string&   plugin_key,
+                                 const std::string&   cap_name,
                                  std::chrono::seconds timeout = std::chrono::seconds(60))
 {
     std::mutex              mutex;
@@ -281,7 +282,7 @@ DynamicPrintConfig pipeline_config(const std::string& cap, const std::string& pl
 
 TEST_CASE("IPC protocol encode/decode round-trips a hello object", "[PluginIpc][protocol]")
 {
-    nlohmann::json msg = {{"type", "hello"}, {"protocol_version", plugin_ipc::k_protocol_version}};
+    nlohmann::json       msg = {{"type", "hello"}, {"protocol_version", plugin_ipc::k_protocol_version}};
     std::vector<uint8_t> frame;
     std::string          error;
     REQUIRE(plugin_ipc::encode_message(msg, frame, error));
@@ -306,8 +307,7 @@ TEST_CASE("IPC protocol rejects oversized, empty and garbage payloads", "[Plugin
     CHECK(error.find("garbage") != std::string::npos);
 
     error.clear();
-    CHECK_FALSE(plugin_ipc::decode_payload(reinterpret_cast<const uint8_t*>("xxxx"),
-                                           plugin_ipc::k_max_payload_bytes + 1, decoded, error));
+    CHECK_FALSE(plugin_ipc::decode_payload(reinterpret_cast<const uint8_t*>("xxxx"), plugin_ipc::k_max_payload_bytes + 1, decoded, error));
     CHECK(error.find("oversized") != std::string::npos);
 
     error.clear();
@@ -325,7 +325,7 @@ TEST_CASE("IPC channel reports truncated and closed-pipe failures", "[PluginIpc]
     auto a = plugin_ipc::Channel::from_posix_fd(sv[0]);
     auto b = plugin_ipc::Channel::from_posix_fd(sv[1]);
 
-    std::string error;
+    std::string    error;
     nlohmann::json msg;
     CHECK_FALSE(a.read_json(msg, 50, error));
     CHECK(error.find("truncated") != std::string::npos);
@@ -401,8 +401,8 @@ TEST_CASE("A script execute through the host matches in-process", "[PluginIpc][P
         return completion;
     };
 
-    const ScriptCompletion host     = run_once(false);
-    const ScriptCompletion in_proc  = run_once(true);
+    const ScriptCompletion host    = run_once(false);
+    const ScriptCompletion in_proc = run_once(true);
     CHECK(host.error.empty());
     CHECK(in_proc.error.empty());
     CHECK(host.result.message == in_proc.result.message);
@@ -437,7 +437,7 @@ TEST_CASE("Killing the host mid-execute fails the run and a later run respawns",
     std::condition_variable cv;
     bool                    done = false;
     ScriptCompletion        first;
-    auto launch = manager.launch_script_capability("Ipc_Kill", "Hold", [&](const ScriptCompletion& c) {
+    auto                    launch = manager.launch_script_capability("Ipc_Kill", "Hold", [&](const ScriptCompletion& c) {
         std::lock_guard<std::mutex> lock(mutex);
         first = c;
         done  = true;
@@ -542,7 +542,7 @@ TEST_CASE("Host RPC denies forged and unknown methods on the Edge side", "[Plugi
     CHECK(denied.error.find("audit context") != std::string::npos);
 
     ScopedPluginAuditContext audit("Ipc_Echo", "Echo");
-    plugin_ipc::HostCall unknown;
+    plugin_ipc::HostCall     unknown;
     unknown.plugin_key = "Ipc_Echo";
     unknown.method     = "host.secret_key";
     denied             = plugin_ipc::handle_host_call(unknown);
@@ -674,14 +674,13 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir data_dir_guard("plugin-ipc-spawn-fast");
+    ScopedDataDir           data_dir_guard("plugin-ipc-spawn-fast");
     plugin_ipc::SpawnedHost host;
     std::string             error;
     const auto              t0 = std::chrono::steady_clock::now();
     REQUIRE(plugin_ipc::spawn_host(host, error));
     CHECK(error.empty());
-    const auto spawn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-                              .count();
+    const auto spawn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     // F_DUPFD used to drop CLOEXEC on the exec-error pipe, so poll(errp[0], 3000)
     // waited the full 3 s on every spawn. spawn_host itself must return promptly.
     CHECK(spawn_ms < 500);
@@ -690,9 +689,9 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
         // The exec-error pipe is moved to fd >= 11 and must not survive exec.
         // Inspect before hello so the helper is blocked in handshake read, not
         // yet in CPython (which opens its own pipes).
-        const fs::path             fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
-        boost::system::error_code  ec;
-        fs::directory_iterator it(fd_dir, ec);
+        const fs::path               fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
+        boost::system::error_code    ec;
+        fs::directory_iterator       it(fd_dir, ec);
         const fs::directory_iterator end;
         for (; !ec && it != end; it.increment(ec)) {
             const int n = std::atoi(it->path().filename().string().c_str());
@@ -753,7 +752,7 @@ TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[Plug
     std::condition_variable cv;
     bool                    done = false;
     ScriptCompletion        completion;
-    auto launch = manager.launch_script_capability("Ipc_Hang", "Hold", [&](const ScriptCompletion& c) {
+    auto                    launch = manager.launch_script_capability("Ipc_Hang", "Hold", [&](const ScriptCompletion& c) {
         std::lock_guard<std::mutex> lock(mutex);
         completion = c;
         done       = true;
@@ -769,14 +768,12 @@ TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[Plug
         std::unique_lock<std::mutex> lock(mutex);
         REQUIRE(cv.wait_for(lock, std::chrono::seconds(8), [&] { return done; }));
     }
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     CHECK(elapsed_ms < 5000);
     CHECK((completion.cancelled || !completion.error.empty()));
 }
 
-TEST_CASE("A cancel that races a successful run does not auto-cancel the next job",
-          "[PluginIpc][Python][cancel]")
+TEST_CASE("A cancel that races a successful run does not auto-cancel the next job", "[PluginIpc][Python][cancel]")
 {
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
@@ -796,7 +793,7 @@ TEST_CASE("A cancel that races a successful run does not auto-cancel the next jo
     std::condition_variable cv;
     bool                    done = false;
     ScriptCompletion        first;
-    auto launch = manager.launch_script_capability("Ipc_SleepOk", "SleepOk", [&](const ScriptCompletion& c) {
+    auto                    launch = manager.launch_script_capability("Ipc_SleepOk", "SleepOk", [&](const ScriptCompletion& c) {
         std::lock_guard<std::mutex> lock(mutex);
         first = c;
         done  = true;
@@ -929,23 +926,24 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     ScopedDataDir data_dir_guard("plugin-ipc-concurrent");
     PluginAuditManager::instance().add_global_allowed_root(data_dir());
     ScopedTemporaryDir gcode_dir("ipc-concurrent-gcode");
-    const fs::path     gcode          = gcode_dir.path() / "box.gcode";
-    const fs::path     probe          = gcode_dir.path() / "from_script.txt";
-    const fs::path     script_started = data_dir_guard.plugins_dir() / "script_started";
-    const fs::path     script_go      = data_dir_guard.plugins_dir() / "script_go";
-    const fs::path     stamp_started  = data_dir_guard.plugins_dir() / "stamp_started";
-    const fs::path     stamp_go       = data_dir_guard.plugins_dir() / "stamp_go";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
+    const fs::path     probe = gcode_dir.path() / "from_script.txt";
+    // Coordination files live inside each plugin dir so Landlock write grants cover them.
+    const fs::path script_started = data_dir_guard.plugins_dir() / "Ipc_Probe" / "script_started";
+    const fs::path script_go      = data_dir_guard.plugins_dir() / "Ipc_Probe" / "script_go";
+    const fs::path stamp_started  = data_dir_guard.plugins_dir() / "PipelineStamp" / "stamp_started";
+    const fs::path stamp_go       = data_dir_guard.plugins_dir() / "PipelineStamp" / "stamp_go";
     write_file(gcode, "G1 X10 Y10 E0.1\n");
 
     std::string stamp_src = WAIT_STAMP_SOURCE_PREFIX;
-    stamp_src = replace_placeholder(stamp_src, "__STARTED_PATH__", stamp_started.string());
-    stamp_src = replace_placeholder(stamp_src, "__GO_PATH__", stamp_go.string());
+    stamp_src             = replace_placeholder(stamp_src, "__STARTED_PATH__", stamp_started.string());
+    stamp_src             = replace_placeholder(stamp_src, "__GO_PATH__", stamp_go.string());
     write_plugin(data_dir_guard, "PipelineStamp", stamp_src);
 
     std::string probe_src = WRITE_PROBE_SOURCE_PREFIX;
-    probe_src = replace_placeholder(probe_src, "__STARTED_PATH__", script_started.string());
-    probe_src = replace_placeholder(probe_src, "__GO_PATH__", script_go.string());
-    probe_src = replace_placeholder(probe_src, "__PROBE_PATH__", probe.string());
+    probe_src             = replace_placeholder(probe_src, "__STARTED_PATH__", script_started.string());
+    probe_src             = replace_placeholder(probe_src, "__GO_PATH__", script_go.string());
+    probe_src             = replace_placeholder(probe_src, "__PROBE_PATH__", probe.string());
     write_plugin(data_dir_guard, "Ipc_Probe", probe_src);
 
     PluginManager& manager = PluginManager::instance();
@@ -959,7 +957,7 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     std::condition_variable cv;
     bool                    done = false;
     ScriptCompletion        script;
-    auto launch = manager.launch_script_capability("Ipc_Probe", "Probe", [&](const ScriptCompletion& c) {
+    auto                    launch = manager.launch_script_capability("Ipc_Probe", "Probe", [&](const ScriptCompletion& c) {
         std::lock_guard<std::mutex> lock(mutex);
         script = c;
         done   = true;
@@ -968,17 +966,21 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     REQUIRE(launch.launched_async);
     REQUIRE(wait_for_file(script_started, std::chrono::seconds(15)));
 
-    DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
-    std::string        path   = gcode.string();
-    std::string        output = gcode.string();
+    DynamicPrintConfig config  = pipeline_config("Stamp", "PipelineStamp");
+    std::string        path    = gcode.string();
+    std::string        output  = gcode.string();
     bool               post_ok = false;
+    std::string        post_error;
     std::thread        post([&] {
-        post_ok = run_post_process_scripts(path, false, "File", output, config);
+        try {
+            post_ok = run_post_process_scripts(path, false, "File", output, config);
+        } catch (const std::exception& ex) {
+            post_error = ex.what();
+        }
     });
 
     const auto overlap_start = std::chrono::steady_clock::now();
-    while (!(PluginHostClient::instance().has_active_run("Ipc_Probe") &&
-             PluginHostClient::instance().has_active_run("PipelineStamp"))) {
+    while (!(PluginHostClient::instance().has_active_run("Ipc_Probe") && PluginHostClient::instance().has_active_run("PipelineStamp"))) {
         if (std::chrono::steady_clock::now() - overlap_start > std::chrono::seconds(15)) {
             post.join();
             FAIL("both jobs never became active together");
@@ -988,6 +990,8 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     write_file(script_go, "1");
     write_file(stamp_go, "1");
     post.join();
+    INFO("post_error=" << post_error);
+    REQUIRE(post_error.empty());
     REQUIRE(post_ok);
 
     {

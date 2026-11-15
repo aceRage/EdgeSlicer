@@ -41,6 +41,10 @@ stored override (see below) or a test-only env override is set.
 The helper is respawned when the sandbox spec changes (different plugin or a different G-code
 write root), so Landlock rules never have to be loosened.
 
+The child does not re-hash the plugin tree on `load`. Edge already evaluated Phase 5 trust
+in-process before sending `load`, and host RPC still rechecks p5 on the Edge side. Re-hashing
+under Landlock missed `trust.json` or picked up execute-time files the pin did not include.
+
 ## Fail-closed policy
 
 If the OS sandbox cannot be applied (Landlock ABI 0 / kernel older than 5.13, AppContainer APIs
@@ -70,6 +74,9 @@ Always allowed inside the child:
 - the plugin's own directory (read/write, including `__pycache__`)
 - a private `TMPDIR` (`/tmp/edge-plugin-XXXXXX`)
 - helper directory / shared `python/packages` / `resources_dir` (read)
+- `trust.json` (the sidecar file only, not all of `data_dir`; Landlock file
+  rules drop directory-only bits so `add_rule` is not EINVAL)
+- the plugin's `plugin_data` storage directory (read/write)
 - on Linux: `/usr`, `/lib`, `/lib64`, `/etc`, `/dev`, `/proc`, `/sys` (read) so CPython and
   libpython keep working
 
