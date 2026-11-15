@@ -78,7 +78,9 @@ public:
     // Depth of the Type1 purge stack at the given width (also the rectangle-wall depth): each
     // purge is whole lines at the block infill gap, one block per adhesiveness category sized by
     // its worst layer, stacked behind one perimeter width.
-    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f);
+    // max_height >= 0: a rectangle tower that tall, whose blocks with ramming may lay their purge rows at the ramming
+    // pitch (calc_block_infill_gap()); < 0 leaves that out (a rib tower never does it).
+    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f, float max_height = -1.f);
     // Side of the square bounding a rib-wall tower's first layer, brim excluded: the body plus the
     // rib bulge, with the ribs extended to the height-based minimum as both generators do (type2: WipeTower2's table).
     static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height, bool type2 = false);

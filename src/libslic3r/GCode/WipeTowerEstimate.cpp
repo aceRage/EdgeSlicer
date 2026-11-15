@@ -234,7 +234,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         if (type1) {
             // plan_tower_new stretches a short purge stack to the stability minimum behind its
             // leading perimeter width.
-            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), tower_line_width)));
+            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), tower_line_width, float(max_object_height))));
         } else {
             depth = volume / (layer_height * width);
             // The flush volumes already hold the spacing between wipes.

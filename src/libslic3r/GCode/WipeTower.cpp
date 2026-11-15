@@ -11,6 +11,8 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <functional>
+#include <set>
 #include <stdexcept>
 
 #include <boost/algorithm/string.hpp>
@@ -1590,7 +1592,7 @@ int WipeTower::adhesiveness_category(int configured, const std::string &filament
     return 0;
 }
 
-float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width)
+float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width, float max_height)
 {
     if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)
         return 0.f;
@@ -1608,24 +1610,46 @@ float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &p
     const float nc_gap      = ncpw + extra_width;
     // A layer purges into at most (filaments - 1) targets, so a category holding every filament
     // never sees its smallest purge (the layer's first filament) in its worst layer.
-    struct Block { float depth = 0.f; float min_purge = 0.f; size_t filaments = 0; };
-    std::map<int, Block> blocks;
-    for (const PurgeEstimate &purge : purges) {
-        Block      &block       = blocks[purge.category];
-        const float purge_depth = std::ceil(purge.prime_volume / line_area(pw) / line_width) * gap;
-        block.min_purge         = block.filaments == 0 ? purge_depth : std::min(block.min_purge, purge_depth);
-        block.depth += purge_depth;
-        ++block.filaments;
-        if (purge.filament_change_length > EPSILON) {
-            // The leaving filament is rammed over the nozzle-change flow, again in whole lines.
-            const float filament_area = float(M_PI) * purge.filament_diameter * purge.filament_diameter / 4.f;
-            const float nc_length     = purge.filament_change_length * filament_area / line_area(ncpw);
-            block.depth += std::ceil(nc_length / (width - ncpw - pw)) * nc_gap;
+    struct Block { float depth = 0.f; float min_purge = 0.f; size_t filaments = 0; bool ramming = false; };
+    // purge_gap / ramming_gap: the row pitch of a category's purge and ramming lines.
+    auto stack = [&](const std::function<float(int)> &purge_gap, const std::function<float(int)> &ramming_gap, std::map<int, Block> &blocks) {
+        for (const PurgeEstimate &purge : purges) {
+            Block      &block       = blocks[purge.category];
+            const float purge_depth = std::ceil(purge.prime_volume / line_area(pw) / line_width) * purge_gap(purge.category);
+            block.min_purge         = block.filaments == 0 ? purge_depth : std::min(block.min_purge, purge_depth);
+            block.depth += purge_depth;
+            ++block.filaments;
+            if (purge.filament_change_length > EPSILON) {
+                // The leaving filament is rammed over the nozzle-change flow, again in whole lines.
+                const float filament_area = float(M_PI) * purge.filament_diameter * purge.filament_diameter / 4.f;
+                const float nc_length     = purge.filament_change_length * filament_area / line_area(ncpw);
+                block.depth += std::ceil(nc_length / (width - ncpw - pw)) * ramming_gap(purge.category);
+                block.ramming = true;
+            }
         }
+        float sum = 0.f;
+        for (const auto &[category, block] : blocks)
+            sum += block.filaments == purges.size() ? block.depth - block.min_purge : block.depth;
+        return sum;
+    };
+    // calc_block_infill_gap() on a rectangle tower of max_height: the blocks are first stacked at the lines' own widths;
+    // a block with ramming whose ramming pitch, stretched to the stability minimum, reaches twice the ramming width
+    // lays its purge rows at the ramming pitch too. (Hidden behind the 20 mm minimum before the Type 1 tower took
+    // Bambu Studio's table, which starts at 5 mm.)
+    std::map<int, Block> raw_blocks;
+    const float          raw_depth = stack([pw](int) { return pw; }, [ncpw](int) { return ncpw; }, raw_blocks);
+    std::set<int>        aligned;
+    if (max_height >= 0.f) {
+        const float height_to_depth   = get_limit_depth_by_height(max_height);
+        const float height_to_spacing = (raw_depth > height_to_depth || raw_depth < EPSILON) ? 1.f : height_to_depth / raw_depth;
+        for (const auto &[category, block] : raw_blocks)
+            if (block.ramming && nc_gap * height_to_spacing >= 2.f * ncpw)
+                aligned.insert(category);
     }
+    std::map<int, Block> blocks;
     float depth = pw; // plan_tower_new starts the first block one perimeter width in
-    for (const auto &[category, block] : blocks)
-        depth += block.filaments == purges.size() ? block.depth - block.min_purge : block.depth;
+    depth += stack([&aligned, gap, nc_gap](int category) { return aligned.count(category) ? nc_gap : gap; },
+                   [nc_gap](int) { return nc_gap; }, blocks);
     return depth;
 }
 
