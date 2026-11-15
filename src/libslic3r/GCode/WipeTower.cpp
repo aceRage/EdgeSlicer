@@ -2637,6 +2637,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     // One fill box per block when there is more than one, else one for the whole tower.
     const bool                   multi_block_fill = m_wipe_tower_blocks.size() > 1 && (extrude_fill_wall || extrude_fill);
     std::vector<box_coordinates> fill_boxes;
+    std::vector<int>             fill_box_categories; // multi_block_fill only
     if (multi_block_fill) {
         for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
             float block_fill_height = block.depth - 2 * m_perimeter_width;
@@ -2646,6 +2647,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                 continue;
             fill_boxes.emplace_back(Vec2f(m_perimeter_width, block.start_depth + m_perimeter_width), m_wipe_tower_width - 2 * m_perimeter_width,
                                     block_fill_height);
+            fill_box_categories.push_back(block.filament_adhesiveness_category);
         }
     }
     if (fill_boxes.empty()) {
@@ -2667,6 +2669,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
 
     for (size_t box_idx = 0; box_idx < fill_boxes.size(); ++box_idx) {
         const box_coordinates &fill_box = fill_boxes[box_idx];
+        // Edge (#1052 review S3): solid under the next layer's purge or ramming rows in this block.
+        const bool box_solid = solid_infill || (box_idx < fill_box_categories.size() && next_layer_purges_into(fill_box_categories[box_idx]));
         if (box_idx > 0)
             writer.travel(m_left_to_right ? fill_box.ru : fill_box.lu);
 
@@ -2682,7 +2686,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                   .append(";--------------------\n"
                           "; CP EMPTY GRID START\n")
                   .comment_with_value(" layer #", m_num_layer_changes + 1);
-            if (solid_infill) {
+            if (box_solid) {
                 float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
                 if (first_layer) {          // the infill should touch perimeters
                     left -= m_perimeter_width;
@@ -2813,6 +2817,21 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     return construct_tcr(writer, false, old_tool, true, false, 0.f, false);
 }
 
+// Edge (#1052 review S3): whether the next tower layer lays purge or ramming rows into the block of this category.
+// Always false on a single-block tower (unchanged from Orca there).
+bool WipeTower::next_layer_purges_into(int category) const
+{
+    if (m_wipe_tower_blocks.size() < 2 || m_layer_info == m_plan.end() || m_layer_info + 1 == m_plan.end())
+        return false;
+    for (const WipeTowerInfo::ToolChange &tc : (m_layer_info + 1)->tool_changes) {
+        if (get_filament_category(tc.new_tool) == category)
+            return true;
+        if (tc.nozzle_change.need_ramming && tc.nozzle_change_depth > EPSILON && get_filament_category(tc.old_tool) == category)
+            return true;
+    }
+    return false;
+}
+
 // Orca #10780 (Bambu Studio finish_block()): the rest of a block this layer's tool changes did not purge into, as
 // sparse fill printed with filament_id, a filament of the block's category where the layer has one.
 WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill)
@@ -2859,6 +2878,10 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
                                 std::any_of((m_layer_info + 1)->tool_changes.begin(), (m_layer_info + 1)->tool_changes.end(),
                                             [this](const WipeTowerInfo::ToolChange &tch) { return m_filpar[tch.new_tool].is_soluble || m_filpar[tch.old_tool].is_soluble; });
         solid_infill |= first_layer && m_adhesion;
+        // Edge (#1052 review S3): a block whose category the next layer purges (or rams) into is filled solid, so
+        // those rows are not bridges over this sparse grid; the soluble rule above, for one more trigger. Only on a
+        // tower with more than one block: a single block is purged into on every layer and stays as upstream.
+        solid_infill |= next_layer_purges_into(block.filament_adhesiveness_category);
 
         if (solid_infill) {
             float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.

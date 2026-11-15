@@ -857,3 +857,118 @@ TEST_CASE("A Polymaker PLA and a Bambu PLA share the PLA adhesiveness category",
         CHECK(category->get_at(0) == 100);
     }
 }
+
+// #1052 review S3: on a two-category tower each band is purged on one layer and block-filled on the next; the fill
+// under the next layer's purge is solid (Edge), so the purge rows are not bridges over a sparse grid. A single-block
+// tower keeps Orca's sparse fill.
+namespace {
+
+struct Segment2
+{
+    Vec2f a, b;
+};
+
+// The extrusions inside the tower wall of every layer (wall and brim left out, as inner_extrusions() does).
+std::vector<std::vector<Segment2>> inner_segments(const DirectTower &t)
+{
+    const float w = t.tower->width(), d = t.tower->get_depth(), m = 0.3f;
+    std::vector<std::vector<Segment2>> out;
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : t.result) {
+        std::vector<Segment2> segs;
+        for (const WipeTower::ToolChangeResult &tcr : layer)
+            for (size_t i = 1; i < tcr.extrusions.size(); ++i) {
+                if (tcr.extrusions[i].width <= 0.f)
+                    continue;
+                const Vec2f a = tcr.extrusions[i - 1].pos, b = tcr.extrusions[i].pos;
+                auto on = [m](float u, float v, float line) { return std::abs(u - line) < m && std::abs(v - line) < m; };
+                const bool outside = std::min(a.x(), b.x()) < -m || std::max(a.x(), b.x()) > w + m || std::min(a.y(), b.y()) < -m ||
+                                     std::max(a.y(), b.y()) > d + m;
+                if (!outside && !on(a.x(), b.x(), 0.f) && !on(a.x(), b.x(), w) && !on(a.y(), b.y(), 0.f) && !on(a.y(), b.y(), d))
+                    segs.push_back({ a, b });
+            }
+        out.push_back(std::move(segs));
+    }
+    return out;
+}
+
+float distance_to_segment(const Vec2f &p, const Segment2 &s)
+{
+    const Vec2f ab = s.b - s.a;
+    const float l2 = ab.squaredNorm();
+    const float t  = l2 > 0.f ? std::clamp((p - s.a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+    return (p - (s.a + t * ab)).norm();
+}
+
+// Share of the horizontal rows of layers 2.. with no extrusion of the layer below within 0.5 mm (the review's measure),
+// sampled every 0.25 mm. The tower wall counts as support (it is under every row end).
+float unsupported_share(const DirectTower &t)
+{
+    const std::vector<std::vector<Segment2>> layers = inner_segments(t);
+    const float w = t.tower->width();
+    float total = 0.f, unsupported = 0.f;
+    for (size_t l = 2; l < layers.size(); ++l)
+        for (const Segment2 &s : layers[l]) {
+            if (std::abs(s.a.y() - s.b.y()) > 1e-3f)
+                continue;
+            const float len = (s.b - s.a).norm();
+            for (float u = 0.f; u <= len; u += 0.25f) {
+                const Vec2f p = s.a + (len > 0.f ? u / len : 0.f) * (s.b - s.a);
+                total += 0.25f;
+                if (p.x() < 0.5f || p.x() > w - 0.5f)
+                    continue;
+                bool supported = false;
+                for (const Segment2 &below : layers[l - 1])
+                    if (distance_to_segment(p, below) <= 0.5f) {
+                        supported = true;
+                        break;
+                    }
+                if (!supported)
+                    unsupported += 0.25f;
+            }
+        }
+    return total > 0.f ? unsupported / total : 0.f;
+}
+
+// layers layers, one change per layer between filaments 0 and 1, alternating, with the given prime volumes.
+std::unique_ptr<DirectTower> alternating_tower(const DynamicPrintConfig &cfg, int layers, float even_volume, float odd_volume)
+{
+    auto t = std::make_unique<DirectTower>();
+    t->config.apply(cfg, true);
+    t->tower = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 0.2f * layers);
+    t->tower->set_extruder(0, t->config);
+    t->tower->set_extruder(1, t->config);
+    for (int layer = 0; layer < layers; ++layer) {
+        const float        z    = 0.2f * (layer + 1);
+        const unsigned int from = unsigned(layer % 2);
+        t->tower->plan_toolchange(z, 0.2f, from, from);
+        t->tower->plan_toolchange(z, 0.2f, from, 1 - from, layer % 2 ? odd_volume : even_volume, 0.f);
+    }
+    t->tower->generate(t->result);
+    return t;
+}
+
+} // namespace
+
+TEST_CASE("Two-category tower: a band the next layer purges into is filled solid under it", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,300" } });
+    const auto t = alternating_tower(cfg, 8, 300.f, 300.f);
+    REQUIRE(t->tower->blocks().size() == 2);
+    const float share = unsupported_share(*t);
+    INFO("unsupported share of the row length " << share);
+    // Before: about 0.4 (rows over fill lines 8 mm apart). Left: the row ends past the solid fill's last line.
+    CHECK(share < 0.15f);
+}
+
+TEST_CASE("Single-category tower: the block fill under a deeper purge stays sparse, as upstream", "[TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C, nullptr);
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" }, { "filament_adhesiveness_category", "100,100" } });
+    // Even layers purge little, odd layers much: the odd layers' upper rows lie over the even layers' sparse fill.
+    const auto t = alternating_tower(cfg, 8, 100.f, 600.f);
+    REQUIRE(t->tower->blocks().size() == 1);
+    const float share = unsupported_share(*t);
+    INFO("unsupported share of the row length " << share);
+    CHECK(share > 0.15f);
+}
