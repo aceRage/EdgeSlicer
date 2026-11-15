@@ -1,6 +1,6 @@
 # Design spike: split a large model to the printer's build volume
 
-Date: 2026-11-15. Status: design only. No code, no build, no branch, no PR.
+Date: 2026-11-15. Status: owner accepted every recommendation D1-D17 on 2026-11-15 ("go with the recommendations"). P1 built on `feat/split-to-fit-p1` (section 7, "P1 as built"); cut-face labels added as P5 (section 7.5).
 Tree read: main at `a21acf2e87`. Every `file:line` below is from that commit.
 
 The owner's ask: a cut-like tool that cuts a very large model into many parts based on a printer's build volume, with configurable margins, automatic dowels (up to X of a chosen shape) where the cuts land, and slight automatic adjustment of the cut planes, with warnings when an adjustment would exceed the build volume. LuBan and similar splitters are inspiration only.
@@ -325,7 +325,7 @@ No new 3MF parts, no new config keys, no G-code change.
 | Dovetails / puzzle joints / tongue and groove on grid faces | The groove cut is a different entry point (`CutUtils.hpp:337`) with its own preview; multiplying it over a grid is not cheap | Not cheap. |
 | Plug and Snap connectors | A protruding plug changes part size and print pose | Cheap to offer later once per-part size re-check exists. |
 | Glue-face texturing | Not asked for | No plan. |
-| **Part numbers embossed on the cut faces** | Needs text volumes placed on each face | **Cheap follow-up** (about 2 days): a recessed label "X2-Z1" as a negative text volume on one hidden face per part; the emboss code is in libslic3r (`src/libslic3r/Emboss.hpp`). |
+| **Part numbers embossed on the cut faces** | Needs text volumes placed on each face | **Now phase P5** (owner, 2026-11-15): matching labels on both faces of every mating pair; see 7.5. |
 | Assembly guide / numbered instructions | Not asked for | The Assemble view with explode already gives the picture. |
 | "Edit split" (re-open the grid) | See 4.4 | Medium follow-up. |
 | Non-rectangular usable area (L-shaped beds, true circle) | Keeps the planner a box problem | Only if asked. |
@@ -354,6 +354,14 @@ Inspiration, for the record: LuBan is closed-source commercial software (proprie
 ## 7. Phases
 
 Sizes: S up to 2 agent-days, M 3 to 5, L more. Every phase is shippable and has no G-code impact (model edit only; the standard gate set has no cut objects, so the `gcode-gate` run must be identical).
+
+| Phase | What | Size | Status |
+|---|---|---|---|
+| P1 | Planner, preview, plain cuts, arrange | M | Built on `feat/split-to-fit-p1` (see "P1 as built" below) |
+| P2 | Automatic dowels | M | Next |
+| P3 | Plane adjustment, 3D plane handles, more after-Apply checks | M | |
+| P4 | Polish (grid angle, other printer / custom size, dowel instances) | S to M | |
+| P5 | Cut-face labels: matching embossed / debossed ids on mating faces (owner, 2026-11-15) | S to M, about 3 days | Designed (section 7.5); after P2 |
 
 ### P1: planner, preview, plain cuts, arrange. M, 5 days
 
@@ -404,6 +412,31 @@ Sizes: S up to 2 agent-days, M 3 to 5, L more. Every phase is shippable and has 
 - Grid angle with "Find best"; collapse identical dowels to instances; "Split it to fit" link on the outside-the-volume notification; printer-volume source list (D8); remember settings; optional click-to-remove a site.
 - Unit tests: best angle for a 45-degree-turned long box is 45 with the smaller count; ties prefer 0; parts are turned back square on Apply; dowel collapsing keeps the count.
 - Hand test: a long model lying diagonally; the notification link; a second printer chosen as the volume source.
+
+### 7.5 Cut-face labels (later phase, P5)
+
+Owner requirement (2026-11-15): every cut face gets an embossed or debossed identifier - a pattern, a number, or a letter-number combination - and the two faces that mate carry the same one, so a person can tell which parts go together.
+
+**What P1 already provides.** The planner's result has one `SplitFace` per mating pair (`src/libslic3r/SplitToVolume.hpp`): the plane, the two cells and the two parts either side, the material area, a stable `key` (`X1:Y2-Z1`: plane name, then the cell along the other cut axes), a short `mate_code` both faces share (`X1.2`: plane name and the face's 1-based number on that plane) and a readable `mate_label` (`X1-Y2 | X2-Y2`). The same planes over the same model give the same ids, keys and codes, and every `SplitPart` lists the ids of its faces. P5 needs nothing more from the planner.
+
+**What gets written.** Default: the `mate_code` (`X1.2`). Options: a running number (face id + 1), or a dot / bar pattern for people who prefer no text (the face number in binary as dots on a fixed grid, so small faces still get a code). Both faces of a pair carry the same code.
+
+**How it is made.** Reuse the Emboss text tool: `src/libslic3r/Emboss.hpp` turns text into outlines (`text2shapes`) and outlines into a mesh (`polygons2model`) without the GUI, and a text volume keeps its text configuration, so the user can later open a label in the Text gizmo and edit it. The pattern option goes through the same path as an SVG shape (the SVG tool's code). Each label is a **negative volume** on its part: it is resolved at slicing time, so no mesh boolean runs and the 3MF stays readable upstream (a plain negative volume).
+
+**Deboss, not emboss, by default.** A raised label would stop the faces sitting flush for glue, so both faces are recessed: depth 0.6 mm (three 0.2 mm layers), text height fitted to the space (below), at least 4 mm; smaller faces fall back to the dot pattern, and a face too small for that gets no label and a line in the warning list. An "emboss" option for faces that are not glued flush is off by default.
+
+**Placement.** On each part's own face (the `SplitFace` region clipped to that part's material), at the point of largest clearance from the outline - the same largest-inscribed-circle routine P2 writes for dowel sites (3.6) - after removing a keep-out disc around every dowel site (dowel footprint radius + 2 mm) and the corner bands along other planes (3.6). The text is scaled to fit what is left. Labels are placed after the P2 sites, so P5 comes after P2.
+
+**Mirrored on the mate.** The two faces of a pair look in opposite directions, so each label is laid out in its own face's frame (seen from outside the part, text upright along +Z on X / Y faces and along +Y on Z faces). In world space the two are mirror images of each other, which is what makes both read correctly when each part is held face-on.
+
+**Tests (P5).** Every face of a 2 x 2 x 2 split gets exactly one label on each of its two parts, with the same text; no label reaches into a dowel keep-out; every label lies inside its part's face; a face too small for text gets the pattern; a 3MF round trip keeps the labels as editable text volumes.
+
+### P1 as built (2026-11-15)
+
+- Planner, usable volume, apply: `src/libslic3r/SplitToVolume.hpp/.cpp`; tests `tests/libslic3r/test_split_to_volume.cpp` (`[SplitToVolume]`).
+- Gizmo `src/slic3r/GUI/Gizmos/GLGizmoSplitToFit.*` (toolbar icon `toolbar_split_fit*.svg`), job `src/slic3r/GUI/Jobs/SplitToFitJob.*`, a "Split to fit..." button beside "Perform cut" in the Cut panel and "Split to fit the printer..." in the object menu (D1).
+- Differences from the plan above: a plane is moved by dragging its position in the panel's "Plane positions" list, not by a handle in the 3D view (P3 adds handles); the nozzle-reach option (D14) is in, shown only on printers with nozzle-only strips; after Apply the parts are moved off the plates and the "place loose objects" arrange runs (it also places anything else already off the plates); the warnings after Apply are "separate pieces" (D15) and "open edges" (text only, no repair button); "very small part" and "no flat face on the bed" stay in P3. The planner refuses more than 1000 cells. Objects with several copies are refused with a message (R12).
+- No G-code change: nothing in slicing or G-code was touched.
 
 Total: about 16 agent-days (range 14 to 17). Follow-ups not included: embossed labels (2), "Edit split" (4), per-part lay-flat (3), TBB over branches (1 to 2).
 

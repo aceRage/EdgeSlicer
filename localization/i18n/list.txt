@@ -217,3 +217,5 @@ src/slic3r/GUI/PrintHostDevicesDialog.cpp
 src/slic3r/GUI/PrinterWebView.cpp
 src/slic3r/GUI/RemoteSend.cpp
 src/slic3r/Utils/ElegooLink.cpp
+src/slic3r/GUI/Gizmos/GLGizmoSplitToFit.cpp
+src/slic3r/GUI/Jobs/SplitToFitJob.cpp

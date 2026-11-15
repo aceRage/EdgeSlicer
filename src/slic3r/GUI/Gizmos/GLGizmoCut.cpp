@@ -9187,6 +9187,11 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             perform_cut(m_parent.get_selection());
     m_imgui->disabled_end();
 
+    // Split to Fit (D1): the whole object cut into parts that fit the printer, in its own gizmo.
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Split to fit..."), _L("Cut the whole object into parts that each fit the printer")))
+        wxGetApp().CallAfter([this]() { m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::SplitToFit); });
+
     ImGui::PopStyleVar(2);
 }
 

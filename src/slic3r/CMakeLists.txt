@@ -245,6 +245,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
+    GUI/Gizmos/GLGizmoSplitToFit.cpp
+    GUI/Gizmos/GLGizmoSplitToFit.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
     GUI/Gizmos/GLGizmoSculpt.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
@@ -383,6 +385,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SliceBakeJob.hpp
     GUI/Jobs/StabilizerBakeJob.cpp
     GUI/Jobs/StabilizerBakeJob.hpp
+    GUI/Jobs/SplitToFitJob.cpp
+    GUI/Jobs/SplitToFitJob.hpp
     GUI/Jobs/SeamAutoPaintJob.cpp
     GUI/Jobs/SeamAutoPaintJob.hpp
     GUI/Jobs/QuadRemeshJob.cpp
