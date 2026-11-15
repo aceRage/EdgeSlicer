@@ -138,10 +138,16 @@ void FillBedJob::prepare()
     plate_list.preprocess_exclude_areas(m_unselected);
     // EdgeSlicer "Avoid nozzle reach zones": the one-nozzle strips, as the exclusion areas above
     // (the Grid layout reads them from m_unselected too, through grid_obstacles()).
-    for (arrangement::ArrangePolygon &ap : nozzle_reach_blockers(m_plater, 1, coord_t(scaled_exclusion_gap)))
-        params.excluded_regions.emplace_back(std::move(ap));
-    for (arrangement::ArrangePolygon &ap : nozzle_reach_blockers(m_plater, 16))
-        m_unselected.emplace_back(std::move(ap));
+    // The bed is clipped to what every nozzle reaches below; only a shape that cannot be clipped
+    // gets the strips as fixed items.
+    m_reach_areas = nozzle_reach_areas(m_plater);
+    {
+        const Points full_bed = get_bed_shape(*m_plater->config());
+        for (arrangement::ArrangePolygon &ap : nozzle_reach_fallback_blockers(m_reach_areas, full_bed, 1, coord_t(scaled_exclusion_gap)))
+            params.excluded_regions.emplace_back(std::move(ap));
+        for (arrangement::ArrangePolygon &ap : nozzle_reach_fallback_blockers(m_reach_areas, full_bed, 16))
+            m_unselected.emplace_back(std::move(ap));
+    }
 
     m_bedpts = get_bed_shape(*m_plater->config());
 
@@ -184,7 +190,8 @@ void FillBedJob::prepare()
         ArrangePolygons probe = m_selected;
         update_selected_items_inflation(probe, m_plater->config(), est_params);
     }
-    const Points est_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), est_params), est_params);
+    Points est_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), est_params), est_params);
+    arrangement::clip_bed_to_nozzle_reach(est_bedpts, m_reach_areas);
     const double bed_area   = std::abs(Polygon{est_bedpts}.area()) / sc;
 
     // The area already taken by the objects staying put, plus the copies of the template that
@@ -295,6 +302,7 @@ void FillBedJob::process(Ctl &ctl)
     update_arrange_params(params, m_plater->config(), m_selected);
     // arrange's own shrink first, then the user's fill-only edge / front margins on top.
     m_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), params), params);
+    arrangement::clip_bed_to_nozzle_reach(m_bedpts, m_reach_areas);
 
     auto &partplate_list               = m_plater->get_partplate_list();
     auto &print                        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();

@@ -220,6 +220,14 @@ extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excl
 // printer with fewer than two nozzle areas or no strip of its own.
 ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, coord_t inflation = 0);
 
+// The same option done by shrinking the bed instead: `bed` becomes its part every nozzle reaches
+// (ExtruderAreas::shared) when that is one polygon, which is how the H2D / H2C / X2D strips are,
+// and the packer then fills and centres on exactly that part as it does on a whole bed. As fixed
+// items the strips switch the packer to growing the pile around the bed centre, which left a
+// column short of the free width with a single stray object in it. Returns false, and leaves `bed`
+// as it is, when there is nothing to clip or the result is not one polygon (use the blockers then).
+bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas);
+
 inline void arrange(ArrangePolygons &items, const Points &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
 inline void arrange(ArrangePolygons &items, const BoundingBox &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
 inline void arrange(ArrangePolygons &items, const CircleBed &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
