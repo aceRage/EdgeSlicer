@@ -135,7 +135,7 @@ void slice_puck(Print &print, Model &model, bool curved_tops,
 
 // Every travel inside the curved block, checked against what is already printed. The block starts
 // after the last extrusion before the first curved one (an extrusion that changes Z along the move,
-// or goes below the highest Z extruded so far) and ends at the last extrusion. Wipes (negative E)
+// or goes below the highest Z extruded so far) and ends at the last extrusion. Wipes (;WIPE_START..END)
 // run back along the line just laid, at its heights, and are not travels.
 struct CurvedTravels
 {
@@ -154,7 +154,12 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
         std::istringstream in(gcode);
         std::string        line;
         double x = 0., y = 0., z = 0.;
+        bool   in_wipe = false;   // a wipe has no E when the whole retraction comes before it
         while (std::getline(in, line)) {
+            if (line.rfind(";WIPE_START", 0) == 0)
+                in_wipe = true;
+            else if (line.rfind(";WIPE_END", 0) == 0)
+                in_wipe = false;
             const std::string code = line.substr(0, line.find(';'));
             const bool arc = code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0;
             if (!arc && code.rfind("G1 ", 0) != 0 && code.rfind("G0 ", 0) != 0)
@@ -172,7 +177,7 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
             word('Z', nz);
             word('E', e);
             const bool xy = nx != x || ny != y;
-            const char kind = arc ? 'a' : (e > 0. && xy) ? 'e' : (e < 0. && xy) ? 'w' : xy ? 't' : 'z';
+            const char kind = arc ? 'a' : (e > 0. && xy) ? 'e' : ((e < 0. || in_wipe) && xy) ? 'w' : xy ? 't' : 'z';
             moves.push_back({ kind, x, y, z, nx, ny, nz });
             x = nx; y = ny; z = nz;
         }
