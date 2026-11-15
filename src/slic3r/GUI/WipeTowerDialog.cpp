@@ -230,6 +230,41 @@ std::string RammingPanel::get_parameters()
 static const float g_min_flush_multiplier = 0.f;
 static const float g_max_flush_multiplier = 3.f;
 
+namespace Slic3r { namespace GUI { namespace FlushVolumes {
+
+int shown_volume(float stored, float multiplier)
+{
+    // Cut to a whole number as the boxes always were, but a volume stored from a typed value comes back
+    // a hair under it in float (15 / 0.3 * 0.3 = 14.99999), and must show what was typed.
+    const double volume = double(stored) * double(multiplier);
+    return int(volume + std::max(1e-3, volume * 1e-6));
+}
+
+float stored_volume(float stored, int shown, float multiplier)
+{
+    if (multiplier <= 0.f || shown == shown_volume(stored, multiplier))
+        return stored;
+    return float(shown) / multiplier;
+}
+
+std::vector<float> read_back_matrix(const std::vector<float>& stored, const std::vector<int>& shown, float multiplier)
+{
+    // One volume per box, as before; a box with no stored volume behind it stores what it shows.
+    std::vector<float> output(shown.size(), 0.f);
+    for (size_t idx = 0; idx < shown.size(); ++idx)
+        output[idx] = stored_volume(idx < stored.size() ? stored[idx] : 0.f, shown[idx], multiplier);
+    return output;
+}
+
+bool volume_out_of_range(int shown, size_t from, size_t to, const std::vector<int>& min_flush_volumes, int max_flush_volume)
+{
+    (void) to;
+    const int least = from < min_flush_volumes.size() ? min_flush_volumes[from] : 0;
+    return shown < least || shown > max_flush_volume;
+}
+
+}}} // namespace Slic3r::GUI::FlushVolumes
+
 wxBoxSizer* WipingDialog::create_btn_sizer(long flags)
 {
     auto btn_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -428,7 +463,8 @@ WipingPanel::WipingPanel(wxWindow* parent, const std::vector<float>& matrix, con
                 edit_boxes[i][j]->Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent&) {});
             }
             else {
-                edit_boxes[i][j]->SetValue(wxString("") << int(m_matrix[m_number_of_extruders * j + i] * flush_multiplier));
+                // edit_boxes[to][from]: the matrix is from -> to.
+                edit_boxes[i][j]->SetValue(wxString("") << FlushVolumes::shown_volume(m_matrix[m_number_of_extruders * j + i], flush_multiplier));
 
                 edit_boxes[i][j]->Bind(wxEVT_TEXT, [this, i, j](wxCommandEvent& e) {
                     wxString str = edit_boxes[i][j]->GetValue();
@@ -445,7 +481,12 @@ WipingPanel::WipingPanel(wxWindow* parent, const std::vector<float>& matrix, con
                 auto on_apply_text_modify = [this, i, j](wxEvent &e) {
                     wxString str   = edit_boxes[i][j]->GetValue();
                     int      value = wxAtoi(str);
-                    m_matrix[m_number_of_extruders * j + i] = value / get_flush_multiplier();
+                    float&   stored = m_matrix[m_number_of_extruders * j + i];
+                    const float multiplier = get_flush_multiplier();
+                    // Leaving a box unedited keeps its volume; with the multiplier at 0 nothing typed can be stored.
+                    stored = FlushVolumes::stored_volume(stored, value, multiplier);
+                    if (multiplier <= 0.f && value != FlushVolumes::shown_volume(stored, multiplier))
+                        edit_boxes[i][j]->ChangeValue(wxString("") << FlushVolumes::shown_volume(stored, multiplier));
                     this->update_warning_texts();
                     e.Skip();
                 };
@@ -529,7 +570,7 @@ WipingPanel::WipingPanel(wxWindow* parent, const std::vector<float>& matrix, con
             }
             for (unsigned int i = 0; i < m_number_of_extruders; ++i) {
                 for (unsigned int j = 0; j < m_number_of_extruders; ++j) {
-                    edit_boxes[i][j]->SetValue(to_string(int(m_matrix[m_number_of_extruders * j + i] * multiplier)));
+                    edit_boxes[i][j]->SetValue(to_string(FlushVolumes::shown_volume(m_matrix[m_number_of_extruders * j + i], multiplier)));
                 }
             }
 
@@ -685,7 +726,8 @@ void WipingPanel::update_warning_texts()
             auto text_box = box_vec[j];
             wxString str = text_box->GetValue();
             int actual_volume = wxAtoi(str);
-            if (actual_volume < m_min_flush_volume[i] || actual_volume > m_max_flush_volume) {
+            // edit_boxes[i][j] flushes filament j out for filament i.
+            if (FlushVolumes::volume_out_of_range(actual_volume, j, i, m_min_flush_volume, m_max_flush_volume)) {
                 if (text_box->GetForegroundColour() != g_warning_color) {
                     text_box->SetForegroundColour(g_warning_color);
                     text_box->Refresh();
@@ -761,7 +803,7 @@ void WipingPanel::calc_flushing_volumes()
                 }
 
                 m_matrix[m_number_of_extruders * from_idx + to_idx] = flushing_volume;
-                flushing_volume = int(flushing_volume * get_flush_multiplier());
+                flushing_volume = FlushVolumes::shown_volume(flushing_volume, get_flush_multiplier());
                 edit_boxes[to_idx][from_idx]->SetValue(std::to_string(flushing_volume));
             }
         }
@@ -783,21 +825,13 @@ void WipingPanel::msw_rescale()
 std::vector<float> WipingPanel::read_matrix_values() {
     if (!m_advanced)
         fill_in_matrix();
-    std::vector<float> output;
+    // What each box shows, from -> to like the stored matrix; boxes left as they were keep their stored volume.
+    std::vector<int> shown;
     for (unsigned int i=0;i<m_number_of_extruders;++i) {
-        for (unsigned int j=0;j<m_number_of_extruders;++j) {
-            double val = 0.;
-            float  flush_multipler = get_flush_multiplier();
-            if (flush_multipler == 0) {
-                output.push_back(0.);
-            }
-            else {
-                edit_boxes[j][i]->GetValue().ToDouble(&val);
-                output.push_back((float) val / get_flush_multiplier());
-            }
-        }
+        for (unsigned int j=0;j<m_number_of_extruders;++j)
+            shown.push_back(wxAtoi(edit_boxes[j][i]->GetValue()));
     }
-    return output;
+    return FlushVolumes::read_back_matrix(m_matrix, shown, get_flush_multiplier());
 }
 
 // Reads values from simple mode to save them for next time:
