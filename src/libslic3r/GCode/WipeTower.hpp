@@ -291,6 +291,9 @@ public:
     // Bambu tags) for Bambu Lab printers; false for a non-Bambu printer set to wipe_tower_type
     // Type 1, whose export reads the compatible tags.
     void set_bbl_gcode_tags(bool bbl) { m_bbl_gcode_tags = bbl; }
+    // Bambu Studio 2.9.1 (Print.cpp:4220, set_first_layer_flow_ratio): the process' initial_layer_flow_ratio, which
+    // is bottom_solid_infill_flow_ratio here (Format/BambuKeyAliases.cpp), scales the tower's first-layer purge.
+    void set_first_layer_flow_ratio(float flow_ratio) { m_first_layer_flow_ratio = flow_ratio; }
 
     // Orca #10780 / #14685: the plate's per-layer nozzle grouping. The tower reads the extruder a filament
     // prints from on a layer (is_valid_last_layer(): an extruder's last layer above its printable height).
@@ -684,8 +687,8 @@ private:
     float           m_nozzle_change_perimeter_width = 0.f;
     float           m_tpu_fixed_spacing             = 2.f;      // ramming line gap with a reverse travel
     float           m_contact_speed                 = 20.f * 60.f;
-    // Orca: the tower's first-layer purge flow (Orca reads first_layer_flow_ratio, which this tree does not
-    // have, and Bambu Studio initial_layer_flow_ratio; both default to 1).
+    // The tower's first-layer purge flow: Bambu Studio's initial_layer_flow_ratio (bottom_solid_infill_flow_ratio
+    // here, set_first_layer_flow_ratio), Orca's first_layer_flow_ratio; all default to 1.
     float           m_first_layer_flow_ratio        = 1.f;
     bool            m_tower_framework               = false;    // prime_tower_enable_framework
     bool            m_flat_ironing                  = false;    // prime_tower_flat_ironing (needs the wall gap)

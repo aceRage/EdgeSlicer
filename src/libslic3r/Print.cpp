@@ -7664,6 +7664,9 @@ void Print::_make_wipe_tower()
         // acceleration (an object setting in this fork, read like the G-code writer does).
         wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
                                                         unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
+        // Bambu Studio 2.9.1 (Print.cpp:4220): the first tower layer purges at the process' initial_layer_flow_ratio,
+        // which loads into bottom_solid_infill_flow_ratio here.
+        wipe_tower.set_first_layer_flow_ratio(float(m_default_region_config.bottom_solid_infill_flow_ratio.value));
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
