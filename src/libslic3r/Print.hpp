@@ -1219,6 +1219,42 @@ enum FilamentTempType {
     HighLowCompatible,
     Undefine
 };
+
+// EdgeSlicer: support interface temperature (support_interface_nozzle_temperature, an object setting).
+// The temperature belongs to the filament for the whole plate: a filament that prints nothing but
+// support (interface and possibly support body) prints at the set temperature on every layer, the first
+// one included (owner decisions D3/D4, 2026-11-14). Every reader of the filament's temperature (tool
+// change heat-up and pre-heat, prime tower, ooze/standby, the layer 1 -> 2 switch, placeholders such as
+// temperature[] / first_layer_temperature[], the estimator) then sees one value, so no extra waits or
+// mid-layer reheats are introduced. A filament that also prints part of a model keeps its own
+// temperatures (ignored, with a warning).
+struct SupportInterfaceTemperatures
+{
+    enum class Ignored { NoInterfaceFilament, FilamentMatching, PrintsModel, Conflict };
+    struct IgnoredEntry
+    {
+        Ignored      reason;
+        int          filament;    // 0-based, -1 when there is none
+        int          temperature; // the value that was not used
+        std::string  object;      // object name
+        bool operator==(const IgnoredEntry &rhs) const
+        {
+            return reason == rhs.reason && filament == rhs.filament && temperature == rhs.temperature && object == rhs.object;
+        }
+    };
+    // Filament (0-based) -> nozzle temperature it prints at.
+    std::map<unsigned int, int> temperatures;
+    std::vector<IgnoredEntry>   ignored;
+
+    bool empty() const { return temperatures.empty() && ignored.empty(); }
+    bool operator==(const SupportInterfaceTemperatures &rhs) const { return temperatures == rhs.temperatures && ignored == rhs.ignored; }
+    bool operator!=(const SupportInterfaceTemperatures &rhs) const { return !(*this == rhs); }
+};
+
+// Writes `temperatures` into nozzle_temperature and nozzle_temperature_initial_layer of `config` at each
+// filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
+void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1292,6 +1328,12 @@ public:
     // Computed on demand: usage type is config-derived (real); physical/flow unprintables are stubbed empty
     // (the config subsystem they need is not ported).
     std::vector<FilamentUsageType> get_filament_usage_type() const;
+    // EdgeSlicer: support interface temperatures, resolved at the end of apply() (see SupportInterfaceTemperatures).
+    const SupportInterfaceTemperatures &support_interface_temperatures() const { return m_support_interface_temperatures; }
+    SupportInterfaceTemperatures        resolve_support_interface_temperatures() const;
+    // config() with the support interface temperatures written in; config() itself when there are none.
+    // `storage` holds the copy.
+    const PrintConfig &config_with_interface_temperatures(PrintConfig &storage) const;
     std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
     std::map<int, std::set<NozzleVolumeType>> get_filament_unprintable_flow(const std::vector<unsigned int>& used_filaments) const;
 
@@ -1601,6 +1643,8 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
+    SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
     // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().

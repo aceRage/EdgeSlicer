@@ -1012,7 +1012,8 @@ indexed_triangle_set split_box_20x20x3()
 // on a 0.4, filaments 2 and 3 on 0.8 nozzles, H2C / H3C-like) or one shared nozzle (X1C-like).
 // The split box has its -X half painted with filament 1 and its +X half with the mixed row, so every layer prints
 // the plain colour and the mixed row's passes.
-std::string slice_type1_tower_mixed_and_plain(Print &print, Model &model, bool shared_nozzle, MixedSublayerMethod method)
+std::string slice_type1_tower_mixed_and_plain(Print &print, Model &model, bool shared_nozzle, MixedSublayerMethod method,
+                                              const std::string &categories = "0,0,0")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(shared_nozzle ? 1 : 3);
@@ -1042,6 +1043,8 @@ std::string slice_type1_tower_mixed_and_plain(Print &print, Model &model, bool s
         { "use_relative_e_distances", "1" },
         { "enable_mixed_color_sublayer", "0" },
         { "dithering_local_z_mode", "0" },
+        // Orca #10780 block tower: one band per adhesiveness category (review S4, #1052).
+        { "filament_adhesiveness_category", categories },
     });
     MixedFilamentManager mgr;
     mgr.add_custom_filament(2, 3, 50, colours);
@@ -1083,14 +1086,16 @@ TEST_CASE("Mixed sublayer: Local-Z passes next to a plain colour on a Type1 towe
     const MixsubAutoGenerateOff auto_generate_off;
     const bool                shared_nozzle = GENERATE(false, true);
     const MixedSublayerMethod method  = GENERATE(MixedSublayerMethod::Subdivide, MixedSublayerMethod::Ratio);
-    CAPTURE(shared_nozzle, int(method));
+    // One block, or the plain colour (PLA) and the mixed pair (PETG) in two bands of the block tower (#1052 review S4).
+    const std::string categories = GENERATE(as<std::string>{}, "0,0,0", "100,300,300");
+    CAPTURE(shared_nozzle, int(method), categories);
 
     Print       print;
     Model       model;
     std::string gcode;
     std::string error;
     try {
-        gcode = slice_type1_tower_mixed_and_plain(print, model, shared_nozzle, method);
+        gcode = slice_type1_tower_mixed_and_plain(print, model, shared_nozzle, method, categories);
     } catch (const std::exception &ex) {
         error = ex.what();
     }
@@ -1170,4 +1175,8 @@ TEST_CASE("Mixed sublayer: Local-Z passes next to a plain colour on a Type1 towe
     CHECK(printing_tools.count(1) == 1);
     CHECK(printing_tools.count(2) == 1);
     CHECK(fallback_switches == 0);
+    // The tower visits of a layer follow each other: each starts with the filament the one before left loaded.
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes)
+        for (size_t i = 1; i < layer.size(); ++i)
+            CHECK(layer[i].initial_tool == layer[i - 1].new_tool);
 }
