@@ -139,8 +139,10 @@ class MappingContainer : public wxPanel
 {
 public:
     wxBitmap  ams_mapping_item_container;
-    MappingContainer(wxWindow* parent);
+    // slots_num: the unit's slot count; more than four (the AMS 3H's nine) widens the row.
+    MappingContainer(wxWindow* parent, int slots_num = 4);
     ~MappingContainer();
+    int       m_slots_num{4};
     void paintEvent(wxPaintEvent& evt);
     void render(wxDC& dc);
     void doRender(wxDC& dc);
@@ -179,8 +181,12 @@ public:
      * BambuStudio's picker does; -1 shows everything (one-extruder printers, unknown side). */
     /* rack_bound: on a nozzle rack's printer (H3C), the slots a rack nozzle is fed from
      * (MachineObject::rack_bound_slots); only those AMS 3H slots and spool holders are offered. */
+    /* multi_extruder: the printer has two extruders (H2D/H2C): the columns are headed "Left AMS" /
+     * "Right AMS"; a one-extruder printer (X1C, H3C with its nozzle rack) gets one "AMS" heading, as
+     * in Bambu Studio. */
     void         update_ams_data(std::map<std::string, Ams *> amsList, const std::vector<AmsTray> &ext_spools = {},
-                                 int only_physical_extruder = -1, const std::vector<std::pair<int, int>> &rack_bound = {});
+                                 int only_physical_extruder = -1, const std::vector<std::pair<int, int>> &rack_bound = {},
+                                 bool multi_extruder = true);
     void         update_ams_data_multi_machines();
     void         add_ams_mapping(std::vector<TrayData> tray_data, wxWindow* container, wxBoxSizer* sizer);
     void         set_current_filament_id(int id){m_current_filament_id = id;};

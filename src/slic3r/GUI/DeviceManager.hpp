@@ -180,6 +180,7 @@ struct Nozzle
     std::string      color_m;
     int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
     int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
+    bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };

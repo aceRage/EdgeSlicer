@@ -96,6 +96,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FillBedDialog.hpp
     GUI/HeightPatternDialog.cpp
     GUI/HeightPatternDialog.hpp
+    GUI/StartupSoundDialog.cpp
+    GUI/StartupSoundDialog.hpp
     GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp

@@ -496,12 +496,16 @@ TEST_CASE("a nil High-Flow override uses the Standard slot, then the printer", "
     CHECK(flow_dst.values[1] == Approx(0.95));
 }
 
-// Audit of the 23 filament flow-variant keys: the six retract overrides and Bambu's four
-// flush / pre-tower cooling keys are nullable, so only they can hold a nil High-Flow slot
-// (compose_filament_flow_variant_segment reads it as the Standard value; GCode.cpp reads a
-// nil flush key as its default). The other 13 are plain vectors whose short presets read
-// the Standard value through get_at.
-TEST_CASE("only the retract overrides and the flush keys among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
+// Audit of the filament flow-variant keys: the six retract overrides, Bambu's four flush / pre-tower
+// cooling keys and Bambu 2.9.1's four nozzle-change ramming keys (#1049: travel time after ramming and
+// ramming volumetric speed, extruder change and hotend change) are nullable, so only they can hold a nil
+// High-Flow slot. compose_filament_flow_variant_segment reads a nil High-Flow slot as the Standard value;
+// a slot nil in both reaches the slicer as nil: GCode.cpp reads a nil flush key as its default, and
+// WipeTower::set_extruder reads a nil ramming key as Bambu Studio does (travel time 0, volumetric speed the
+// filament's maximum volumetric speed; is_nil() reads a slot past the end as slot 0). The filament tab shows
+// a nil slot as N/A. The other keys are plain vectors whose short presets read the Standard value through
+// get_at.
+TEST_CASE("only the retract overrides, the flush keys and the ramming keys among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
 {
     std::vector<std::string> nullable;
     for (const std::string &key : filament_flow_variant_options()) {
@@ -513,7 +517,9 @@ TEST_CASE("only the retract overrides and the flush keys among the filament flow
     std::sort(nullable.begin(), nullable.end());
     CHECK(nullable == std::vector<std::string>{"filament_cooling_before_tower", "filament_deretraction_speed",
                                                "filament_flush_temp", "filament_flush_temp_fast",
-                                               "filament_flush_volumetric_speed", "filament_retract_length_toolchange",
+                                               "filament_flush_volumetric_speed", "filament_ramming_travel_time",
+                                               "filament_ramming_travel_time_nc", "filament_ramming_volumetric_speed",
+                                               "filament_ramming_volumetric_speed_nc", "filament_retract_length_toolchange",
                                                "filament_retraction_length", "filament_retraction_speed",
                                                "filament_wipe_distance", "filament_z_hop_types"});
 }

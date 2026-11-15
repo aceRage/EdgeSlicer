@@ -224,10 +224,17 @@ std::string collapse_nozzle_strip_labels(const std::vector<std::string> &labels)
 
 NozzleChip nozzle_chip_for(const std::vector<NozzleStripTile> &tiles, size_t extruder, double diameter)
 {
+    return nozzle_chip_for(tiles, extruder, diameter, 0, {});
+}
+
+NozzleChip nozzle_chip_for(const std::vector<NozzleStripTile> &tiles, size_t extruder, double diameter, int rack_slot,
+                           const std::vector<int> &split)
+{
     NozzleChip               chip;
     std::vector<std::string> labels, flows;
     for (const NozzleStripTile &t : tiles)
-        if (t.extruder == extruder && !t.empty() && same_nozzle_diameter(t.diameter, diameter)) {
+        if (t.extruder == extruder && !t.empty() && same_nozzle_diameter(t.diameter, diameter) &&
+            (rack_slot > 0 ? t.slot == rack_slot : std::find(split.begin(), split.end(), t.slot) == split.end())) {
             labels.push_back(t.label);
             const std::string flow = nozzle_flow_short(t.volume_type);
             if (std::find(flows.begin(), flows.end(), flow) == flows.end())
