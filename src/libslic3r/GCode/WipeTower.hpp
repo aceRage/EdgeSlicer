@@ -55,6 +55,10 @@ public:
     static float get_wrapping_detection_depth();
     // Line width of the nozzle-change purge lines at this nozzle diameter.
     static float nozzle_change_perimeter_width(float nozzle_diameter);
+    // Bambu Studio 2.9.1 / Orca #14800: what a Bambu Lab Type 1 tower primes after a change to `filament`:
+    // filament_prime_volume, filament_prime_volume_nc after a hotend change on one extruder (H2C rack), 15 mm3 in
+    // prime_volume_mode Saving.
+    static float bambu_prime_volume(const PrintConfig &config, unsigned int filament, bool hotend_change);
     // One filament's share of a Type1 tower layer, as plan_tower_new() reserves it.
     struct PurgeEstimate
     {

@@ -1284,6 +1284,17 @@ float WipeTower::nozzle_change_perimeter_width(float nozzle_diameter)
     return it != nozzle_diameter_to_nozzle_change_width.end() ? it->second : 2.f * nozzle_diameter * 1.25f;
 }
 
+float WipeTower::bambu_prime_volume(const PrintConfig &config, unsigned int filament, bool hotend_change)
+{
+    if (config.prime_volume_mode == PrimeVolumeMode::pvmSaving)
+        return 15.f;
+    if (hotend_change && !config.filament_prime_volume_nc.values.empty())
+        return float(config.filament_prime_volume_nc.get_at(filament));
+    if (!config.filament_prime_volume.values.empty())
+        return float(config.filament_prime_volume.get_at(filament));
+    return float(config.prime_volume.value);
+}
+
 float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width)
 {
     if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)

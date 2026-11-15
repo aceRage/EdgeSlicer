@@ -7619,13 +7619,8 @@ void Print::_make_wipe_tower()
                         // mode. Edge: on Bambu Lab printers, whose filament presets carry them; others keep prime_volume.
                         float prime_volume = float(m_config.prime_volume);
                         if (is_BBL_printer()) {
-                            const bool hotend_change = nozzle_change.need_ramming && !nozzle_change.extruder_change;
-                            if (m_config.prime_volume_mode == PrimeVolumeMode::pvmSaving)
-                                prime_volume = 15.f;
-                            else if (hotend_change && !m_config.filament_prime_volume_nc.values.empty())
-                                prime_volume = float(m_config.filament_prime_volume_nc.get_at(extruder_id));
-                            else if (!m_config.filament_prime_volume.values.empty())
-                                prime_volume = float(m_config.filament_prime_volume.get_at(extruder_id));
+                            prime_volume = WipeTower::bambu_prime_volume(m_config, extruder_id,
+                                                                         nozzle_change.need_ramming && !nozzle_change.extruder_change);
                             // Orca #14685 (Bambu Studio, A2L): the filament change extrudes grab_length for its detection,
                             // which the flush can count.
                             const int grab_extruder = extruder_id < m_config.filament_map.values.size() ? m_config.filament_map.values[extruder_id] - 1 : 0;

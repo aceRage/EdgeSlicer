@@ -21,6 +21,8 @@
 #include <vector>
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 // Bambu Studio 2.9.1's nozzle-change ramming on the Type1 prime tower (tests/design_bbs_tower_port.md): on a change
 // onto another nozzle the outgoing filament rams filament_change_length(_nc) on the tower before the swap
@@ -246,16 +248,16 @@ TEST_CASE("The ramming length is filament_change_length over a ramming line's ex
     tower.set_extruder(1, config);
 
     // 0.4 nozzle: Bambu Studio's ramming line is 1.0 mm wide.
-    CHECK(tower.nozzle_change_width(0) == Approx(1.0f));
+    CHECK_THAT(tower.nozzle_change_width(0), WithinAbs(1.0, 1e-6));
     // Bambu Studio set_toolchange(): mm of filament per mm of line = h * (w - h * (1 - pi/4)) / filament area.
     const double area   = M_PI * 1.75 * 1.75 / 4.;
     const double e_flow = 0.2 * (1.0 - 0.2 * (1. - M_PI / 4.)) / area;
-    CHECK(tower.nozzle_change_length(0, true, 0.2f) == Approx(4. / e_flow).epsilon(1e-4));
-    CHECK(tower.nozzle_change_length(0, false, 0.2f) == Approx(10. / e_flow).epsilon(1e-4));
+    CHECK_THAT(tower.nozzle_change_length(0, true, 0.2f), WithinRel(4. / e_flow, 1e-4));
+    CHECK_THAT(tower.nozzle_change_length(0, false, 0.2f), WithinRel(10. / e_flow, 1e-4));
     // Whole lines across the tower between the outgoing filament's purge lines: 35 - (1.0 + 0.5) per line.
     const float length = tower.nozzle_change_length(0, true, 0.2f);
     const float line   = 35.f - (1.0f + tower.tool_line_width(0));
-    CHECK(tower.nozzle_change_depth(0, length) == Approx(std::ceil(length / line) * 1.0f));
+    CHECK_THAT(tower.nozzle_change_depth(0, length), WithinAbs(std::ceil(length / line) * 1.0, 1e-5));
     CHECK(tower.nozzle_change_depth(0, 0.f) == 0.f);
 }
 
@@ -276,7 +278,7 @@ TEST_CASE("A nozzle change makes the tower deeper by its ramming lines", "[BBSTo
     // calc_block_infill_gap().
     const float lines = rammed->tower->nozzle_change_depth(0, rammed->tower->nozzle_change_length(0, true, 0.2f)) / 1.0f;
     REQUIRE(lines > 0.f);
-    CHECK(rammed->tower->get_depth() == Approx(plain->tower->get_depth() + lines * 1.25f).margin(0.01));
+    CHECK_THAT(rammed->tower->get_depth(), WithinAbs(plain->tower->get_depth() + lines * 1.25f, 0.01));
     // Without a plan the tower writes no nozzle change at all.
     CHECK_FALSE(change_on_layer(*plain, 1).nozzle_change_result.has_action());
 }
@@ -457,7 +459,7 @@ TEST_CASE("H3C: a filament without a ramming length turns its hotend off, or coo
         CHECK(idle.gcode.find(" E") == std::string::npos);
         // The idle travel takes no tower depth.
         const auto plain = direct_tower(cfg, WipeTower::NozzleChangePlan());
-        CHECK(t->tower->get_depth() == Approx(plain->tower->get_depth()).margin(0.01));
+        CHECK_THAT(t->tower->get_depth(), WithinAbs(plain->tower->get_depth(), 0.01));
     }
 }
 
@@ -563,7 +565,7 @@ TEST_CASE("The ramming rows go into the outgoing filament's block, ahead of the 
             const auto purge   = y_range(tc.gcode, true);
             REQUIRE(purge.first < 1e9f);
             // The block starts one 0.5 mm line in; the 1.0 mm ramming lines are centred half a line further.
-            CHECK(tc.nozzle_change_result.start_pos.y() == Approx(0.5f + 0.25f).margin(1e-3));
+            CHECK_THAT(tc.nozzle_change_result.start_pos.y(), WithinAbs(0.5 + 0.25, 1e-3));
             CHECK(purge.first > ramming.second);
         }
     }
@@ -686,7 +688,7 @@ TEST_CASE("Filaments of one adhesiveness category share one block", "[TowerBlock
     const auto t = block_tower(cfg, 4);
     REQUIRE(t->tower->blocks().size() == 1);
     CHECK(t->tower->blocks().front().filament_adhesiveness_category == 100);
-    CHECK(t->tower->blocks().front().start_depth == Approx(0.5f));
+    CHECK_THAT(t->tower->blocks().front().start_depth, WithinAbs(0.5, 1e-5));
 }
 
 TEST_CASE("The block tower stays stacked: no layer prints beyond the layer below it", "[TowerBlocks]")
@@ -769,4 +771,89 @@ TEST_CASE("X1C G-code: a PLA and PETG plate slices through the block planner", "
     CHECK(changes >= 10);
     // The start and end G-code have their own too.
     CHECK(templates >= changes);
+}
+
+// Review S4 (#1052): the H2C rack hotend change no gate plate reaches (the grouping puts two filaments of one
+// extruder on one nozzle): the prime volume rule, and the ramming inside the M632 / M633 interlock of a change planned
+// with it.
+TEST_CASE("H2C rack hotend change: filament_prime_volume_nc primes it, the ramming sits inside M632 / M633", "[TowerBlocks][BBSTowerRamming]")
+{
+    DynamicPrintConfig cfg = machine_config(H2C, "2,2");
+    cfg.set_deserialize_strict({ { "prime_tower_width", "35" },
+                                 { "filament_prime_volume", "45,300" },
+                                 { "filament_prime_volume_nc", "60,600" },
+                                 { "filament_change_length_nc", "4,4" },
+                                 { "prime_volume_mode", "Default" } });
+    PrintConfig config;
+    config.apply(cfg, true);
+    CHECK_THAT(WipeTower::bambu_prime_volume(config, 1, false), WithinAbs(300., 1e-6));
+    CHECK_THAT(WipeTower::bambu_prime_volume(config, 1, true), WithinAbs(600., 1e-6));
+    {
+        PrintConfig saving = config;
+        saving.prime_volume_mode.value = PrimeVolumeMode::pvmSaving;
+        CHECK_THAT(WipeTower::bambu_prime_volume(saving, 1, true), WithinAbs(15., 1e-6));
+    }
+
+    WipeTower::NozzleChangePlan hotend;
+    hotend.need_ramming          = true;
+    hotend.extruder_change       = false;
+    hotend.old_nozzle            = 1;
+    hotend.new_nozzle            = 2;
+    hotend.old_extruder          = 1;
+    hotend.old_physical_extruder = 0;
+    // Two layers 0 -> 1, each primed with what Print hands the tower for a hotend change or for an extruder change.
+    auto tower_with = [&config, &hotend](bool use_nc) {
+        auto t = std::make_unique<DirectTower>();
+        t->config = config;
+        t->tower  = std::make_unique<WipeTower>(t->config, 0, Vec3d::Zero(), 15.f, 0, 0.4f);
+        t->tower->set_extruder(0, t->config);
+        t->tower->set_extruder(1, t->config);
+        for (int layer = 0; layer < 2; ++layer) {
+            const float z = 0.2f * (layer + 1);
+            t->tower->plan_toolchange(z, 0.2f, 0, 0);
+            t->tower->plan_toolchange(z, 0.2f, 0, 1, WipeTower::bambu_prime_volume(t->config, 1, use_nc), 0.f, hotend);
+        }
+        t->tower->generate(t->result);
+        return t;
+    };
+    const auto nc = tower_with(true);
+    const auto ec = tower_with(false);
+    // Twice the prime: a deeper tower.
+    CHECK(nc->tower->get_depth() > ec->tower->get_depth() + 5.f);
+
+    const WipeTower::NozzleChangeResult &ncr = change_on_layer(*nc, 1).nozzle_change_result;
+    REQUIRE(ncr.has_action());
+    CHECK_FALSE(ncr.is_extruder_change);
+    const std::vector<std::string> lines = split_lines(ncr.gcode);
+    static const std::regex        extrude_re(R"(^G1 .*E[\d.]+)");
+    size_t first_m632 = std::string::npos, first_ram = std::string::npos, last_ram = 0, last_m633 = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].rfind("M632 S1", 0) == 0 && first_m632 == std::string::npos)
+            first_m632 = i;
+        if (std::regex_search(lines[i], extrude_re)) {
+            if (first_ram == std::string::npos)
+                first_ram = i;
+            last_ram = i;
+        }
+        if (lines[i] == "M633")
+            last_m633 = i;
+    }
+    REQUIRE(first_m632 != std::string::npos);
+    REQUIRE(first_ram != std::string::npos);
+    CHECK(first_m632 < first_ram);
+    CHECK(last_ram < last_m633);
+}
+
+// Review S1 (#1052): a Polymaker PLA preset of a P2S sits in Bambu PLA's band.
+TEST_CASE("A Polymaker PLA and a Bambu PLA share the PLA adhesiveness category", "[TowerBlocks][BBLProfiles]")
+{
+    PresetBundle &b = ramming_bundle();
+    for (const char *name : { "Bambu PLA Basic @BBL P2S", "Panchroma PLA @BBL P2S", "Polymaker PLA @BBL H2S" }) {
+        INFO(name);
+        const Preset *preset = b.filaments.find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        const auto *category = preset->config.option<ConfigOptionInts>("filament_adhesiveness_category");
+        REQUIRE(category != nullptr);
+        CHECK(category->get_at(0) == 100);
+    }
 }
