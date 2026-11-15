@@ -761,13 +761,14 @@ TEST_CASE("Side scrape on the left and right walls", "[BBSTowerH3C]")
         const WipeTower::ToolChangeResult *tcr = scrape_on_layer(*t, layer);
         if (tcr == nullptr)
             continue;
-        INFO("layer " << layer << " scrape start " << tcr->start_pos.x() << ", " << tcr->start_pos.y());
-        // Outside a side wall by the wall gap + the scrape length, beside the tower's depth.
-        const bool l = tcr->start_pos.x() < -2.f;
-        const bool r = tcr->start_pos.x() > t->tower->width() + 1.9f;
+        INFO("layer " << layer << " scrape start " << tcr->tool_change_start_pos.x() << ", " << tcr->tool_change_start_pos.y());
+        // Outside a side wall by the wall gap + the scrape length, beside the tower's depth. A block fill merged in
+        // front of the tool change keeps its own start_pos; the tool change starts at the scrape.
+        const bool l = tcr->tool_change_start_pos.x() < -2.f;
+        const bool r = tcr->tool_change_start_pos.x() > t->tower->width() + 1.9f;
         CHECK((l || r));
-        CHECK(tcr->start_pos.y() > 0.f);
-        CHECK(tcr->start_pos.y() < t->tower->get_depth());
+        CHECK(tcr->tool_change_start_pos.y() > 0.f);
+        CHECK(tcr->tool_change_start_pos.y() < t->tower->get_depth());
         left += l;
         right += r;
     }
@@ -788,15 +789,15 @@ TEST_CASE("Side scrape on a rib wall: on the straight part, outside the wall", "
             continue;
         ++scrapes;
         // The start is beyond the outer extrusion of this layer and the one below at its own X, front or back.
-        const float x = tcr->start_pos.x();
+        const float x = tcr->tool_change_start_pos.x();
         float       lo = 0.f, hi = 0.f, lo_below = 0.f, hi_below = 0.f;
         REQUIRE(extrusion_extreme_y_at(t->result[layer], x, false, lo));
         REQUIRE(extrusion_extreme_y_at(t->result[layer], x, true, hi));
         REQUIRE(extrusion_extreme_y_at(t->result[layer - 1], x, false, lo_below));
         REQUIRE(extrusion_extreme_y_at(t->result[layer - 1], x, true, hi_below));
-        INFO("layer " << layer << " start " << x << ", " << tcr->start_pos.y() << "; walls " << lo << " .. " << hi);
-        const bool front = tcr->start_pos.y() < std::min(lo, lo_below) - 1.9f;
-        const bool back  = tcr->start_pos.y() > std::max(hi, hi_below) + 1.9f;
+        INFO("layer " << layer << " start " << x << ", " << tcr->tool_change_start_pos.y() << "; walls " << lo << " .. " << hi);
+        const bool front = tcr->tool_change_start_pos.y() < std::min(lo, lo_below) - 1.9f;
+        const bool back  = tcr->tool_change_start_pos.y() > std::max(hi, hi_below) + 1.9f;
         CHECK((front || back));
         CHECK(tcr->side_scrape_z_low >= 0.6f - 1e-4f);
     }
