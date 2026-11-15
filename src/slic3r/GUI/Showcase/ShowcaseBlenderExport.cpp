@@ -22,6 +22,7 @@
 #include "libslic3r/Showcase/ShowcaseBlender.hpp"
 #include "libslic3r/Showcase/ShowcaseHdr.hpp"
 #include "libslic3r/Showcase/ShowcaseLens.hpp"
+#include "libslic3r/Showcase/ShowcaseSurfaceColours.hpp"
 #include "libslic3r/Showcase/ShowcaseTubes.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Utils.hpp"
@@ -310,12 +311,20 @@ bool ShowcaseView::gather_blender_package(Showcase::PackageInput &in, bool toolp
         int base_extruder = mv->extruder_id();
         if (base_extruder <= 0)
             base_extruder = 1;
+        // Edge: so does a modifier on a filament of its own, where it covers the part (as the view draws it).
+        const Transform3d instance_matrix = v->instance_idx() >= 0 && size_t(v->instance_idx()) < mo->instances.size() ?
+                                                mo->instances[size_t(v->instance_idx())]->get_matrix() : Transform3d::Identity();
+        const std::vector<Showcase::ColourRegion> regions = Showcase::colour_regions_for(*mv, instance_matrix, filaments.size());
         std::vector<std::pair<int, indexed_triangle_set>> pieces;
-        if (mv->mmu_segmentation_facets.empty())
+        if (mv->mmu_segmentation_facets.empty() && regions.empty())
             pieces.emplace_back(base_extruder, mv->mesh().its);
         else {
             std::vector<indexed_triangle_set> per_state;
-            mv->mmu_segmentation_facets.get_facets(*mv, per_state);
+            if (regions.empty())
+                mv->mmu_segmentation_facets.get_facets(*mv, per_state);
+            else
+                Showcase::surface_colour_facets(mv->mesh(), mv->mmu_segmentation_facets.empty() ? nullptr : &mv->mmu_segmentation_facets.get_data(),
+                                                regions, Showcase::surface_colour_edge_limit(instance_matrix * mv->get_matrix()), per_state);
             for (size_t st = 0; st < per_state.size(); ++st)
                 if (!per_state[st].indices.empty())
                     pieces.emplace_back(st == 0 ? base_extruder : int(st), std::move(per_state[st]));

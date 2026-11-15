@@ -139,7 +139,10 @@ public:
         SlicingRackMixedDiameter,
         // precise_z_height could not bring an object's last layer to the object's height (fewer than six
         // layers, or the last five at the layer height limits). Appended; own id.
-        SlicingPreciseZNotApplied
+        SlicingPreciseZNotApplied,
+        // An object rests on the bed but its first layer has no extrusions (a bed contact narrower
+        // than the first-layer wall can print), so it gets no brim and starts in mid-air. Appended; own id.
+        SlicingEmptyFirstLayer
     };
 
     typedef size_t TimeStamp;

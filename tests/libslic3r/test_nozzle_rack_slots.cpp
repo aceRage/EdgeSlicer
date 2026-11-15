@@ -12,6 +12,7 @@
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleStripModel.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -917,16 +918,21 @@ TEST_CASE("A nozzle chip is an override layered over the Plate", "[NozzleRackSlo
 
 // ---- H3C (owner report 2026-11-06): one extruder, a nine-slot rack of mixed sizes ----------------------------------------
 
-TEST_CASE("A single extruder with a rack of mixed sizes takes a process per size; one size adds nothing", "[NozzleProcess][NozzleRackSlots][H3C]")
+TEST_CASE("A single extruder with a nozzle rack takes a process per size; one size is one tool", "[NozzleProcess][NozzleRackSlots][H3C]")
 {
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
     cfg.set_num_filaments(2);
     cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4 };
     cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
     cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 9 }));
-    CHECK_FALSE(supports_nozzle_processes(cfg)); // the default rack: nine of the mounted size
+    // Owner report 2026-11-14: the default rack (nine of the mounted size) is a per-nozzle printer too: one tool, T1.
+    CHECK(single_extruder_nozzle_rack(cfg));
+    CHECK(supports_nozzle_processes(cfg));
+    CHECK(nozzle_tool_entries(cfg).size() == 1);
+    CHECK(nozzle_slot_tools(cfg).empty());
     cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.4,0.4" };
-    CHECK_FALSE(supports_nozzle_processes(cfg));
+    CHECK(supports_nozzle_processes(cfg));
+    CHECK(nozzle_tool_entries(cfg).size() == 1);
     cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.6,0.8,0.4" };
     CHECK(supports_nozzle_processes(cfg));
     CHECK_FALSE(supports_filament_nozzle_assignment(cfg));
@@ -937,7 +943,33 @@ TEST_CASE("A single extruder with a rack of mixed sizes takes a process per size
     CHECK(nozzle_tool_entry_id(entries[2]) == "T1:0.8");
     // No rack (a printer with one nozzle and an AMS): nothing changes.
     cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1 }));
+    CHECK_FALSE(single_extruder_nozzle_rack(cfg));
     CHECK_FALSE(supports_nozzle_processes(cfg));
+    // A config that declares no rack count (custom printers, older tests) is no rack printer either.
+    cfg.erase("extruder_max_nozzle_count");
+    CHECK_FALSE(single_extruder_nozzle_rack(cfg));
+    CHECK_FALSE(supports_nozzle_processes(cfg));
+}
+
+TEST_CASE("single_extruder_nozzle_rack is the H3C class only: not the H2C, U1 or a single-nozzle printer", "[NozzleProcess][NozzleRackSlots][H3C]")
+{
+    DynamicPrintConfig h2c = DynamicPrintConfig::full_print_config();
+    h2c.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" }, { "extruder_max_nozzle_count", "1,6" }, { "single_extruder_multi_material", "0" } });
+    CHECK_FALSE(single_extruder_nozzle_rack(h2c));
+    CHECK(supports_nozzle_processes(h2c)); // as before: two extruders
+    DynamicPrintConfig u1 = DynamicPrintConfig::full_print_config();
+    u1.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4,0.4,0.4" }, { "extruder_max_nozzle_count", "1,1,1,1" }, { "single_extruder_multi_material", "0" } });
+    CHECK_FALSE(single_extruder_nozzle_rack(u1));
+    CHECK(supports_nozzle_processes(u1));
+    DynamicPrintConfig x1c = DynamicPrintConfig::full_print_config();
+    x1c.set_deserialize_strict({ { "nozzle_diameter", "0.4" }, { "extruder_max_nozzle_count", "1" }, { "single_extruder_multi_material", "1" } });
+    CHECK_FALSE(single_extruder_nozzle_rack(x1c));
+    CHECK_FALSE(supports_nozzle_processes(x1c));
+    DynamicPrintConfig h3c = DynamicPrintConfig::full_print_config();
+    h3c.set_deserialize_strict({ { "nozzle_diameter", "0.4" }, { "extruder_max_nozzle_count", "9" }, { "single_extruder_multi_material", "1" } });
+    CHECK(single_extruder_nozzle_rack(h3c));
+    CHECK(supports_nozzle_processes(h3c));
+    CHECK_FALSE(supports_filament_nozzle_assignment(h3c)); // the H3C keeps its rack pins
 }
 
 TEST_CASE("A chosen process's layer height in whole plate layers, held to the nozzle's window", "[NozzleProcess][H3C][LayerHeight]")
@@ -995,14 +1027,41 @@ PresetBundle &h3c_bundle(const std::vector<std::string> &rack_override)
 TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chosen one sets the 0.8's layer height", "[NozzleProcess][NozzleRackSlots][H3C][PresetBundle]")
 {
     using Kind = PresetBundle::NozzleToolProcessKind;
-    SECTION("the stock rack (nine 0.4): no per-nozzle tools, nothing reaches the slicing config")
+    SECTION("the stock rack (nine 0.4): T1 and the TPU285 slot follow the plate, nothing reaches the slicing config")
     {
         PresetBundle &b = h3c_bundle({});
-        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0 });
-        CHECK_FALSE(supports_nozzle_processes(b.printer_config_with_project_sizes()));
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1 }); // slot 8 (TPU285) is a tool of its own
+        // Owner report 2026-11-14: the per-nozzle process system is on for the H3C whatever its rack holds.
+        CHECK(supports_nozzle_processes(b.printer_config_with_project_sizes()));
+        CHECK(b.nozzle_tool_count() == 2);
+        CHECK(b.nozzle_tool_ref(0).id == "T1");
+        CHECK(b.nozzle_tool_process_info(0).kind == Kind::FollowsPlate);
+        CHECK_FALSE(b.nozzle_process_choices_set());
         const DynamicPrintConfig full = b.full_config();
         CHECK(full.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values.empty());
         CHECK(full.option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
+        CHECK(full.option<ConfigOptionInts>("nozzle_process_missing")->values.empty());
+        CHECK(full.option<ConfigOptionStrings>("nozzle_region_values")->values.empty());
+        CHECK(full.option<ConfigOptionFloatsOrPercents>("nozzle_line_width")->values.empty());
+    }
+    SECTION("the stock rack: a process chosen for T1 is what every filament prints with")
+    {
+        PresetBundle &b = h3c_bundle({});
+        const double plate_outer = b.full_config().option<ConfigOptionFloats>("outer_wall_speed")->get_at(0);
+        REQUIRE(b.set_nozzle_process(0, "0.12mm High Quality @BBL H3C"));
+        CHECK(b.nozzle_tool_process_info(0).kind == Kind::Chosen);
+        CHECK(b.nozzle_process_choices_set());
+        const Preset *fine = b.prints.find_preset("0.12mm High Quality @BBL H3C", false);
+        REQUIRE(fine != nullptr);
+        const double fine_outer = fine->config.option<ConfigOptionFloats>("outer_wall_speed")->get_at(0);
+        const DynamicPrintConfig full = b.full_config();
+        CHECK(full.opt_float("layer_height") == Approx(0.2)); // the plate's grid stays
+        // Every filament (all on the one extruder) reads T1's speeds.
+        REQUIRE(std::abs(fine_outer - plate_outer) > 1.);
+        CHECK(std::stod(nozzle_process_value(full, "outer_wall_speed", 0, false)) == Approx(fine_outer));
+        b.set_nozzle_process(0, "");
+        CHECK(b.nozzle_tool_process_info(0).kind == Kind::FollowsPlate);
+        CHECK(b.full_config().option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
     }
     SECTION("rack 0.4 / 0.6 / 0.8: T1, T1 0.6, T1 0.8, each size picked its system process; the badges stay rack pins")
     {
@@ -1059,4 +1118,192 @@ TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chose
         b.set_filament_rack_slot(2, 0);
         b.set_rack_nozzle_override({});
     }
+}
+
+// ---- H3C slot process groups (owner 2026-11-14): pinned slots and the TPU285 slot are tools of their own -----------------------
+
+namespace {
+
+// An H3C-like single extruder: nine 0.4 slots, slot 8 TPU285; three filaments, the third 2.85 mm.
+DynamicPrintConfig h3c_slots_config(const std::vector<int> &pins)
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_filaments(3);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4 };
+    cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 9 }));
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4" };
+    cfg.option<ConfigOptionFloats>("filament_diameter", true)->values              = { 1.75, 1.75, 2.85 };
+    cfg.option<ConfigOptionInts>("filament_map", true)->values                     = { 1, 1, 1 };
+    cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values        = pins;
+    return cfg;
+}
+
+std::vector<std::string> entry_ids(const ConfigBase &cfg)
+{
+    std::vector<std::string> out;
+    for (const NozzleToolEntry &entry : nozzle_tool_entries(cfg))
+        out.push_back(nozzle_tool_entry_id(entry));
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("H3C slot tool ids: T1.9 parses, size ids and extruder ids do not", "[NozzleProcess][NozzleRackSlots][H3C][SlotGroups]")
+{
+    CHECK(nozzle_rack_slot_tool_id(0, 9) == "T1.9");
+    size_t e = 7;
+    int    k = 0;
+    REQUIRE(parse_nozzle_rack_slot_tool_id("T1.9", e, k));
+    CHECK(e == 0);
+    CHECK(k == 9);
+    CHECK_FALSE(parse_nozzle_rack_slot_tool_id("T1:0.6", e, k));
+    CHECK_FALSE(parse_nozzle_rack_slot_tool_id("T1", e, k));
+    CHECK_FALSE(parse_nozzle_rack_slot_tool_id("T1.x", e, k));
+    CHECK_FALSE(parse_nozzle_rack_slot_tool_id("T1.0", e, k));
+    CHECK(nozzle_tool_id_extruder("T1.9") == -1);
+    CHECK(is_nozzle_rack_tool_id("T1.9"));
+    CHECK(is_nozzle_rack_tool_id("T2:0.6"));
+    CHECK_FALSE(is_nozzle_rack_tool_id("T2"));
+    // Stored choices keep slot ids next to size ids.
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings({ "T1.9\nA", "T1:0.6\nB", "bad\nC" }));
+    const std::map<std::string, std::string> names = nozzle_slot_process_names(cfg);
+    CHECK(names.size() == 2);
+    CHECK(names.at("T1.9") == "A");
+    CHECK(names.at("T1:0.6") == "B");
+}
+
+TEST_CASE("H3C: the TPU285 slot and every pinned slot are tools of their own; the rest stays in the size group", "[NozzleProcess][NozzleRackSlots][H3C][SlotGroups]")
+{
+    SECTION("nothing pinned: T1 (slots 1-7, 9) and the TPU285 slot 8")
+    {
+        const DynamicPrintConfig cfg = h3c_slots_config({ 0 });
+        CHECK(split_rack_slots(cfg, 0) == std::vector<int>{ 8 });
+        CHECK(entry_ids(cfg) == std::vector<std::string>{ "T1", "T1.8" });
+        CHECK(nozzle_filament_group_id(cfg, 1).empty());
+        CHECK(nozzle_filament_group_id(cfg, 2).empty());
+        CHECK(nozzle_filament_group_id(cfg, 3) == "T1.8"); // 2.85 mm: the TPU285 nozzle
+        CHECK(nozzle_filament_tool_name(cfg, 3) == "T1 slot 8");
+        CHECK(nozzle_filament_tool_id(cfg, 1) == "T1");
+    }
+    SECTION("filament 2 (PETG) pinned to slot 9: T1 covers 1-7, slot 9 is its own tool")
+    {
+        const DynamicPrintConfig cfg = h3c_slots_config({ 0, 9, 0 });
+        CHECK(split_rack_slots(cfg, 0) == std::vector<int>{ 8, 9 });
+        CHECK(entry_ids(cfg) == std::vector<std::string>{ "T1", "T1.8", "T1.9" });
+        const std::vector<NozzleToolEntry> slots = nozzle_slot_tools(cfg);
+        REQUIRE(slots.size() == 2);
+        CHECK(slots[1].rack_slot == 9);
+        CHECK(slots[1].diameter == Approx(0.4));
+        CHECK(nozzle_tool_entry_name(cfg, slots[1]) == "T1 slot 9");
+        CHECK(nozzle_filament_group_id(cfg, 1).empty());
+        CHECK(nozzle_filament_group_id(cfg, 2) == "T1.9");
+        CHECK(nozzle_filament_group_id(cfg, 3) == "T1.8");
+        CHECK(filament_split_rack_slot(cfg, 2) == 9);
+    }
+    SECTION("two filaments pinned to one slot share its tool; a pin on the TPU285 slot is that slot's tool")
+    {
+        const DynamicPrintConfig cfg = h3c_slots_config({ 9, 9, 8 });
+        CHECK(entry_ids(cfg) == std::vector<std::string>{ "T1", "T1.8", "T1.9" });
+        CHECK(nozzle_filament_group_id(cfg, 1) == "T1.9");
+        CHECK(nozzle_filament_group_id(cfg, 2) == "T1.9");
+        CHECK(nozzle_filament_group_id(cfg, 3) == "T1.8");
+    }
+    SECTION("a mixed rack: a pinned 0.6 slot splits off, a size held only by pinned slots has no size group")
+    {
+        DynamicPrintConfig cfg = h3c_slots_config({ 0, 4, 0 });
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.4,0.6,0.6" };
+        CHECK(entry_ids(cfg) == std::vector<std::string>{ "T1", "T1:0.6", "T1.4" });
+        CHECK(nozzle_filament_group_id(cfg, 2) == "T1.4");
+        cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 3, 4, 0 };
+        CHECK(entry_ids(cfg) == std::vector<std::string>{ "T1", "T1.3", "T1.4" });
+        CHECK(nozzle_filament_group_id(cfg, 1) == "T1.3");
+    }
+}
+
+TEST_CASE("H2C and U1 keep their tools: no slot tools from pins or nozzle types", "[NozzleProcess][NozzleRackSlots][SlotGroups]")
+{
+    DynamicPrintConfig h2c = DynamicPrintConfig::full_print_config();
+    h2c.set_num_filaments(2);
+    h2c.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" },
+                                 { "extruder_max_nozzle_count", "1,6" },
+                                 { "single_extruder_multi_material", "0" },
+                                 { "filament_map", "2,2" },
+                                 { "filament_rack_nozzle_slot", "3,6" } });
+    h2c.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "", "0.4,0.4,0.6:high_flow,0.4,0.4,0.6" };
+    CHECK(split_rack_slots(h2c, 0).empty());
+    CHECK(split_rack_slots(h2c, 1).empty());
+    CHECK(entry_ids(h2c) == std::vector<std::string>{ "T1", "T2", "T2:0.6" });
+    CHECK(nozzle_slot_tools(h2c).size() == 1);
+    CHECK(nozzle_slot_tools(h2c)[0].rack_slot == 0);
+
+    DynamicPrintConfig u1 = DynamicPrintConfig::full_print_config();
+    u1.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4,0.4,0.4" }, { "extruder_max_nozzle_count", "1,1,1,1" }, { "single_extruder_multi_material", "0" } });
+    CHECK(entry_ids(u1) == std::vector<std::string>{ "T1", "T2", "T3", "T4" });
+}
+
+TEST_CASE("H3C chips: a slot tool shows its tile, the size group the tiles not split off", "[NozzleStrip][H3C][SlotGroups]")
+{
+    const DynamicPrintConfig           cfg   = h3c_slots_config({ 0, 9, 0 });
+    const NozzleStripInput             in    = nozzle_strip_input(cfg, false);
+    const std::vector<NozzleStripTile> tiles = nozzle_strip_tiles(in);
+    const std::vector<int>             split = split_rack_slots(cfg, 0);
+    const NozzleChip                   base  = nozzle_chip_for(tiles, 0, 0.4, 0, split);
+    CHECK(base.tiles == "1-7");
+    CHECK(base.flow == "Std");
+    const NozzleChip tpu = nozzle_chip_for(tiles, 0, 0.4, 8, split);
+    CHECK(tpu.tiles == "8");
+    CHECK(tpu.flow == "TPU285");
+    CHECK(nozzle_chip_for(tiles, 0, 0.4, 9, split).tiles == "9");
+    // The old call: every tile of the size.
+    CHECK(nozzle_chip_for(tiles, 0, 0.4).tiles == "1-9");
+}
+
+TEST_CASE("H3C preset bundle: pinning a filament to a slot gives that slot a process of its own", "[NozzleProcess][NozzleRackSlots][H3C][PresetBundle][SlotGroups]")
+{
+    using Kind      = PresetBundle::NozzleToolProcessKind;
+    PresetBundle &b = h3c_bundle({});
+    // The stock rack: T1 and the TPU285 slot 8, both following the plate; nothing reaches the slicing config.
+    CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1 });
+    CHECK(b.nozzle_tool_ref(1).id == "T1.8");
+    CHECK(b.nozzle_tool_ref(1).rack_slot == 8);
+    CHECK(b.nozzle_tool_name(1) == "T1 slot 8");
+    CHECK(b.nozzle_tool_process_info(1).kind == Kind::FollowsPlate);
+    CHECK(b.nozzle_split_rack_slots(0) == std::vector<int>{ 8 });
+    {
+        const DynamicPrintConfig full = b.full_config();
+        CHECK(full.option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
+        CHECK(full.option<ConfigOptionStrings>("nozzle_slot_process_missing")->values.empty());
+    }
+
+    // Filament 2 on slot 9 with its own process: filament 1 keeps the plate's, filament 2 reads slot 9's.
+    REQUIRE(b.set_filament_rack_slot(1, 9));
+    CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1, 2 });
+    CHECK(b.nozzle_tool_ref(2).id == "T1.9");
+    CHECK(b.nozzle_tool_index("T1.9") == 2);
+    REQUIRE(b.set_nozzle_process(2, "0.12mm High Quality @BBL H3C"));
+    CHECK(b.nozzle_tool_process_info(2).kind == Kind::Chosen);
+    CHECK(b.nozzle_tool_selection(2) == "0.12mm High Quality @BBL H3C");
+    DynamicPrintConfig full = b.full_config();
+    const auto *slots = full.option<ConfigOptionInts>("nozzle_filament_process_slot");
+    REQUIRE(slots->values.size() == 3);
+    CHECK(slots->values[0] == -1);
+    REQUIRE(slots->values[1] >= 0);
+    CHECK(slots->values[2] == -1);
+    const auto *speed = full.option<ConfigOptionFloats>("outer_wall_speed");
+    REQUIRE(size_t(slots->values[1]) < speed->values.size());
+    CHECK(speed->values[size_t(slots->values[1])] == Approx(60.));
+    CHECK(speed->values[0] == Approx(200.));
+    const auto *tools = full.option<ConfigOptionStrings>("nozzle_filament_tool");
+    REQUIRE(tools->values.size() == 3);
+    CHECK(tools->values[1] == "T1.9");
+
+    // Unpinned: slot 9 goes back into T1 and its choice no longer applies.
+    REQUIRE(b.set_filament_rack_slot(1, 0));
+    CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1 });
+    CHECK(b.nozzle_tool_index("T1.9") < 0);
+    b.prune_nozzle_processes();
+    CHECK(nozzle_slot_process_names(b.project_config).count("T1.9") == 0);
+    CHECK(b.full_config().option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
 }

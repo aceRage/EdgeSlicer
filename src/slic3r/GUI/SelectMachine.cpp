@@ -3977,7 +3977,8 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots());
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }
@@ -4403,7 +4404,8 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots());
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }
