@@ -275,6 +275,6 @@ BBS 2.9.1 code stays the source either way.
   purge rows bridge 6-8 mm. Cheapest upstream-compatible mitigation: in `finish_block()`, print the solid fill (the
   existing `solid_infill` branch, 1.5 x line spacing) when the next layer purges into that block's category, the same
   way the block already goes solid under a soluble change. G-code cost: only the finish blocks of multi-category
-  towers whose band is purged on the next layer change (sparse grid -> solid grid, roughly 3-4 x the fill's
-  filament in those blocks); single-category towers and Type 2 are untouched. A denser `m_bridging` instead would
+  towers whose band is purged on the next layer change (sparse grid -> solid grid: the fill of those blocks
+  takes several times its sparse filament, up to about 10 x for a deep block); single-category towers and Type 2 are untouched. A denser `m_bridging` instead would
   change every Bambu tower's sparse fill. Not done in #1052 (upstream behaviour; owner decision after the prints).
