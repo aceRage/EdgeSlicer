@@ -29,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_arrange_scoring.cpp
 	test_arrange_compacted_tower.cpp
 	test_arrange_results.cpp
+	test_arrange_exclusion.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_device_info_json.cpp
