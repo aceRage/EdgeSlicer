@@ -251,8 +251,12 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         footprint.brim_width = WipeTower::get_auto_brim_by_height(float(max_object_height));
     footprint.brim_width = WipeTower::estimate_brim_real_width(float(footprint.brim_width), float(nozzle_diameter), float(first_layer_height > EPSILON ? first_layer_height : layer_height), !type1, tower_line_width);
     // A tower interface run-in starts outside the tower (wipe_tower_interface_run_in): both
-    // generators report its room through the brim width, so the reserved area covers it.
-    footprint.brim_width = std::max(footprint.brim_width, TowerInterface::run_in_reserve(config, filament_ids, perimeter_width));
+    // generators report its room through the brim width, so the reserved area covers it. Not on a Type 1 tower that
+    // uses Bambu Studio's interface features instead (WipeTower: m_interface off); their contact-layer run-in reserves
+    // nothing, as in Bambu Studio, and Print::validate() warns about parts in its way.
+    const bool bbs_interface = type1 && opt_bool("enable_tower_interface_features") && TowerInterface::bambu_features_supported(config);
+    if (!bbs_interface)
+        footprint.brim_width = std::max(footprint.brim_width, TowerInterface::run_in_reserve(config, filament_ids, perimeter_width));
     return footprint;
 }
 
