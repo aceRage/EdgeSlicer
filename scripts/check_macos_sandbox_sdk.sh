@@ -3,6 +3,9 @@
 # (sandbox_init deprecated, named-profile string constants removed). Runs on
 # Linux CI; does not require Xcode. A real macOS link/run is still owed on a
 # signed helper.
+#
+# macOS /bin/bash is 3.2: `set -u` treats an empty array's "${arr[@]}" as unbound.
+# Do not use arrays for optional compiler flags.
 
 set -euo pipefail
 
@@ -25,6 +28,24 @@ can_compile_cstdint() {
 int main() { return 0; }' | "${cxx}" -fsyntax-only -std=c++17 "$@" -x c++ - >/dev/null 2>&1
 }
 
+syntax_check() {
+    local inc_dir="$1"
+    if [[ -n "${CXX_EXTRA}" ]]; then
+        "${CXX_BIN}" -fsyntax-only -std=c++17 \
+            -Werror -Wdeprecated-declarations \
+            "${CXX_EXTRA}" \
+            -I "${ROOT}/src" \
+            -I "${inc_dir}" \
+            "${CHECK_CC}"
+    else
+        "${CXX_BIN}" -fsyntax-only -std=c++17 \
+            -Werror -Wdeprecated-declarations \
+            -I "${ROOT}/src" \
+            -I "${inc_dir}" \
+            "${CHECK_CC}"
+    fi
+}
+
 [[ -f "${CHECK_CC}" && -f "${HEADER}" && -f "${MAC_CC}" && -f "${STUB_DIR}/sandbox.h" ]] ||
     die "missing Seatbelt probe sources or SDK stub"
 
@@ -34,44 +55,34 @@ if grep -nE 'kSBXProfile(NoWrite|NoInternet|NoNetwork|PureComputation)' \
 fi
 
 CXX_BIN=""
-declare -a CXX_EXTRA=()
+CXX_EXTRA=""
 GCC13_INSTALL="/usr/lib/gcc/x86_64-linux-gnu/13"
 # Prefer a compiler that can actually see <cstdint>. Ubuntu clang++ 18 may
 # select a GCC 14 install that has no libstdc++ headers.
-for candidate in "${CXX:-}" clang++ clang++-18 clang++-17 g++ g++-13 c++; do
+for candidate in ${CXX-} clang++ clang++-18 clang++-17 g++ g++-13 c++; do
     [[ -n "${candidate}" ]] || continue
     command -v "${candidate}" >/dev/null 2>&1 || continue
     resolved="$(command -v "${candidate}")"
     if can_compile_cstdint "${resolved}"; then
         CXX_BIN="${resolved}"
-        CXX_EXTRA=()
+        CXX_EXTRA=""
         break
     fi
     if [[ -d "${GCC13_INSTALL}" ]] && can_compile_cstdint "${resolved}" --gcc-install-dir="${GCC13_INSTALL}"; then
         CXX_BIN="${resolved}"
-        CXX_EXTRA=(--gcc-install-dir="${GCC13_INSTALL}")
+        CXX_EXTRA="--gcc-install-dir=${GCC13_INSTALL}"
         break
     fi
 done
 [[ -n "${CXX_BIN}" ]] || die "no C++ compiler on PATH can parse <cstdint> for -fsyntax-only"
 
-echo "check_macos_sandbox_sdk: using ${CXX_BIN} ${CXX_EXTRA[*]:-} with stub ${STUB_DIR}/sandbox.h"
+echo "check_macos_sandbox_sdk: using ${CXX_BIN} ${CXX_EXTRA} with stub ${STUB_DIR}/sandbox.h"
 
-"${CXX_BIN}" -fsyntax-only -std=c++17 \
-    -Werror -Wdeprecated-declarations \
-    "${CXX_EXTRA[@]}" \
-    -I "${ROOT}/src" \
-    -I "${STUB_DIR}" \
-    "${CHECK_CC}"
+syntax_check "${STUB_DIR}"
 
 # Also compile without a sandbox.h so the guarded fallback prototype is checked.
 NO_STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "${NO_STUB_DIR}"' EXIT
-"${CXX_BIN}" -fsyntax-only -std=c++17 \
-    -Werror -Wdeprecated-declarations \
-    "${CXX_EXTRA[@]}" \
-    -I "${ROOT}/src" \
-    -I "${NO_STUB_DIR}" \
-    "${CHECK_CC}"
+syntax_check "${NO_STUB_DIR}"
 
 echo "check_macos_sandbox_sdk: ok (stub SDK + missing sandbox.h, both -Werror=deprecated-declarations)"
