@@ -3254,6 +3254,38 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
         }
 
+        // Mixed nozzle diameters (H3C rack): the objects' layers merge into slabs per nozzle (AdaptiveLayerMerge), but the
+        // prime tower still purges every filament at the plate's layer height (Bambu Studio's mixed-diameter tower is not
+        // ported). Warn when that height is outside the layer height range of a nozzle that purges into the tower.
+        if (extruders.size() > 1 && has_multiple_used_nozzle_diameters(m_config, extruders)) {
+            std::vector<double> tower_heights;
+            for (const PrintObject *object : m_objects)
+                tower_heights.push_back(object->config().layer_height.value);
+            sort_remove_duplicates(tower_heights);
+            bool warned = false;
+            for (unsigned int filament : extruders) {
+                const AdaptiveLayerHeightRange range = adaptive_layer_height_range_for_nozzle(m_config, filament + 1, extruders);
+                if (range.max_height <= EPSILON)
+                    continue;
+                for (double height : tower_heights) {
+                    if (range.contains(height))
+                        continue;
+                    warn(Slic3r::format(L("The prime tower prints every filament at the layer height of %1% mm. Filament %2% prints with a "
+                                          "%3% mm nozzle, whose layer height range is %4%-%5% mm. Its prime tower lines may be weak "
+                                          "and the tower may lean or fall. Mixed nozzle diameters are not planned on the prime tower "
+                                          "yet: use a layer height inside every nozzle's range, or check the tower in a test print."),
+                                        float_to_string_decimal_point(height, 3), filament + 1,
+                                        float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1), 2),
+                                        float_to_string_decimal_point(range.min_height, 3), float_to_string_decimal_point(range.max_height, 3)),
+                         "layer_height");
+                    warned = true;
+                    break;
+                }
+                if (warned)
+                    break;
+            }
+        }
+
         if (! m_config.use_relative_e_distances)
             return { L("The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).") };
 
