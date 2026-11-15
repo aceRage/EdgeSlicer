@@ -502,7 +502,6 @@ TEST_CASE("An uncategorised PLA and PETG purge into separate blocks", "[BBSTower
     CHECK(categories == std::vector<int>{ 100, 300 });
 }
 
-
 // Review #1062 (d): Bambu Studio offers the switch on multi-extruder and hotend-as-extruder printers only; elsewhere it
 // does nothing.
 TEST_CASE("Tower interface features do nothing on a single-extruder printer", "[BBSTowerLeftovers][TowerInterfaceBBS]")
@@ -633,4 +632,53 @@ TEST_CASE("A part within the contact run-in beside the tower is warned about", "
     CHECK(warns(true, 5.));
     CHECK_FALSE(warns(false, 5.));
     CHECK_FALSE(warns(true, 15.));
+}
+
+namespace {
+
+// Every "M620.11 K.. I<filament>" line of a slice whose filament 0 has the extruder-change long retraction on (10 mm)
+// and filament 1 has it off: the K/R pair must be the one of the filament named by I.
+void check_ec_lines_follow_their_filament(const Machine &m)
+{
+    DynamicPrintConfig cfg = machine_config(m);
+    cfg.set_deserialize_strict({ { "curr_bed_type", "Textured PEI Plate" },
+                                 { "long_retractions_when_ec", "1,0" },
+                                 { "retraction_distances_when_ec", "10,0" } });
+    Print             print;
+    const std::string gcode = slice_contact_plate(print, cfg);
+    REQUIRE_FALSE(gcode.empty());
+    size_t on_lines = 0, off_lines = 0;
+    for (const std::string &line : split_lines(gcode)) {
+        if (line.rfind("M620.11 K", 0) != 0)
+            continue;
+        INFO(line);
+        double k = -1., id = -1., r = -1.;
+        REQUIRE(has_token(line, 'K', &k));
+        REQUIRE(has_token(line, 'I', &id));
+        REQUIRE(has_token(line, 'R', &r));
+        if (id == 0.) {
+            CHECK(k == 1.);
+            CHECK_THAT(r, WithinAbs(10., 1e-6));
+            ++on_lines;
+        } else {
+            CHECK(id == 1.);
+            CHECK(k == 0.);
+            CHECK_THAT(r, WithinAbs(0., 1e-6));
+            ++off_lines;
+        }
+    }
+    // PLA -> PETG at 2 mm and PETG -> PLA on every layer above: both directions are on the plate.
+    CHECK(on_lines >= 2);
+    CHECK(off_lines >= 1);
+}
+
+} // namespace
+
+TEST_CASE("Extruder-change long retraction: each M620.11 K line carries the outgoing filament's K and R",
+          "[BBSTowerLeftovers][PrintGCode][LongRetractEC]")
+{
+    // Bambu Studio 2.9.1 expands change_filament_gcode with the scalar pair of the filament loaded last (set after each
+    // change, GCode.cpp 1262-1268 / 8953-8959), the same filament as I[current_filament_id] on that line.
+    SECTION("H2D") { check_ec_lines_follow_their_filament(H2D_PLA_PETG); }
+    SECTION("H2C") { check_ec_lines_follow_their_filament(H2C_PLA_PETG); }
 }
