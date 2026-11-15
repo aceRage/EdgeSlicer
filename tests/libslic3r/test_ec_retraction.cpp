@@ -23,9 +23,10 @@ using namespace Slic3r;
 //     {endif}
 //
 // and the firmware uses K/R to park the idle filament with a controlled retraction instead of
-// unloading it. Those two placeholders are PER TOOLCHANGE and are keyed by the filament being
-// switched TO - Bambu Studio sets them at four toolchange sites from the target filament's entry
-// of the two per-filament options.
+// unloading it. Those two placeholders are PER TOOLCHANGE and belong to the filament named on the
+// line, I[current_filament_id] - the OUTGOING one: Bambu Studio 2.9.1 sets them from the new
+// filament's entry only AFTER each change_filament_gcode, so the template sees the filament loaded
+// last. (tests/fff_print [LongRetractEC] checks the K/R-to-I pairing on real H2D / H2C slices.)
 //
 // This fork used to hardcode the pair to false/0 globally ("Ultra: remaining single-mapped shims"),
 // so every switch emitted K0 ... R0 no matter what the project config said. These cases pin the
@@ -120,7 +121,7 @@ std::string slice_two_filaments(const DynamicPrintConfig &config)
 
 } // namespace
 
-SCENARIO("Extruder-change retraction placeholders follow the target filament", "[EcRetraction]")
+SCENARIO("Extruder-change retraction placeholders follow the filament of each toolchange", "[EcRetraction]")
 {
     GIVEN("a two-filament print whose filaments carry different _when_ec values")
     {
@@ -141,7 +142,7 @@ SCENARIO("Extruder-change retraction placeholders follow the target filament", "
 
         THEN("every emitted pair is one of the two filaments' own values")
         {
-            // Switching TO filament 0 -> K1 R10. Switching TO filament 1 -> K0 R0
+            // Switching AWAY FROM filament 0 -> K1 R10. Away from filament 1 -> K0 R0
             // (the distance is forced to 0 when the feature is off, so K and R never disagree).
             for (const KR &kr : krs) {
                 const bool to_filament_0 = (kr.k == "1");
@@ -277,7 +278,7 @@ SCENARIO("Extruder-change retraction probe works in both G-code layouts", "[EcRe
                 if (bbl && exec_at != std::string::npos)
                     REQUIRE(config_at < exec_at);
             }
-            THEN("switches to filament 0 carry K1 R10 and switches to filament 1 carry K0 R0")
+            THEN("switches away from filament 0 carry K1 R10 and away from filament 1 carry K0 R0")
             {
                 REQUIRE(krs.size() >= 2);
                 bool saw_on = false, saw_off = false;

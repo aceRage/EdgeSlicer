@@ -1584,10 +1584,14 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                                  new ConfigOptionFloat(cfg.filament_tower_interface_purge_volume.get_at(filament)));
             config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInt(interface_temp));
         }
-        // BBS: the extruder-change retraction pair must be published BEFORE the template is
-        // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
-        // R{retraction_distance_when_ec}) - and it is keyed by the filament being switched TO.
-        set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
+        // BBS: change_filament_gcode reads the extruder-change retraction pair as
+        // "M620.11 K{0|1} I[current_filament_id] ... R{retraction_distance_when_ec}", so the pair belongs to the
+        // OUTGOING filament, like the id on that line. Bambu Studio 2.9.1 never sets it before the template:
+        // the parser still holds the values of the filament loaded last (GCode.cpp 1262-1268, set after the
+        // change for the new filament; start 2932-2938). Publish the outgoing pair explicitly; the incoming
+        // filament's pair is published after the change, below.
+        if (previous_extruder_id >= 0)
+            set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(previous_extruder_id));
         toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_extruder_id, &config);
         check_add_eol(toolchange_gcode_str);
 
@@ -1699,7 +1703,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     gcodegen.placeholder_parser().set("current_extruder",
                                       new_extruder_id < 0 ? new_extruder_id : int(gcodegen.writer().output_tool(unsigned(new_extruder_id))));
     set_cut_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
-    // (the _ec pair was published above, before change_filament_gcode was expanded)
+    // The incoming filament is now the loaded one: the next change_filament_gcode (and filament_start_gcode)
+    // read its _ec pair, as in Bambu Studio 2.9.1 GCode.cpp 1262-1268.
+    set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
 
     // Process the start filament gcode.
     std::string        start_filament_gcode_str;
@@ -13831,8 +13837,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             flush.set(dyn_config);
         }
 
-        // BBS: as above - the _ec pair has to be in the parser before the template reads it.
-        set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
+        // BBS: as in append_tcr - the template's _ec pair is the OUTGOING filament's (it goes on the
+        // "M620.11 K.. I[current_filament_id]" line). Bambu Studio 2.9.1 set_extruder publishes the new
+        // filament's pair only after the template (GCode.cpp 8905 then 8953-8959).
+        if (previous_extruder_id >= 0)
+            set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(previous_extruder_id));
         toolchange_gcode_parsed = placeholder_parser_process("change_filament_gcode", change_filament_gcode, extruder_id, &dyn_config);
         check_add_eol(toolchange_gcode_parsed);
         // FanMover skips spans bracketed by "; custom gcode" ... "; custom gcode end" (prefix match,
@@ -13895,7 +13904,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     this->placeholder_parser().set("current_extruder", m_writer.output_tool(extruder_id));
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
     // BBS: re-publish for everything that runs AFTER the toolchange (filament_start_gcode and the
-    // rest of the layer). change_filament_gcode itself already saw these values above.
+    // rest of the layer, and the next change_filament_gcode if it has no outgoing filament id).
     set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
     // Append the filament start G-code.
