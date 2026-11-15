@@ -3924,8 +3924,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("prime_tower_acceleration", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_line_width", "multimaterial_settings_prime_tower");
         // Orca #10780 / #15035: Type 1 tower block planner.
-        optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower#infill-gap");
-        optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower#internal-ribs");
+        optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_flat_ironing", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
