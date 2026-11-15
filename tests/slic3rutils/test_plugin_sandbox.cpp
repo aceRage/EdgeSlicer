@@ -237,11 +237,11 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir           data_dir_guard("plugin-sandbox-hello");
-    plugin_ipc::SpawnedHost host;
-    std::string             error;
-    const auto              t0 = std::chrono::steady_clock::now();
-    REQUIRE(plugin_ipc::spawn_host(host, error));
+    ScopedDataDir       data_dir_guard("plugin-sandbox-hello");
+    ScopedSpawnedHost   spawned;
+    std::string         error;
+    const auto          t0 = std::chrono::steady_clock::now();
+    REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     plugin_ipc::SandboxSpec spec;
     spec.python_home     = PythonInterpreter::bundled_python_home();
     spec.plugin_root     = data_dir_guard.plugins_dir().string();
@@ -249,9 +249,9 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
         {"type", plugin_ipc::k_type_hello}, {"protocol_version", plugin_ipc::k_protocol_version}, {"data_dir", data_dir()},
         {"resources_dir", resources_dir()}, {"sandbox", plugin_ipc::sandbox_spec_to_json(spec)},
     };
-    REQUIRE(host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
     nlohmann::json reply;
-    REQUIRE(host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
     CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
     REQUIRE(reply.contains("sandbox"));
     const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
@@ -290,8 +290,6 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
 #else
     CHECK(ms < 1500);
 #endif
-    plugin_ipc::kill_host(host);
-    plugin_ipc::close_host(host);
 }
 
 TEST_CASE("sandboxed child cannot read a user-home file and can read its plugin dir", "[PluginSandbox][Python][fs]")
@@ -475,10 +473,10 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir           data_dir_guard("plugin-sandbox-seatbelt");
-    plugin_ipc::SpawnedHost host;
-    std::string             error;
-    REQUIRE(plugin_ipc::spawn_host(host, error));
+    ScopedDataDir       data_dir_guard("plugin-sandbox-seatbelt");
+    ScopedSpawnedHost   spawned;
+    std::string         error;
+    REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     plugin_ipc::SandboxSpec spec;
     spec.python_home        = PythonInterpreter::bundled_python_home();
     spec.plugin_root        = data_dir_guard.plugins_dir().string();
@@ -487,9 +485,9 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
         {"type", plugin_ipc::k_type_hello}, {"protocol_version", plugin_ipc::k_protocol_version}, {"data_dir", data_dir()},
         {"resources_dir", resources_dir()}, {"sandbox", plugin_ipc::sandbox_spec_to_json(spec)},
     };
-    REQUIRE(host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
     nlohmann::json reply;
-    REQUIRE(host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
     CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
     REQUIRE(reply.contains("sandbox"));
     const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
@@ -497,8 +495,6 @@ TEST_CASE("Seatbelt probe is labelled and parent-gated", "[PluginSandbox][handsh
     CHECK(report.applied);
     CHECK(report.kind == plugin_ipc::k_sandbox_kind_seatbelt_probe);
     CHECK(report.detail.find("DEV/TEST") != std::string::npos);
-    plugin_ipc::kill_host(host);
-    plugin_ipc::close_host(host);
 }
 #endif
 

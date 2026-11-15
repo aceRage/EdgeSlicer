@@ -674,11 +674,11 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
     if (!plugin_ipc::helper_exists())
         SKIP("edge-plugin-host is not next to the test binary");
 
-    ScopedDataDir           data_dir_guard("plugin-ipc-spawn-fast");
-    plugin_ipc::SpawnedHost host;
-    std::string             error;
-    const auto              t0 = std::chrono::steady_clock::now();
-    REQUIRE(plugin_ipc::spawn_host(host, error));
+    ScopedDataDir     data_dir_guard("plugin-ipc-spawn-fast");
+    ScopedSpawnedHost spawned;
+    std::string       error;
+    const auto        t0 = std::chrono::steady_clock::now();
+    REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     CHECK(error.empty());
     const auto spawn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     // F_DUPFD used to drop CLOEXEC on the exec-error pipe, so poll(errp[0], 3000)
@@ -689,7 +689,7 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
         // The exec-error pipe is moved to fd >= 11 and must not survive exec.
         // Inspect before hello so the helper is blocked in handshake read, not
         // yet in CPython (which opens its own pipes).
-        const fs::path               fd_dir = fs::path("/proc") / std::to_string(host.pid) / "fd";
+        const fs::path               fd_dir = fs::path("/proc") / std::to_string(spawned.host.pid) / "fd";
         boost::system::error_code    ec;
         fs::directory_iterator       it(fd_dir, ec);
         const fs::directory_iterator end;
@@ -710,9 +710,9 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
         {"data_dir", data_dir()},
         {"resources_dir", resources_dir()},
     };
-    REQUIRE(host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
     nlohmann::json reply;
-    REQUIRE(host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    REQUIRE(spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
     CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 #ifdef __SANITIZE_ADDRESS__
@@ -720,8 +720,6 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
 #else
     CHECK(ms < 1000);
 #endif
-    plugin_ipc::kill_host(host);
-    plugin_ipc::close_host(host);
 }
 #endif
 

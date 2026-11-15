@@ -19,6 +19,7 @@
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
+#include <slic3r/plugin/ipc/PluginHostProcess.hpp>
 #include <slic3r/plugin/ipc/PluginSandbox.hpp>
 #endif
 
@@ -174,6 +175,23 @@ struct ScopedResourcesDir
 };
 
 #ifdef EDGE_PYTHON_PLUGINS
+// Always kill+reap a spawned helper, including when Catch2 REQUIRE aborts the case.
+// A leaked child becomes a zombie that hub_platform_tests waitpid(-1) can reap.
+struct ScopedSpawnedHost
+{
+    plugin_ipc::SpawnedHost host;
+
+    ~ScopedSpawnedHost()
+    {
+        plugin_ipc::kill_host(host);
+        plugin_ipc::close_host(host);
+    }
+
+    ScopedSpawnedHost()                                    = default;
+    ScopedSpawnedHost(const ScopedSpawnedHost&)            = delete;
+    ScopedSpawnedHost& operator=(const ScopedSpawnedHost&) = delete;
+};
+
 // Unsigned macOS helpers and missing AppContainer report kind=none. Isolation tests skip;
 // execute tests still need IPC/trust/script coverage via the stored Run anyway override.
 inline bool test_os_sandbox_will_apply() { return plugin_ipc::os_sandbox_available() && !plugin_ipc::sandbox_env_force_unavailable(); }
