@@ -891,3 +891,76 @@ TEST_CASE("The side scrape's 2.2 mm count in the tower clearance check", "[BBSTo
     CHECK(tower_too_close_warning(true));
     CHECK_FALSE(tower_too_close_warning(false));
 }
+
+// ---- Review #1056 S1: the scrape's ring in the in-bed check and in print by object. ----
+
+namespace {
+
+// An H3C plate whose tower stands `tower_x` mm from the bed's left edge, two cubes far from it.
+std::string tower_validate_error(double tower_x, double brim, bool side_scrape)
+{
+    DynamicPrintConfig cfg = machine_config(H3C);
+    cfg.set_deserialize_strict({ { "wipe_tower_x", tower_x },
+                                 { "prime_tower_brim_width", brim },
+                                 { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 2.)));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(120. + 30. * i, 60., 0.));
+        object->ensure_on_bed();
+    }
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    return print.validate().string;
+}
+
+bool off_bed(const std::string &error) { return error.find("partially outside the printable area") != std::string::npos; }
+
+} // namespace
+
+TEST_CASE("The side scrape's ring beyond the tower brim has to be on the bed", "[BBSTowerH3C]")
+{
+    // A brimless tower 1 mm from the bed's edge: the tower fits, the scrape 2.2 mm outside it does not.
+    CHECK_FALSE(off_bed(tower_validate_error(1., 0., false)));
+    CHECK(off_bed(tower_validate_error(1., 0., true)));
+    // A 3 mm brim already reaches past the scrape; the in-bed check tests the body only, as before.
+    CHECK_FALSE(off_bed(tower_validate_error(3.5, 3., true)));
+}
+
+TEST_CASE("Print by object: a single object too close to the tower's scrape ring is warned about", "[BBSTowerH3C]")
+{
+    auto warned = [](bool side_scrape) {
+        DynamicPrintConfig cfg = machine_config(H3C);
+        cfg.set_deserialize_strict({ { "print_sequence", "by object" },
+                                     { "prime_tower_brim_width", "0" },
+                                     { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+        // One object of two parts, one per filament, 1 mm left of the tower at (160, 180): it builds a tower.
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "two_parts";
+        ModelVolume *a      = object->add_volume(TriangleMesh(its_make_cube(10., 10., 2.)));
+        ModelVolume *b      = object->add_volume(TriangleMesh(its_make_cube(10., 10., 2.)));
+        b->set_offset(Vec3d(-12., 0., 0.));
+        a->config.set("extruder", 1);
+        b->config.set("extruder", 2);
+        object->add_instance();
+        object->ensure_on_bed();
+        // Place it by its bounding box: right edge 1 mm left of the tower's left edge.
+        const BoundingBoxf3 bb = object->instance_bounding_box(0);
+        object->instances.front()->set_offset(object->instances.front()->get_offset() + Vec3d(159. - bb.max.x(), 182. - bb.min.y(), 0.));
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        std::vector<StringObjectException> warnings;
+        print.validate(&warnings);
+        return std::any_of(warnings.begin(), warnings.end(), [](const StringObjectException &w) {
+            return w.string.find("Prime Tower") != std::string::npos && w.string.find("too close to others") != std::string::npos;
+        });
+    };
+    CHECK(warned(true));
+    CHECK_FALSE(warned(false));
+}

@@ -2453,6 +2453,24 @@ static Polygons estimated_prime_tower_outline(const Print &print, bool with_brim
     return outline;
 }
 
+// Review #1056 S1: how far the side scrape reaches beyond the tower brim - the part of its ring the brim
+// does not already reserve. 0 with the scrape off or with a brim at least as wide as the scrape's reach.
+static double side_scrape_ring_beyond_brim(const Print &print)
+{
+    const double margin = prime_tower_side_scrape_margin(print.config());
+    if (margin <= 0.)
+        return 0.;
+    const double brim = print.wipe_tower_data(int(print.extruders(true).size())).brim_width;
+    return std::max(0., margin - std::max(0., brim));
+}
+
+static Polygons grown_by(Polygons polygons, double distance)
+{
+    if (distance > 0. && ! polygons.empty())
+        polygons = offset(polygons, float(scaled(distance)));
+    return polygons;
+}
+
 // Orca #15146: a tower placed where the bed has no corner (delta, circular or custom beds) is reported
 // before slicing instead of only once the tower is generated (the exact check in _make_wipe_tower()).
 // Only the body is tested here: the brim estimate can overshoot the generated brim and must not
@@ -2464,7 +2482,8 @@ std::string Print::prime_tower_off_bed_error() const
     const Print &print = *this;
     if (!print.has_wipe_tower())
         return {};
-    const Polygons body = estimated_prime_tower_outline(print, /*with_brim=*/false);
+    // The scrape travels beside the wall, so where it reaches past the brim the bed has to hold it too.
+    const Polygons body = grown_by(estimated_prime_tower_outline(print, /*with_brim=*/false), side_scrape_ring_beyond_brim(print));
     if (body.empty())
         return {};
     Polygon bed;
@@ -2499,7 +2518,7 @@ static std::string prime_tower_reach_error(const Print &print, bool grouping_don
     if (config.print_sequence == PrintSequence::ByObject && print.objects().size() > 1)
         return {};
 
-    const Polygons tower = estimated_prime_tower_outline(print);
+    const Polygons tower = grown_by(estimated_prime_tower_outline(print), side_scrape_ring_beyond_brim(print));
     if (tower.empty())
         return {};
 
@@ -2645,6 +2664,34 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         }*/
         return {L("Prime Tower") + L(" is too close to exclusion area, and collisions will be caused.\n")};
     }
+    return {};
+}
+
+// Review #1056 S1: print by object runs sequential_print_clearance_valid() instead of the by-layer check, which has
+// no tower test, yet a single object printed "by object" still builds a tower when it changes filament. The same
+// tower / object test as by layer (the brimmed outline grown by the side scrape's reach), and the same warning.
+static StringObjectException by_object_tower_clearance_warning(const Print &print)
+{
+    if (! print.has_wipe_tower() || print.objects().size() != 1)
+        return {};
+    Polygons tower = estimated_prime_tower_outline(print);
+    if (tower.empty())
+        return {};
+    if (const double margin = prime_tower_side_scrape_margin(print.config()); margin > 0.)
+        tower = offset(tower, float(scaled(margin)));
+    for (const PrintObject *object : print.objects())
+        for (const PrintInstance &inst : object->instances()) {
+            const ModelInstance *model_instance = inst.model_instance;
+            Polygon hull = object->model_object()->convex_hull_2d(
+                Geometry::assemble_transform(Vec3d::Zero(), model_instance->get_rotation(), model_instance->get_scaling_factor(), model_instance->get_mirror()));
+            hull.translate(inst.shift - object->center_offset());
+            if (! intersection(Polygons{ hull }, tower).empty()) {
+                StringObjectException w;
+                w.string     = L("Prime Tower") + L(" is too close to others, and collisions may be caused.\n");
+                w.is_warning = true;
+                return w;
+            }
+        }
     return {};
 }
 
@@ -3041,6 +3088,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             ret.type = STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT;
             return ret;
         }
+        // A single object printed by object can still build a tower: test it against the object (warning only).
+        if (StringObjectException tower_warning = by_object_tower_clearance_warning(*this); !tower_warning.string.empty())
+            add_warning(tower_warning);
     }
     else {
         //BBS

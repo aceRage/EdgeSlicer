@@ -1104,3 +1104,19 @@ SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAre
     cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
     CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
 }
+
+// Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to
+// wall gap + scrape length (2.2 mm) outside the tower, so the reach check counts what of that ring the tower brim
+// does not already cover.
+SCENARIO("the side scrape's ring beyond the tower brim counts in the prime tower reach check", "[ExtruderAreas][H2D][PrimeTower]")
+{
+    auto has_tower_text = [](const std::string &text) { return text.find("prime tower is outside") != std::string::npos; };
+    // Brimless tower 1 mm inside the right nozzle's area (X 25..350), both nozzles printing on it.
+    auto config = [](bool side_scrape) {
+        DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "1,2", 26.);
+        cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+        return cfg;
+    };
+    GIVEN("the scrape off") { THEN("the tower is fine") { CHECK_FALSE(has_tower_text(tower_error(config(false)))); } }
+    GIVEN("the scrape on") { THEN("the right nozzle cannot reach the scrape's ring: refused") { CHECK(has_tower_text(tower_error(config(true)))); } }
+}
