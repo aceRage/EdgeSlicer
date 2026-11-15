@@ -97,6 +97,7 @@ Settings Settings::from_config(const ConfigBase &config)
     s.extra_prime = opt_bool(config, "wipe_tower_interface_extra_prime");
     if (const ConfigOption *opt = option_of(config, "wipe_tower_interface_trigger"); opt != nullptr)
         s.trigger = opt->getInt();
+    s.cooldown_during_tower = opt_bool(config, "enable_tower_interface_cooldown_during_tower");
     return s;
 }
 

@@ -9916,6 +9916,16 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<TowerInterfaceTrigger>(titMaterialChange));
 
+    // Orca #12266 (PrintConfig.cpp:8476).
+    def          = this->add("enable_tower_interface_cooldown_during_tower", coBool);
+    def->label   = L("Cool down from interface boost during prime tower");
+    def->tooltip = L("When a tower interface raises the nozzle to the filament's tower interface temperature (\"Enable tower "
+                     "interface features\" on the Bambu Lab tower, or \"Heat up for tower interfaces\"), set the print "
+                     "temperature back right after that heat-up, at the start of the prime tower purge, so the nozzle cools "
+                     "during the purge, instead of after it.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def          = this->add("wipe_tower_interface_temp", coBool);
     def->label   = L("Heat up for tower interfaces");
     def->tooltip = L("At a tower interface tool change, wait for the new filament's tower interface temperature (filament "

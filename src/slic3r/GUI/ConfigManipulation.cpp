@@ -1256,6 +1256,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                                       (config->opt_bool("wipe_tower_interface_run_in") && config->opt_bool("wipe_tower_wall_gap")) ||
                                       config->opt_bool("wipe_tower_interface_extra_prime");
     toggle_field("wipe_tower_interface_trigger", have_prime_tower && !bbs_interface && have_tower_interface);
+    // Orca #12266: only where an interface heats the nozzle up.
+    toggle_line("enable_tower_interface_cooldown_during_tower", have_prime_tower);
+    toggle_field("enable_tower_interface_cooldown_during_tower",
+                 have_prime_tower && (bbs_interface || (!bbs_interface && config->opt_bool("wipe_tower_interface_temp"))));
 
     const bool local_z_dithering_enabled =
         config->has("dithering_local_z_mode") && config->option("dithering_local_z_mode") != nullptr &&

@@ -1897,6 +1897,7 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     // Bambu Studio 2.9.1 (WipeTower.cpp:1925): its interface features on the contact layers. Edge's own interface
     // options approximate the same bundle on a tool change trigger; with Bambu's switch on they are not used here.
     m_enable_tower_interface_features = config.enable_tower_interface_features.value;
+    m_interface_cooldown_during_tower = m_interface.cooldown_during_tower;
     if (m_enable_tower_interface_features)
         m_interface = TowerInterface::Settings();
 
@@ -3729,6 +3730,10 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
             writer.append(bbs_format_M109(filament_id, fill_fp.interface_temperature, "Wipe tower interface layer enter"));
         writer.retract(-fill_fp.extra_prime_length - TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
     }
+    // Orca #12266: with the cool-down during the tower the print temperature goes back on before the rows.
+    if (interface_temp && m_interface_cooldown_during_tower)
+        writer.append(bbs_format_M104(filament_id, fill_fp.nozzle_temperature, fill_fp.nozzle_temperature > fill_fp.interface_temperature,
+                                      "Wipe tower interface cool down during tower"));
     writer.set_initial_position(initial_pos, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
     for (int i = 0; i < n; ++i) {
         writer.extrude(m_left_to_right ? right : left, writer.y(), feedrate);
@@ -3740,7 +3745,7 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
         writer.extrude(writer.x(), writer.y() + spacing * (up_to_down ? -1.f : 1.f), feedrate);
     }
     // Bambu Studio 2.9.1: back to the print temperature after the fill of a contact layer.
-    if (interface_temp)
+    if (interface_temp && !m_interface_cooldown_during_tower)
         writer.append(bbs_format_M104(filament_id, fill_fp.nozzle_temperature, fill_fp.nozzle_temperature > fill_fp.interface_temperature,
                                       "Wipe tower interface layer leave restore"));
     writer.append("; CP EMPTY GRID END\n"
@@ -4851,6 +4856,16 @@ void WipeTower::interface_before_wipe(WipeTowerWriter &writer, const WipeTowerIn
                           " N0 ;tower interface temperature\n");
         else
             writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, fp.physical_extruder, "tower interface temperature"));
+        // Orca #12266: the normal temperature goes back on now, without a wait, so the nozzle cools during the purge.
+        if (m_interface.cooldown_during_tower) {
+            const bool heating = fp.nozzle_temperature > fp.interface_temperature;
+            if (m_handle_hotend_as_extruder)
+                writer.append(std::string(heating ? "" : "M400\n") + "M104 I" + std::to_string(tool_change.new_tool) + " S" +
+                              std::to_string(fp.nozzle_temperature) + " N0" + (heating ? " W" : " C") + " ;tower interface cool down during tower\n");
+            else
+                writer.append(GCodeWriter::set_temperature(fp.nozzle_temperature, m_gcode_flavor, false, fp.physical_extruder,
+                                                           "tower interface cool down during tower"));
+        }
     }
 
     const Vec2f start  = writer.pos();
@@ -4942,8 +4957,9 @@ bool WipeTower::plan_layer_is_laid(size_t layer_idx) const
 void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change)
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
-    // Back to the normal temperature; wait only if that means heating up.
-    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature) {
+    // Back to the normal temperature; wait only if that means heating up. With the cool-down during the tower
+    // (Orca #12266) that happened before the purge.
+    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature && !m_interface.cooldown_during_tower) {
         const bool heating = fp.nozzle_temperature > fp.interface_temperature;
         // Bambu Studio 2.9.1 format_line_M104() / format_line_M109() on a hotend_as_extruder printer (H3C): the
         // filament names the nozzle (I), N0 marks a slicer line, a cooling M104 waits for the moves and carries C.

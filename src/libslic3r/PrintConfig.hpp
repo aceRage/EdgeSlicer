@@ -2449,6 +2449,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Bambu Studio 2.9.1 tower interface features (enable_tower_interface_features): the firmware purge of a contact
     // layer tool change (M620.13 L in the H2 / H3C change_filament_gcode), per filament.
     ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
+    // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
+    ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.

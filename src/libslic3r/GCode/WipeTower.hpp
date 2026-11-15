@@ -639,6 +639,8 @@ private:
     // gaps, change_filament_gcode purges for the interface (GCode::append_tcr), a contact block left unfilled is filled
     // hot. m_interface (the Edge options) is off while it is on.
     bool            m_enable_tower_interface_features = false;
+    // Orca #12266: the print temperature goes back on at the start of an interface purge or fill, not after it.
+    bool            m_interface_cooldown_during_tower = false;
 
     // Bed properties
     enum {

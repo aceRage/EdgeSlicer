@@ -385,3 +385,42 @@ TEST_CASE("H2C G-code: a contact tool change runs the firmware interface purge",
     CHECK(count_prefix(on, "G150.1") == count_prefix(off, "G150.1") + purges);
     CHECK(count_prefix(off, "M620.13") == 0);
 }
+
+TEST_CASE("Cool down during the tower: the print temperature goes back on before the contact fill", "[BBSTowerLeftovers][TowerInterfaceBBS]")
+{
+    DynamicPrintConfig cfg = interface_config(X1C_PLA_PETG, true);
+    cfg.set_deserialize_strict({ { "enable_tower_interface_cooldown_during_tower", "1" } });
+    const auto                     on    = direct_tower(cfg, contact_layers);
+    const std::vector<std::string> lines = split_lines(layer_gcode(*on, 1));
+    const auto enter = std::find(lines.begin(), lines.end(), std::string("M109 T0 S260 N0 ;Wipe tower interface layer enter"));
+    const auto cool  = std::find(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface cool down during tower"));
+    REQUIRE(enter != lines.end());
+    REQUIRE(cool != lines.end());
+    CHECK(enter < cool);
+    // Before the first row of the fill: no extrusion with X or Y between the heat-up and the cool-down.
+    for (auto it = enter; it != cool; ++it)
+        CHECK_FALSE((it->rfind("G1 X", 0) == 0 || it->rfind("G1 Y", 0) == 0));
+    CHECK(std::count(lines.begin(), lines.end(), std::string("M104 T0 S240 N0 C ;Wipe tower interface layer leave restore")) == 0);
+}
+
+TEST_CASE("Cool down during the tower with Edge's interface heat-up", "[BBSTowerLeftovers][TowerInterface]")
+{
+    DynamicPrintConfig cfg = interface_config(X1C_PLA_PETG, false);
+    cfg.set_deserialize_strict({ { "wipe_tower_interface_temp", "1" }, { "wipe_tower_interface_trigger", "every_toolchange" } });
+    const std::string plain = all_layers(*direct_tower(cfg, contact_layers));
+    cfg.set_deserialize_strict({ { "enable_tower_interface_cooldown_during_tower", "1" } });
+    const std::string cooled = all_layers(*direct_tower(cfg, contact_layers));
+    const size_t      heats  = plain.find("tower interface temperature") == std::string::npos ? 0 : 1;
+    REQUIRE(heats == 1);
+    CHECK(plain.find("tower interface cool down during tower") == std::string::npos);
+    CHECK(plain.find("tower interface done, normal temperature") != std::string::npos);
+    CHECK(cooled.find("tower interface cool down during tower") != std::string::npos);
+    CHECK(cooled.find("tower interface done, normal temperature") == std::string::npos);
+    // The cool-down follows its heat-up directly.
+    const std::vector<std::string> lines = split_lines(cooled);
+    for (size_t i = 0; i < lines.size(); ++i)
+        if (lines[i].find("tower interface temperature") != std::string::npos) {
+            REQUIRE(i + 1 < lines.size());
+            CHECK(lines[i + 1].find("tower interface cool down during tower") != std::string::npos);
+        }
+}

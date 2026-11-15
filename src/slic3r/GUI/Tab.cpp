@@ -3955,6 +3955,7 @@ void TabPrint::build()
         // Tower interface features: Bambu Studio 2.9.1's switch (Type 1 tower, contact layers), then the Edge options
         // (per-filament values on the filament Multimaterial page). Kept together for a later master toggle.
         optgroup->append_single_option_line("enable_tower_interface_features", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("enable_tower_interface_cooldown_during_tower", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_extra_prime", "multimaterial_settings_prime_tower");

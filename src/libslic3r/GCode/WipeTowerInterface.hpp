@@ -74,6 +74,9 @@ struct Settings
     bool run_in      = false; // already false when wipe_tower_wall_gap is off
     bool extra_prime = false;
     int  trigger     = 1;     // titMaterialChange
+    // Orca #12266 enable_tower_interface_cooldown_during_tower: the normal temperature goes back on right after the
+    // interface heat-up, at the start of the purge, instead of after it.
+    bool cooldown_during_tower = false;
 
     bool any() const { return temp || run_in || extra_prime; }
     // Reads the process options; a key the config lacks takes its declared default.

@@ -1310,7 +1310,7 @@ static std::vector<std::string> s_Preset_print_options {
      "toolchange_cyclic_first_layer",
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "wipe_tower_stagger_toolchange_start",
      "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger",
-     "enable_tower_interface_features",
+     "enable_tower_interface_features", "enable_tower_interface_cooldown_during_tower",
      "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "paint_depth_mode", "paint_depth_walls", "paint_depth_mm", "paint_infill_override", "paint_depth_solid_interfaces",
