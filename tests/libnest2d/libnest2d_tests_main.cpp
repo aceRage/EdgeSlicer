@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <cstdint>
+#include <set>
 
 #include <libnest2d/libnest2d.hpp>
 #include "printer_parts.hpp"
@@ -720,6 +721,41 @@ TEST_CASE("Items can be preloaded", "[Nesting]") {
         REQUIRE(getX(bb.center()) == getX(bin.center()));
         REQUIRE(getY(bb.center()) == getY(bin.center()));
     }
+}
+
+// Each bed's search for an item starts from the item's own rotation. The placer leaves the item
+// turned as its last search left it, and the next bed's search used to start from there, so with
+// rotations that are not closed under addition a later bed tried turns the configuration does not
+// have (here: half and three-quarter turns with only {0, 90 degrees} allowed).
+TEST_CASE("Each bed tries the configured rotations from the item's own rotation", "[Nesting]")
+{
+    const Box bin({0, 0}, {100000000, 100000000});
+
+    std::vector<Item> items;
+    for (int i = 0; i < 60; ++i) {
+        const Coord w = (18 + 7 * (i % 5)) * 1000000, h = (10 + 9 * (i % 3)) * 1000000;
+        items.emplace_back(Item{{0, 0}, {w / 4, h}, {w, 0}});
+    }
+
+    NestConfig<> cfg;
+    cfg.placer_config.rotations = {0., Pi / 2};
+
+    int passes = 0;
+    const int max_passes = 1000000;
+    libnest2d::nest(items, bin, 2000000, cfg, NestControl{[&passes, max_passes] { return ++passes > max_passes; }});
+    REQUIRE(passes <= max_passes);
+
+    std::set<int> beds;
+    for (const Item &itm : items) {
+        REQUIRE(itm.binId() >= 0);
+        beds.insert(itm.binId());
+        double r = std::fmod(double(itm.rotation()), 2 * Pi);
+        if (r < 0) r += 2 * Pi;
+        const bool allowed = std::abs(r) < 1e-6 || std::abs(r - Pi / 2) < 1e-6 || std::abs(r - 2 * Pi) < 1e-6;
+        INFO("bed " << itm.binId() << " rotation " << r);
+        CHECK(allowed);
+    }
+    CHECK(beds.size() > 1);
 }
 
 namespace {
