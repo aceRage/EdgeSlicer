@@ -2072,6 +2072,22 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
 
     WipeTower::ToolChangeResult result = construct_tcr(writer, false, old_tool, false);
     result.purge_volume                = wipe_volume;
+    // The gap get_all_wall_skip_points() cut into this layer's wall for this tool change: level with
+    // it, a line in from the block's start on the gap's side (the column the block's first moves take),
+    // in the frame the writer emits (as start_pos). Not for the Local-Z changes, which have no gap of
+    // their own.
+    if (m_use_gap_wall && tool_change != nullptr && m_layer_info != m_plan.end()) {
+        const auto  &changes  = m_layer_info->tool_changes;
+        const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+        if (!changes.empty() && tool_change >= changes.data() && tool_change < changes.data() + changes.size() &&
+            layer_id < m_wall_skip_points.size() && size_t(tool_change - changes.data()) < m_wall_skip_points[layer_id].size()) {
+            const Vec2f &gap = m_wall_skip_points[layer_id][size_t(tool_change - changes.data())];
+            const float  in  = initial_position.x() + m_perimeter_width;
+            const float  x   = gap.x() < m_wipe_tower_width / 2.f ? in : m_wipe_tower_width - in;
+            result.gap_entry     = writer.rotate(Vec2f(x, gap.y()));
+            result.has_gap_entry = true;
+        }
+    }
     return result;
 }
 
@@ -2971,7 +2987,11 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
             // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
+            // With sparse layers skipped G-code leaves out every layer but the first and those with a tool
+            // change (WipeTowerIntegration::tool_change), so count only those.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx, [this](size_t idx) {
+                return ! m_sparse_layers_skipped || idx == m_first_layer_idx || ! m_plan[idx].tool_changes.empty();
+            });
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative

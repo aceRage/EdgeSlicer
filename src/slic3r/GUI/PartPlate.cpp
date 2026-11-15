@@ -6313,12 +6313,9 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							// for all of them told the printer every filament lived in the first nozzle
 							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
 							// live config and the emitted G-code are untouched.
-							const std::vector<int> identity_map =
-								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
+							const DynamicPrintConfig &full_config = print->full_print_config();
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								int group = 0;
-								if (info.id >= 0 && size_t(info.id) < identity_map.size())
-									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								const int group = identity_filament_group(full_config, info.id);
 								info.group_id = { group };
 								const size_t nozzle_idx = size_t(group);
 								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());

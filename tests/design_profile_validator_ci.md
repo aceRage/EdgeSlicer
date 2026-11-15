@@ -151,3 +151,21 @@ Now:
 enum (or config key) and uses it in profiles is rejected by main's binary until the engine change
 is on main, exactly the case option C avoids for same-repo PRs. Maintainers handle that case
 by re-running the check from a same-repo branch.
+
+## Every PR on the hosted runner (2026-11-15)
+
+The self-hosted runner is the build VM. Every same-repo PR push that touched profiles or the
+engine files above ran the VM job (about 2-5 min), and while its `Runner.Worker` ran, the VM's
+release guard refused every agent build (exit 95), which the build broker then held off for 10 min.
+
+- `validate` now runs the published-validator steps (the former `validate_fork`) on
+  `ubuntu-24.04` for **every** pull request, same-repo and fork alike, with the same job name
+  `Check profiles (EdgeSlicer validator)`. `validate_fork` is gone.
+- The VM build-from-source job is kept as `validate_source`, run only by a manual
+  `workflow_dispatch` with `build_from_source: true`. It never runs on `pull_request`.
+- The limit above now applies to same-repo PRs too: a PR that adds an engine enum or key AND
+  uses it in a profile is reported until the engine change is on main (or dispatch
+  `validate_source` on the PR branch). profile_validator_binary.yml republishes the binary on
+  every main push touching those files.
+- Cost: this repository is public, so standard GitHub-hosted runners are free and do not count
+  toward the Actions minutes quota. The job takes about 1 min (artifact download + validation).

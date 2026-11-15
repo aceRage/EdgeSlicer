@@ -3025,28 +3025,39 @@ int WipeTower::brim_chamfer_loops_num(size_t layer) const
         return 0;
     const float max_chamfer_width = 3.f;
     const int   chamfer_loops_num = (int) (max_chamfer_width / spacing);
-    const int   dist_to_1st       = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer);
+    // #1019: in laid layers - a tower with no sparse layers steps one loop per layer it lays, not per print layer.
+    const int   dist_to_1st       = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer,
+                                                                      [this](size_t idx) { return plan_layer_is_laid(idx); });
     return dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
 }
 
-float WipeTower::side_scrape_z_floor() const
+float WipeTower::side_scrape_z_floor(float *above_base) const
 {
     // Bambu Studio 2.9.1 side_scrape_z_floor() (WipeTower.cpp:4769): stay a clearance above the highest layer that
     // still carries a brim chamfer loop (the tower's own first layer without a brim, which also keeps the nozzle off
     // the bed). keeps_outer_walls_unshrunk() holds every other wall on the same footprint.
     const float clearance = 0.4f;
+    if (above_base != nullptr)
+        *above_base = clearance;
     if (m_plan.empty())
         return m_layer_height + clearance;
     const size_t first      = m_first_layer_idx < m_plan.size() ? m_first_layer_idx : 0;
     size_t       flared_top = first;
+    // Edge: the chamfer's height above the tower's first layer counted in laid layers, which is what it is on a tower
+    // compacted by wipe_tower_no_sparse_layers (GCode::append_tcr measures the floor from the compacted base).
+    float        laid_above = 0.f;
     for (size_t i = first; i < m_plan.size(); ++i) {
-        // A layer folded into a later one prints no loops of its own.
-        if (m_plan[i].combined_away)
+        // A layer folded into a later one, or not laid at all (no sparse layers), prints no loops of its own.
+        if (m_plan[i].combined_away || ! plan_layer_is_laid(i))
             continue;
         if (brim_chamfer_loops_num(i) <= 0)
             break;
+        if (i > first)
+            laid_above += m_plan[i].height;
         flared_top = i;
     }
+    if (above_base != nullptr)
+        *above_base = laid_above + clearance;
     return m_plan[flared_top].z + clearance;
 }
 
@@ -3094,13 +3105,9 @@ bool WipeTower::toolchange_side_scrape(WipeTowerWriter &writer, const Vec2f &ini
     float scrape_speed = m_side_scrape_speed;
 
     float z_top  = m_z_pos;
-    // Top of the tower's own first layer, the base the floor is expressed relative to.
-    float z_base = m_layer_height;
-    if (m_first_layer_idx != size_t(-1) && m_first_layer_idx < m_plan.size())
-        z_base = m_plan[m_first_layer_idx].z;
-    else if (! m_plan.empty())
-        z_base = m_plan.front().z;
-    const float z_floor = side_scrape_z_floor();
+    // The floor, and its height above the top of the tower's first layer (the compacted tower's base in GCode).
+    float       floor_above_base = 0.f;
+    const float z_floor = side_scrape_z_floor(&floor_above_base);
     float       z_low   = std::max(m_z_pos - m_side_scrape_height, z_floor);
     // No vertical room left close to the tower base: no scrape rather than a flat move.
     if (z_top - z_low <= (float) EPSILON)
@@ -3146,7 +3153,7 @@ bool WipeTower::toolchange_side_scrape(WipeTowerWriter &writer, const Vec2f &ini
     if (out_z) {
         out_z->z_low                 = z_low;
         out_z->depth                 = z_top - z_low;
-        out_z->min_height_above_base = std::max(0.f, z_floor - z_base);
+        out_z->min_height_above_base = std::max(0.f, floor_above_base);
     }
 
     writer.append(";--------------------\n"
@@ -4149,9 +4156,12 @@ void WipeTower::plan_tower_new()
             m_extra_spacing = std::max(min_wipe_tower_depth / max_depth, m_extra_spacing);
     }
 
+    // Edge: the tower's first layer is the print's first, or with sparse layers skipped its first tool change,
+    // the layer it lays on the bed (the print's first is not laid then). 0 when nothing is skipped.
+    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
     for (size_t idx = 0; idx < m_plan.size(); ++idx) {
         WipeTowerInfo &info = m_plan[idx];
-        if (idx == 0) {
+        if (idx == first_tower_layer) {
             // The first layer is printed solid: its purge and ramming lines fill the depth reserved for them.
             info.extra_spacing = 1.f;
             for (WipeTowerInfo::ToolChange &tc : info.tool_changes) {
@@ -4794,6 +4804,13 @@ bool WipeTower::layer_is_printed(bool toolchanges_on_layer) const
     return ! m_sparse_layers_skipped || toolchanges_on_layer;
 }
 
+// With sparse layers skipped WipeTowerIntegration::tool_change() leaves out a layer whose only result
+// is the finish (wipe_tower_layer_is_sparse); that is a planned layer without tool changes.
+bool WipeTower::plan_layer_is_laid(size_t layer_idx) const
+{
+    return layer_idx < m_plan.size() && (! m_sparse_layers_skipped || ! m_plan[layer_idx].tool_changes.empty());
+}
+
 
 void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change)
 {
@@ -4820,8 +4837,17 @@ bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {
         return false;
     if (m_cur_block == nullptr || m_cur_layer_id < 1 || m_cur_layer_id - 1 >= m_cur_block->finish_depth.size())
         return false;
+    // Edge: the tower layer this one is laid on: the one below, or with sparse layers skipped the last one laid.
+    // A layer that is left out has no tool changes, so its finish_depth reads as open from wall to wall.
+    size_t below = m_cur_layer_id - 1;
+    while (below > 0 && ! plan_layer_is_laid(below))
+        --below;
+    // Nothing is open over the solid first layer (nor under the tower's first, with nothing laid below it).
+    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
+    if (below <= first_tower_layer || ! plan_layer_is_laid(below))
+        return false;
     end_pos_y   = m_cur_block->start_depth + m_cur_block->depth - m_perimeter_width;
-    start_pos_y = m_cur_block->finish_depth[m_cur_layer_id - 1];
+    start_pos_y = m_cur_block->finish_depth[below];
     return true;
 }
 

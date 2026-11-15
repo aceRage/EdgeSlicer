@@ -44,10 +44,12 @@ typedef std::function<ThumbnailsList(const ThumbnailsParams&)> ThumbnailsGenerat
 
 struct BBoxData
 {
-    int id;  // object id
+    // Zero by default: an entry whose area or layer height is not set must not carry whatever the
+    // stack held before (the command line's wipe tower entry did).
+    int id = 0;  // object id
     std::vector<coordf_t> bbox; // first layer bounding box: min.{x,y}, max.{x,y}
-    float area;  // first layer area
-    float layer_height;
+    float area = 0.f;  // first layer area
+    float layer_height = 0.f;
     std::string name;
     void to_json(nlohmann::json& j) const{
         j = nlohmann::json{
@@ -66,6 +68,14 @@ struct BBoxData
         j.at("name").get_to(name);
     }
 };
+
+// The wipe tower's entry in a sliced plate's Metadata/plate_N.json, from its first-layer outline
+// (Print::first_layer_wipe_tower_corners, in bed coordinates): the box round every point of it,
+// made relative to the plate's origin; named "wipe_tower", id 1000 + the plate's 0-based index; its
+// layer height the print's first layer height. Its area is 0: the tower is not an object, and
+// before this the GUI wrote the last object's area here and the command line whatever the stack
+// held. An empty outline gives an empty box.
+BBoxData wipe_tower_first_layer_bbox_data(const Points &corners, const Vec2d &plate_origin, int plate_index, float first_layer_height);
 
 struct PlateBBoxData
 {

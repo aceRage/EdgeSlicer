@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_arrange_seq_print.cpp
+	test_arrange_scoring.cpp
 	test_arrange_compacted_tower.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
@@ -100,6 +101,7 @@ add_executable(${_TEST_NAME}_tests
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
+	test_sliced_plate_metadata.cpp
 	test_bambu_extruder_map.cpp
 	test_bambu_dual_nozzle_sync.cpp
 	test_bambu_idle_precool.cpp
