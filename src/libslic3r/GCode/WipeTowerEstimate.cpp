@@ -207,7 +207,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         }
     }
 
-    const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height));
+    const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height), !type1);
     // Bambu Studio 2.9.1 prime_tower_line_width (Type1 only; 0 = from the nozzle diameter).
     const float  tower_line_width = type1 ? float(std::max(0., opt_float("prime_tower_line_width"))) : 0.f;
     const float  perimeter_width = tower_line_width > 0.f ? tower_line_width : float(nozzle_diameter) * 1.25f; // Width_To_Nozzle_Ratio
@@ -225,7 +225,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
             // filament kept for timelapse or wrapping) sizes for the idle depth.
             const bool   has_purge = !type1 && volume > EPSILON;
             const double square    = has_purge ? std::sqrt(volume / layer_height * extra_spacing) : idle_depth;
-            side = WipeTower::rib_footprint_side(float(square), float(square), float(rib_width), float(extra_rib_length), float(max_object_height));
+            side = WipeTower::rib_footprint_side(float(square), float(square), float(rib_width), float(extra_rib_length), float(max_object_height), !type1);
         }
         footprint.width = footprint.depth = side;
     } else {

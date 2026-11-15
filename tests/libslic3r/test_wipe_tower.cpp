@@ -88,6 +88,24 @@ TEST_CASE("Rib footprint extends the ribs, not the body, below the stability min
     CHECK_THAT(WipeTower::rib_footprint_side(0.f, 30.f, 8.f, 0.f, 5.f), WithinAbs(0.f, 1e-6f));
 }
 
+// Bambu Studio 2.9.1 / Orca stability table for the Type 1 tower (D4); WipeTower2 keeps its own.
+TEST_CASE("The Type 1 tower uses Bambu Studio's stability depth table", "[WipeTower][TowerDepthTable]") {
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(2.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(52.5f), WithinAbs(12.5f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(100.f), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(300.f), WithinAbs(50.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(350.f), WithinAbs(60.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-5f));
+    // WipeTower2 (Type 2): unchanged, 20 mm up to 100 mm, 40 mm from 250 mm.
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f, true), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f, true), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f, true), WithinAbs(40.f, 1e-5f));
+    // The rib footprint follows the table of its generator.
+    CHECK(WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f, true) > WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f) + 5.f);
+}
+
 TEST_CASE("Brim width estimate matches each generator's loop quantization", "[WipeTower]") {
     const float spacing = 0.5f - 0.2f * float(1. - M_PI_4);
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, true), WithinAbs(7.f * spacing, 1e-4f));
@@ -1259,8 +1277,8 @@ TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower po
     const double brim = wtd.brim_width;
     // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
     // to it, so the footprint is at least that deep.
-    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
-    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
 
     const Vec2d              anchor(140., 140.);
     const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));

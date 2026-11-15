@@ -3744,7 +3744,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
         // Orca #15035: like WipeTower::plan_tower_new(), extend the ribs instead of the tower when the
         // tower is smaller than the height-based stability minimum (what WipeTower::rib_footprint_side()
         // and so the pre-slice footprint estimate already assume).
-        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height);
+        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height, true);
         if (m_wipe_tower_depth + EPSILON < min_depth)
             m_rib_length = std::max(m_rib_length, min_depth * float(std::sqrt(2.f)));
     }

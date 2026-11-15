@@ -1371,16 +1371,22 @@ WipeTower::ToolChangeResult WipeTower::construct_block_tcr(WipeTowerWriter &writ
     return result;
 }
 
-// BBS
+// BBS: Bambu Studio 2.9.1 (WipeTower.cpp:1714), also Orca's: towers below 100 mm may be as shallow as 5 mm, taller
+// ones than 250 mm grow towards 60 mm.
 const std::map<float, float> WipeTower::min_depth_per_height = {
+    {5.f, 5.f}, {100.f, 20.f}, {250.f, 40.f}, {350.f, 60.f}
+};
+// Edge: WipeTower2 (U1, Voron and every other non-Bambu printer) keeps the table it has always used.
+const std::map<float, float> WipeTower::min_depth_per_height_type2 = {
     {100.f, 20.f}, {250.f, 40.f}
 };
 
-float WipeTower::get_limit_depth_by_height(float max_height)
+float WipeTower::get_limit_depth_by_height(float max_height, bool type2)
 {
+    const std::map<float, float> &table = type2 ? WipeTower::min_depth_per_height_type2 : WipeTower::min_depth_per_height;
     float min_wipe_tower_depth = 0.f;
-    auto  iter                 = WipeTower::min_depth_per_height.begin();
-    while (iter != WipeTower::min_depth_per_height.end()) {
+    auto  iter                 = table.begin();
+    while (iter != table.end()) {
         auto curr_height_to_depth = *iter;
 
         // This is the case that wipe tower height is lower than the first min_depth_to_height member.
@@ -1392,7 +1398,7 @@ float WipeTower::get_limit_depth_by_height(float max_height)
         iter++;
 
         // If curr_height_to_depth is the last member, use its min_depth.
-        if (iter == WipeTower::min_depth_per_height.end()) {
+        if (iter == table.end()) {
             min_wipe_tower_depth = curr_height_to_depth.second;
             break;
         }
@@ -1574,7 +1580,7 @@ float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &p
     return depth;
 }
 
-float WipeTower::rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height)
+float WipeTower::rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height, bool type2)
 {
     if (width < EPSILON || depth < EPSILON)
         return 0.f;
@@ -1582,8 +1588,9 @@ float WipeTower::rib_footprint_side(float width, float depth, float rib_width, f
     // body, then by the extra length, never ending up shorter than the diagonal.
     const float diagonal   = std::sqrt(width * width + depth * depth);
     float       rib_length = diagonal;
-    if (depth + EPSILON < get_limit_depth_by_height(max_height))
-        rib_length = std::max(rib_length, get_limit_depth_by_height(max_height) * float(std::sqrt(2.)));
+    const float min_depth  = get_limit_depth_by_height(max_height, type2);
+    if (depth + EPSILON < min_depth)
+        rib_length = std::max(rib_length, min_depth * float(std::sqrt(2.)));
     rib_length = std::max(diagonal, rib_length + extra_rib_length);
     // Half the extension at each end of the diagonal plus half the rib width, projected onto the axes.
     const float rib_w    = std::min(rib_width, std::min(width, depth) / 2.f);

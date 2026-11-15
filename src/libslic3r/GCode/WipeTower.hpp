@@ -37,9 +37,11 @@ class WipeTower
 public:
     static const std::string never_skip_tag() { return "_GCODE_WIPE_TOWER_NEVER_SKIP_TAG"; }
 
-	// WipeTower height to minimum depth map
+	// WipeTower height to minimum depth map: Bambu Studio 2.9.1's (also Orca's) for this Type 1 tower, and the
+	// older two-point table WipeTower2 (Type 2) keeps so its towers stay as they were.
 	static const std::map<float, float> min_depth_per_height;
-    static float get_limit_depth_by_height(float max_height);
+	static const std::map<float, float> min_depth_per_height_type2;
+    static float get_limit_depth_by_height(float max_height, bool type2 = false);
     static float get_auto_brim_by_height(float max_height);
     // Both generators lay the brim in whole loops one line spacing apart, so the printed width
     // differs from the configured one. WipeTower reports it with half a spacing of line width
@@ -72,8 +74,8 @@ public:
     // its worst layer, stacked behind one perimeter width.
     static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f);
     // Side of the square bounding a rib-wall tower's first layer, brim excluded: the body plus the
-    // rib bulge, with the ribs extended to the height-based minimum as both generators do.
-    static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height);
+    // rib bulge, with the ribs extended to the height-based minimum as both generators do (type2: WipeTower2's table).
+    static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height, bool type2 = false);
     // Type1 rib tower: plan_tower_new() squares the tower from the depth at the configured width,
     // then re-plans the depth at the squared width.
     static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height, float line_width = 0.f);
