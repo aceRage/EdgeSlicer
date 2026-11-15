@@ -14,6 +14,7 @@
 #include <vector>
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
 
 // A Bambu Studio 2.9.1 H3C project (tests/h3c_cube_bs.gcode.3mf from the owner's hand test, with the
 // plate G-code, the thumbnails and the account id removed). Its project settings carry the 2.9.1
@@ -97,6 +98,29 @@ TEST_CASE("A Bambu Studio 2.9.1 project keeps its circle compensation, support i
         // prime_tower_max_speed is Bambu's name for wipe_tower_max_purge_speed (BambuKeyAliases).
         CHECK(config.opt_float("wipe_tower_max_purge_speed") == Approx(90.));
     }
+
+    SECTION("H3C tower motion (side scrape, tail slowdown, line ironing, speed)")
+    {
+        CHECK(config.opt_bool("prime_tower_side_scrape"));
+        const auto *face = config.option<ConfigOptionEnum<SideScrapeFace>>("prime_tower_side_scrape_face");
+        REQUIRE(face != nullptr);
+        CHECK(face->value == sssfFrontBack);
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_length"), WithinAbs(2., 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_height"), WithinAbs(1.5, 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_speed"), WithinAbs(1400., 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_wall_gap"), WithinAbs(0.2, 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_point_spacing"), WithinAbs(1., 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_side_scrape_along_length"), WithinAbs(2., 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_tail_slowdown_volume"), WithinAbs(3., 1e-9));
+        CHECK_THAT(config.option<ConfigOptionPercent>("prime_tower_tail_speed_factor")->value, WithinAbs(50., 1e-9));
+        CHECK_FALSE(config.opt_bool("prime_tower_line_ironing"));
+        CHECK_THAT(config.opt_float("prime_tower_ironing_speed"), WithinAbs(10., 1e-9));
+        CHECK_THAT(config.opt_float("prime_tower_feedrate_factor"), WithinAbs(1., 1e-9));
+        const auto *curve = config.option<ConfigOptionStrings>("filament_prime_tower_speed_factor_curve");
+        REQUIRE(curve != nullptr);
+        REQUIRE(! curve->values.empty());
+        CHECK(curve->values.front() == "0.5,1");
+    }
 }
 
 TEST_CASE("Bambu Studio 2.9.1 prime tower keys without a Type 1 tower counterpart stay unported", "[BS29Keys][BambuCompat]")
@@ -104,14 +128,9 @@ TEST_CASE("Bambu Studio 2.9.1 prime tower keys without a Type 1 tower counterpar
     // These drive parts of Bambu's newer tower generator (plan_tower_new / toolchange_wipe_new and
     // the hotend-as-extruder path) that this fork's Type 1 tower does not have. Declaring them
     // would only add settings that do nothing; see the PR for each one's reason.
-    // prime_tower_enable_framework, _infill_gap and _flat_ironing came with the block planner (Orca #10780 / #15035).
-    for (const char *key : { "prime_tower_ramming_line_width",
-                             "prime_tower_feedrate_factor", "prime_tower_line_ironing",
-                             "prime_tower_ironing_speed", "prime_tower_lift_height", "prime_tower_lift_speed",
-                             "prime_tower_side_scrape", "prime_tower_side_scrape_face", "prime_tower_side_scrape_length",
-                             "prime_tower_side_scrape_height", "prime_tower_side_scrape_speed", "prime_tower_side_scrape_wall_gap",
-                             "prime_tower_side_scrape_point_spacing", "prime_tower_side_scrape_along_length",
-                             "prime_tower_tail_slowdown_volume", "prime_tower_tail_speed_factor" }) {
+    // prime_tower_enable_framework, _infill_gap and _flat_ironing came with the block planner (Orca #10780 / #15035), the
+    // H3C tower motion keys (feedrate factor, line ironing, side scrape, tail slowdown) with the H3C tower parity port.
+    for (const char *key : { "prime_tower_ramming_line_width", "prime_tower_lift_height", "prime_tower_lift_speed" }) {
         INFO(key);
         CHECK_FALSE(print_config_def.has(key));
     }
@@ -122,7 +141,13 @@ TEST_CASE("Bambu Studio 2.9.1 prime tower keys without a Type 1 tower counterpar
                              "hole_limit_max", "diameter_limit", "support_ironing_inset", "support_ironing_speed",
                              "support_ironing_direction", "prime_tower_acceleration", "prime_tower_line_width",
                              "prime_tower_wipe_speed", "prime_tower_wipe_distance", "prime_tower_enable_framework",
-                             "prime_tower_infill_gap", "prime_tower_flat_ironing" }) {
+                             "prime_tower_infill_gap", "prime_tower_flat_ironing",
+                             "prime_tower_feedrate_factor", "prime_tower_line_ironing", "prime_tower_ironing_speed",
+                             "prime_tower_side_scrape", "prime_tower_side_scrape_face", "prime_tower_side_scrape_length",
+                             "prime_tower_side_scrape_height", "prime_tower_side_scrape_speed", "prime_tower_side_scrape_wall_gap",
+                             "prime_tower_side_scrape_point_spacing", "prime_tower_side_scrape_along_length",
+                             "prime_tower_tail_slowdown_volume", "prime_tower_tail_speed_factor",
+                             "filament_prime_tower_speed_factor_curve" }) {
         INFO(key);
         CHECK(print_config_def.has(key));
     }

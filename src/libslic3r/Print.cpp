@@ -3274,9 +3274,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                                           "%3% mm nozzle, whose layer height range is %4%-%5% mm. Its prime tower lines may be weak "
                                           "and the tower may lean or fall. Mixed nozzle diameters are not planned on the prime tower "
                                           "yet: use a layer height inside every nozzle's range, or check the tower in a test print."),
-                                        float_to_string_decimal_point(height, 3), filament + 1,
-                                        float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1), 2),
-                                        float_to_string_decimal_point(range.min_height, 3), float_to_string_decimal_point(range.max_height, 3)),
+                                        float_to_string_decimal_point(height), filament + 1,
+                                        float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1)),
+                                        float_to_string_decimal_point(range.min_height), float_to_string_decimal_point(range.max_height)),
                          "layer_height");
                     warned = true;
                     break;
