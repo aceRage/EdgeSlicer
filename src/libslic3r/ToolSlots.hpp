@@ -201,6 +201,16 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id);
 // the n-th nozzle of the slot's kind.
 int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot);
 
+// H3C slot process groups (owner 2026-11-14): on a single extruder with a nozzle rack (H3C), the rack slots that are tools of
+// their own on the Process tab (id "T1.<slot>"), sorted: every slot a filament is pinned to (filament_rack_nozzle_slot) and
+// every slot whose nozzle type differs from the extruder's (the TPU285 slot). The other slots stay in their size group ("T1",
+// "T1:0.6"). Empty on any other printer (the H2C keeps its size groups as before).
+std::vector<int> split_rack_slots(const ConfigBase &config, size_t extruder);
+// The split rack slot (1-based) 1-based `filament_id` prints with, 0 when none: its pin when that slot is split, else (unpinned)
+// the first split slot that nobody is pinned to whose type the filament needs (a 2.85 mm filament: TPU285; a High Flow
+// filament: High Flow).
+int filament_split_rack_slot(const ConfigBase &config, unsigned int filament_id);
+
 // Send-time check (the printer's reported rack).
 struct RackSlotUse
 {

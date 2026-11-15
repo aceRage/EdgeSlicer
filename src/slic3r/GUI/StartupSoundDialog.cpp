@@ -29,15 +29,20 @@ namespace GUI {
 
 namespace {
 
-const char *SSD_SECTION = "startup_sound";
+// Settings: the calibration (ms per unit) is the printer's and is shared; the rest is kept per tune
+// ("ending_sound" falls back to the start tune's values until it has its own).
+const char *SSD_SECTION     = "startup_sound";
+const char *SSD_END_SECTION = "ending_sound";
 // A startup tune is a few seconds; a MIDI file bigger than this is not one.
 constexpr std::streamsize SSD_MAX_MIDI_BYTES = 1024 * 1024;
 
 } // namespace
 
-StartupSoundDialog::StartupSoundDialog(wxWindow *parent)
-    : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Startup sound"),
+StartupSoundDialog::StartupSoundDialog(wxWindow *parent, Target target)
+    : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY,
+                target == Target::End ? _L("Ending sound") : _L("Startup sound"),
                 wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER)
+    , m_target(target)
 {
     SetBackgroundColour(*wxWHITE);
     SetFont(Label::Body_14);
@@ -45,7 +50,10 @@ StartupSoundDialog::StartupSoundDialog(wxWindow *parent)
 
     auto *v_sizer = new wxBoxSizer(wxVERTICAL);
 
-    auto *intro = new wxStaticText(this, wxID_ANY,
+    auto *intro = new wxStaticText(this, wxID_ANY, target == Target::End ?
+        _L("Turn a MIDI file into the tune this printer plays when a print finishes (M1006 lines). "
+           "It replaces the tune between \"M1006 S1\" and \"M1006 W\" in Machine end G-code. "
+           "The printer waits for the tune to finish before the rest of the end G-code runs.") :
         _L("Turn a MIDI file into the tune this printer plays at the start of every print (M1006 lines). "
            "It replaces the tune between \"M1006 S1\" and \"M1006 W\" in Machine start G-code. "
            "The printer waits for the tune to finish, so a longer tune makes every print start later."));
@@ -123,7 +131,8 @@ StartupSoundDialog::StartupSoundDialog(wxWindow *parent)
     auto *dlg_btns = new DialogButtons(this, {"OK", "Cancel"});
     m_ok           = dlg_btns->GetOK();
     m_ok->SetLabel(_L("Insert"));
-    m_ok->SetToolTip(_L("Replace the tune in Machine start G-code with this one"));
+    m_ok->SetToolTip(target == Target::End ? _L("Replace the tune in Machine end G-code with this one")
+                                           : _L("Replace the tune in Machine start G-code with this one"));
     m_ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         if (m_block.empty())
             return;
@@ -193,8 +202,16 @@ void StartupSoundDialog::load_options()
     AppConfig *cfg = wxGetApp().app_config;
     if (cfg == nullptr)
         return;
-    auto num = [cfg](const char *key, double fallback) {
-        const std::string v = cfg->get(SSD_SECTION, key);
+    const bool end = m_target == Target::End;
+    // The ending tune's own value, else the start tune's (always the start's for the shared calibration).
+    auto get = [cfg, end](const char *key) {
+        std::string v;
+        if (end && std::string(key) != "ms_per_unit")
+            v = cfg->get(SSD_END_SECTION, key);
+        return v.empty() ? cfg->get(SSD_SECTION, key) : v;
+    };
+    auto num = [&get](const char *key, double fallback) {
+        const std::string v = get(key);
         try { return v.empty() ? fallback : std::stod(v); } catch (...) { return fallback; }
     };
     m_ms_per_unit->SetValue(num("ms_per_unit", m_ms_per_unit->GetValue()));
@@ -204,10 +221,10 @@ void StartupSoundDialog::load_options()
     m_max_volume->SetValue(int(num("max_volume", m_max_volume->GetValue())));
     m_max_seconds->SetValue(num("max_seconds", m_max_seconds->GetValue()));
     m_max_steps->SetValue(int(num("max_steps", m_max_steps->GetValue())));
-    const std::string unison = cfg->get(SSD_SECTION, "unison_fill");
+    const std::string unison = get("unison_fill");
     if (!unison.empty())
         m_unison->SetValue(unison == "1");
-    const std::string drums = cfg->get(SSD_SECTION, "skip_percussion");
+    const std::string drums = get("skip_percussion");
     if (!drums.empty())
         m_skip_drums->SetValue(drums == "1");
 }
@@ -218,15 +235,16 @@ void StartupSoundDialog::save_options() const
     if (cfg == nullptr)
         return;
     const StartupSound::Options o = read_options();
-    cfg->set(SSD_SECTION, "ms_per_unit", std::to_string(o.ms_per_unit));
-    cfg->set(SSD_SECTION, "quantise_ms", std::to_string(int(o.quantise_ms)));
-    cfg->set(SSD_SECTION, "min_note", std::to_string(o.min_note));
-    cfg->set(SSD_SECTION, "max_note", std::to_string(o.max_note));
-    cfg->set(SSD_SECTION, "max_volume", std::to_string(o.max_volume));
-    cfg->set(SSD_SECTION, "max_seconds", std::to_string(o.max_seconds));
-    cfg->set(SSD_SECTION, "max_steps", std::to_string(o.max_steps));
-    cfg->set(SSD_SECTION, "unison_fill", o.unison_fill ? "1" : "0");
-    cfg->set(SSD_SECTION, "skip_percussion", o.skip_percussion ? "1" : "0");
+    const char *section = m_target == Target::End ? SSD_END_SECTION : SSD_SECTION;
+    cfg->set(SSD_SECTION, "ms_per_unit", std::to_string(o.ms_per_unit)); // shared calibration
+    cfg->set(section, "quantise_ms", std::to_string(int(o.quantise_ms)));
+    cfg->set(section, "min_note", std::to_string(o.min_note));
+    cfg->set(section, "max_note", std::to_string(o.max_note));
+    cfg->set(section, "max_volume", std::to_string(o.max_volume));
+    cfg->set(section, "max_seconds", std::to_string(o.max_seconds));
+    cfg->set(section, "max_steps", std::to_string(o.max_steps));
+    cfg->set(section, "unison_fill", o.unison_fill ? "1" : "0");
+    cfg->set(section, "skip_percussion", o.skip_percussion ? "1" : "0");
 }
 
 void StartupSoundDialog::update_preview()

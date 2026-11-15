@@ -104,8 +104,9 @@ TEST_CASE("Bambu Studio 2.9.1 prime tower keys without a Type 1 tower counterpar
     // These drive parts of Bambu's newer tower generator (plan_tower_new / toolchange_wipe_new and
     // the hotend-as-extruder path) that this fork's Type 1 tower does not have. Declaring them
     // would only add settings that do nothing; see the PR for each one's reason.
-    for (const char *key : { "prime_tower_enable_framework", "prime_tower_infill_gap", "prime_tower_ramming_line_width",
-                             "prime_tower_feedrate_factor", "prime_tower_flat_ironing", "prime_tower_line_ironing",
+    // prime_tower_enable_framework, _infill_gap and _flat_ironing came with the block planner (Orca #10780 / #15035).
+    for (const char *key : { "prime_tower_ramming_line_width",
+                             "prime_tower_feedrate_factor", "prime_tower_line_ironing",
                              "prime_tower_ironing_speed", "prime_tower_lift_height", "prime_tower_lift_speed",
                              "prime_tower_side_scrape", "prime_tower_side_scrape_face", "prime_tower_side_scrape_length",
                              "prime_tower_side_scrape_height", "prime_tower_side_scrape_speed", "prime_tower_side_scrape_wall_gap",
@@ -120,7 +121,8 @@ TEST_CASE("Bambu Studio 2.9.1 prime tower keys without a Type 1 tower counterpar
                              "hole_coef_2", "hole_coef_3", "counter_limit_min", "counter_limit_max", "hole_limit_min",
                              "hole_limit_max", "diameter_limit", "support_ironing_inset", "support_ironing_speed",
                              "support_ironing_direction", "prime_tower_acceleration", "prime_tower_line_width",
-                             "prime_tower_wipe_speed", "prime_tower_wipe_distance" }) {
+                             "prime_tower_wipe_speed", "prime_tower_wipe_distance", "prime_tower_enable_framework",
+                             "prime_tower_infill_gap", "prime_tower_flat_ironing" }) {
         INFO(key);
         CHECK(print_config_def.has(key));
     }

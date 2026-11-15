@@ -2,7 +2,8 @@
 #define slic3r_GUI_StartupSoundDialog_hpp_
 
 // "Startup sound" dialog (tests/design_startup_sounds.md): pick a MIDI file, see the M1006 lines
-// it becomes and how long they play, and hand back the tune block for Machine start G-code.
+// it becomes and how long they play, and hand back the tune block for Machine start G-code
+// (Startup sound) or Machine end G-code (Ending sound).
 // The conversion is libslic3r/GCode/StartupSound.hpp, which has the unit tests.
 //
 // No Widgets/*.hpp here: Tab.cpp includes this header and Field.hpp's CheckBox would clash.
@@ -28,9 +29,12 @@ namespace GUI {
 class StartupSoundDialog : public DPIDialog
 {
 public:
-    explicit StartupSoundDialog(wxWindow *parent);
+    // Which tune the dialog makes: the one in Machine start G-code or the one in Machine end G-code.
+    enum class Target { Start, End };
 
-    // The tune block (label line, M1006 S1 ... M1006 W) to put into the start G-code.
+    explicit StartupSoundDialog(wxWindow *parent, Target target = Target::Start);
+
+    // The tune block (label line, M1006 S1 ... M1006 W) to put into the start or end G-code.
     const std::string &tune_block() const { return m_block; }
 
 protected:
@@ -43,6 +47,7 @@ private:
     void load_options();
     void save_options() const;
 
+    Target               m_target;
     std::vector<uint8_t> m_midi;
     std::string          m_file_name;
     std::string          m_block;

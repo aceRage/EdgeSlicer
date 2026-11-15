@@ -49,6 +49,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_rack_slots_gcode.cpp
 	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
+	test_bbs_tower_ramming.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_polyholes.cpp
@@ -62,6 +63,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
+	test_support_interface_temperature.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp

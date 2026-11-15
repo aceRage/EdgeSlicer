@@ -34,6 +34,10 @@ namespace PreCooling {
 // BambuStudio names them (GCodeProcessor.cpp:68-72).
 constexpr const char *MachineStartGCodeEndMarker = " MACHINE_START_GCODE_END";
 constexpr const char *MachineEndGCodeStartMarker = " MACHINE_END_GCODE_START";
+// Bambu Studio 2.9.1 custom_tags FilamentChangeGCodeStart / End: written around change_filament_gcode on
+// handle_hotend_as_extruder printers (H3C), where the pass keeps its lines out of that span.
+constexpr const char *FilamentChangeGCodeStartMarker = " FilamentChangeGCodeStart";
+constexpr const char *FilamentChangeGCodeEndMarker   = " FilamentChangeGCodeEnd";
 
 // Input line id -> lines to write right after that line.
 using InsertedLines = std::map<unsigned int, std::vector<std::string>>;
@@ -95,7 +99,10 @@ struct ExtruderUsageBlock
 class UsageBlockBuilder
 {
 public:
-    UsageBlockBuilder(const MultiNozzleUtils::LayeredNozzleGroupResult &group, std::string layer_change_tag);
+    // hotend_as_extruder (Bambu Studio 2.9.1 handle_hotend_as_extruder, H3C): every rack hotend counts as an
+    // extruder of its own (the nozzle-change blocks carry the hotend's id), and the change_filament_gcode spans
+    // are skippable blocks.
+    UsageBlockBuilder(const MultiNozzleUtils::LayeredNozzleGroupResult &group, std::string layer_change_tag, bool hotend_as_extruder = false);
 
     // line: one G-code line, with or without its EOL.
     void on_line(const std::string &line, unsigned int line_id);
@@ -113,6 +120,7 @@ private:
 
     const MultiNozzleUtils::LayeredNozzleGroupResult &m_group;
     const std::string                                 m_layer_change_tag;
+    const bool                                        m_hotend_as_extruder;
     ExtruderUsageBlock                                m_temp_block;
     int                                               m_layer_id = 0;
 };
@@ -130,6 +138,9 @@ struct InjectorParams
     std::vector<int>    filament_pre_cooling_temps;    // per filament
     std::vector<double> filament_preheat_temperature_delta; // per filament
     std::vector<double> cooling_rate;                  // per logical extruder, degrees per second
+    std::vector<double> cooling_rate_on_rack;          // per logical extruder: an idle hotend parked in the rack (H3C)
+    std::vector<int>    filament_pre_heating_enabled;  // per filament (H3C: 0 = never pre-heated)
+    std::vector<std::string> filament_types;           // per filament
     std::vector<double> heating_rate;                  // per logical extruder, degrees per second
     std::vector<int>    physical_extruder_map;         // logical -> physical extruder
     std::vector<int>    extruder_max_nozzle_count;     // per logical extruder
@@ -158,6 +169,9 @@ public:
         int          last_nozzle_id;
         int          next_nozzle_id;
         int          extruder_id;
+        // The chain this idle window belongs to: the extruder, or the filament on hotend_as_extruder printers
+        // (Bambu Studio 2.9.1 idle_chain_key, used for "M104 I<filament>").
+        int          idle_chain_key = -1;
         bool         ignore_cooling_before_tower = false;
     };
 
@@ -183,8 +197,15 @@ public:
 private:
     void build_by_filament_blocks(const std::vector<FilamentUsageBlock> &filament_blocks);
     void build_by_extruder_blocks(const std::vector<ExtruderUsageBlock> &extruder_blocks);
+    // hotend_as_extruder: one idle chain per filament (Bambu Studio 2.9.1 build_by_extruder_blocks).
+    void build_by_filament_chains(const std::vector<FilamentUsageBlock> &filament_blocks, const std::vector<ExtruderUsageBlock> &extruder_blocks);
+    void attach_nc_bounds_if_gap_crosses_nozzle_change(ExtruderFreeBlock &idle, const FilamentUsageBlock &prev, const FilamentUsageBlock &next,
+                                                       const std::vector<ExtruderUsageBlock> &nc_blocks) const;
     void inject_cooling_heating_command(InsertedLines &inserted_lines, const ExtruderFreeBlock &block, float curr_temp, float target_temp,
                                         bool pre_cooling, bool pre_heating) const;
+    // hotend_as_extruder: Bambu Studio 2.9.1 inject_cooling_heating_command.
+    void inject_hotend_cooling_heating_command(InsertedLines &inserted_lines, const ExtruderFreeBlock &block, float curr_temp, float target_temp,
+                                               bool pre_cooling, bool pre_heating) const;
 
     std::vector<ExtruderFreeBlock>                            m_free_blocks;
     const std::vector<TimedMove>                             &m_moves;
