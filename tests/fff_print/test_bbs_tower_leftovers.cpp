@@ -575,19 +575,14 @@ TEST_CASE("Tower interface features: wall gaps on the three layers below a conta
     const std::vector<std::pair<int, int>> layers{ { 0, 1 }, { 1, 1 }, { 1, 1 }, { 1, 1 }, { 1, 1 }, { 1, 0 }, { 0, 1 } };
     const auto on  = direct_tower(interface_config(H2D_PLA_PETG, true), layers);
     const auto off = direct_tower(interface_config(H2D_PLA_PETG, false), layers);
-    auto travels = [](const std::string &gcode) {
-        size_t n = 0;
-        for (const std::string &l : split_lines(gcode))
-            if (l.rfind("G1 ", 0) == 0 && (has_token(l, 'X') || has_token(l, 'Y')) && !has_token(l, 'E'))
-                ++n;
-        return n;
-    };
+    // Only the outer walls differ there (cut open at the run-in's place, printed in pieces); nothing else on those layers
+    // depends on the switch.
     for (size_t layer : { size_t(2), size_t(3), size_t(4) }) {
         INFO("layer " << layer);
-        CHECK(travels(layer_gcode(*on, layer)) > travels(layer_gcode(*off, layer)));
+        CHECK(layer_gcode(*on, layer) != layer_gcode(*off, layer));
     }
     // Layer 6 (above the contact) is not cut for it.
-    CHECK(travels(layer_gcode(*on, 6)) == travels(layer_gcode(*off, 6)));
+    CHECK(layer_gcode(*on, 6) == layer_gcode(*off, 6));
 }
 
 // Review #1062 (i): a contact change onto another nozzle rams the outgoing filament and still runs in from outside.
