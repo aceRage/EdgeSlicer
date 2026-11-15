@@ -172,7 +172,7 @@ TEST_CASE("OS sandbox probe reports this kernel", "[PluginSandbox][probe]")
         CHECK(probe.seccomp);
         CHECK(plugin_ipc::expected_sandbox_kind() == plugin_ipc::k_sandbox_kind_landlock_seccomp);
     }
-    CHECK_FALSE(plugin_ipc::sandbox_env_bwrap_requested() && plugin_ipc::running_inside_flatpak());
+    CHECK_FALSE((plugin_ipc::sandbox_env_bwrap_requested() && plugin_ipc::running_inside_flatpak()));
 #endif
 }
 
