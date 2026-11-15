@@ -5615,6 +5615,12 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
     } else if (!preset.empty() && NozzleInfo::diameter_known(obj->m_extder_data.extders.front().current_nozzle_diameter)) {
         reported.assign(preset.size(), obj->m_extder_data.extders.front().current_nozzle_diameter);
+    } else if (!preset.empty() && obj->has_nozzle_rack()) {
+        // Owner bug 2026-11-13: the H3C mounts no nozzle between prints (its extruder's hnow names none of the reported
+        // nozzles, which all sit in the rack), so the extruder's size comes from the rack's first usable position.
+        const std::vector<double> sizes = reported_sync_nozzle_sizes(DualNozzle::nozzle_report_state(obj), 1);
+        if (!sizes.empty() && sizes.front() > 0.)
+            reported.assign(preset.size(), sizes.front());
     }
     if (std::none_of(reported.begin(), reported.end(), [](double d) { return d > 0.; })) {
         MessageDialog dlg(wxGetApp().mainframe, _L("The printer did not report its nozzle sizes."), _L("Sync nozzle sizes"), wxOK);
@@ -5632,7 +5638,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
     // (printer_state() reports no nozzles on a single-extruder one), so an H3C sync left its nine slots as they were.
     wxString rack_note;
     if (obj->has_nozzle_rack()) {
-        const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(DualNozzle::nozzle_report_state(obj), preset.size());
+        const DualNozzleSync::PrinterState          rack_state = DualNozzle::nozzle_report_state(obj);
+        const std::vector<std::vector<RackNozzle>> layout     = reported_rack_nozzles(rack_state, preset.size());
+        const std::vector<double>                  mounted    = reported_extruder_nozzle_sizes(rack_state, preset.size());
         std::vector<std::string>                   current(preset.size());
         for (size_t e = 0; e < preset.size(); ++e)
             current[e] = bundle->rack_nozzle_override(e);
@@ -5647,7 +5655,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
         for (size_t e = 0; e < texts.size(); ++e)
             if (!texts[e].empty())
-                rack_note += "\n" + wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e]));
+                rack_note += "\n" + (e < mounted.size() && mounted[e] > 0. ?
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e])) :
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slots in rack order)."), int(e + 1), from_u8(texts[e])));
     }
     if (changed) {
         on_nozzle_sizes_changed();

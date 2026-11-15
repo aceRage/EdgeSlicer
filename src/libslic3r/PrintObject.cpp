@@ -8,6 +8,8 @@
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
+#include "MixedFilament.hpp"
+#include "MixedSublayer.hpp"
 #include "MutablePolygon.hpp"
 #include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
@@ -430,6 +432,18 @@ void PrintObject::make_perimeters()
     // print through a single nozzle diameter returns at the gate and leaves every region without patches.
     this->compute_adaptive_merge_groups();
     m_print->throw_if_canceled();
+    // Mixed color sublayer P3 (D9): Ratio rows split the band heights the merge just chose.
+    const MixedRatioMergeStats merge_stats = this->adapt_local_z_ratio_plan_to_merge_bands();
+    if (merge_stats.whole_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: %2% merged layer bands of a mixed color sublayer print in one colour each: no sub-layer "
+                             "of the mix is tall enough to start above the layers the band merges."),
+                           this->model_object()->name, merge_stats.whole_bands));
+    if (merge_stats.reordered_top_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: on %2% merged layer bands of a mixed color sublayer the Bambu Studio colour order could not be "
+                             "kept, so the top colour there may differ: the first sub-layer must reach above the layers the band merges."),
+                           this->model_object()->name, merge_stats.reordered_top_bands));
 
     // Ultra (over-support walls): the per-layer "there is support under here" region the wall
     // classifier needs, built once here and dropped again below. When the feature is off this
@@ -701,8 +715,71 @@ void PrintObject::infill()
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         det_dump_extrusions(*this, "4_infill_extrusions");
+        this->warn_if_first_layer_prints_nothing(*this);
         this->set_done(posInfill);
     }
+}
+
+// An object whose bed contact is narrower than the first-layer wall gets no first-layer extrusion
+// at all: it starts in mid-air, and because getObjectExtruderMap (Print.cpp) finds no first-layer
+// extruder for it, it gets no brim of any kind either (brim types and painted ears alike). Nothing
+// here changes the slice; it only says so, with the width needed and the settings that fix it.
+void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_src)
+{
+    if (layers_src.layers().empty() || this->has_raft())
+        return;
+    const Layer *first = layers_src.layers().front();
+    if (first->lslices.empty() || first->has_extrusions())
+        return;
+
+    // Contact width: the narrowest inward offset that erases the whole first-layer footprint.
+    BoundingBox bbox = get_extents(first->lslices);
+    double lo = 0., hi = unscaled(std::max(bbox.size().x(), bbox.size().y()));
+    for (int i = 0; i < 24 && hi - lo > 0.002; ++ i) {
+        const double mid = 0.5 * (lo + hi);
+        if (offset_ex(first->lslices, -float(scale_(mid / 2.))).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    const double contact = hi;
+
+    // Wall settings of the first region that has first-layer slices.
+    const LayerRegion *layerm = nullptr;
+    for (const LayerRegion *r : first->regions())
+        if (!r->slices.empty()) { layerm = r; break; }
+    if (layerm == nullptr && !first->regions().empty())
+        layerm = first->regions().front();
+    if (layerm == nullptr)
+        return;
+    const Flow   ext_flow   = layerm->flow(frExternalPerimeter);
+    const double line_width = ext_flow.width();
+    const double nozzle     = ext_flow.nozzle_diameter();
+    const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
+    const bool   thin_walls = layerm->region().config().detect_thin_wall.value;
+
+    auto mm = [](double v) { return Slic3r::format("%.2f", v); };
+    std::string message;
+    if (classic && !thin_walls) {
+        // Classic walls without thin-wall detection need room for one whole external wall.
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
+                                      "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
+                                      "contact must be comfortably wider than %3% mm."),
+                                 this->model_object()->name, mm(contact), mm(line_width));
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
+        if (suggest >= 0.6 * nozzle)
+            message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
+                                            mm(suggest));
+        else
+            message += " " + _u8L("To fix it, set Wall generator to Arachne or turn on Detect thin wall, or give the part a wider base.");
+    } else {
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow to print, "
+                                      "so it gets no brim and starts in mid-air. Give the part a wider base or reorient it."),
+                                 this->model_object()->name, mm(contact));
+    }
+    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message, PrintStateBase::SlicingEmptyFirstLayer);
 }
 
 void PrintObject::ironing()
@@ -1831,6 +1908,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "spiral_finishing_flow_ratio"
             // Edge: read by GCode::process_layer only.
             || opt_key == "min_layer_time_pause"
+            // Edge: nothing sliced depends on it. Print::apply invalidates psWipeTower when the resolved
+            // interface temperatures (Print::support_interface_temperatures) change.
+            || opt_key == "support_interface_nozzle_temperature"
             // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
             || opt_key == "apply_scarf_seam_on_circles"
             || opt_key == "support_ironing_speed") {
@@ -6329,6 +6409,39 @@ double Print::adaptive_merge_reference_nozzle() const
     return adaptive_band_reference_nozzle(m_config, plate_wall_filament_ids(*this));
 }
 
+// Mixed color sublayer P3 (D9): a Ratio row's painted region keeps its virtual (mixed) filament id, whose nozzle
+// is no physical nozzle. Its components print through one nozzle diameter (D8, Print::validate), so the region is
+// banded on that nozzle, as Bambu Studio 2.9.1 syncs a mixed slot's nozzle from its components
+// (sync_mixed_filament_nozzle_diameters). Every other region, and every row outside the feature, keeps its own id.
+static unsigned int adaptive_merge_region_filament(const Print &print, unsigned int wall_filament)
+{
+    const PrintConfig          &cfg          = print.config();
+    const MixedFilamentManager &mgr          = print.mixed_filament_manager();
+    const size_t                num_physical = cfg.filament_colour.size();
+    if (wall_filament == 0 || !mgr.is_mixed(wall_filament, num_physical) ||
+        mixed_sublayer_legacy_mode(mgr.mixed_filaments(), cfg.enable_mixed_color_sublayer.value))
+        return wall_filament;
+    const MixedFilament *mf = mgr.mixed_filament_from_id(wall_filament, num_physical);
+    if (mf == nullptr)
+        return wall_filament;
+    const bool gradient = mf->gradient_enabled && mf->component_a != mf->component_b;
+    if (mixed_sublayer_effective_method(mf->sublayer_method, cfg.enable_mixed_color_sublayer.value, cfg.dithering_local_z_mode.value, gradient) !=
+        MixedSublayerMethod::Ratio)
+        return wall_filament;
+    const std::vector<MixedRatioComponent> components = mixed_ratio_components(*mf, num_physical);
+    if (components.size() < 2)
+        return wall_filament;
+    std::vector<unsigned int> ids;
+    std::vector<double>       nozzles(num_physical, 0.);
+    for (size_t i = 0; i < num_physical; ++i)
+        nozzles[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
+    for (const MixedRatioComponent &c : components)
+        ids.push_back(c.extruder);
+    if (mixed_ratio_diameter_mismatch(ids, nozzles).mismatch())
+        return wall_filament;
+    return components.front().extruder;
+}
+
 void PrintObject::compute_adaptive_merge_groups()
 {
     for (Layer *layer : m_layers)
@@ -6365,7 +6478,7 @@ void PrintObject::compute_adaptive_merge_groups()
         // wall_filament is already a 1-based config id; nozzle_diameter_for_filament() wants that
         // convention, so it is passed through unchanged. (used_printing_filaments() / object_extruders()
         // are 0-based and need +1, which adaptive_band_reference_nozzle() applies internally.)
-        const unsigned int filament = (unsigned int) config.wall_filament.value;
+        const unsigned int filament = adaptive_merge_region_filament(*this->print(), (unsigned int) config.wall_filament.value);
         region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
     }
     // Band reference is the plate's wall nozzles only. Infill-only nozzles deliberately do not size the
@@ -6375,6 +6488,18 @@ void PrintObject::compute_adaptive_merge_groups()
     const double min_nozzle = adaptive_band_reference_nozzle(print_config, plate_wall_filament_ids(*this->print()));
     if (min_nozzle <= EPSILON)
         return;
+    // A mixed region that is not a Ratio row (Subdivide, gradient, cadence kept on its virtual id) is never banded: its
+    // Local-Z passes split one layer, not a merged band. nozzle_diameter_for_filament() now resolves a mixed filament to
+    // its components' nozzle, so pin these regions to the band reference (a ladder of one), as they printed before.
+    {
+        const MixedFilamentManager &mgr          = this->print()->mixed_filament_manager();
+        const size_t                num_physical = print_config.filament_colour.size();
+        for (size_t region_id = 0; region_id < region_count; ++region_id) {
+            const unsigned int wall = (unsigned int) this->printing_region(region_id).config().wall_filament.value;
+            if (mgr.is_mixed(wall, num_physical) && adaptive_merge_region_filament(*this->print(), wall) == wall)
+                region_nozzles[region_id] = min_nozzle;
+        }
+    }
 
     // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
     // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that
@@ -6386,7 +6511,8 @@ void PrintObject::compute_adaptive_merge_groups()
     for (size_t region_id = 0; region_id < region_count; ++ region_id)
         region_ranges[region_id] = adaptive_ladder_height_range(
             adaptive_layer_height_range_for_nozzle(
-                print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments),
+                print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                used_filaments),
             region_nozzles[region_id], min_nozzle, m_slicing_params.layer_height);
 
     // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
@@ -6466,7 +6592,7 @@ void PrintObject::compute_adaptive_merge_groups()
         // base layers, in the same window) instead of the size ratio. The finest nozzle keeps printing the plate's layer height.
         if (nozzle > min_nozzle + EPSILON)
             band_size = nozzle_process_band_size(
-                nozzle_layer_height_for_filament(print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                nozzle_layer_height_for_filament(print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value)),
                 band_size, m_slicing_params.layer_height, range.min_height, range.max_height);
 
         std::vector<unsigned char> has_material(layer_count, 0);

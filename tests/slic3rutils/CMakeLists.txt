@@ -205,19 +205,16 @@ endif ()
 # lives in <prefix>/include/msvc rather than <prefix>/include, and only wxWidgets_USE_FILE adds it.
 # find_package(wxWidgets) runs in src/, whose variables do not reach this sibling directory, so it
 # is repeated here - it is cached, so this costs nothing.
-find_package(wxWidgets 3.1 QUIET COMPONENTS html adv gl core base webview aui net media)
+find_package(wxWidgets 3.1 QUIET COMPONENTS stc html adv gl core base webview aui net media)
 if (wxWidgets_FOUND)
     # Set on the target, not through wxWidgets_USE_FILE: that one calls include_directories(),
     # which only affects targets created after it, and this target already exists above.
     target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE ${wxWidgets_DEFINITIONS})
 endif ()
-# chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
-# slice_v1_tests.cpp compares the /result producer with the JSON fixtures next to it.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICE_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/slice_v1")
-# paint_v1_tests.cpp compares the paint_v1 producers with the fixtures next to it (PAINT_V1_WRITE_FIXTURES=1 rewrites them).
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE PAINT_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/paint_v1")
+# SLIC3R_TEST_RESOURCES_DIR (the shipped resources/), SLICE_V1_FIXTURES_DIR and PAINT_V1_FIXTURES_DIR
+# (the JSON fixtures next to slice_v1_tests.cpp / paint_v1_tests.cpp) come from tests/edge_test_paths.hpp
+# through test_common, not from -D values: see tests/CMakeLists.txt.
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

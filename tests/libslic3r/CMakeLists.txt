@@ -53,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
 	test_color_split.cpp
 	test_code_emboss.cpp
 	test_emboss_bend.cpp
+	test_svg_surface_modifier.cpp
 	test_inline_shapes.cpp
 	test_inline_text.cpp
 	test_simple_shape.cpp
@@ -157,6 +158,7 @@ add_executable(${_TEST_NAME}_tests
 	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
+	test_gcode_template_lint.cpp
 	test_polygon.cpp
 	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
@@ -194,6 +196,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stl.cpp
 	test_support_set.cpp
 	test_support_interlock.cpp
+	test_startup_sound.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp

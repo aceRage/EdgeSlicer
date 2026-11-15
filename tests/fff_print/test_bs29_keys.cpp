@@ -296,6 +296,11 @@ std::vector<double> toolchange_wipe_lengths(const std::string &gcode)
             const double nx = word(line, 'X', x), ny = word(line, 'Y', y);
             if (in_wipe)
                 wipe_len += std::hypot(nx - x, ny - y);
+            // Orca #10780: the tower may print a block of the old filament before the change (a finish-first
+            // tower visit); the wipe before that is the ordinary one of the travel to the tower, not the
+            // tool change's.
+            else if (word(line, 'E', 0.) > 0. && (nx != x || ny != y))
+                last_wipe = -1.;
             x = nx;
             y = ny;
         }

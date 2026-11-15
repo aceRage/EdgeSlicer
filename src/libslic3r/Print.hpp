@@ -80,6 +80,13 @@ struct LocalZInterval
 };
 
 struct SubLayerPlan;
+// Mixed color sublayer P3: what PrintObject::adapt_local_z_ratio_plan_to_merge_bands() did.
+struct MixedRatioMergeStats
+{
+    size_t split_bands { 0 };         // band tops split into passes
+    size_t whole_bands { 0 };         // band tops printed in one colour: no pass reached above the swallowed layers
+    size_t reordered_top_bands { 0 }; // Bambu Studio order asked for (or a top surface), but the first pass had to change
+};
 // The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
 bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
 // The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
@@ -104,6 +111,14 @@ struct SubLayerPlan
     bool   ratio_pass { false };
     // The top pass of its Ratio row on this layer: ironing prints here only, once (D6).
     bool   ratio_last_pass { false };
+    // How the planner ordered this Ratio row on this layer (Bambu Studio's ascending order, asked for or forced by a
+    // top surface) and the gradient share of component A it used (< 0: none). The AdaptiveLayerMerge band split
+    // (P3, D9) re-plans the row's passes over the band heights with the same choices.
+    bool   ratio_ascending { false };
+    double ratio_gradient_a { -1.0 };
+    // The height a Ratio pass takes its share of: the layer height, or the merged band height (P3). Every path of the
+    // pass keeps pass height / this of its own flow (bridges included).
+    double ratio_layer_height { 0.0 };
     std::vector<ExPolygons> painted_masks_by_extruder;
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;
@@ -519,12 +534,18 @@ public:
     {
         m_local_z_intervals = std::move(intervals);
         m_local_z_sublayer_plan = std::move(sublayers);
+        m_local_z_plan_before_merge.reset();
     }
     void                                clear_local_z_plan()
     {
         m_local_z_intervals.clear();
         m_local_z_sublayer_plan.clear();
+        m_local_z_plan_before_merge.reset();
     }
+    // Mixed color sublayer P3 (D9): re-plan the Ratio rows whose region AdaptiveLayerMerge merged into bands, so
+    // their passes split each band patch's height on its top and skip the swallowed footprint. Runs right after
+    // compute_adaptive_merge_groups(); idempotent (the slice-time plan is kept and restored first).
+    MixedRatioMergeStats                adapt_local_z_ratio_plan_to_merge_bands();
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
@@ -793,6 +814,9 @@ private:
     void combine_adaptive_infill();
     void prepare_infill();
     void infill();
+    // Raises SlicingEmptyFirstLayer on this object when the first layer of `layers_src` (this object,
+    // or the object it shares its layers with) has slices but no extrusions. Needs posInfill started.
+    void warn_if_first_layer_prints_nothing(const PrintObject &layers_src);
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();
@@ -856,6 +880,8 @@ private:
     SupportLayerPtrs                        m_support_layers;
     std::vector<LocalZInterval>             m_local_z_intervals;
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
+    // The slice-time Local-Z plan, kept while adapt_local_z_ratio_plan_to_merge_bands() has replaced it.
+    std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -1193,6 +1219,42 @@ enum FilamentTempType {
     HighLowCompatible,
     Undefine
 };
+
+// EdgeSlicer: support interface temperature (support_interface_nozzle_temperature, an object setting).
+// The temperature belongs to the filament for the whole plate: a filament that prints nothing but
+// support (interface and possibly support body) prints at the set temperature on every layer, the first
+// one included (owner decisions D3/D4, 2026-11-14). Every reader of the filament's temperature (tool
+// change heat-up and pre-heat, prime tower, ooze/standby, the layer 1 -> 2 switch, placeholders such as
+// temperature[] / first_layer_temperature[], the estimator) then sees one value, so no extra waits or
+// mid-layer reheats are introduced. A filament that also prints part of a model keeps its own
+// temperatures (ignored, with a warning).
+struct SupportInterfaceTemperatures
+{
+    enum class Ignored { NoInterfaceFilament, FilamentMatching, PrintsModel, Conflict };
+    struct IgnoredEntry
+    {
+        Ignored      reason;
+        int          filament;    // 0-based, -1 when there is none
+        int          temperature; // the value that was not used
+        std::string  object;      // object name
+        bool operator==(const IgnoredEntry &rhs) const
+        {
+            return reason == rhs.reason && filament == rhs.filament && temperature == rhs.temperature && object == rhs.object;
+        }
+    };
+    // Filament (0-based) -> nozzle temperature it prints at.
+    std::map<unsigned int, int> temperatures;
+    std::vector<IgnoredEntry>   ignored;
+
+    bool empty() const { return temperatures.empty() && ignored.empty(); }
+    bool operator==(const SupportInterfaceTemperatures &rhs) const { return temperatures == rhs.temperatures && ignored == rhs.ignored; }
+    bool operator!=(const SupportInterfaceTemperatures &rhs) const { return !(*this == rhs); }
+};
+
+// Writes `temperatures` into nozzle_temperature and nozzle_temperature_initial_layer of `config` at each
+// filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
+void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1266,6 +1328,12 @@ public:
     // Computed on demand: usage type is config-derived (real); physical/flow unprintables are stubbed empty
     // (the config subsystem they need is not ported).
     std::vector<FilamentUsageType> get_filament_usage_type() const;
+    // EdgeSlicer: support interface temperatures, resolved at the end of apply() (see SupportInterfaceTemperatures).
+    const SupportInterfaceTemperatures &support_interface_temperatures() const { return m_support_interface_temperatures; }
+    SupportInterfaceTemperatures        resolve_support_interface_temperatures() const;
+    // config() with the support interface temperatures written in; config() itself when there are none.
+    // `storage` holds the copy.
+    const PrintConfig &config_with_interface_temperatures(PrintConfig &storage) const;
     std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
     std::map<int, std::set<NozzleVolumeType>> get_filament_unprintable_flow(const std::vector<unsigned int>& used_filaments) const;
 
@@ -1575,6 +1643,8 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
+    SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
     // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
