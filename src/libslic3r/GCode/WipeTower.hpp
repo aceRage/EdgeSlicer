@@ -61,6 +61,12 @@ public:
     // filament_prime_volume, filament_prime_volume_nc after a hotend change on one extruder (H2C rack), 15 mm3 in
     // prime_volume_mode Saving.
     static float bambu_prime_volume(const PrintConfig &config, unsigned int filament, bool hotend_change);
+    // Edge (PR-B, decision D5): the purge block a filament goes to. A filament without a
+    // filament_adhesiveness_category (0) gets the category Bambu Studio's own presets give its filament_type
+    // (PLA 100, ABS / ASA 200, PETG / PCTG 300, PA / PPA 400, PC 500, TPU 600, PET-CF 800, PE 901, PP 902,
+    // PVA 704, BVOH 797, HIPS 798, PPS 801; a support filament for PLA 702, for PA / PET 703, for ABS 706), so
+    // an uncategorised PLA and PETG no longer share a block. A type without a Bambu category stays 0.
+    static int   adhesiveness_category(int configured, const std::string &filament_type, bool is_support);
     // One filament's share of a Type1 tower layer, as plan_tower_new() reserves it.
     struct PurgeEstimate
     {

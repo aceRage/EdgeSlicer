@@ -180,7 +180,8 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
             purge.prime_volume      = saving_mode ? 15.f : (bbl_printer || hotend_rack) ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
-            purge.category          = int_at("filament_adhesiveness_category", id, 0);
+            const TowerInterface::FilamentKind kind = TowerInterface::filament_kind(config, id);
+            purge.category          = WipeTower::adhesiveness_category(int_at("filament_adhesiveness_category", id, 0), kind.type, kind.is_support);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);
             if (dual_nozzle) {

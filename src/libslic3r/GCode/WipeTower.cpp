@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include <boost/algorithm/string.hpp>
 #include <boost/log/trivial.hpp>
 
 #include "GCodeProcessor.hpp"
@@ -1541,6 +1542,54 @@ float WipeTower::bambu_prime_volume(const PrintConfig &config, unsigned int fila
     return float(config.prime_volume.value);
 }
 
+int WipeTower::adhesiveness_category(int configured, const std::string &filament_type, bool is_support)
+{
+    if (configured != 0)
+        return configured;
+    const std::string t = boost::to_upper_copy(boost::trim_copy(filament_type));
+    auto starts = [&t](const char *prefix) { return boost::starts_with(t, prefix); };
+    // Bambu Studio 2.9.1's own presets, by type (resources/profiles/BBL/filament).
+    if (t == "PVA")
+        return 704;
+    if (t == "BVOH")
+        return 797;
+    if (t == "HIPS")
+        return 798;
+    if (is_support) {
+        // Bambu Support For PLA (702), Support For PA/PET and Support G (703 / 701), Support for ABS (706).
+        if (starts("PLA"))
+            return 702;
+        if (starts("PA") || starts("PET"))
+            return 703;
+        if (starts("ABS") || starts("ASA"))
+            return 706;
+        return 0;
+    }
+    if (starts("PLA"))
+        return 100;
+    if (starts("ABS") || starts("ASA"))
+        return 200;
+    if (t == "PET-CF")
+        return 800;
+    if (starts("PETG") || starts("PCTG") || t == "PET")
+        return 300;
+    if (starts("PPS"))
+        return 801;
+    if (starts("PPA"))
+        return 400;
+    if (t == "PP" || starts("PP-"))
+        return 902;
+    if (starts("PA"))
+        return 400;
+    if (t == "PC" || starts("PC-") || starts("PC/"))
+        return 500;
+    if (starts("TPU") || starts("TPE") || t == "FLEX")
+        return 600;
+    if (t == "PE" || starts("PE-"))
+        return 901;
+    return 0;
+}
+
 float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width)
 {
     if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)
@@ -1950,7 +1999,8 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
         m_filpar[idx].max_e_speed = (max_vol_speed / filament_area());
     m_filpar[idx].wipe_dist = float(config.wipe_distance.get_at(idx));
     // Orca #10780 / #15035: the filament's block, and the retraction and spiral of the wall gap ironing.
-    m_filpar[idx].category       = config.filament_adhesiveness_category.values.empty() ? 0 : config.filament_adhesiveness_category.get_at(idx);
+    m_filpar[idx].category       = adhesiveness_category(config.filament_adhesiveness_category.values.empty() ? 0 : config.filament_adhesiveness_category.get_at(idx),
+                                                         m_filpar[idx].material, m_filpar[idx].is_support);
     m_filpar[idx].retract_length = config.retraction_length.values.empty() ? 0.f : float(config.retraction_length.get_at(idx));
     m_filpar[idx].retract_speed  = config.retraction_speed.values.empty() ? 0.f : float(config.retraction_speed.get_at(idx));
     m_filpar[idx].flat_iron_area = config.filament_tower_ironing_area.values.empty() ? 0.f : float(config.filament_tower_ironing_area.get_at(idx));

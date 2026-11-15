@@ -424,3 +424,50 @@ TEST_CASE("Cool down during the tower with Edge's interface heat-up", "[BBSTower
             CHECK(lines[i + 1].find("tower interface cool down during tower") != std::string::npos);
         }
 }
+
+TEST_CASE("A filament without an adhesiveness category gets Bambu's for its type", "[BBSTowerLeftovers][TowerBlocks]")
+{
+    // A category that is set always wins.
+    CHECK(WipeTower::adhesiveness_category(300, "PLA", false) == 300);
+    CHECK(WipeTower::adhesiveness_category(0, "PLA", false) == 100);
+    CHECK(WipeTower::adhesiveness_category(0, "pla-cf ", false) == 100);
+    CHECK(WipeTower::adhesiveness_category(0, "ABS", false) == 200);
+    CHECK(WipeTower::adhesiveness_category(0, "ASA-CF", false) == 200);
+    CHECK(WipeTower::adhesiveness_category(0, "PETG", false) == 300);
+    CHECK(WipeTower::adhesiveness_category(0, "PETG-CF", false) == 300);
+    CHECK(WipeTower::adhesiveness_category(0, "PCTG", false) == 300);
+    CHECK(WipeTower::adhesiveness_category(0, "PET-CF", false) == 800);
+    CHECK(WipeTower::adhesiveness_category(0, "PA6-CF", false) == 400);
+    CHECK(WipeTower::adhesiveness_category(0, "PAHT-CF", false) == 400);
+    CHECK(WipeTower::adhesiveness_category(0, "PPA-CF", false) == 400);
+    CHECK(WipeTower::adhesiveness_category(0, "PC", false) == 500);
+    CHECK(WipeTower::adhesiveness_category(0, "PCTG-CF", false) == 300);
+    CHECK(WipeTower::adhesiveness_category(0, "TPU-AMS", false) == 600);
+    CHECK(WipeTower::adhesiveness_category(0, "PVA", true) == 704);
+    CHECK(WipeTower::adhesiveness_category(0, "BVOH", false) == 797);
+    CHECK(WipeTower::adhesiveness_category(0, "HIPS", false) == 798);
+    CHECK(WipeTower::adhesiveness_category(0, "PPS-CF", false) == 801);
+    CHECK(WipeTower::adhesiveness_category(0, "PE-CF", false) == 901);
+    CHECK(WipeTower::adhesiveness_category(0, "PP-GF", false) == 902);
+    // Support filaments get Bambu's support bands, not their base material's.
+    CHECK(WipeTower::adhesiveness_category(0, "PLA", true) == 702);
+    CHECK(WipeTower::adhesiveness_category(0, "PA", true) == 703);
+    CHECK(WipeTower::adhesiveness_category(0, "ABS", true) == 706);
+    // No Bambu category for these: they stay uncategorised.
+    for (const char *type : { "EVA", "PHA", "SBS", "CoPE", "PEEK", "" })
+        CHECK(WipeTower::adhesiveness_category(0, type, false) == 0);
+}
+
+TEST_CASE("An uncategorised PLA and PETG purge into separate blocks", "[BBSTowerLeftovers][TowerBlocks]")
+{
+    DynamicPrintConfig cfg = machine_config(X1C_PLA_PETG);
+    cfg.set_deserialize_strict({ { "filament_adhesiveness_category", "0,0" } });
+    REQUIRE(cfg.option<ConfigOptionStrings>("filament_type")->get_at(1) == "PETG");
+    const auto t = direct_tower(cfg, alternating(4));
+    REQUIRE(t->tower->blocks().size() == 2);
+    std::vector<int> categories;
+    for (const auto &b : t->tower->blocks())
+        categories.push_back(b.filament_adhesiveness_category);
+    std::sort(categories.begin(), categories.end());
+    CHECK(categories == std::vector<int>{ 100, 300 });
+}
