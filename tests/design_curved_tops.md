@@ -55,7 +55,13 @@ built block gets a summary line (`SlicingCurvedTopsSummary`), the block ends wit
 the safe Z (R5), wipes on curved lines are held to 40 mm/s, and `check_head_clearance()` runs on
 curved prints and stops the export on a contact (D2). New refusals: by-object, more than one filament,
 smooth timelapse tower, local-Z / sub-layer plans, mixed nozzle diameters, draft shield or skirt taller
-than one layer, supports or stabilizers on the object, safe travel Z above the printable height.
+than one layer, supports or stabilizers on the object, Z contouring on the same object, safe travel
+Z above the printable height, several surfaces whose combined height span exceeds the allowed rise.
+Every value a guard reads is recorded per object (`curved_tops_guard_inputs()`); `Print::apply()`
+regenerates that object's walls when any of them changes, or when the curved step was left
+unfinished over walls it already cut, so the block is always planned on uncut layers. The head check
+lets the tip land meet the neighbouring bead up to the slope the block actually follows, on the
+block's layer's extrusions only.
 
 ## Source choice and credit
 
