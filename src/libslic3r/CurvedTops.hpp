@@ -35,7 +35,7 @@ struct CurvedTopsHeadClearance
     double      max_slope_deg    = 12.0;
     const char *source           = "generic conservative default";
     // False for the generic default: apply_curved_tops() leaves the object planar on a printer
-    // whose clearance nobody has given.
+    // whose clearance nobody has given, and PrintObject::contour_z() raises SlicingCurvedTopsUnavailable.
     bool        known            = false;
 };
 
