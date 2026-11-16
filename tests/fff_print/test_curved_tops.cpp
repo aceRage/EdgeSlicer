@@ -150,17 +150,18 @@ struct CurvedTravels
     size_t under_margin  = 0;   // clearance below the margin somewhere along the travel
     size_t arcs          = 0;   // G2/G3 inside the block: a spiral lift, or an arc-fitted curved line
     double max_travel_z  = 0.;
+    double max_extrude_f = 0.;  // highest feedrate of an extrusion in the block, mm/min
     double min_clearance = 1e9;
 };
 
 CurvedTravels check_curved_travels(const std::string &gcode, double radius, double margin)
 {
-    struct Move { char kind; double x0, y0, z0, x1, y1, z1; };   // kind: 'e' extrude, 'A' arc extrude, 't' travel, 'w' wipe, 'a' arc, 'z' other
+    struct Move { char kind; double x0, y0, z0, x1, y1, z1, f; };   // kind: 'e' extrude, 'A' arc extrude, 't' travel, 'w' wipe, 'a' arc, 'z' other
     std::vector<Move> moves;
     {
         std::istringstream in(gcode);
         std::string        line;
-        double x = 0., y = 0., z = 0.;
+        double x = 0., y = 0., z = 0., f = 0.;
         bool   in_wipe = false;   // a wipe has no E when the whole retraction comes before it
         while (std::getline(in, line)) {
             if (line.rfind(";WIPE_START", 0) == 0)
@@ -183,9 +184,10 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
             word('Y', ny);
             word('Z', nz);
             word('E', e);
+            word('F', f);
             const bool xy = nx != x || ny != y;
             const char kind = arc ? (e > 0. ? 'A' : 'a') : (e > 0. && xy) ? 'e' : ((e < 0. || in_wipe) && xy) ? 'w' : xy ? 't' : 'z';
-            moves.push_back({ kind, x, y, z, nx, ny, nz });
+            moves.push_back({ kind, x, y, z, nx, ny, nz, f });
             x = nx; y = ny; z = nz;
         }
     }
@@ -241,6 +243,8 @@ CurvedTravels check_curved_travels(const std::string &gcode, double radius, doub
         if (i >= start && (m.kind == 'A' || m.kind == 'a'))
             ++out.arcs;
         if (extrudes(m.kind)) {
+            if (i >= start)
+                out.max_extrude_f = std::max(out.max_extrude_f, m.f);
             for (int j = 0; j <= n; ++j) {
                 const double t = double(j) / n;
                 const Vec3d  p(m.x0 + (m.x1 - m.x0) * t, m.y0 + (m.y1 - m.y0) * t, m.z0 + (m.z1 - m.z0) * t);
@@ -408,13 +412,15 @@ TEST_CASE("Curved tops: the stock X1C process keeps its travels clear and its G-
 
     const CurvedTravels t = check_curved_travels(gcode, 0.2, 0.5);
     INFO("travels " << t.travels << ", slanted " << t.slanted << ", under margin " << t.under_margin << ", arcs " << t.arcs
-                    << ", min clearance " << t.min_clearance << " mm, max travel Z " << t.max_travel_z);
+                    << ", min clearance " << t.min_clearance << " mm, max travel Z " << t.max_travel_z << ", max extrusion F " << t.max_extrude_f);
     CHECK(t.travels >= 5);
     CHECK(t.slanted == 0);
     CHECK(t.arcs == 0);
     CHECK(t.under_margin == 0);
     CHECK(t.min_clearance >= 0.5);
     CHECK(t.max_travel_z < cfg.opt_float("printable_height"));
+    // Curved paths at 40 mm/s or less, overhang walls included (the X1C's walls ran at 50).
+    CHECK(t.max_extrude_f <= CURVED_TOPS_MAX_SPEED_MM_S * 60. + 1e-6);
 
     // One layer change and one Z_HEIGHT per printed layer (the planar layers the curved block
     // emptied are not printed), the header's total says the same, progress lines still there.

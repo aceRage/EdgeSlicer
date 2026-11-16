@@ -12752,6 +12752,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 continue;
             path_length += line_length;
             double new_speed = pre_processed_point.speed * 60.0;
+            // EdgeSlicer SPIKE, curved tops: the overhang speeds are worked out from the role speed, so the
+            // curved paths' cap (see F above) applies to them too.
+            if (curved_top)
+                new_speed = std::min(new_speed, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
 
             if ((std::abs(last_set_speed - new_speed) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
                 // ORCA: Adaptive PA code segment when adjusting PA within the same feature
