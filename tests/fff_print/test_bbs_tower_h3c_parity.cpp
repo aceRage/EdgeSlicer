@@ -78,6 +78,8 @@ DynamicPrintConfig machine_config(const Machine &m)
         { "wipe_tower_y", 180. },
         { "wipe_tower_rotation_angle", 0 },
         { "gcode_comments", 0 },
+        // Tower-general test: its expectations are rectangle-wall geometry (depth, band rows, scrape beside a straight wall). The BBL presets now default to rib (a rib tower is square and shifts the origin), so pin rectangle; the rib wall has its own cases.
+        { "wipe_tower_wall_type", "rectangle" },
     });
     if (cfg.option("filament_map") != nullptr)
         cfg.set_deserialize_strict({ { "filament_map_mode", "Manual" }, { "filament_map", "1,2" } });
