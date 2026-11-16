@@ -372,7 +372,8 @@ Polygons segment_area(const TowerSegment &s)
 {
     if ((s.b - s.a).norm() < 1e-4f)
         return {};
-    const Polyline pl{ Point::new_scale(s.a.x(), s.a.y()), Point::new_scale(s.b.x(), s.b.y()) };
+    Polyline pl;
+    pl.points = { Point::new_scale(s.a.x(), s.a.y()), Point::new_scale(s.b.x(), s.b.y()) };
     return offset(pl, float(scale_(0.5 * s.width)));
 }
 
