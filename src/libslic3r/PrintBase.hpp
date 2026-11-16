@@ -142,7 +142,10 @@ public:
         SlicingPreciseZNotApplied,
         // An object rests on the bed but its first layer has no extrusions (a bed contact narrower
         // than the first-layer wall can print), so it gets no brim and starts in mid-air. Appended; own id.
-        SlicingEmptyFirstLayer
+        SlicingEmptyFirstLayer,
+        // Head clearance check (GCode/HeadCollisionCheck.hpp): a Z-contoured print has moves where the
+        // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
+        SlicingHeadCollision
     };
 
     typedef size_t TimeStamp;

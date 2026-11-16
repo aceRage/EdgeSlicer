@@ -1,0 +1,30 @@
+{
+    "schema": "edgeslicer.head_clearance.v1",
+    "id": "bambu-h2d",
+    "name": "Bambu Lab H2D dual-nozzle toolhead",
+    "printer_models": ["Bambu Lab H2D", "Bambu Lab H2D Pro"],
+    "calibrated": false,
+    "source": "Adapted from PancakeSlicer head envelope bambu-h2d (AGPL-3.0, github.com/ZimengXiong/PancakeSlicer, engine/resources/nonplanar/heads, clone 174a578f43); all its parts are that author's estimates. The idle nozzle sits about 4 mm above the active tip, 25 mm to either side; both sides are listed because either nozzle can be the active one. Idle nozzles are bounded by one box each instead of their cone bands (conservative). Gantry rod height 47.4 mm and distance 50 mm are Bambu's extruder_clearance_height_to_rod / dist_to_rod from the H2D machine profile. Not measured on a printer.",
+    "nozzle": {
+        "estimated": true,
+        "profile": [[0.0, 0.3], [0.05, 0.34], [0.1, 0.41], [0.2, 0.48], [0.3, 0.62], [0.5, 0.79], [0.75, 0.97], [1.0, 1.32], [1.5, 1.67], [2.0, 2.0]]
+    },
+    "boxes": [
+        {"name": "nozzle body", "min": [-2, -2, 2], "max": [2, 2, 4], "estimated": true},
+        {"name": "silicone sock lower", "min": [-4.5, -4.5, 4], "max": [4.5, 4.5, 6], "estimated": true},
+        {"name": "silicone sock", "min": [-9, -7, 6], "max": [9, 7, 24], "estimated": true},
+        {"name": "idle right nozzle", "min": [23, -2, 4], "max": [27, 2, 8], "estimated": true},
+        {"name": "idle left nozzle", "min": [-27, -2, 4], "max": [-23, 2, 8], "estimated": true},
+        {"name": "idle right sock", "min": [16, -7, 8], "max": [34, 7, 28], "estimated": true},
+        {"name": "idle left sock", "min": [-34, -7, 8], "max": [-16, 7, 28], "estimated": true},
+        {"name": "left duct outlet", "min": [-14, -12, 4], "max": [-8, 8, 9], "estimated": true},
+        {"name": "right duct outlet", "min": [8, -12, 4], "max": [14, 8, 9], "estimated": true},
+        {"name": "left duct", "min": [-46.5, -14, 4], "max": [-34, 10, 18], "estimated": true},
+        {"name": "right duct", "min": [34, -14, 4], "max": [46.5, 10, 18], "estimated": true},
+        {"name": "left duct riser", "min": [-58.5, -20, 9], "max": [-8, 15, 26], "estimated": true},
+        {"name": "right duct riser", "min": [8, -20, 9], "max": [58.5, 15, 26], "estimated": true},
+        {"name": "front housing", "min": [-64.5, -32, 26], "max": [64.5, 18, 95], "estimated": true},
+        {"name": "carriage", "min": [-70, 15, 47.4], "max": [70, 50, 120], "estimated": true},
+        {"name": "X gantry", "min": [0, -50, 47.4], "max": [0, 50, 120], "spans_x": true, "estimated": true}
+    ]
+}

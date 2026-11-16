@@ -2071,6 +2071,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                zaa_min_z))
     ((ConfigOptionFloat,                zaa_minimize_perimeter_height))
     ((ConfigOptionBool,                 zaa_speed_scaling))
+    ((ConfigOptionFloat,                zaa_max_segment_rate))
 
     // Edge: a layer shorter than this (after the cooling slowdown) waits parked for the rest. 0 = off.
     ((ConfigOptionFloat,                min_layer_time_pause))
