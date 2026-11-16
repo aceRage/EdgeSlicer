@@ -17,6 +17,8 @@
 #include <boost/nowide/cstdlib.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <future>
 #include <mutex>
 
@@ -28,6 +30,29 @@ namespace {
 
 std::mutex               g_prompt_mutex;
 SandboxUnavailablePrompt g_prompt_for_testing;
+std::atomic<bool>        g_abort_sandbox_prompt{false};
+
+std::string unsandboxed_bind_hash(const std::string& plugin_key)
+{
+    if (plugin_key.empty())
+        return {};
+    boost::filesystem::path root;
+    PluginDescriptor        descriptor;
+    if (PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                boost::filesystem::path(descriptor.plugin_root);
+        boost::system::error_code ec;
+        const auto                st = boost::filesystem::status(root, ec);
+        if (!ec && boost::filesystem::is_regular_file(st))
+            root = root.parent_path();
+    } else if (!Slic3r::data_dir().empty()) {
+        root = boost::filesystem::path(Slic3r::data_dir()) / "orca_plugins" / plugin_key;
+    }
+    if (root.empty())
+        return {};
+    std::string hash_error;
+    return plugin_trust::sha256_plugin_tree(root, hash_error);
+}
 
 std::string strip_tree_wildcard(std::string path)
 {
@@ -102,8 +127,8 @@ bool sandbox_spec_from_json(const nlohmann::json& json, SandboxSpec& spec, std::
 nlohmann::json sandbox_report_to_json(const SandboxReport& report)
 {
     return {
-        {"applied", report.applied},           {"kind", report.kind},       {"detail", report.detail},
-        {"landlock_abi", report.landlock_abi}, {"network", report.network}, {"exec", report.exec},
+        {"applied", report.applied}, {"kind", report.kind}, {"detail", report.detail},     {"landlock_abi", report.landlock_abi},
+        {"network", report.network}, {"exec", report.exec}, {"degraded", report.degraded},
     };
 }
 
@@ -118,6 +143,7 @@ SandboxReport sandbox_report_from_json(const nlohmann::json& json)
     report.landlock_abi = json.value("landlock_abi", 0);
     report.network      = json.value("network", false);
     report.exec         = json.value("exec", false);
+    report.degraded     = json.value("degraded", false);
     if (!report.applied)
         report.kind = k_sandbox_kind_none;
     return report;
@@ -222,7 +248,8 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
         add_unique_path(spec.extra_paths, resources, false);
 
     // Grant the trust sidecar file, not all of data_dir (presets, printer state).
-    // The plugin's own directory is granted write separately via plugin_root.
+    // The plugin's own directory is granted read-only via plugin_root; writable scratch
+    // is get_storage_dir (plugin_data) plus the private TMPDIR.
     const boost::filesystem::path sidecar = plugin_trust::trust_sidecar_path();
     if (!sidecar.empty())
         add_unique_path(spec.extra_paths, sidecar.string(), false);
@@ -325,7 +352,14 @@ void set_sandbox_unavailable_prompt_for_testing(SandboxUnavailablePrompt prompt)
 {
     std::lock_guard<std::mutex> lock(g_prompt_mutex);
     g_prompt_for_testing = std::move(prompt);
+    g_abort_sandbox_prompt.store(false, std::memory_order_release);
 }
+
+void abort_sandbox_unavailable_prompt() { g_abort_sandbox_prompt.store(true, std::memory_order_release); }
+
+void clear_sandbox_unavailable_prompt_abort() { g_abort_sandbox_prompt.store(false, std::memory_order_release); }
+
+bool sandbox_unavailable_prompt_aborted() { return g_abort_sandbox_prompt.load(std::memory_order_acquire); }
 
 std::string sandbox_unavailable_message(const std::string& plugin_key, const std::string& reason)
 {
@@ -347,36 +381,55 @@ bool allow_unsandboxed_run(const std::string& plugin_key, const std::string& rea
         return true;
     }
 
-    if (plugin_trust::is_unsandboxed(plugin_key))
+    const std::string bind_hash = unsandboxed_bind_hash(plugin_key);
+    if (plugin_trust::is_unsandboxed(plugin_key, bind_hash))
         return true;
 
     SandboxUnavailableChoice choice = SandboxUnavailableChoice::DontRun;
+    SandboxUnavailablePrompt prompt;
     {
         std::lock_guard<std::mutex> lock(g_prompt_mutex);
-        if (g_prompt_for_testing) {
-            choice = g_prompt_for_testing(plugin_key, reason);
+        prompt = g_prompt_for_testing;
+    }
+    if (prompt) {
+        choice = prompt(plugin_key, reason);
+    } else {
+        const wxString body = wxString::FromUTF8(sandbox_unavailable_message(plugin_key, reason).c_str());
+        auto           show = [](const wxString& message) {
+            GUI::MessageDialog dialog(nullptr, message, _L("Plugin sandbox unavailable"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+            dialog.SetButtonLabel(wxID_NO, _L("Don't run"), /*set_focus=*/true);
+            dialog.SetButtonLabel(wxID_YES, _L("Run anyway"));
+            return dialog.ShowModal() == wxID_YES ? SandboxUnavailableChoice::RunUnsandboxed : SandboxUnavailableChoice::DontRun;
+        };
+        if (wxTheApp == nullptr || GUI::wxGetApp().is_closing() || g_abort_sandbox_prompt.load(std::memory_order_acquire)) {
+            choice = SandboxUnavailableChoice::DontRun;
+        } else if (wxIsMainThread()) {
+            choice = show(body);
         } else {
-            const wxString body = wxString::FromUTF8(sandbox_unavailable_message(plugin_key, reason).c_str());
-            auto           show = [](const wxString& message) {
-                GUI::MessageDialog dialog(nullptr, message, _L("Plugin sandbox unavailable"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
-                dialog.SetButtonLabel(wxID_NO, _L("Don't run"), /*set_focus=*/true);
-                dialog.SetButtonLabel(wxID_YES, _L("Run anyway"));
-                return dialog.ShowModal() == wxID_YES ? SandboxUnavailableChoice::RunUnsandboxed : SandboxUnavailableChoice::DontRun;
-            };
-            if (wxTheApp == nullptr || GUI::wxGetApp().is_closing()) {
-                choice = SandboxUnavailableChoice::DontRun;
-            } else if (wxIsMainThread()) {
-                choice = show(body);
-            } else {
-                auto result = std::make_shared<std::promise<SandboxUnavailableChoice>>();
-                auto future = result->get_future();
-                GUI::wxGetApp().CallAfter([result, body, show]() {
-                    if (wxTheApp == nullptr || GUI::wxGetApp().is_closing())
+            auto result = std::make_shared<std::promise<SandboxUnavailableChoice>>();
+            auto future = result->get_future();
+            GUI::wxGetApp().CallAfter([result, body, show]() {
+                try {
+                    if (wxTheApp == nullptr || GUI::wxGetApp().is_closing() || g_abort_sandbox_prompt.load(std::memory_order_acquire))
                         result->set_value(SandboxUnavailableChoice::DontRun);
                     else
                         result->set_value(show(body));
-                });
+                } catch (const std::future_error&) {}
+            });
+            for (;;) {
+                if (future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready)
+                    break;
+                if (g_abort_sandbox_prompt.load(std::memory_order_acquire) || wxTheApp == nullptr || GUI::wxGetApp().is_closing()) {
+                    try {
+                        result->set_value(SandboxUnavailableChoice::DontRun);
+                    } catch (const std::future_error&) {}
+                    break;
+                }
+            }
+            try {
                 choice = future.get();
+            } catch (const std::future_error&) {
+                choice = SandboxUnavailableChoice::DontRun;
             }
         }
     }
@@ -386,7 +439,11 @@ bool allow_unsandboxed_run(const std::string& plugin_key, const std::string& rea
         return false;
     }
     std::string save_error;
-    if (!plugin_key.empty() && !plugin_trust::allow_unsandboxed(plugin_key, save_error)) {
+    if (!plugin_key.empty() && bind_hash.empty()) {
+        error = "cannot record unsandboxed override without a plugin hash";
+        return false;
+    }
+    if (!plugin_key.empty() && !plugin_trust::allow_unsandboxed(plugin_key, bind_hash, save_error)) {
         error = save_error.empty() ? std::string("failed to record unsandboxed override") : save_error;
         return false;
     }

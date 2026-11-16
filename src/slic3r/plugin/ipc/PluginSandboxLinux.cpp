@@ -41,6 +41,7 @@ bool probe_linux_sandbox(SandboxProbe& probe)
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -90,6 +91,20 @@ bool probe_linux_sandbox(SandboxProbe& probe)
 #define LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
 #define LANDLOCK_ACCESS_NET_CONNECT_TCP (1ULL << 1)
 #endif
+#ifndef LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
+#define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET (1ULL << 0)
+#define LANDLOCK_SCOPE_SIGNAL (1ULL << 1)
+#endif
+#ifndef __X32_SYSCALL_BIT
+#define __X32_SYSCALL_BIT 0x40000000u
+#endif
+#ifndef __NR_io_uring_setup
+#if defined(__x86_64__) || defined(__aarch64__)
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#endif
+#endif
 
 #ifndef SYS_landlock_create_ruleset
 #define SYS_landlock_create_ruleset 444
@@ -116,6 +131,7 @@ struct landlock_ruleset_attr_min
 {
     __u64 handled_access_fs;
     __u64 handled_access_net;
+    __u64 scoped;
 };
 
 struct landlock_path_beneath_attr_min
@@ -155,6 +171,22 @@ __u64 net_handled_for_abi(int abi)
     if (abi >= 4)
         return LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
     return 0;
+}
+
+__u64 scoped_for_abi(int abi)
+{
+    if (abi >= 6)
+        return LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL;
+    return 0;
+}
+
+size_t ruleset_attr_size(const landlock_ruleset_attr_min& attr)
+{
+    if (attr.scoped)
+        return sizeof(attr);
+    if (attr.handled_access_net)
+        return offsetof(landlock_ruleset_attr_min, scoped);
+    return sizeof(attr.handled_access_fs);
 }
 
 __u64 fs_read_access(int abi)
@@ -234,8 +266,6 @@ std::string make_private_tmp()
 #define EDGE_AUDIT_ARCH 0
 #endif
 
-#include <cstddef>
-
 // Deny-list seccomp-bpf. Python keeps its usual syscalls; the listed ones return EPERM.
 bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
 {
@@ -259,6 +289,11 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
     emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, EDGE_AUDIT_ARCH);
     emit(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
     emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
+#ifdef __x86_64__
+    // x32 syscalls set __X32_SYSCALL_BIT; the native table does not apply. Kill them.
+    emit(BPF_JMP | BPF_JGE | BPF_K, 0, 1, __X32_SYSCALL_BIT);
+    emit(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+#endif
 
     auto deny_nr = [&](int nr) {
         emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(nr));
@@ -328,6 +363,18 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
 #ifdef __NR_perf_event_open
     deny_nr(__NR_perf_event_open);
 #endif
+#ifdef __NR_io_uring_setup
+    deny_nr(__NR_io_uring_setup);
+#endif
+#ifdef __NR_io_uring_enter
+    deny_nr(__NR_io_uring_enter);
+#endif
+#ifdef __NR_io_uring_register
+    deny_nr(__NR_io_uring_register);
+#endif
+#ifdef __NR_setsid
+    deny_nr(__NR_setsid);
+#endif
 
     if (!allow_exec) {
 #ifdef __NR_execve
@@ -338,26 +385,41 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
 #endif
     }
 
+#ifdef __NR_socketpair
+    // socketpair(AF_UNIX) stays: asyncio and the inherited IPC fd already use connected
+    // pairs. It cannot connect() to an existing socket (session bus, X11, Flatpak portal).
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, static_cast<uint32_t>(__NR_socketpair));
+    emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, static_cast<uint32_t>(AF_UNIX));
+    emit(BPF_RET | BPF_K, 0, 0, deny);
+    emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
+#endif
+
     if (!allow_network) {
 #ifdef __NR_socket
-        // socket(domain, ...): deny inet/inet6/netlink/packet. jf skips this whole block.
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 10, static_cast<uint32_t>(__NR_socket));
-        emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(AF_INET));
-        emit(BPF_RET | BPF_K, 0, 0, deny);
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(AF_INET6));
-        emit(BPF_RET | BPF_K, 0, 0, deny);
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(AF_NETLINK));
-        emit(BPF_RET | BPF_K, 0, 0, deny);
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(AF_PACKET));
-        emit(BPF_RET | BPF_K, 0, 0, deny);
-        emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
+        deny_nr(__NR_socket);
 #endif
-#ifdef __NR_socketpair
-        // socketpair must stay (asyncio, IPC). Only AF_UNIX is typical; deny others.
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, static_cast<uint32_t>(__NR_socketpair));
+#ifdef __NR_connect
+        deny_nr(__NR_connect);
+#endif
+#ifdef __NR_bind
+        deny_nr(__NR_bind);
+#endif
+#ifdef __NR_listen
+        deny_nr(__NR_listen);
+#endif
+#ifdef __NR_accept
+        deny_nr(__NR_accept);
+#endif
+#ifdef __NR_accept4
+        deny_nr(__NR_accept4);
+#endif
+    } else {
+#ifdef __NR_socket
+        // Network grant is inet. AF_UNIX would still reach the session bus / X11 / portals.
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, static_cast<uint32_t>(__NR_socket));
         emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
-        emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, static_cast<uint32_t>(AF_UNIX));
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(AF_UNIX));
         emit(BPF_RET | BPF_K, 0, 0, deny);
         emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
 #endif
@@ -417,7 +479,8 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
     landlock_ruleset_attr_min attr{};
     attr.handled_access_fs  = fs_handled_for_abi(abi);
     attr.handled_access_net = spec.allow_network ? 0 : net_handled_for_abi(abi);
-    const size_t attr_size  = attr.handled_access_net ? sizeof(attr) : sizeof(attr.handled_access_fs);
+    attr.scoped             = scoped_for_abi(abi);
+    const size_t attr_size  = ruleset_attr_size(attr);
     const int    ruleset    = static_cast<int>(::syscall(SYS_landlock_create_ruleset, &attr, attr_size, 0));
     if (ruleset < 0) {
         error         = std::string("landlock_create_ruleset failed: ") + std::strerror(errno);
@@ -444,8 +507,11 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
         return false;
     }
 
-    // System trees CPython and libpython need. Read+execute only.
-    for (const char* p : {"/usr", "/lib", "/lib64", "/lib32", "/opt", "/etc", "/dev", "/proc", "/sys", "/run"})
+    // System trees CPython and libpython need. Read+execute only. Do not grant all of
+    // /proc (other pids' environ) or /run (session bus sockets).
+    for (const char* p : {"/usr", "/lib", "/lib64", "/lib32", "/opt", "/etc", "/dev", "/sys"})
+        add_opt(p, false);
+    for (const char* p : {"/proc/self", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/filesystems", "/proc/version"})
         add_opt(p, false);
 
     auto add_req_if_exists = [&](const std::string& path, bool write) {
@@ -467,8 +533,9 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
         report.detail = error;
         return false;
     }
-    // Plugin dir is optional: a handshake without a discovered plugin still sandboxes.
-    if (!spec.plugin_root.empty() && !add_opt(spec.plugin_root, true)) {
+    // Plugin dir is read-only: a writable root plus a skipped child rehash would let the
+    // plugin rewrite itself for the rest of this host. Scratch lives in plugin_data / TMPDIR.
+    if (!spec.plugin_root.empty() && !add_opt(spec.plugin_root, false)) {
         ::close(ruleset);
         report.detail = error;
         return false;
@@ -494,11 +561,14 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
         return false;
     }
 
-    report.applied = true;
-    report.kind    = k_sandbox_kind_landlock_seccomp;
-    report.network = spec.allow_network;
-    report.exec    = spec.allow_exec;
-    report.detail  = "Landlock ABI " + std::to_string(abi) + (spec.allow_network ? " network=on" : " network=off");
+    report.applied  = true;
+    report.kind     = k_sandbox_kind_landlock_seccomp;
+    report.network  = spec.allow_network;
+    report.exec     = spec.allow_exec;
+    report.degraded = abi < 3;
+    report.detail   = "Landlock ABI " + std::to_string(abi) + (spec.allow_network ? " network=on" : " network=off");
+    if (report.degraded)
+        report.detail += "; truncated files unenforced (ABI<3)";
     return true;
 }
 

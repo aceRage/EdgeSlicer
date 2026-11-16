@@ -59,7 +59,17 @@ struct SandboxReport
     int         landlock_abi = 0;
     bool        network      = false;
     bool        exec         = false;
+    // True when the shipping sandbox is applied but weaker than the current policy
+    // (Linux Landlock ABI < 3 has no truncate). Fail-closed still requires applied.
+    bool degraded = false;
 };
+
+// Fail-closed handshake: only these kinds skip the Don't-run prompt. seatbelt-probe
+// is labelled isolation for tests and does not satisfy production.
+inline bool sandbox_kind_is_shipping(const std::string& kind)
+{
+    return kind == k_sandbox_kind_landlock_seccomp || kind == k_sandbox_kind_appcontainer || kind == k_sandbox_kind_app_sandbox;
+}
 
 struct SandboxProbe
 {
@@ -122,6 +132,11 @@ enum class SandboxUnavailableChoice { DontRun, RunUnsandboxed };
 
 using SandboxUnavailablePrompt = std::function<SandboxUnavailableChoice(const std::string& plugin_key, const std::string& reason)>;
 void set_sandbox_unavailable_prompt_for_testing(SandboxUnavailablePrompt prompt);
+
+// Unblock allow_unsandboxed_run waiters (host shutdown). Tests can poll the flag.
+void abort_sandbox_unavailable_prompt();
+void clear_sandbox_unavailable_prompt_abort();
+bool sandbox_unavailable_prompt_aborted();
 
 // Returns true when the workload may proceed. applied_out is false when the user (or a stored
 // override / test env) allowed an unsandboxed run. Default is Don't run.

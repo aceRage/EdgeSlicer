@@ -727,6 +727,7 @@ void HomePanel::send_init()
     s["source_catalog"]       = _u8L("Catalog");
     s["in_process_pipeline"]  = _u8L("Early slicing steps run unsandboxed in-process");
     s["running_unsandboxed"]  = _u8L("Running unsandboxed");
+    s["revoke_unsandboxed"]   = _u8L("Revoke unsandboxed run");
     s["host_fallback"]        = _u8L("Plugin host helper is missing; scripts and post-process run in-process.");
     s["plugin_deleted"]       = _u8L("Plugin deleted.");
 #endif

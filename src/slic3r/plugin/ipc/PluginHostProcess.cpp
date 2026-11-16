@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,9 +30,6 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/prctl.h>
-#ifndef PR_SET_CHILD_SUBREAPER
-#define PR_SET_CHILD_SUBREAPER 36
-#endif
 #endif
 #include <cerrno>
 #include <poll.h>
@@ -204,9 +202,11 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         error = "CreateJobObject failed";
         return false;
     }
+    // DoS cap, not a security boundary, and not plugin-configurable (that would be an escape).
+    constexpr SIZE_T                     k_plugin_host_job_process_memory = 1024ull * 1024ull * 1024ull;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
     jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-    jeli.ProcessMemoryLimit               = 1024ull * 1024ull * 1024ull;
+    jeli.ProcessMemoryLimit               = k_plugin_host_job_process_memory;
     if (!spec.allow_exec) {
         jeli.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         jeli.BasicLimitInformation.ActiveProcessLimit = 1;
@@ -369,6 +369,41 @@ void close_fd(int& fd)
     }
 }
 
+bool env_entry_allowed(const char* entry)
+{
+    if (entry == nullptr || entry[0] == '\0')
+        return false;
+    static const char* exact[] = {"PATH=",           "HOME=",
+                                  "USER=",           "LOGNAME=",
+                                  "LANG=",           "TZ=",
+                                  "TMPDIR=",         "TMP=",
+                                  "TEMP=",           "TERM=",
+                                  "CURL_CA_BUNDLE=", "REQUESTS_CA_BUNDLE=",
+                                  "FLATPAK_ID=",     "PYTHONNOUSERSITE="};
+    for (const char* prefix : exact) {
+        const size_t n = std::strlen(prefix);
+        if (std::strncmp(entry, prefix, n) == 0)
+            return true;
+    }
+    return std::strncmp(entry, "LC_", 3) == 0 || std::strncmp(entry, "SSL_CERT_", 9) == 0;
+}
+
+std::vector<std::string> scrubbed_helper_env()
+{
+    std::vector<std::string> kept;
+    bool                     have_nousersite = false;
+    for (char** e = ::environ; e && *e; ++e) {
+        if (!env_entry_allowed(*e))
+            continue;
+        kept.emplace_back(*e);
+        if (std::strncmp(*e, "PYTHONNOUSERSITE=", 17) == 0)
+            have_nousersite = true;
+    }
+    if (!have_nousersite)
+        kept.emplace_back("PYTHONNOUSERSITE=1");
+    return kept;
+}
+
 bool spawn_host_fork(SpawnedHost&                   out,
                      const boost::filesystem::path& helper,
                      int                            sv[2],
@@ -378,16 +413,22 @@ bool spawn_host_fork(SpawnedHost&                   out,
                      long                           maxfd,
                      std::string&                   error)
 {
-    // argv lives in the parent so the child does not allocate after fork.
-    const std::string helper_str = helper.string();
-    char              fd_arg[]   = "3";
-    char              wd_arg[]   = "4";
-    char*             argv[]     = {const_cast<char*>(helper_str.c_str()),
-                                    const_cast<char*>("--ipc-fd"),
-                                    fd_arg,
-                                    const_cast<char*>("--parent-watchdog-fd"),
-                                    wd_arg,
-                                    nullptr};
+    // argv and env live in the parent so the child does not allocate after fork.
+    const std::string        helper_str = helper.string();
+    char                     fd_arg[]   = "3";
+    char                     wd_arg[]   = "4";
+    char*                    argv[]     = {const_cast<char*>(helper_str.c_str()),
+                                           const_cast<char*>("--ipc-fd"),
+                                           fd_arg,
+                                           const_cast<char*>("--parent-watchdog-fd"),
+                                           wd_arg,
+                                           nullptr};
+    std::vector<std::string> env_keep   = scrubbed_helper_env();
+    std::vector<char*>       envp;
+    envp.reserve(env_keep.size() + 1);
+    for (std::string& s : env_keep)
+        envp.push_back(s.data());
+    envp.push_back(nullptr);
 
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -444,7 +485,7 @@ bool spawn_host_fork(SpawnedHost&                   out,
             if (!keep_fd)
                 ::close(fd);
         }
-        ::execv(helper_str.c_str(), argv);
+        ::execve(helper_str.c_str(), argv, envp.data());
         const int e = errno;
         (void) !::write(errp[1], &e, sizeof(e));
         ::_exit(127);
@@ -509,8 +550,6 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 #ifdef __linux__
-    static const int subreaper = ::prctl(PR_SET_CHILD_SUBREAPER, 1);
-    (void) subreaper;
     if (sandbox_env_bwrap_requested() && running_inside_flatpak()) {
         // Nested bwrap is never used; Landlock+seccomp inside Flatpak is the path.
     }

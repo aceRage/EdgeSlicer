@@ -44,8 +44,10 @@ void* win_pipe_security_attributes() { return nullptr; }
 
 #include <boost/nowide/convert.hpp>
 
+#include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r::plugin_ipc {
@@ -84,29 +86,25 @@ void resolve_apis()
 
 std::wstring profile_name(const std::string& plugin_key)
 {
-    std::wstring name = L"EdgeSlicer.pluginhost";
-    if (plugin_key.empty())
-        return name;
-    name += L".";
+    // Fixed-length name so two long keys cannot truncate to the same profile.
+    std::uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : plugin_key) {
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
-            name += static_cast<wchar_t>(c);
-        else
-            name += L'_';
-        if (name.size() > 50)
-            break;
+        hash ^= static_cast<std::uint64_t>(c);
+        hash *= 1099511628211ull;
     }
-    return name;
+    wchar_t buf[48];
+    swprintf(buf, 48, L"EdgeSlicer.ph.%016llx", static_cast<unsigned long long>(hash));
+    return buf;
 }
 
-bool grant_dir_acl(PSID sid, const std::string& path, bool write)
+bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mode)
 {
     if (path.empty() || sid == nullptr)
         return true;
     const std::wstring wide = boost::nowide::widen(path);
     EXPLICIT_ACCESSW   ea{};
     ea.grfAccessPermissions = write ? (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE) : (GENERIC_READ | GENERIC_EXECUTE);
-    ea.grfAccessMode        = SET_ACCESS;
+    ea.grfAccessMode        = mode;
     ea.grfInheritance       = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
@@ -133,21 +131,32 @@ bool grant_dir_acl(PSID sid, const std::string& path, bool write)
 
 struct WinState
 {
-    PSID                         sid     = nullptr;
-    PSID                         cap_sid = nullptr;
-    SID_AND_ATTRIBUTES           cap_attr{};
-    SECURITY_CAPABILITIES        caps{};
-    LPPROC_THREAD_ATTRIBUTE_LIST attr_list = nullptr;
-    SECURITY_ATTRIBUTES          pipe_sa{};
-    PSECURITY_DESCRIPTOR         pipe_sd  = nullptr;
-    PACL                         pipe_acl = nullptr;
-    bool                         ready    = false;
+    PSID                                      sid     = nullptr;
+    PSID                                      cap_sid = nullptr;
+    SID_AND_ATTRIBUTES                        cap_attr{};
+    SECURITY_CAPABILITIES                     caps{};
+    LPPROC_THREAD_ATTRIBUTE_LIST              attr_list = nullptr;
+    SECURITY_ATTRIBUTES                       pipe_sa{};
+    PSECURITY_DESCRIPTOR                      pipe_sd  = nullptr;
+    PACL                                      pipe_acl = nullptr;
+    std::vector<std::pair<std::string, bool>> grants;
+    bool                                      ready = false;
 };
 
 WinState g_win;
 
+void revoke_grants()
+{
+    if (g_win.sid) {
+        for (const auto& grant : g_win.grants)
+            grant_dir_acl(g_win.sid, grant.first, grant.second, REVOKE_ACCESS);
+    }
+    g_win.grants.clear();
+}
+
 void clear_win_state()
 {
+    revoke_grants();
     if (g_win.attr_list) {
         ::DeleteProcThreadAttributeList(g_win.attr_list);
         ::HeapFree(::GetProcessHeap(), 0, g_win.attr_list);
@@ -207,11 +216,26 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     }
     g_win.sid = sid;
 
-    grant_dir_acl(sid, spec.python_home, false);
-    grant_dir_acl(sid, spec.plugin_root, true);
-    grant_dir_acl(sid, spec.write_root, true);
-    for (const SandboxPath& extra : spec.extra_paths)
-        grant_dir_acl(sid, extra.path, extra.write);
+    auto grant_or_fail = [&](const std::string& path, bool write) {
+        if (path.empty())
+            return true;
+        if (!grant_dir_acl(sid, path, write, SET_ACCESS)) {
+            error = "AppContainer ACL grant failed for " + path;
+            return false;
+        }
+        g_win.grants.emplace_back(path, write);
+        return true;
+    };
+    if (!grant_or_fail(spec.python_home, false) || !grant_or_fail(spec.plugin_root, false) || !grant_or_fail(spec.write_root, true)) {
+        clear_win_state();
+        return false;
+    }
+    for (const SandboxPath& extra : spec.extra_paths) {
+        if (!grant_or_fail(extra.path, extra.write)) {
+            clear_win_state();
+            return false;
+        }
+    }
 
     SID_AND_ATTRIBUTES* cap_ptr = nullptr;
     DWORD               cap_n   = 0;

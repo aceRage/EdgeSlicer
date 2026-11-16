@@ -1549,6 +1549,8 @@
       { label: t('reload_clear', 'Reload (clear dependency cache)'), run: () => post('plugin_reload', { key: p.plugin_key, clear: true }) },
     ];
     if (p.can_run) menu.push({ label: t('run_script', 'Run'), run: () => post('plugin_run', { key: p.plugin_key }) });
+    if (p.running_unsandboxed) menu.push({ label: t('revoke_unsandboxed', 'Revoke unsandboxed run'),
+      run: () => post('plugin_clear_unsandboxed', { key: p.plugin_key }) });
     menu.push({ label: t('configure', 'Configure'), run: () => post('plugin_configure', { key: p.plugin_key }) });
     menu.push({ label: t('permissions', 'Permissions'), run: () => post('plugin_permissions', { key: p.plugin_key }) });
     if (p.update_available) menu.push({ label: t('update_available', 'Update available'), run: () => post('plugin_update', { key: p.plugin_key }) });

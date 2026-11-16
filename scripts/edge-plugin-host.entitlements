@@ -15,7 +15,8 @@
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
-    <!-- Read the OS and the helper's own tree (bundled Python lives at @executable_path/python). -->
+    <!-- Read the OS. The helper's own bundle (bundled CPython at @executable_path/python) is
+         readable without an exception under App Sandbox. Unverifiable without a signed helper. -->
     <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
     <array>
         <string>/usr/lib/</string>
@@ -23,6 +24,17 @@
         <string>/System/</string>
         <string>/Library/Frameworks/</string>
         <string>/dev/</string>
+    </array>
+    <!-- data_dir plugins live under Application Support. G-code is a user-chosen folder and
+         needs a security-scoped bookmark from Edge; that cannot be baked in here and is
+         unverifiable without a signed build that actually presents the bookmark. -->
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+    <array>
+        <string>/Library/Application Support/EdgeSlicer/orca_plugins/</string>
+    </array>
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+    <array>
+        <string>/Library/Application Support/EdgeSlicer/plugin_data/</string>
     </array>
     <!-- Network is off by default. A plugin that was granted p4 network still has that grant
          enforced on the Edge side; opening client sockets from the helper requires a signed

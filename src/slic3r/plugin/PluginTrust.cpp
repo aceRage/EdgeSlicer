@@ -2,6 +2,7 @@
 
 #include "PluginAuditManager.hpp"
 #include "PluginFsUtils.hpp"
+#include "PluginManager.hpp"
 
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -771,11 +772,14 @@ TrustStore load_trust_store()
     const auto unsandboxed_it = user.find("unsandboxed");
     if (unsandboxed_it != user.end() && unsandboxed_it->is_array()) {
         for (const nlohmann::json& entry : *unsandboxed_it) {
-            if (!entry.is_string())
+            // Legacy string-only keys are ignored: they survived updates.
+            if (!entry.is_object())
                 continue;
-            const std::string key = entry.get<std::string>();
-            if (!key.empty())
-                store.unsandboxed.push_back(key);
+            const std::string key  = entry.value("plugin_key", std::string());
+            const std::string hash = ascii_lower(entry.value("sha256", std::string()));
+            if (key.empty() || hash.size() != 64 || !is_hex_chars(hash))
+                continue;
+            store.unsandboxed.push_back(UnsandboxedOverride{key, hash});
         }
     }
     return store;
@@ -824,11 +828,20 @@ bool save_trust_store(const TrustStore& store, std::string& error)
         pins.push_back(std::move(entry));
     }
     nlohmann::json unsandboxed = nlohmann::json::array();
-    for (const std::string& key : store.unsandboxed) {
-        if (key.empty())
+    for (const UnsandboxedOverride& item : store.unsandboxed) {
+        if (item.plugin_key.empty() || item.sha256.size() != 64 || !is_hex_chars(item.sha256))
             continue;
-        if (std::find(unsandboxed.begin(), unsandboxed.end(), key) == unsandboxed.end())
-            unsandboxed.push_back(key);
+        nlohmann::json entry = {{"plugin_key", item.plugin_key}, {"sha256", ascii_lower(item.sha256)}};
+        bool           seen  = false;
+        for (const auto& existing : unsandboxed) {
+            if (existing.value("plugin_key", std::string()) == item.plugin_key &&
+                existing.value("sha256", std::string()) == entry["sha256"]) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen)
+            unsandboxed.push_back(std::move(entry));
     }
     const nlohmann::json root = {
         {"version", 1},
@@ -944,21 +957,56 @@ bool local_install_needs_prompt(const std::string& plugin_key, const std::string
     return !is_hash_pinned(store, plugin_key, sha256);
 }
 
-bool is_unsandboxed(const std::string& plugin_key)
+bool is_unsandboxed(const std::string& plugin_key, const std::string& sha256)
 {
     if (plugin_key.empty())
+        return false;
+    const std::string hash = ascii_lower(sha256);
+    if (hash.size() != 64 || !is_hex_chars(hash))
         return false;
     const TrustStore store = load_trust_store();
     if (store.user_file_corrupt)
         return false;
-    return std::find(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key) != store.unsandboxed.end();
+    for (const UnsandboxedOverride& item : store.unsandboxed) {
+        if (item.plugin_key == plugin_key && item.sha256 == hash)
+            return true;
+    }
+    return false;
 }
 
-bool allow_unsandboxed(const std::string& plugin_key, std::string& error)
+bool is_unsandboxed(const std::string& plugin_key)
+{
+    if (plugin_key.empty())
+        return false;
+    PluginDescriptor        descriptor;
+    boost::filesystem::path root;
+    if (PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                boost::filesystem::path(descriptor.plugin_root);
+        boost::system::error_code ec;
+        const auto                st = boost::filesystem::status(root, ec);
+        if (!ec && boost::filesystem::is_regular_file(st))
+            root = root.parent_path();
+    } else if (!Slic3r::data_dir().empty()) {
+        root = boost::filesystem::path(Slic3r::data_dir()) / "orca_plugins" / plugin_key;
+    }
+    if (root.empty())
+        return false;
+    std::string       hash_error;
+    const std::string hash = sha256_plugin_tree(root, hash_error);
+    return is_unsandboxed(plugin_key, hash);
+}
+
+bool allow_unsandboxed(const std::string& plugin_key, const std::string& sha256, std::string& error)
 {
     error.clear();
     if (plugin_key.empty()) {
         error = "unsandboxed override requires a plugin_key";
+        return false;
+    }
+    const std::string hash = ascii_lower(sha256);
+    if (hash.size() != 64 || !is_hex_chars(hash)) {
+        error = "unsandboxed override requires a SHA-256 plugin tree hash";
         return false;
     }
     std::lock_guard<std::mutex> lock(trust_mutex());
@@ -967,8 +1015,15 @@ bool allow_unsandboxed(const std::string& plugin_key, std::string& error)
         error = "trust.json is corrupt; reset it before saving";
         return false;
     }
-    if (std::find(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key) == store.unsandboxed.end())
-        store.unsandboxed.push_back(plugin_key);
+    bool replaced = false;
+    for (UnsandboxedOverride& item : store.unsandboxed) {
+        if (item.plugin_key == plugin_key) {
+            item.sha256 = hash;
+            replaced    = true;
+        }
+    }
+    if (!replaced)
+        store.unsandboxed.push_back(UnsandboxedOverride{plugin_key, hash});
     return save_trust_store(store, error);
 }
 
@@ -981,7 +1036,9 @@ bool clear_unsandboxed(const std::string& plugin_key, std::string& error)
         error = "trust.json is corrupt; reset it before saving";
         return false;
     }
-    store.unsandboxed.erase(std::remove(store.unsandboxed.begin(), store.unsandboxed.end(), plugin_key), store.unsandboxed.end());
+    store.unsandboxed.erase(std::remove_if(store.unsandboxed.begin(), store.unsandboxed.end(),
+                                           [&plugin_key](const UnsandboxedOverride& item) { return item.plugin_key == plugin_key; }),
+                            store.unsandboxed.end());
     return save_trust_store(store, error);
 }
 

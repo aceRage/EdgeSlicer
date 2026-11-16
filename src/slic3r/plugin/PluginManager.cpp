@@ -988,10 +988,9 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
         return;
     }
 
-    // Edge already evaluated Phase 5 trust before sending load. Re-hashing under Landlock
-    // can miss trust.json or see execute-time files the pin did not include. Host RPC still
-    // rechecks p5 on the Edge side.
-    if (!plugin_ipc::in_child_process()) {
+    // plugin_root is read-only in the OS sandbox and trust.json is granted, so the child
+    // rehash matches the Edge-side pin. Host RPC still rechecks p5 on the Edge side.
+    {
         const plugin_trust::TrustState trust = plugin_trust::evaluate(snapshot);
         if (!trust.allowed()) {
             const std::string message = trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error;
@@ -1076,7 +1075,7 @@ void PluginManager::load_plugin_impl(const std::string& plugin_key, bool skip_de
         return;
     }
 
-    if (!plugin_ipc::in_child_process()) {
+    {
         const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
         if (!trust.allowed()) {
             fail(trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error);

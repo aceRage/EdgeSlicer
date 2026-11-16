@@ -27,6 +27,7 @@ bool probe_mac_sandbox(SandboxProbe& probe)
 
 #include "PluginSandboxMacSeatbelt.hpp"
 
+#include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -36,10 +37,18 @@ bool probe_mac_sandbox(SandboxProbe& probe)
 namespace Slic3r::plugin_ipc {
 namespace {
 
+using sandbox_check_fn = int (*)(pid_t, const char*, int);
+
 bool containerized()
 {
-    const char* id = ::getenv("APP_SANDBOX_CONTAINER_ID");
-    return id != nullptr && id[0] != '\0';
+    // APP_SANDBOX_CONTAINER_ID is inherited and spoofable (launchctl setenv). The kernel
+    // view is sandbox_check(getpid(), NULL, 0): non-zero means this process is sandboxed.
+    static sandbox_check_fn check = []() -> sandbox_check_fn {
+        return reinterpret_cast<sandbox_check_fn>(::dlsym(RTLD_DEFAULT, "sandbox_check"));
+    }();
+    if (check == nullptr)
+        return false;
+    return check(::getpid(), nullptr, 0) != 0;
 }
 
 // DEV/TEST PROBE ONLY. Not the shipping sandbox (that is a signed helper with
@@ -70,7 +79,7 @@ bool probe_mac_sandbox(SandboxProbe& probe)
 {
     probe.app_sandbox = containerized();
     probe.available   = probe.app_sandbox;
-    probe.reason      = probe.app_sandbox ? "APP_SANDBOX_CONTAINER_ID is set (signed helper with app-sandbox entitlements)" :
+    probe.reason      = probe.app_sandbox ? "sandbox_check reports this process is in an App Sandbox container" :
                                             "helper is not in an App Sandbox container (unsigned or missing entitlements)";
     return probe.available;
 }

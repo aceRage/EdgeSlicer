@@ -43,6 +43,7 @@ private:
     void remove(const std::string& key);
     void reveal(const std::string& key);
     void run(const std::string& key);
+    void clear_unsandboxed(const std::string& key);
     void stub(const std::string& text);
 
     struct RunState

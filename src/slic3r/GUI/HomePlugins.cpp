@@ -185,9 +185,12 @@ bool HomePlugins::handle(const json& msg)
     } else if (command == "plugin_reveal") {
         if (listed(key))
             reveal(key);
-    } else if (command == "plugin_run") {
+    }     else if (command == "plugin_run") {
         if (listed(key))
             run(key);
+    } else if (command == "plugin_clear_unsandboxed") {
+        if (listed(key))
+            clear_unsandboxed(key);
     }
     else if (is_inspector_home_command(command)) {
         if (!listed(key))
@@ -321,6 +324,18 @@ void HomePlugins::remove(const std::string& key)
         return;
     }
     PluginManager::instance().rescan_plugins();
+    send_state();
+}
+
+void HomePlugins::clear_unsandboxed(const std::string& key)
+{
+    std::string error;
+    if (!plugin_trust::clear_unsandboxed(key, error)) {
+        notice(error.empty() ? _u8L("The unsandboxed override could not be revoked.") : error, true);
+        send_state();
+        return;
+    }
+    notice(_u8L("Unsandboxed run was revoked. The plugin will not run until the OS sandbox applies or you choose Run anyway again."));
     send_state();
 }
 

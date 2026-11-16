@@ -41,7 +41,9 @@ bool helper_env_overrides_allowed();
 // Linux child installs PR_SET_PDEATHSIG. Every POSIX spawn also keeps a parent-pipe
 // EOF watchdog so the helper dies if the spawning thread exits while Edge lives.
 // The child is placed in its own process group; kill_host signals the group so
-// grandchildren die too. Linux also sets PR_SET_CHILD_SUBREAPER on Edge.
+// grandchildren die too. setsid is denied in the Linux seccomp filter so the
+// group cannot be escaped. Linux does not set PR_SET_CHILD_SUBREAPER (no reap
+// path, and orphans would become Edge zombies).
 // Windows: named pipe + Job object (KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=1, no breakaway),
 // create suspended, assign, resume. Phase 8 wraps the job in an AppContainer when
 // `spec` is supplied. The pipe client pid must match the child.

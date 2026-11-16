@@ -205,7 +205,20 @@ struct PluginHostClient::Impl
         }
     }
 
-    bool ensure_started_locked(const SandboxSpec& spec, std::string& error)
+    bool prompt_unsandboxed(std::unique_lock<std::mutex>& io, const std::string& plugin_key, const std::string& reason, std::string& error)
+    {
+        io.unlock();
+        bool       applied = false;
+        const bool ok      = allow_unsandboxed_run(plugin_key, reason, applied, error);
+        io.lock();
+        if (stopping.load(std::memory_order_acquire)) {
+            error = "plugin host is shutting down";
+            return false;
+        }
+        return ok;
+    }
+
+    bool ensure_started_locked(std::unique_lock<std::mutex>& io, const SandboxSpec& spec, std::string& error)
     {
         if (stopping.load(std::memory_order_acquire)) {
             error = "plugin host is shutting down";
@@ -218,11 +231,15 @@ struct PluginHostClient::Impl
         if (host.valid())
             return true;
 
+#ifndef __APPLE__
+        // macOS: the parent is never in the helper's App Sandbox, so probe_os_sandbox() is
+        // always false there and would prompt every user before spawn. Handshake is the
+        // source of truth (child reports kind=app-sandbox via sandbox_check).
         if (!os_sandbox_available() && !sandbox_env_disable_requested()) {
-            bool applied = false;
-            if (!allow_unsandboxed_run(spec.plugin_key, probe_os_sandbox().reason, applied, error))
+            if (!prompt_unsandboxed(io, spec.plugin_key, probe_os_sandbox().reason, error))
                 return false;
         }
+#endif
 
         if (!spawn_host(host, spec, error))
             return false;
@@ -258,13 +275,12 @@ struct PluginHostClient::Impl
             reset_child_locked();
             return false;
         }
-        sandbox_report = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
-        if (!sandbox_report.applied && !sandbox_env_disable_requested()) {
-            bool applied = false;
-            if (!allow_unsandboxed_run(spec.plugin_key,
-                                       sandbox_report.detail.empty() ? std::string("plugin host reported no OS sandbox") :
-                                                                       sandbox_report.detail,
-                                       applied, error)) {
+        sandbox_report      = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
+        const bool shipping = sandbox_report.applied && sandbox_kind_is_shipping(sandbox_report.kind);
+        if (!shipping && !sandbox_env_disable_requested()) {
+            const std::string reason = sandbox_report.detail.empty() ? std::string("plugin host reported no shipping OS sandbox") :
+                                                                       sandbox_report.detail;
+            if (!prompt_unsandboxed(io, spec.plugin_key, reason, error)) {
                 reset_child_locked();
                 return false;
             }
@@ -495,7 +511,7 @@ struct PluginHostClient::Impl
         }
         std::unique_lock<std::mutex> io(io_mutex);
         const SandboxSpec            spec = make_sandbox_spec(job.plugin_key, job.write_root);
-        if (!ensure_started_locked(spec, error) || !load_plugin_locked(job.plugin_key, error)) {
+        if (!ensure_started_locked(io, spec, error) || !load_plugin_locked(job.plugin_key, error)) {
             io.unlock();
             fail_job(job, error, false);
             return;
@@ -851,6 +867,7 @@ void PluginHostClient::shutdown()
     if (!m_impl)
         return;
     m_impl->stopping.store(true, std::memory_order_release);
+    abort_sandbox_unavailable_prompt();
     m_impl->cv.notify_all();
     // Never wait on io_mutex here: the worker holds it for the whole pump. Kill by
     // pid (or the stored process handle on Windows) so a hung execute unblocks,
@@ -883,6 +900,7 @@ void PluginHostClient::shutdown()
     for (auto& job : leftover)
         m_impl->fail_job(*job, "plugin host is shutting down", false);
     m_impl->stopping.store(false, std::memory_order_release);
+    clear_sandbox_unavailable_prompt_abort();
 }
 
 } // namespace Slic3r::plugin_ipc

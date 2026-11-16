@@ -186,7 +186,11 @@ bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
         if (it->path() == entry_path)
             continue;
 
-        const fs::path dep_dir = plugin_dir / "__whl_extracted__" / it->path().stem().string();
+        fs::path extract_root = plugin_dir / "__whl_extracted__";
+        try {
+            extract_root = fs::path(PluginManager::instance().get_storage_dir(descriptor.plugin_key)) / "__whl_extracted__";
+        } catch (...) {}
+        const fs::path dep_dir = extract_root / it->path().stem().string();
         boost::system::error_code ec;
         fs::remove_all(dep_dir, ec);
         std::string extract_error;

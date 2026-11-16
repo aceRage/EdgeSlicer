@@ -32,13 +32,20 @@ struct Pin
     std::string plugin_key; // required; local sideload of a named package
 };
 
+// Run anyway is bound to this tree hash so an update does not keep the override.
+struct UnsandboxedOverride
+{
+    std::string plugin_key;
+    std::string sha256;
+};
+
 struct TrustStore
 {
-    std::vector<Publisher>   shipped_publishers;
-    std::vector<Publisher>   user_publishers;
-    std::vector<Pin>         pins;
-    std::vector<std::string> unsandboxed; // plugin_keys allowed to run without an OS sandbox
-    bool                     user_file_corrupt{false};
+    std::vector<Publisher>           shipped_publishers;
+    std::vector<Publisher>           user_publishers;
+    std::vector<Pin>                 pins;
+    std::vector<UnsandboxedOverride> unsandboxed;
+    bool                             user_file_corrupt{false};
 };
 
 struct SignedMetadata
@@ -121,8 +128,11 @@ bool unpin_plugin(const std::string& plugin_key, std::string& error);
 
 // Phase 8: plugins the user explicitly allowed to run when the OS sandbox cannot be applied.
 // Stored on the same trust.json sidecar as the pin allow-list. Never implied by a pin.
-bool is_unsandboxed(const std::string& plugin_key);
-bool allow_unsandboxed(const std::string& plugin_key, std::string& error);
+// Bound to sha256 so an updated package does not keep Run anyway. A legacy string-only
+// trust.json entry is ignored (fail closed). Empty sha256 never matches.
+bool is_unsandboxed(const std::string& plugin_key, const std::string& sha256);
+bool is_unsandboxed(const std::string& plugin_key); // hashes the installed tree; false if missing
+bool allow_unsandboxed(const std::string& plugin_key, const std::string& sha256, std::string& error);
 bool clear_unsandboxed(const std::string& plugin_key, std::string& error);
 
 bool is_hash_pinned(const TrustStore& store, const std::string& plugin_key, const std::string& sha256);
