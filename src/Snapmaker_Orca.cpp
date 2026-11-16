@@ -4028,6 +4028,14 @@ int CLI::run(int argc, char **argv)
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     m_print_config.apply(m_extra_config, true);
+    // A project the CLI exports must say these values differ from the presets, or the GUI puts
+    // them back to the system preset's on open (record_cli_overrides_as_different).
+    {
+        const size_t recorded = record_cli_overrides_as_different(m_print_config, m_extra_config, Preset::print_options(),
+                                                                  Preset::filament_options(), Preset::printer_options());
+        if (recorded > 0)
+            BOOST_LOG_TRIVIAL(info) << "command line settings recorded as different from the presets: " << recorded;
+    }
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
 

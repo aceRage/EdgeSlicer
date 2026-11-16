@@ -2376,6 +2376,18 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_fix_through_netfabb(&m_object_menu);
     // Object Simplify
     append_menu_item_simplify(&m_object_menu);
+    // Split to Fit (tests/design_split_to_build_volume.md, D1): opens the gizmo on the selected object.
+    append_menu_item(&m_object_menu, wxID_ANY, _L("Split to fit the printer..."),
+        _L("Cut this object into parts that each fit the printer"),
+        [](wxCommandEvent&) {
+            GLGizmosManager &gizmos = plater()->get_view3D_canvas3D()->get_gizmos_manager();
+            if (gizmos.get_current_type() != GLGizmosManager::SplitToFit)
+                gizmos.open_gizmo(GLGizmosManager::SplitToFit);
+        }, "", &m_object_menu,
+        []() {
+            GLGizmoBase *gizmo = plater()->get_view3D_canvas3D()->get_gizmos_manager().get_gizmo(GLGizmosManager::SplitToFit);
+            return gizmo != nullptr && gizmo->is_activable();
+        }, m_parent);
     // Ultra (slice baking, phase 1): turn the SLICED outer wall - fuzzy skin and all - into
     // a mesh that can be re-sliced. Enabled only once the object has perimeters to bake.
     // docs/superpowers/specs/2026-09-12-slice-bake-research.md

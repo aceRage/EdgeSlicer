@@ -206,12 +206,12 @@ size_t count_matching(const std::string &gcode, const std::regex &re)
     return n;
 }
 
-// Two 20 x 20 x 2 mm cubes, one per filament: every layer changes filament.
-std::string slice(Print &print, Model &model, const DynamicPrintConfig &cfg)
+// Two 20 x 20 x 2 mm cubes (z_scale 0.1 of 20 mm), one per filament: every layer changes filament.
+std::string slice(Print &print, Model &model, const DynamicPrintConfig &cfg, float z_scale = 0.1f)
 {
     for (int i = 0; i < 2; ++i) {
         TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
-        cube.scale(Vec3f(1.f, 1.f, 0.1f));
+        cube.scale(Vec3f(1.f, 1.f, z_scale));
         ModelObject *object = model.add_object();
         object->name        = "cube" + std::to_string(i);
         object->add_volume(cube);
@@ -965,4 +965,75 @@ TEST_CASE("Print by object: a single object too close to the tower's scrape ring
     };
     CHECK(warned(true));
     CHECK_FALSE(warned(false));
+}
+
+// A tower visit can join a block fill or the wall ahead of its tool change (WipeTower::merge_tcr). The purge after
+// change_filament_gcode starts where append_tcr travelled (tool_change_start_pos), but post_process_wipe_tower_moves()
+// kept the first part's last position across [change_filament_gcode]: a first purge row ending at that stale X lost
+// its X word and was extruded in one spot ("G1  E3.6764 F3566"). It shows where the purge starts with neither the
+// start ironing nor the side scrape: the H3C presets (no line ironing) below the scrape floor, any Type 1 printer with
+// line ironing off. PLA + PETG: two filament categories, two blocks, so a block fill joins the visits.
+TEST_CASE("Tower purge: no extruding move after a tool change lacks both X and Y", "[BBSTowerH3C][PrintGCode]")
+{
+    struct Case
+    {
+        const char *name;
+        Machine     machine;
+        const char *option_off;
+    };
+    const std::vector<Case> cases{
+        { "H3C PLA + PETG, no side scrape",
+          { "Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C", "Bambu PETG Basic @BBL H3C" },
+          "prime_tower_side_scrape" },
+        { "X1C PLA + PETG, no line ironing",
+          { "Bambu Lab X1 Carbon 0.4 nozzle", "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C", "Bambu PETG Basic @BBL X1C" },
+          "prime_tower_line_ironing" },
+    };
+    for (const Case &c : cases) {
+        DYNAMIC_SECTION(c.name)
+        {
+            DynamicPrintConfig cfg = machine_config(c.machine);
+            cfg.set_deserialize_strict({ { c.option_off, "0" }, { "cool_plate_temp", "60,60" }, { "cool_plate_temp_initial_layer", "60,60" } });
+
+            // Larger than any retract or unretract the tower writes inside a purge (the line ironing's).
+            double retract = 0.;
+            for (double v : cfg.option<ConfigOptionFloats>("retraction_length")->values)
+                retract = std::max(retract, v);
+            if (const auto *opt = dynamic_cast<const ConfigOptionFloatsNullable *>(cfg.option("filament_retraction_length")))
+                for (size_t i = 0; i < opt->values.size(); ++i)
+                    if (! opt->is_nil(i))
+                        retract = std::max(retract, opt->values[i]);
+
+            Model             model;
+            Print             print;
+            const std::string gcode = slice(print, model, cfg, 0.2f);
+            REQUIRE(! gcode.empty());
+
+            size_t                   purges = 0, rows = 0;
+            std::vector<std::string> in_place;
+            bool                     in_purge = false;
+            for (const std::string &line : split_lines(gcode)) {
+                if (line.rfind("; CP TOOLCHANGE WIPE", 0) == 0) {
+                    in_purge = true;
+                    ++purges;
+                    continue;
+                }
+                if (line.rfind("; CP TOOLCHANGE END", 0) == 0) {
+                    in_purge = false;
+                    continue;
+                }
+                double e = 0.;
+                if (! in_purge || line.rfind("G1 ", 0) != 0 || ! has_token(line, 'E', &e) || e <= retract + 1e-4)
+                    continue;
+                ++rows;
+                if (! has_token(line, 'X') && ! has_token(line, 'Y'))
+                    in_place.push_back(line);
+            }
+            CAPTURE(retract, purges, rows);
+            CHECK(purges >= 15);
+            CHECK(rows > purges);
+            INFO("first extrusion without X and Y: " << (in_place.empty() ? std::string("none") : in_place.front()));
+            CHECK(in_place.size() == 0);
+        }
+    }
 }
