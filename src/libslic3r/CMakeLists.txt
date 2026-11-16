@@ -242,6 +242,8 @@ set(lisbslic3r_sources
     ExtrusionEntityCollection.hpp
     ContourZ.cpp
     ContourZ.hpp
+    CurvedTops.cpp
+    CurvedTops.hpp
     HeadClearance.cpp
     HeadClearance.hpp
     ExtrusionEntity.cpp

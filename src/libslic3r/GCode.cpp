@@ -2851,7 +2851,10 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
             }
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between)
+            // EdgeSlicer: a curved-tops block reaches down into the layers it emptied.
+            const bool curved_tops_block = layer_to_print.object_layer != nullptr && layer_to_print.object_layer->curved_tops_block;
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between &&
+                ! curved_tops_block)
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
@@ -3955,13 +3958,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
     m_layer_count = 0;
+    // EdgeSlicer, curved tops: the planar layers a curved block emptied on purpose are not
+    // printed (no layer change), so they are not counted either; the printer's layer x / total and
+    // the progress then end at the real count. Always false with curved tops off.
+    auto curved_tops_emptied = [](const Layer *layer) {
+        const Layer *top = layer->object()->layers().empty() ? nullptr : layer->object()->layers().back();
+        return top != nullptr && top != layer && top->curved_tops_block && !layer->has_extrusions();
+    };
     if (print.config().print_sequence == PrintSequence::ByObject) {
         // Add each of the object's layers separately.
         for (auto object : print.objects()) {
             std::vector<coordf_t> zs;
             zs.reserve(object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
             std::sort(zs.begin(), zs.end());
@@ -3980,7 +3991,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         for (auto object : print.objects()) {
             zs.reserve(zs.size() + object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
         }
@@ -11733,6 +11745,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool   zaa_contoured = path.z_contoured();
     const double zaa_base_z    = m_nominal_z + double(path.z_offset) * double(path.height);
     const double zaa_first_z   = zaa_contoured ? zaa_base_z + double(path.z_contour->z_at(path.first_point())) : zaa_base_z;
+    // EdgeSlicer, curved tops (CurvedTops.cpp): a conformal path is reached from above. Lift to
+    // a Z that clears the whole surface, travel in XY there and only then descend vertically, so
+    // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
+    const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
+    const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
+    if (curved_top)
+        gcode += this->curved_tops_travel_to(path.first_point(), path.role(), "move to first " + description + " point", curved_safe_z);
 
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
@@ -11747,7 +11766,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // Move to first point of extrusion path
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
-    if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
+    // Curved tops: curved_tops_travel_to() above already went there; the ZAA block below descends.
+    if (!curved_top && (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel)) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
@@ -12279,6 +12299,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
+    // EdgeSlicer, curved tops: every conformal move also moves Z, and a printer's Z axis is far
+    // slower than XY (Elegoo Centauri Carbon: 20 mm/s, 100-500 mm/s2), so the role speed would only be
+    // throttled segment by segment by the firmware, i.e. stutter. Cap the path speed instead.
+    if (curved_top)
+        F = std::min(F, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
 
     // Snapmaker (feedrate guard): hand the writer the provenance of this feedrate and the
     // preferred substitute, so that if F turns out to be non-positive / non-finite the guard can
@@ -12351,7 +12376,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // filament_max_volumetric_speed cap that `speed` has already been clamped to.
     // Not ironing: its flow is not scaled for the local height (contour_z_extrusion_ratio), and its path.height is
     // the ironing line's own few thousandths of a mm, not a layer's, so the ratio would slow it to a crawl.
-    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value && path.role() != erIroning;
+    // Not curved tops either: their Z is a placement, not a bead height.
+    const bool   zaa_speed_scaling = zaa_contoured && !curved_top && m_config.zaa_speed_scaling.value && path.role() != erIroning;
     const double zaa_h_nominal     = double(path.height);
     const double zaa_max_vol       = filament_max_volumetric_speed;
     // The local height that set the F currently in force, mm; <= 0 means "no scaled F emitted yet
@@ -12635,7 +12661,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                         // reads as fuzz. The trapezoid rule is the exact volume for a linear ramp.
                         const double z_prev = double(path.z_contour->z_at(line.a));
                         const double z_mean = 0.5 * (z_prev + z_diff);
-                        const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                        // Curved tops: z is a placement, not a bead height; the flow is stored per sample.
+                        const double ratio  = curved_top ?
+                            0.5 * (double(path.z_contour->flow_at(line.a)) + double(path.z_contour->flow_at(line.b))) :
+                            contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                         const double e      = dE * ratio;
                         // ZAA speed scaling. The segment's local height is exactly the height the
                         // E above was derived from (the trapezoid mean), so scaling F by the same
@@ -12787,6 +12816,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 continue;
             path_length += line_length;
             double new_speed = pre_processed_point.speed * 60.0;
+            // EdgeSlicer, curved tops: the overhang speeds are worked out from the role speed, so the
+            // curved paths' cap (see F above) applies to them too.
+            if (curved_top)
+                new_speed = std::min(new_speed, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
 
             if ((std::abs(last_set_speed - new_speed) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
                 // ORCA: Adaptive PA code segment when adjusting PA within the same feature
@@ -12856,7 +12889,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 const double z_diff = double(path.z_contour->z_at(processed_point.p));
                 const double z_prev = double(path.z_contour->z_at(pre_processed_point.p));
                 const double z_mean = 0.5 * (z_prev + z_diff);
-                const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                const double ratio  = curved_top ?
+                    0.5 * (double(path.z_contour->flow_at(pre_processed_point.p)) + double(path.z_contour->flow_at(processed_point.p))) :
+                    contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                 const double e      = dE * ratio;
                 // ZAA speed scaling on top of the per-point dynamic speed: the reference is
                 // last_set_speed, i.e. the F the overhang / curled-perimeter estimator just put in
@@ -13159,6 +13194,56 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         this->set_last_pos(travel.points.back());
     }
 
+    return gcode;
+}
+
+// EdgeSlicer, curved tops (CurvedTops.cpp): the travel to the first point of a conformal path.
+// The nozzle sits on (or just above) curved lines laid moments ago, so the order is fixed:
+//  1. retract, and wipe if enabled, where the nozzle is: the wipe runs back along the line just
+//     laid at that line's own heights (Wipe::update_path), so it has to happen before the lift;
+//  2. lift straight up to safe_z, which clears the highest curved surface by SAFE_LIFT_MM;
+//  3. travel in XY, level, at safe_z: no avoid-crossing detour (it would drop to the layer Z at its
+//     first point) and no z-hop of any type on top (a slope lift or spiral lift would merge Z into
+//     the XY move, and a spiral circles at the surface; safe_z is the hop);
+//  4. (the caller) descend vertically to the path's first Z.
+// Before this, the lift came first and travel_to() then retracted and wiped, which put the nozzle
+// back down on the surface, and the travel climbed from there to safe_z in one diagonal move
+// through the curved lines (hand test 2026-11-15).
+std::string GCode::curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z)
+{
+    std::string gcode;
+    m_need_change_layer_lift_z = false;
+    if (m_last_pos_defined && m_last_pos == point)
+        return gcode; // no XY move: the caller just sets the path's Z
+
+    // Travel acceleration and jerk, as travel_to() sets them for a travel off the first layer.
+    unsigned int acceleration_to_set = 0;
+    double       jerk_to_set         = 0.;
+    if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0)
+        acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+    if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0)
+        jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+    if (m_writer.get_gcode_flavor() == gcfKlipper) {
+        gcode += m_writer.set_accel_and_jerk(acceleration_to_set, jerk_to_set);
+    } else {
+        gcode += m_writer.set_travel_acceleration(acceleration_to_set);
+        gcode += m_writer.set_jerk_xy(jerk_to_set);
+    }
+
+    // 1. Retract and wipe at the surface.
+    gcode += this->retract(false, false, LiftType::NormalLift, role);
+    // 2. Straight up.
+    const double travel_z = std::max(safe_z, m_writer.get_position().z());
+    if (m_writer.get_position().z() < safe_z - EPSILON)
+        gcode += m_writer.travel_to_z(safe_z, "curved tops: lift clear of the surface", true);
+    // The safe Z is the hop: drop the one retract() asked for, of whatever z_hop_types.
+    m_writer.cancel_pending_lift();
+    m_avoid_crossing_perimeters.reset_once_modifiers();
+
+    m_writer.add_object_change_labels(gcode);
+    // 3. Level, straight.
+    gcode += m_writer.travel_to_xyz(Vec3d(this->point_to_gcode(point).x(), this->point_to_gcode(point).y(), travel_z), comment);
+    this->set_last_pos(point);
     return gcode;
 }
 
