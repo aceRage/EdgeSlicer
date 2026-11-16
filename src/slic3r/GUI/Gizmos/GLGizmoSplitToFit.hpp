@@ -22,6 +22,11 @@
 // when the mouse is released, not on every mouse move: the dowel site search builds an AABB tree
 // of the whole mesh.
 //
+// Phase 5 adds loose parts and matching labels: every piece of material a section falls into is a part
+// of its own (its own row, size and checks, its own colour in the 3D view when a section has several,
+// its own object after Apply), with "Discard pieces smaller than" (off by default); and a "Labels"
+// group: the same code recessed into both faces of every mating pair, drawn on the planes before Apply.
+//
 // Entry points (D1): its own toolbar icon, a "Split to fit..." button in the Cut panel and
 // "Split to fit the printer..." in the object's right-click menu.
 //
@@ -34,7 +39,9 @@
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/SplitToVolume.hpp"
 
+#include <array>
 #include <string>
+#include <vector>
 
 namespace Slic3r {
 class ModelObject;
@@ -101,6 +108,8 @@ private:
 
     // The mesh in the grid frame, and what it was taken from.
     indexed_triangle_set  m_mesh;
+    // P5: its face neighbours, worked out once per mesh (the piece search needs them on every plan).
+    std::vector<Vec3i32>  m_mesh_neighbors;
     ObjectID              m_mesh_object;
     Transform3d           m_mesh_trafo{ Transform3d::Identity() };
     size_t                m_mesh_volumes{ 0 };
@@ -112,6 +121,10 @@ private:
     // P2: the dowel sites, drawn on top of the model (discs on the planes, their axes as lines).
     GLModel               m_sites_fill;
     GLModel               m_sites_axes;
+    // P5: the pieces of sections that fall apart (one colour each), and the labels' outlines.
+    // Six colours and grey (discarded), filled in place: a GLModel must not be copied.
+    std::array<GLModel, 7> m_piece_boxes;
+    GLModel               m_labels;
     bool                  m_preview_dirty{ true };
 
     // P3: the plane being dragged (index in m_plan.planes, -1 for none) and where it is now.
@@ -121,7 +134,7 @@ private:
     double                m_drag_start_t{ 0. };
     bool                  m_drag_have_t{ false };
     // The adjustment's on / off and limit are kept for the session (no app config key); the first
-    // opening uses the defaults (D4: on, 10 mm).
+    // opening uses the defaults (D4: on, 10 mm). P5: so are the label settings and the discard option.
     bool                  m_adjust_seen{ false };
     // The Output Log's fold: collapsed by default, remembered for the session.
     bool                  m_output_log_open{ false };

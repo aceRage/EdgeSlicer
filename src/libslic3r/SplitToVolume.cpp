@@ -7,6 +7,7 @@
 #include "CutUtils.hpp"
 #include "ExtruderAreas.hpp"
 #include "Geometry.hpp"
+#include "KDTreeIndirect.hpp"
 #include "Model.hpp"
 #include "PrintConfig.hpp"
 #include "PushFit.hpp"
@@ -17,6 +18,9 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <optional>
+#include <unordered_map>
 
 namespace Slic3r {
 
@@ -373,6 +377,39 @@ size_t SplitPlan::parts_not_fitting() const
     return size_t(std::count_if(parts.begin(), parts.end(), [](const SplitPart &p) { return !p.empty && !p.fits; }));
 }
 
+size_t SplitPlan::piece_count() const
+{
+    return size_t(std::count_if(pieces.begin(), pieces.end(), [](const SplitPiece &p) { return !p.discarded; }));
+}
+
+size_t SplitPlan::pieces_not_fitting() const
+{
+    return size_t(std::count_if(pieces.begin(), pieces.end(), [](const SplitPiece &p) { return !p.discarded && !p.fits; }));
+}
+
+size_t SplitPlan::discarded_count() const
+{
+    return size_t(std::count_if(pieces.begin(), pieces.end(), [](const SplitPiece &p) { return p.discarded; }));
+}
+
+double SplitPlan::discarded_volume() const
+{
+    double v = 0.;
+    for (const SplitPiece &p : pieces)
+        if (p.discarded)
+            v += p.volume;
+    return v;
+}
+
+std::vector<int> SplitPlan::pieces_of(int section) const
+{
+    std::vector<int> out;
+    for (size_t i = 0; i < pieces.size(); ++i)
+        if (pieces[i].section == section)
+            out.push_back(int(i));
+    return out;
+}
+
 std::vector<double> SplitPlan::plane_positions(int axis) const
 {
     std::vector<double> out;
@@ -516,24 +553,43 @@ namespace split_to_volume_detail {
 // for depth along both normals; then the face's picks are taken island by island in turn up to the
 // cap. A face with no room tries smaller dowels; a face that ends with one round dowel tries two
 // smaller ones before it warns.
-static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, const std::vector<ExPolygons> &sections,
-                         const std::array<std::vector<double>, 3> &positions, const std::function<void()> &cancel_point)
+// Material along `dir` from `origin` (mm): the first surface the ray meets. A ray that meets nothing
+// started outside the material.
+struct MaterialDepth
 {
-    const SplitDowelOptions &opt = plan.dowel_options;
-    if (opt.diameter <= 0. || opt.length <= 0. || opt.max_per_face <= 0)
-        return;
+    const indexed_triangle_set   &mesh;
+    const AABBTreeIndirect::Tree3f &tree;
+    mutable std::vector<igl::Hit>  hits;
 
-    const auto tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.vertices, mesh.indices);
-    // Material along `dir` from `origin` (mm): the first surface the ray meets. A ray that meets
-    // nothing started outside the material.
-    std::vector<igl::Hit> hits;
-    auto depth_along = [&](const Vec3d &origin, const Vec3d &dir) {
+    double operator()(const Vec3d &origin, const Vec3d &dir) const
+    {
         AABBTreeIndirect::intersect_ray_all_hits(mesh.vertices, mesh.indices, tree, origin, dir, hits);
         for (const igl::Hit &h : hits)
             if (double(h.t) > RAY_EPS)
                 return double(h.t);
         return 0.;
-    };
+    }
+};
+
+// P5: the faces' mating pairs, face by face (indices in plan.mates).
+static std::vector<std::vector<int>> mates_by_face(const SplitPlan &plan)
+{
+    std::vector<std::vector<int>> out(plan.faces.size());
+    for (const SplitMate &m : plan.mates)
+        if (m.face >= 0 && size_t(m.face) < out.size())
+            out[size_t(m.face)].push_back(m.id);
+    return out;
+}
+
+// P5: the cap ("up to N") is per mating pair, shared round-robin over the pair's patches; a pair that
+// gets no dowel is warned about, so a loose piece is never left without one silently.
+static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, const std::array<std::vector<double>, 3> &positions,
+                         const std::function<void()> &cancel_point)
+{
+    const SplitDowelOptions &opt = plan.dowel_options;
+    if (opt.diameter <= 0. || opt.length <= 0. || opt.max_per_face <= 0)
+        return;
+    const std::vector<std::vector<int>> face_mates = mates_by_face(plan);
 
     const Vec3d lo        = plan.model_bbox.min;
     const Vec3d hi        = plan.model_bbox.max;
@@ -559,18 +615,21 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
         const double u0 = cell_lo(ua, cell[ua]), u1 = cell_hi(ua, cell[ua]);
         const double w0 = cell_lo(va, cell[va]), w1 = cell_hi(va, cell[va]);
 
-        ExPolygons islands = intersection_ex(sections[size_t(face.plane)], Polygons{ scaled_rect(u0, w0, u1, w1) });
+        // Room along the normal before the next parallel plane (a model end is left to the depth check).
+        const double room_below = pl.index > 0 ? pl.pos - positions[a][size_t(pl.index) - 1] : inf;
+        const double room_above = size_t(pl.index) + 1 < positions[a].size() ? positions[a][size_t(pl.index) + 1] - pl.pos : inf;
+
+        face.islands = 0;
+        for (const int mate_id : face_mates[size_t(face.id)]) {
+        SplitMate &mate = plan.mates[size_t(mate_id)];
+        ExPolygons islands = mate.patches;
         islands.erase(std::remove_if(islands.begin(), islands.end(),
                                      [](const ExPolygon &ex) { return ex.area() * SCALING_FACTOR * SCALING_FACTOR < MIN_FACE_AREA; }),
                       islands.end());
         std::stable_sort(islands.begin(), islands.end(), [](const ExPolygon &l, const ExPolygon &r) { return l.area() > r.area(); });
-        face.islands = int(islands.size());
+        face.islands += int(islands.size());
         if (islands.empty())
             continue;
-
-        // Room along the normal before the next parallel plane (a model end is left to the depth check).
-        const double room_below = pl.index > 0 ? pl.pos - positions[a][size_t(pl.index) - 1] : inf;
-        const double room_above = size_t(pl.index) + 1 < positions[a].size() ? positions[a][size_t(pl.index) + 1] - pl.pos : inf;
 
         struct Pick { Vec2d uv; double half; int island; };
         bool had_room = false;
@@ -655,9 +714,14 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
                 }
             }
 
+        // P5: the warnings name the pair (and so the two pieces) as well as the face.
+        auto warn = [&](SplitWarning::Kind kind, double value) {
+            SplitWarning w{ kind, face.plane, -1, value, face.id };
+            w.mate = mate.id;
+            plan.warnings.push_back(w);
+        };
         if (chosen.empty()) {
-            plan.warnings.push_back({ SplitWarning::Kind::NoDowelOnFace, face.plane, -1,
-                                      had_room ? SPLIT_NO_DOWEL_TOO_THIN : SPLIT_NO_DOWEL_TOO_SMALL, face.id });
+            warn(SplitWarning::Kind::NoDowelOnFace, had_room ? SPLIT_NO_DOWEL_TOO_THIN : SPLIT_NO_DOWEL_TOO_SMALL);
             continue;
         }
 
@@ -670,6 +734,7 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
             s.face             = face.id;
             s.plane            = face.plane;
             s.island           = pk.island;
+            s.mate             = mate.id;
             s.pos[a]           = pl.pos;
             s.pos[ua]          = pk.uv.x();
             s.pos[va]          = pk.uv.y();
@@ -678,10 +743,11 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
             s.footprint_radius = fp;
             s.shortened        = pk.half < req_half - 1e-6;
             s.scaled_down      = level > 0;
-            s.name             = face.mate_code + "-" + std::to_string(face.sites.size() + 1);
+            s.name             = mate.code + "-" + std::to_string(mate.sites.size() + 1);
             shortest           = std::min(shortest, pk.half);
             island_has[size_t(pk.island)] = true;
             face.sites.push_back(int(plan.sites.size()));
+            mate.sites.push_back(int(plan.sites.size()));
             plan.sites.push_back(std::move(s));
         }
         int without = 0;
@@ -689,13 +755,14 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
             if (!island_has[ii] && islands[ii].area() * SCALING_FACTOR * SCALING_FACTOR >= worth_area)
                 ++without;
         if (without > 0)
-            plan.warnings.push_back({ SplitWarning::Kind::IslandsWithoutDowel, face.plane, -1, double(without), face.id });
+            warn(SplitWarning::Kind::IslandsWithoutDowel, double(without));
         if (chosen.size() == 1 && dowel_is_round(opt))
-            plan.warnings.push_back({ SplitWarning::Kind::DowelCanTurn, face.plane, -1, 0., face.id });
+            warn(SplitWarning::Kind::DowelCanTurn, 0.);
         if (level > 0)
-            plan.warnings.push_back({ SplitWarning::Kind::DowelScaledDown, face.plane, -1, d, face.id });
+            warn(SplitWarning::Kind::DowelScaledDown, d);
         if (shortest < req_half - 1e-6)
-            plan.warnings.push_back({ SplitWarning::Kind::DowelShortened, face.plane, -1, 2. * shortest, face.id });
+            warn(SplitWarning::Kind::DowelShortened, 2. * shortest);
+        } // mates of the face
     }
 }
 
@@ -932,10 +999,1128 @@ static void adjust_planes(SplitPlan &plan, const indexed_triangle_set &mesh, con
     }
 }
 
+// ---- pieces (P5) --------------------------------------------------------------------------------------
+//
+// A section's material can fall apart into several pieces (an ear tip and a wedge of the back that only
+// met through material now in another section). The pieces are found without cutting the mesh:
+//
+//  - every triangle, clipped to the cells it crosses, is a FRAGMENT of the surface in each of them;
+//  - the plane's section on each face rectangle splits into ISLANDS, each a cap of the cell below and
+//    of the cell above;
+//  - two fragments in one cell are joined where their triangles share an edge that runs through the
+//    cell; a fragment is joined to the cap its triangle's crossing of the plane lies on; two caps of one
+//    cell on planes that meet are joined where both run along the line the planes meet in (a cell with
+//    no surface at all, deep inside a big model, is one piece of six caps that way);
+//  - pieces from different shells of the model whose boxes overlap stay together (a model made of
+//    overlapping bodies is not pulled apart); a void (an inward-facing shell) goes with the piece it is in.
+//
+// One pass over the triangles and one over their edges, with the face neighbours given (the gizmo keeps
+// them for the mesh). The planes are first moved off the mesh's vertices as Apply moves them, so no
+// vertex lies on a plane.
+
+struct SplitUnionFind
+{
+    std::vector<int> parent;
+
+    void init(size_t n)
+    {
+        parent.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            parent[i] = int(i);
+    }
+    int add()
+    {
+        parent.push_back(int(parent.size()));
+        return int(parent.size()) - 1;
+    }
+    int find(int x)
+    {
+        while (parent[size_t(x)] != x) {
+            parent[size_t(x)] = parent[size_t(parent[size_t(x)])];
+            x                 = parent[size_t(x)];
+        }
+        return x;
+    }
+    void unite(int a, int b)
+    {
+        if (a < 0 || b < 0)
+            return;
+        a = find(a);
+        b = find(b);
+        if (a == b)
+            return;
+        if (a < b)
+            std::swap(a, b);
+        parent[size_t(a)] = b;
+    }
+};
+
+// `pos` moved, by at most a twentieth of a millimetre, to where no coordinate of `sorted` is within
+// 2.5e-3 mm: what Apply's clear_of_vertices() does to a plane.
+static double nudge_off(const std::vector<double> &sorted, double pos)
+{
+    auto clearance = [&sorted](double x) {
+        auto   it = std::lower_bound(sorted.begin(), sorted.end(), x);
+        double d  = std::numeric_limits<double>::max();
+        if (it != sorted.end())
+            d = std::min(d, *it - x);
+        if (it != sorted.begin())
+            d = std::min(d, x - *(it - 1));
+        return d;
+    };
+    static constexpr double CLEAR = 2.5e-3, STEP = 2.5e-3;
+    if (clearance(pos) > CLEAR)
+        return pos;
+    for (int k = 1; k <= 20; ++k) {
+        if (clearance(pos + double(k) * STEP) > CLEAR)
+            return pos + double(k) * STEP;
+        if (clearance(pos - double(k) * STEP) > CLEAR)
+            return pos - double(k) * STEP;
+    }
+    return pos;
+}
+
+// One island of a plane's section on one face rectangle: a cap of the cell below and of the cell above.
+struct CapIsland
+{
+    int       plane{ -1 };
+    int       face{ -1 };       // SplitPlan::faces, or -1 (a face too small to list)
+    int       cell_below{ -1 };
+    int       cell_above{ -1 };
+    ExPolygon shape;            // scaled, the plane's (u, v)
+    double    area{ 0. };       // mm2
+    int       node_below{ -1 };
+    int       node_above{ -1 };
+};
+
+// The islands of one face rectangle, to find the one a point of the outline belongs to.
+struct CapIndex
+{
+    std::vector<int>                                     islands;
+    std::vector<int>                                     line_island;
+    std::unique_ptr<AABBTreeLines::LinesDistancer<Line>> lines;
+};
+
+struct PieceComp
+{
+    int              cell{ -1 };
+    BoundingBoxf3    bbox;
+    double           volume{ 0. };
+    std::vector<int> shells;
+    bool             surface{ false };   // has some of the model's surface (not only caps)
+};
+
+static std::string piece_letter(int i)
+{
+    std::string s;
+    do {
+        s.insert(s.begin(), char('a' + i % 26));
+        i = i / 26 - 1;
+    } while (i >= 0);
+    return s;
+}
+
+// The stretches of an island's outline that lie on the side of its rectangle at `side` (scaled) on
+// coordinate `coord` (0: u, 1: v), as intervals of the other coordinate (mm).
+static std::vector<std::pair<double, double>> side_intervals(const ExPolygon &ex, int coord, coord_t side)
+{
+    std::vector<std::pair<double, double>> out;
+    static constexpr coord_t TOL = 10;
+    auto scan = [&](const Polygon &p) {
+        for (size_t i = 0, n = p.points.size(); i < n; ++i) {
+            const Point &a = p.points[i];
+            const Point &b = p.points[(i + 1) % n];
+            if (std::abs(a[coord] - side) <= TOL && std::abs(b[coord] - side) <= TOL) {
+                double x0 = unscale<double>(a[1 - coord]), x1 = unscale<double>(b[1 - coord]);
+                if (x0 > x1)
+                    std::swap(x0, x1);
+                if (x1 - x0 > 1e-6)
+                    out.emplace_back(x0, x1);
+            }
+        }
+    };
+    scan(ex.contour);
+    for (const Polygon &h : ex.holes)
+        scan(h);
+    return out;
+}
+
+static bool intervals_overlap(const std::vector<std::pair<double, double>> &l, const std::vector<std::pair<double, double>> &r)
+{
+    for (const auto &a : l)
+        for (const auto &b : r)
+            if (std::min(a.second, b.second) - std::max(a.first, b.first) > 1e-4)
+                return true;
+    return false;
+}
+
+static bool boxes_touch(const BoundingBoxf3 &l, const BoundingBoxf3 &r, double tol)
+{
+    if (!l.defined || !r.defined)
+        return false;
+    for (int a = 0; a < 3; ++a)
+        if (l.max[a] < r.min[a] - tol || r.max[a] < l.min[a] - tol)
+            return false;
+    return true;
+}
+
+static bool box_contains(const BoundingBoxf3 &box, const Vec3d &p, double tol)
+{
+    if (!box.defined)
+        return false;
+    for (int a = 0; a < 3; ++a)
+        if (p[a] < box.min[a] - tol || p[a] > box.max[a] + tol)
+            return false;
+    return true;
+}
+
+// The piece of section `cell` a point of it belongs to, by the pieces' boxes: the smallest box that
+// holds it, else the nearest box centre. -1 when the section has no pieces.
+static int piece_at(const SplitPlan &plan, const std::vector<int> &section_pieces, const Vec3d &p)
+{
+    int    best = -1;
+    double best_v = std::numeric_limits<double>::max();
+    for (int i : section_pieces) {
+        const BoundingBoxf3 &bb = plan.pieces[size_t(i)].bbox;
+        if (!box_contains(bb, p, 1e-3))
+            continue;
+        const Vec3d  s = bb.size();
+        const double v = s.x() * s.y() * s.z();
+        if (v < best_v) {
+            best_v = v;
+            best   = i;
+        }
+    }
+    if (best >= 0)
+        return best;
+    double best_d = std::numeric_limits<double>::max();
+    for (int i : section_pieces) {
+        const BoundingBoxf3 &bb = plan.pieces[size_t(i)].bbox;
+        if (!bb.defined)
+            continue;
+        const double d = (bb.center() - p).squaredNorm();
+        if (d < best_d) {
+            best_d = d;
+            best   = i;
+        }
+    }
+    return best;
+}
+
+// Fills plan.pieces (every non-empty section, its pieces largest first), plan.mates (the pairs of pieces
+// that meet on a face, with their patches) and plan.vertex_piece. `sections` are the planes' sections at
+// their positions.
+static void find_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, const std::vector<Vec3i32> &neighbors,
+                        const std::vector<ExPolygons> &sections, const SplitOptions &options, const std::function<void()> &cancel_point)
+{
+    const size_t T     = mesh.indices.size();
+    const int    ncell = int(plan.parts.size());
+    const Vec3d  lo    = plan.model_bbox.min;
+    const Vec3d  hi    = plan.model_bbox.max;
+    const Vec3d  origin = plan.model_bbox.center();
+    plan.pieces.clear();
+    plan.mates.clear();
+    plan.vertex_piece.assign(mesh.vertices.size(), -1);
+
+    // Each non-empty cell's pieces (indices in `pieces`, after step 8).
+    std::vector<std::vector<int>> section_pieces(static_cast<size_t>(ncell));
+    auto make_piece = [&](int ci, const BoundingBoxf3 &bbox, double volume) {
+        SplitPiece p;
+        p.section = ci;
+        p.bbox    = bbox;
+        p.volume  = volume;
+        section_pieces[size_t(ci)].push_back(int(plan.pieces.size()));
+        plan.pieces.push_back(std::move(p));
+    };
+
+    if (plan.planes.empty() || T == 0 || neighbors.size() != T) {
+        // Nothing is cut: every non-empty cell is one piece, as it was.
+        for (int ci = 0; ci < ncell; ++ci)
+            if (!plan.parts[size_t(ci)].empty)
+                make_piece(ci, plan.parts[size_t(ci)].bbox, plan.parts[size_t(ci)].volume);
+        return;
+    }
+
+    // 1. The planes moved off the vertices, as Apply moves them; their sections again where one moved.
+    std::array<std::vector<double>, 3> np;
+    std::vector<ExPolygons>            secs = sections;
+    for (int a = 0; a < 3; ++a) {
+        np[a] = plan.plane_positions(a);
+        if (np[a].empty())
+            continue;
+        std::vector<double> coords;
+        coords.reserve(mesh.vertices.size());
+        for (const Vec3f &v : mesh.vertices)
+            coords.push_back(double(v[a]));
+        std::sort(coords.begin(), coords.end());
+        std::vector<double> moved = np[a];
+        bool                any = false, ordered = true;
+        for (size_t i = 0; i < moved.size(); ++i) {
+            moved[i] = nudge_off(coords, moved[i]);
+            any      = any || moved[i] != np[a][i];
+            if (i > 0 && moved[i] <= moved[i - 1])
+                ordered = false;
+        }
+        if (!any || !ordered)
+            continue;
+        np[a] = std::move(moved);
+        MeshSlicingParamsEx params;
+        params.trafo = axis_to_z(a);
+        std::vector<float> zs;
+        for (double p : np[a])
+            zs.push_back(float(p));
+        std::vector<ExPolygons> slices = slice_mesh_ex(mesh, zs, params, [&cancel_point]() { cancel_point(); });
+        for (size_t i = 0; i < slices.size() && i < np[a].size(); ++i)
+            if (const int idx = plan.plane_index(a, int(i)); idx >= 0)
+                secs[size_t(idx)] = std::move(slices[i]);
+    }
+    auto cell_lo   = [&](int a, int c) { return c == 0 ? lo[a] : np[a][size_t(c) - 1]; };
+    auto cell_hi   = [&](int a, int c) { return c == plan.counts[a] - 1 ? hi[a] : np[a][size_t(c)]; };
+    auto axis_cell = [&](int a, double x) { return std::min(count_below(np[a], x), plan.counts[a] - 1); };
+    auto cell_of   = [&](const Vec3d &p) { return plan.cell_index({ { axis_cell(0, p.x()), axis_cell(1, p.y()), axis_cell(2, p.z()) } }); };
+    auto vertex    = [&mesh](int i) { return mesh.vertices[size_t(i)].cast<double>(); };
+
+    SplitUnionFind uf;
+    uf.init(T);
+
+    // 2. Caps: each plane's section on every face rectangle between two non-empty cells.
+    std::vector<CapIsland>                 caps;
+    std::map<std::array<int, 3>, CapIndex> cap_index;   // (plane, cell along u, cell along v)
+    std::map<std::pair<int, int>, int>     face_of;     // (plane, cell below) -> face
+    for (const SplitFace &f : plan.faces)
+        face_of[{ f.plane, plan.cell_index(f.cell_below) }] = f.id;
+    for (size_t pi = 0; pi < plan.planes.size(); ++pi) {
+        const SplitPlane &pl = plan.planes[pi];
+        const int         a = pl.axis, ua = u_axis(a), va = v_axis(a);
+        for (int cv = 0; cv < plan.counts[va]; ++cv)
+            for (int cu = 0; cu < plan.counts[ua]; ++cu) {
+                SplitCell below{ { 0, 0, 0 } };
+                below[a]        = pl.index;
+                below[ua]       = cu;
+                below[va]       = cv;
+                SplitCell above = below;
+                above[a]        = pl.index + 1;
+                const int cb = plan.cell_index(below), ca = plan.cell_index(above);
+                if (plan.parts[size_t(cb)].empty || plan.parts[size_t(ca)].empty)
+                    continue;
+                ExPolygons ex = intersection_ex(secs[pi], Polygons{ scaled_rect(cell_lo(ua, cu), cell_lo(va, cv), cell_hi(ua, cu), cell_hi(va, cv)) });
+                CapIndex         &index = cap_index[{ { int(pi), cu, cv } }];
+                std::vector<Line> lines;
+                for (ExPolygon &e : ex) {
+                    const double area = e.area() * SCALING_FACTOR * SCALING_FACTOR;
+                    if (area <= 1e-9)
+                        continue;
+                    CapIsland c;
+                    c.plane      = int(pi);
+                    c.cell_below = cb;
+                    c.cell_above = ca;
+                    c.area       = area;
+                    const auto it = face_of.find({ int(pi), cb });
+                    c.face        = it == face_of.end() ? -1 : it->second;
+                    c.node_below  = uf.add();
+                    c.node_above  = uf.add();
+                    for (const Line &l : e.lines()) {
+                        lines.push_back(l);
+                        index.line_island.push_back(int(caps.size()));
+                    }
+                    index.islands.push_back(int(caps.size()));
+                    c.shape = std::move(e);
+                    caps.push_back(std::move(c));
+                }
+                if (!lines.empty())
+                    index.lines = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(std::move(lines));
+            }
+    }
+    auto cap_at = [&cap_index](int plane, int cu, int cv, const Vec2d &uv) -> int {
+        const auto it = cap_index.find({ { plane, cu, cv } });
+        if (it == cap_index.end() || !it->second.lines)
+            return -1;
+        if (it->second.islands.size() == 1)
+            return it->second.islands.front();
+        const auto [d, idx, nearest] = it->second.lines->distance_from_lines_extra<false>(Point::new_scale(uv.x(), uv.y()));
+        return idx < it->second.line_island.size() ? it->second.line_island[idx] : -1;
+    };
+
+    // 3. Two caps of one cell on planes that meet: joined where both run along the line they meet in.
+    {
+        std::map<std::array<int, 3>, std::vector<std::pair<int, std::vector<std::pair<double, double>>>>> along;
+        for (const CapIsland &c : caps) {
+            const int a = plan.planes[size_t(c.plane)].axis;
+            for (int side = 0; side < 2; ++side) {
+                const int        ci   = side == 0 ? c.cell_below : c.cell_above;
+                const int        node = side == 0 ? c.node_below : c.node_above;
+                const SplitCell &cell = plan.parts[size_t(ci)].cell;
+                for (int k = 0; k < 2; ++k) {
+                    const int b = k == 0 ? u_axis(a) : v_axis(a);
+                    for (int end = 0; end < 2; ++end) {
+                        const int m = end == 0 ? cell[b] - 1 : cell[b];
+                        if (m < 0 || m >= plan.counts[b] - 1)
+                            continue;
+                        const int other = plan.plane_index(b, m);
+                        if (other < 0)
+                            continue;
+                        const coord_t s  = Point::new_scale(np[b][size_t(m)], 0.).x();
+                        auto          iv = side_intervals(c.shape, k, s);
+                        if (!iv.empty())
+                            along[{ { ci, c.plane, other } }].emplace_back(node, std::move(iv));
+                    }
+                }
+            }
+        }
+        for (const auto &[key, mine] : along) {
+            if (key[1] > key[2])
+                continue;
+            const auto it = along.find({ { key[0], key[2], key[1] } });
+            if (it == along.end())
+                continue;
+            for (const auto &m0 : mine)
+                for (const auto &m1 : it->second)
+                    if (intervals_overlap(m0.second, m1.second))
+                        uf.unite(m0.first, m1.first);
+        }
+    }
+
+    // 4. The triangles: fragments of those that cross planes, and where they cross a plane, the cap.
+    std::vector<int>                  home(T, -1);   // the one cell a triangle lies in, or -1
+    std::unordered_map<uint64_t, int> frag_node;
+    struct Frag
+    {
+        int                t;
+        int                cell;
+        std::vector<Vec3d> poly;
+        int                node;
+    };
+    std::vector<Frag> frags;
+    auto key_of  = [ncell](size_t t, int cell) { return uint64_t(t) * uint64_t(ncell) + uint64_t(cell); };
+    auto node_of = [&](size_t t, int cell) -> int {
+        if (cell < 0)
+            return -1;
+        if (home[t] >= 0)
+            return home[t] == cell ? int(t) : -1;
+        const auto it = frag_node.find(key_of(t, cell));
+        return it == frag_node.end() ? -1 : it->second;
+    };
+    std::vector<Vec3d>  poly;
+    std::vector<double> ts;
+    for (size_t t = 0; t < T; ++t) {
+        if ((t & 0xFFFF) == 0)
+            cancel_point();
+        const stl_triangle_vertex_indices &f = mesh.indices[t];
+        const Vec3d v[3] = { vertex(f[0]), vertex(f[1]), vertex(f[2]) };
+        std::array<int, 3> c0, c1;
+        bool               single = true;
+        for (int a = 0; a < 3; ++a) {
+            c0[a]  = axis_cell(a, std::min({ v[0][a], v[1][a], v[2][a] }));
+            c1[a]  = axis_cell(a, std::max({ v[0][a], v[1][a], v[2][a] }));
+            single = single && c0[a] == c1[a];
+        }
+        if (single) {
+            home[t] = plan.cell_index({ { c0[0], c0[1], c0[2] } });
+            continue;
+        }
+        for (int k = c0[2]; k <= c1[2]; ++k)
+            for (int j = c0[1]; j <= c1[1]; ++j)
+                for (int i = c0[0]; i <= c1[0]; ++i) {
+                    poly.assign(v, v + 3);
+                    const int cc[3] = { i, j, k };
+                    for (int a = 0; a < 3 && !poly.empty(); ++a) {
+                        if (cc[a] > 0)
+                            clip_polygon(poly, a, np[a][size_t(cc[a]) - 1], true);
+                        if (cc[a] < plan.counts[a] - 1)
+                            clip_polygon(poly, a, np[a][size_t(cc[a])], false);
+                    }
+                    if (poly.size() < 3)
+                        continue;
+                    Vec3d n = Vec3d::Zero();
+                    for (size_t q = 1; q + 1 < poly.size(); ++q)
+                        n += (poly[q] - poly[0]).cross(poly[q + 1] - poly[0]);
+                    if (n.norm() < 1e-12)
+                        continue;
+                    const int ci   = plan.cell_index({ { i, j, k } });
+                    const int node = uf.add();
+                    frag_node[key_of(t, ci)] = node;
+                    frags.push_back({ int(t), ci, poly, node });
+                }
+        for (int a = 0; a < 3; ++a)
+            for (int k = c0[a]; k < c1[a]; ++k) {
+                const double P = np[a][size_t(k)];
+                Vec3d        pts[2];
+                int          n = 0;
+                for (int e = 0; e < 3; ++e) {
+                    const Vec3d &p = v[e], &q = v[(e + 1) % 3];
+                    const double dp = p[a] - P, dq = q[a] - P;
+                    if ((dp < 0.) != (dq < 0.) && n < 2)
+                        pts[n++] = p + (q - p) * (dp / (dp - dq));
+                }
+                const int pi = plan.plane_index(a, k);
+                if (n != 2 || pi < 0)
+                    continue;
+                const int    ua = u_axis(a), va = v_axis(a);
+                const double len = (pts[1] - pts[0]).norm();
+                ts.assign({ 0., 1. });
+                for (int b : { ua, va }) {
+                    const double x0 = pts[0][b], x1 = pts[1][b];
+                    if (x0 == x1)
+                        continue;
+                    for (double P2 : np[b]) {
+                        const double s = (P2 - x0) / (x1 - x0);
+                        if (s > 0. && s < 1.)
+                            ts.push_back(s);
+                    }
+                }
+                std::sort(ts.begin(), ts.end());
+                for (size_t q = 0; q + 1 < ts.size(); ++q) {
+                    if ((ts[q + 1] - ts[q]) * len < 1e-7)
+                        continue;
+                    const Vec3d mid = pts[0] + (pts[1] - pts[0]) * (0.5 * (ts[q] + ts[q + 1]));
+                    const int   cu = axis_cell(ua, mid[ua]), cv = axis_cell(va, mid[va]);
+                    const int   cap = cap_at(pi, cu, cv, Vec2d(mid[ua], mid[va]));
+                    if (cap < 0)
+                        continue;
+                    SplitCell below{ { 0, 0, 0 } };
+                    below[a]        = k;
+                    below[ua]       = cu;
+                    below[va]       = cv;
+                    SplitCell above = below;
+                    above[a]        = k + 1;
+                    uf.unite(caps[size_t(cap)].node_below, node_of(t, plan.cell_index(below)));
+                    uf.unite(caps[size_t(cap)].node_above, node_of(t, plan.cell_index(above)));
+                }
+            }
+    }
+
+    // 5. Fragments of neighbouring triangles in one cell, joined where their shared edge runs through it.
+    for (size_t t = 0; t < T; ++t) {
+        if ((t & 0xFFFF) == 0)
+            cancel_point();
+        for (int e = 0; e < 3; ++e) {
+            const int n = neighbors[t][e];
+            if (n < 0 || size_t(n) == t || size_t(n) >= T)
+                continue;
+            if (home[t] >= 0 && home[size_t(n)] >= 0) {
+                if (home[t] == home[size_t(n)])
+                    uf.unite(int(t), n);
+                continue;
+            }
+            const Vec2i32 ev = its_triangle_edge(mesh.indices[t], e);
+            const Vec3d   p0 = vertex(ev[0]), p1 = vertex(ev[1]);
+            const int     k0 = cell_of(p0), k1 = cell_of(p1);
+            if (k0 == k1) {
+                uf.unite(node_of(t, k0), node_of(size_t(n), k0));
+                continue;
+            }
+            ts.assign({ 0., 1. });
+            for (int a = 0; a < 3; ++a) {
+                if (p0[a] == p1[a])
+                    continue;
+                for (double P : np[a]) {
+                    const double s = (P - p0[a]) / (p1[a] - p0[a]);
+                    if (s > 0. && s < 1.)
+                        ts.push_back(s);
+                }
+            }
+            std::sort(ts.begin(), ts.end());
+            for (size_t q = 0; q + 1 < ts.size(); ++q) {
+                if (ts[q + 1] - ts[q] < 1e-12)
+                    continue;
+                const int c = cell_of(p0 + (p1 - p0) * (0.5 * (ts[q] + ts[q + 1])));
+                uf.unite(node_of(t, c), node_of(size_t(n), c));
+            }
+        }
+    }
+
+    // 6. The components: box, volume (divergence theorem, as the cells' volumes) and shells.
+    std::vector<int> shell(T, -1);
+    {
+        int              next = 0;
+        std::vector<int> stack;
+        for (size_t t = 0; t < T; ++t) {
+            if (shell[t] >= 0)
+                continue;
+            shell[t] = next;
+            stack.assign(1, int(t));
+            while (!stack.empty()) {
+                const int x = stack.back();
+                stack.pop_back();
+                for (int e = 0; e < 3; ++e) {
+                    const int n = neighbors[size_t(x)][e];
+                    if (n >= 0 && size_t(n) < T && shell[size_t(n)] < 0) {
+                        shell[size_t(n)] = next;
+                        stack.push_back(n);
+                    }
+                }
+            }
+            ++next;
+        }
+    }
+    std::vector<int>       comp_of(uf.parent.size(), -1);
+    std::vector<PieceComp> comps;
+    auto comp_index = [&](int node) {
+        const int r = uf.find(node);
+        if (comp_of[size_t(r)] < 0) {
+            comp_of[size_t(r)] = int(comps.size());
+            comps.emplace_back();
+        }
+        return comp_of[size_t(r)];
+    };
+    auto tet = [&origin](const Vec3d &p0, const Vec3d &p1, const Vec3d &p2) { return (p0 - origin).dot((p1 - origin).cross(p2 - origin)) / 6.; };
+    auto add_shell = [](PieceComp &c, int s) {
+        if (std::find(c.shells.begin(), c.shells.end(), s) == c.shells.end())
+            c.shells.push_back(s);
+    };
+    for (size_t t = 0; t < T; ++t) {
+        if (home[t] < 0)
+            continue;
+        PieceComp &c = comps[size_t(comp_index(int(t)))];
+        const stl_triangle_vertex_indices &f = mesh.indices[t];
+        const Vec3d v[3] = { vertex(f[0]), vertex(f[1]), vertex(f[2]) };
+        c.cell = home[t];
+        for (const Vec3d &p : v)
+            c.bbox.merge(p);
+        c.volume += tet(v[0], v[1], v[2]);
+        c.surface = true;
+        add_shell(c, shell[t]);
+    }
+    for (const Frag &fr : frags) {
+        PieceComp &c = comps[size_t(comp_index(fr.node))];
+        c.cell       = fr.cell;
+        for (const Vec3d &p : fr.poly)
+            c.bbox.merge(p);
+        for (size_t q = 1; q + 1 < fr.poly.size(); ++q)
+            c.volume += tet(fr.poly[0], fr.poly[q], fr.poly[q + 1]);
+        c.surface = true;
+        add_shell(c, shell[size_t(fr.t)]);
+    }
+    for (const CapIsland &cap : caps) {
+        const SplitPlane &pl = plan.planes[size_t(cap.plane)];
+        const int         a = pl.axis, ua = u_axis(a), va = v_axis(a);
+        const double      P = np[a][size_t(pl.index)];
+        const BoundingBox bb = get_extents(cap.shape);
+        Vec3d             p0, p1;
+        p0[a]  = P;
+        p1[a]  = P;
+        p0[ua] = unscale<double>(bb.min.x());
+        p1[ua] = unscale<double>(bb.max.x());
+        p0[va] = unscale<double>(bb.min.y());
+        p1[va] = unscale<double>(bb.max.y());
+        const double vol = (P - origin[a]) * cap.area / 3.;
+        for (int side = 0; side < 2; ++side) {
+            PieceComp &c = comps[size_t(comp_index(side == 0 ? cap.node_below : cap.node_above))];
+            c.cell       = side == 0 ? cap.cell_below : cap.cell_above;
+            c.bbox.merge(p0);
+            c.bbox.merge(p1);
+            c.volume += side == 0 ? vol : -vol;
+        }
+    }
+
+    // 7. Joins the topology does not see: other shells overlapping, caps on their own, voids.
+    SplitUnionFind cu;
+    cu.init(comps.size());
+    std::vector<std::vector<int>> by_cell(static_cast<size_t>(ncell));
+    for (size_t i = 0; i < comps.size(); ++i)
+        if (comps[i].cell >= 0 && comps[i].cell < ncell)
+            by_cell[size_t(comps[i].cell)].push_back(int(i));
+    for (const std::vector<int> &list : by_cell) {
+        if (list.size() < 2)
+            continue;
+        std::vector<int> surf, bare;
+        for (int i : list)
+            (comps[size_t(i)].surface ? surf : bare).push_back(i);
+        // Pieces of different shells whose boxes overlap: overlapping bodies stay together.
+        if (surf.size() <= 2000)
+            for (size_t x = 0; x < surf.size(); ++x)
+                for (size_t y = x + 1; y < surf.size(); ++y) {
+                    const PieceComp &l = comps[size_t(surf[x])], &r = comps[size_t(surf[y])];
+                    bool other = false;
+                    for (int sl : l.shells)
+                        for (int sr : r.shells)
+                            other = other || sl != sr;
+                    if (other && boxes_touch(l.bbox, r.bbox, 1e-6))
+                        cu.unite(surf[x], surf[y]);
+                }
+        // A cap that joined no surface: with the piece whose box holds it (a deep inside cell, all caps,
+        // is one piece).
+        for (int b : bare) {
+            if (surf.empty()) {
+                cu.unite(b, bare.front());
+                continue;
+            }
+            const Vec3d c    = comps[size_t(b)].bbox.center();
+            int         best = -1;
+            double      best_d = std::numeric_limits<double>::max();
+            for (int s : surf) {
+                const BoundingBoxf3 &bb = comps[size_t(s)].bbox;
+                const double d = box_contains(bb, c, 1e-3) ? -1. : (bb.center() - c).squaredNorm();
+                if (d < best_d) {
+                    best_d = d;
+                    best   = s;
+                }
+            }
+            cu.unite(b, best);
+        }
+    }
+    std::vector<int>       group_of(comps.size(), -1);
+    std::vector<PieceComp> groups;
+    for (size_t i = 0; i < comps.size(); ++i) {
+        if (comps[i].cell < 0)
+            continue;
+        const int r = cu.find(int(i));
+        if (group_of[size_t(r)] < 0) {
+            group_of[size_t(r)] = int(groups.size());
+            groups.emplace_back();
+            groups.back().cell = comps[i].cell;
+        }
+        group_of[i]  = group_of[size_t(r)];
+        PieceComp &g = groups[size_t(group_of[i])];
+        if (comps[i].bbox.defined)
+            g.bbox.merge(comps[i].bbox);
+        g.volume += comps[i].volume;
+        g.surface = g.surface || comps[i].surface;
+        for (int s : comps[i].shells)
+            add_shell(g, s);
+    }
+    // A void (an inward-facing shell) goes with the piece whose box holds it; too little to be a piece is dropped.
+    std::vector<int> final_of(groups.size(), -1);
+    for (size_t g = 0; g < groups.size(); ++g)
+        final_of[g] = groups[g].volume > 1e-6 ? int(g) : -1;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (groups[g].volume >= -1e-6)
+            continue;
+        int    best = -1;
+        double best_v = std::numeric_limits<double>::max();
+        for (size_t h = 0; h < groups.size(); ++h) {
+            if (final_of[h] != int(h) || groups[h].cell != groups[g].cell || !boxes_touch(groups[h].bbox, groups[g].bbox, 1e-3))
+                continue;
+            if (box_contains(groups[h].bbox, groups[g].bbox.min, 1e-3) && box_contains(groups[h].bbox, groups[g].bbox.max, 1e-3) &&
+                groups[h].volume < best_v) {
+                best_v = groups[h].volume;
+                best   = int(h);
+            }
+        }
+        if (best >= 0) {
+            groups[size_t(best)].volume += groups[g].volume;
+            final_of[g] = best;
+        }
+    }
+
+    // 8. The pieces of every section, largest first.
+    std::vector<int> group_piece(groups.size(), -1);
+    for (int ci = 0; ci < ncell; ++ci) {
+        if (plan.parts[size_t(ci)].empty)
+            continue;
+        std::vector<int> mine;
+        for (size_t g = 0; g < groups.size(); ++g)
+            if (final_of[g] == int(g) && groups[g].cell == ci)
+                mine.push_back(int(g));
+        std::stable_sort(mine.begin(), mine.end(), [&groups](int l, int r) { return groups[size_t(l)].volume > groups[size_t(r)].volume; });
+        if (mine.empty()) {
+            // Nothing found (a model that is not closed, say): the section is one piece, as before.
+            make_piece(ci, plan.parts[size_t(ci)].bbox, plan.parts[size_t(ci)].volume);
+            continue;
+        }
+        for (int g : mine) {
+            group_piece[size_t(g)] = int(plan.pieces.size());
+            make_piece(ci, groups[size_t(g)].bbox, groups[size_t(g)].volume);
+        }
+    }
+    auto piece_of_node = [&](int node) -> int {
+        if (node < 0)
+            return -1;
+        const int c = comp_of[size_t(uf.find(node))];
+        if (c < 0 || group_of[size_t(c)] < 0)
+            return -1;
+        const int f = final_of[size_t(group_of[size_t(c)])];
+        return f < 0 ? -1 : group_piece[size_t(f)];
+    };
+
+    // 9. The piece of every vertex.
+    for (size_t t = 0; t < T; ++t) {
+        const stl_triangle_vertex_indices &f = mesh.indices[t];
+        for (int k = 0; k < 3; ++k) {
+            const size_t vi = size_t(f[k]);
+            if (plan.vertex_piece[vi] >= 0)
+                continue;
+            plan.vertex_piece[vi] = piece_of_node(node_of(t, cell_of(vertex(f[k]))));
+        }
+    }
+
+    // 10. The mating pairs: the caps of every listed face, grouped by the two pieces either side.
+    std::vector<int> order(caps.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = int(i);
+    std::stable_sort(order.begin(), order.end(), [&caps](int l, int r) {
+        const CapIsland &a = caps[size_t(l)], &b = caps[size_t(r)];
+        return a.face != b.face ? a.face < b.face : a.area > b.area;
+    });
+    std::map<std::array<int, 3>, int> mate_of;
+    for (int ci : order) {
+        const CapIsland &cap = caps[size_t(ci)];
+        if (cap.face < 0 || cap.area < MIN_FACE_AREA)
+            continue;
+        const SplitPlane &pl = plan.planes[size_t(cap.plane)];
+        const int         a = pl.axis, ua = u_axis(a), va = v_axis(a);
+        int pb = piece_of_node(cap.node_below), pa = piece_of_node(cap.node_above);
+        if (pb < 0 || pa < 0) {
+            // A cap the topology did not place: by the pieces' boxes.
+            const Point c2 = cap.shape.contour.centroid();
+            Vec3d       c3;
+            c3[a]  = np[a][size_t(pl.index)];
+            c3[ua] = unscale<double>(c2.x());
+            c3[va] = unscale<double>(c2.y());
+            if (pb < 0)
+                pb = piece_at(plan, section_pieces[size_t(cap.cell_below)], c3);
+            if (pa < 0)
+                pa = piece_at(plan, section_pieces[size_t(cap.cell_above)], c3);
+        }
+        if (pb < 0 || pa < 0)
+            continue;
+        const std::array<int, 3> key{ { cap.face, pb, pa } };
+        auto                     it = mate_of.find(key);
+        if (it == mate_of.end()) {
+            SplitMate m;
+            m.id          = int(plan.mates.size());
+            m.face        = cap.face;
+            m.piece_below = pb;
+            m.piece_above = pa;
+            it            = mate_of.emplace(key, m.id).first;
+            plan.mates.push_back(std::move(m));
+        }
+        SplitMate &m = plan.mates[size_t(it->second)];
+        m.patches.push_back(cap.shape);
+        m.area += cap.area;
+    }
+    // Codes: the face's own, with a letter when it joins more than one pair.
+    {
+        std::vector<std::vector<int>> per_face = mates_by_face(plan);
+        for (size_t f = 0; f < per_face.size(); ++f)
+            for (size_t k = 0; k < per_face[f].size(); ++k) {
+                SplitMate &m = plan.mates[size_t(per_face[f][k])];
+                m.code       = plan.faces[f].mate_code;
+                if (per_face[f].size() > 1)
+                    m.code += k < 26 ? std::string(1, char('A' + k)) : std::to_string(k + 1);
+            }
+    }
+    (void) options;
+}
+
+// After find_pieces(): names, sizes against the usable volume, the small-piece rule, the discard, the
+// contact areas, the pieces' own warnings, and the pairs of discarded pieces taken out.
+static void finish_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, const SplitOptions &options,
+                          const std::array<std::vector<double>, 3> &positions, const std::function<void()> &cancel_point)
+{
+    const Vec3d lo = plan.model_bbox.min, hi = plan.model_bbox.max;
+    auto cell_lo = [&](int a, int c) { return c == 0 ? lo[a] : positions[a][size_t(c) - 1]; };
+    auto cell_hi = [&](int a, int c) { return c == plan.counts[a] - 1 ? hi[a] : positions[a][size_t(c)]; };
+    plan.small_piece_volume = options.small_piece_volume;
+
+    std::vector<std::vector<int>> per_section(plan.parts.size());
+    for (size_t i = 0; i < plan.pieces.size(); ++i)
+        per_section[size_t(plan.pieces[i].section)].push_back(int(i));
+
+    // Contact areas: a section of one piece stands on what the section stands on; pieces of a section of
+    // several get the section's footprint split by their boxes.
+    std::vector<float> heights;
+    auto contact_z = [](const SplitPiece &p) { return p.bbox.min.z() + std::min(SPLIT_CONTACT_HEIGHT, 0.5 * p.size().z()); };
+    for (const SplitPiece &p : plan.pieces)
+        if (per_section[size_t(p.section)].size() > 1 && p.bbox.defined)
+            heights.push_back(float(contact_z(p)));
+    AxisSections bottoms;
+    if (!heights.empty() && !plan.planes.empty())
+        bottoms = slice_axis(mesh, 2, std::move(heights), cancel_point);
+
+    for (size_t s = 0; s < per_section.size(); ++s) {
+        const std::vector<int> &list = per_section[s];
+        const SplitPart        &part = plan.parts[s];
+        for (size_t k = 0; k < list.size(); ++k) {
+            SplitPiece &p = plan.pieces[size_t(list[k])];
+            p.index       = int(k);
+            const std::string letter = piece_letter(int(k));
+            p.id          = part.name.empty() ? letter : part.name + "_" + letter;
+            p.tiny        = !plan.planes.empty() && p.volume < options.small_piece_volume;
+            p.discarded   = p.tiny && options.discard_small;
+            p.name        = part.name;
+            if (list.size() > 1)
+                p.name += (p.name.empty() ? "" : "_") + letter;
+            if (p.tiny)
+                p.name += "_tiny";
+            const Vec3d sz = p.size();
+            p.fits = sz.x() <= plan.usable.size.x() + POS_EPS && sz.y() <= plan.usable.size.y() + POS_EPS && sz.z() <= plan.usable.size.z() + POS_EPS;
+            if (list.size() == 1 || bottoms.zs.empty()) {
+                p.contact_area = part.contact_area;
+                continue;
+            }
+            const SplitCell &cell = part.cell;
+            const double     z    = contact_z(p);
+            const ExPolygons isl  = intersection_ex(bottoms.slices[bottoms.index(z)],
+                                                    Polygons{ scaled_rect(cell_lo(0, cell[0]), cell_lo(1, cell[1]), cell_hi(0, cell[0]), cell_hi(1, cell[1])) });
+            for (const ExPolygon &ex : isl) {
+                const Point c = ex.contour.centroid();
+                if (piece_at(plan, list, Vec3d(unscale<double>(c.x()), unscale<double>(c.y()), z)) == list[k])
+                    p.contact_area += ex.area() * SCALING_FACTOR * SCALING_FACTOR;
+            }
+        }
+    }
+
+    // The pieces' warnings (P1's "does not fit", P3's part checks, now per piece).
+    size_t discarded = 0;
+    double discarded_v = 0.;
+    for (size_t i = 0; i < plan.pieces.size(); ++i) {
+        const SplitPiece &p = plan.pieces[i];
+        auto warn = [&](SplitWarning::Kind kind, double value) {
+            SplitWarning w{ kind, -1, p.section, value };
+            w.piece = int(i);
+            plan.warnings.push_back(w);
+        };
+        if (p.discarded) {
+            ++discarded;
+            discarded_v += p.volume;
+            continue;
+        }
+        if (!p.fits)
+            warn(SplitWarning::Kind::PartDoesNotFit, 0.);
+        if (plan.planes.empty())
+            continue;
+        if (p.tiny)
+            warn(SplitWarning::Kind::SmallPart, p.volume);
+        else if (p.contact_area < SPLIT_MIN_CONTACT_AREA)
+            warn(SplitWarning::Kind::NoFlatFace, p.contact_area);
+    }
+    if (discarded > 0) {
+        SplitWarning w{ SplitWarning::Kind::DiscardedPieces, -1, -1, double(discarded) };
+        w.value2 = discarded_v;
+        plan.warnings.push_back(w);
+    }
+
+    // A pair with a discarded piece is no pair: no dowels, no labels.
+    if (discarded > 0) {
+        std::vector<SplitMate> kept;
+        for (SplitMate &m : plan.mates)
+            if (!plan.pieces[size_t(m.piece_below)].discarded && !plan.pieces[size_t(m.piece_above)].discarded) {
+                m.id = int(kept.size());
+                kept.push_back(std::move(m));
+            }
+        plan.mates = std::move(kept);
+    }
+    for (SplitPiece &p : plan.pieces)
+        p.mates.clear();
+    for (const SplitMate &m : plan.mates) {
+        plan.pieces[size_t(m.piece_below)].mates.push_back(m.id);
+        plan.pieces[size_t(m.piece_above)].mates.push_back(m.id);
+    }
+}
+
+// ---- labels (P5, design 7.5) --------------------------------------------------------------------------
+
+// Does segment (a, b) touch the box [lo, hi]? (Liang-Barsky.)
+static bool segment_touches_box(const Vec2d &a, const Vec2d &b, const Vec2d &lo, const Vec2d &hi)
+{
+    double      t0 = 0., t1 = 1.;
+    const Vec2d d  = b - a;
+    for (int k = 0; k < 2; ++k) {
+        const double p[2] = { -d[k], d[k] };
+        const double q[2] = { a[k] - lo[k], hi[k] - a[k] };
+        for (int s = 0; s < 2; ++s) {
+            if (p[s] == 0.) {
+                if (q[s] < 0.)
+                    return false;
+            } else {
+                const double r = q[s] / p[s];
+                if (p[s] < 0.)
+                    t0 = std::max(t0, r);
+                else
+                    t1 = std::min(t1, r);
+            }
+        }
+    }
+    return t0 <= t1;
+}
+
+// Every mating pair gets one label on each of its two pieces, on the pair's largest patch: inset by the
+// margin, clear of every dowel hole on the face, with material behind it on both sides. The text is as
+// tall as asked if it fits, else smaller down to the smallest height, else the dot pattern, else none
+// (each with a note). Both labels sit on the same spot; each is laid out seen from outside its piece.
+static void place_labels(SplitPlan &plan, const MaterialDepth *depth_along, const std::function<void()> &cancel_point)
+{
+    const SplitLabelOptions &opt = plan.label_options;
+    if (opt.depth <= 0. || opt.height <= 0.)
+        return;
+    for (SplitMate &mate : plan.mates) {
+        cancel_point();
+        if (mate.patches.empty())
+            continue;
+        const SplitFace  &face = plan.faces[size_t(mate.face)];
+        const SplitPlane &pl   = plan.planes[size_t(face.plane)];
+        const int         a = pl.axis, ua = u_axis(a), va = v_axis(a);
+        auto warn = [&](SplitWarning::Kind kind, double value) {
+            SplitWarning w{ kind, face.plane, -1, value, face.id };
+            w.mate = mate.id;
+            plan.warnings.push_back(w);
+        };
+
+        // Where it may go.
+        ExPolygons region = offset_ex(mate.patches.front(), -float(scale_(opt.margin)));
+        Polygons   discs;
+        static constexpr int DISC = 32;
+        for (int si : face.sites) {
+            const SplitSite &s = plan.sites[size_t(si)];
+            // Round the hole with its clearance; the polygon goes round the circle, not inside it.
+            const double r = (s.footprint_radius + opt.dowel_clearance) / std::cos(PI / DISC);
+            Polygon      c;
+            for (int k = 0; k < DISC; ++k) {
+                const double t = 2. * PI * double(k) / DISC;
+                c.points.push_back(Point::new_scale(s.pos[ua] + r * std::cos(t), s.pos[va] + r * std::sin(t)));
+            }
+            discs.push_back(std::move(c));
+        }
+        if (!discs.empty() && !region.empty())
+            region = diff_ex(region, discs);
+        if (region.empty()) {
+            warn(SplitWarning::Kind::NoLabel, SPLIT_NO_LABEL_TOO_SMALL);
+            continue;
+        }
+
+        // Candidate centres, farthest from the region's outline first.
+        std::vector<Line> lines;
+        for (const ExPolygon &ex : region)
+            append(lines, ex.lines());
+        const AABBTreeLines::LinesDistancer<Line> outline(std::move(lines));
+        struct Cand { Vec2d uv; double clr; };
+        std::vector<Cand> cands;
+        {
+            const double      area_mm2 = expolygons_area_mm2(region);
+            const double      step     = std::max(0.25, std::sqrt(area_mm2 / 3000.));
+            const BoundingBox bb       = get_extents(region);
+            const Vec2d       l = unscale(bb.min), h = unscale(bb.max);
+            for (double v = l.y() + 0.5 * step; v < h.y(); v += step)
+                for (double u = l.x() + 0.5 * step; u < h.x(); u += step)
+                    if (section_contains(region, Vec2d(u, v)))
+                        cands.push_back({ Vec2d(u, v), outline.distance_from_lines<false>(Point::new_scale(u, v)) * SCALING_FACTOR });
+            const Vec2d mid = 0.5 * (l + h);
+            std::stable_sort(cands.begin(), cands.end(), [&mid](const Cand &x, const Cand &y) {
+                if (std::abs(x.clr - y.clr) > 1e-3)
+                    return x.clr > y.clr;
+                return (x.uv - mid).squaredNorm() < (y.uv - mid).squaredNorm();
+            });
+        }
+
+        // Text reads along `right`; `up` is +Z on X / Y faces and +Y on Z faces.
+        const int  up_axis = a == 2 ? 1 : 2;
+        const bool up_is_v = va == up_axis;
+        Vec3d      n_axis  = Vec3d::Zero();
+        n_axis[a]          = 1.;
+        const double need  = opt.depth + 0.4;
+        auto at = [&](const Vec2d &uv) {
+            Vec3d p = Vec3d::Zero();
+            p[a]    = pl.pos;
+            p[ua]   = uv.x();
+            p[va]   = uv.y();
+            return p;
+        };
+        auto fits_at = [&](const Cand &c, double w, double h) {
+            const double eu = up_is_v ? w : h, ev = up_is_v ? h : w;
+            const double half_diag = 0.5 * std::hypot(eu, ev);
+            if (c.clr < 0.5 * std::min(eu, ev))
+                return false;
+            const Vec2d blo(c.uv.x() - 0.5 * eu, c.uv.y() - 0.5 * ev), bhi(c.uv.x() + 0.5 * eu, c.uv.y() + 0.5 * ev);
+            if (c.clr < half_diag)
+                for (size_t li : outline.all_lines_in_radius(Point::new_scale(c.uv.x(), c.uv.y()), scale_(half_diag))) {
+                    const Line &l = outline.get_line(li);
+                    if (segment_touches_box(unscale(l.a), unscale(l.b), blo, bhi))
+                        return false;
+                }
+            if (depth_along != nullptr) {
+                const Vec2d pts[5] = { c.uv, blo, bhi, Vec2d(blo.x(), bhi.y()), Vec2d(bhi.x(), blo.y()) };
+                for (const Vec2d &q : pts) {
+                    const Vec3d p = at(q);
+                    if ((*depth_along)(p, n_axis) < need || (*depth_along)(p, -n_axis) < need)
+                        return false;
+                }
+            }
+            return true;
+        };
+        static constexpr size_t MAX_TRIES = 400;
+        auto find_spot = [&](double w, double h, Vec2d &out) {
+            size_t tries = 0;
+            for (const Cand &c : cands) {
+                if (c.clr < 0.5 * std::min(w, h) || ++tries > MAX_TRIES)
+                    break;
+                if (fits_at(c, w, h)) {
+                    out = c.uv;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        SplitLabel  lab;
+        Vec2d       spot = Vec2d::Zero();
+        bool        found = false;
+        lab.depth = opt.depth;
+        lab.text  = opt.style == SplitLabelStyle::Number ? std::to_string(mate.id + 1) : mate.code;
+        if (opt.style != SplitLabelStyle::Pattern)
+            for (double h = opt.height; h >= std::min(opt.min_height, opt.height) - 1e-9 && !found; h -= 0.5) {
+                const double stroke = std::max(opt.min_stroke, 0.14 * h);
+                double       w      = 0.;
+                if (split_label_text_shapes(lab.text, h, stroke, &w).empty())
+                    break;
+                if (find_spot(w, h, spot)) {
+                    found      = true;
+                    lab.height = h;
+                    lab.width  = w;
+                    lab.stroke = stroke;
+                }
+            }
+        if (!found) {
+            // The dot pattern: as big as the text would be when it is the chosen style, else the smallest.
+            std::vector<double> strokes{ opt.min_stroke };
+            if (opt.style == SplitLabelStyle::Pattern && opt.height / 5. > opt.min_stroke)
+                strokes.insert(strokes.begin(), opt.height / 5.);
+            for (double stroke : strokes) {
+                double size = 0.;
+                split_label_pattern_shapes(mate.id + 1, stroke, &size);
+                if (size > 0. && find_spot(size, size, spot)) {
+                    found       = true;
+                    lab.pattern = true;
+                    lab.number  = mate.id + 1;
+                    lab.height  = size;
+                    lab.width   = size;
+                    lab.stroke  = stroke;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            warn(SplitWarning::Kind::NoLabel, SPLIT_NO_LABEL_TOO_SMALL);
+            continue;
+        }
+        if (!lab.pattern && lab.height < opt.height - 1e-6)
+            warn(SplitWarning::Kind::LabelSmaller, lab.height);
+        if (lab.pattern && opt.style != SplitLabelStyle::Pattern)
+            warn(SplitWarning::Kind::LabelPattern, 0.);
+
+        Vec3d up = Vec3d::Zero();
+        up[up_axis] = 1.;
+        for (int side = 0; side < 2; ++side) {
+            SplitLabel l = lab;
+            l.mate       = mate.id;
+            l.below      = side == 0;
+            l.piece      = side == 0 ? mate.piece_below : mate.piece_above;
+            l.center     = at(spot);
+            l.normal     = side == 0 ? n_axis : Vec3d(-n_axis);
+            l.up         = up;
+            l.right      = up.cross(l.normal);
+            const int li = int(plan.labels.size());
+            mate.labels.push_back(li);
+            plan.pieces[size_t(l.piece)].labels.push_back(li);
+            plan.labels.push_back(std::move(l));
+        }
+    }
+}
+
 } // namespace split_to_volume_detail
 
 SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVolume &usable, const SplitOptions &options,
-                          std::function<void()> throw_on_cancel)
+                          std::function<void()> throw_on_cancel, const std::vector<Vec3i32> *face_neighbors)
 {
     using namespace split_to_volume_detail;
     auto cancel_point = [&throw_on_cancel]() {
@@ -1185,8 +2370,7 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
                 part.bbox = bb;
                 const Vec3d s = bb.size();
                 part.fits     = s.x() <= usable.size.x() + POS_EPS && s.y() <= usable.size.y() + POS_EPS && s.z() <= usable.size.z() + POS_EPS;
-                if (!part.fits)
-                    plan.warnings.push_back({ SplitWarning::Kind::PartDoesNotFit, -1, int(ci), 0. });
+                // P5: "does not fit" is warned about per piece (finish_pieces()).
             }
 
     // 5. Cut faces: each plane's section clipped to each pair of neighbouring cells.
@@ -1264,17 +2448,37 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
             const Polygon    rect = scaled_rect(cell_lo(0, cell[0]), cell_lo(1, cell[1]), cell_hi(0, cell[0]), cell_hi(1, cell[1]));
             if (!bottoms.zs.empty())
                 p.contact_area = expolygons_area_mm2(intersection_ex(bottoms.slices[bottoms.index(contact_z(p))], Polygons{ rect }));
-            if (p.volume < SPLIT_SMALL_PART_VOLUME)
-                plan.warnings.push_back({ SplitWarning::Kind::SmallPart, -1, int(ci), p.volume });
-            else if (p.contact_area < SPLIT_MIN_CONTACT_AREA)
-                plan.warnings.push_back({ SplitWarning::Kind::NoFlatFace, -1, int(ci), p.contact_area });
+            // P5: the small-part and flat-face warnings are given per piece (finish_pieces()).
         }
     }
 
-    // 6. Dowel sites (P2, design 3.6), face by face.
+    // 5c. P5: the pieces of every section, the mating pairs, and the pieces' checks.
+    {
+        std::vector<Vec3i32> own_neighbors;
+        if (face_neighbors == nullptr || face_neighbors->size() != mesh.indices.size()) {
+            own_neighbors  = plan.planes.empty() ? std::vector<Vec3i32>() : its_face_neighbors(mesh);
+            face_neighbors = &own_neighbors;
+        }
+        find_pieces(plan, mesh, *face_neighbors, sections, options, cancel_point);
+        finish_pieces(plan, mesh, options, positions, cancel_point);
+    }
+
+    // 6. Dowel sites (P2, design 3.6), per mating pair of each face (P5).
     plan.dowel_options = options.dowels;
-    if (options.dowels.enabled && !plan.faces.empty())
-        place_dowels(plan, mesh, sections, positions, cancel_point);
+    plan.label_options = options.labels;
+    const bool want_dowels = options.dowels.enabled && !plan.mates.empty();
+    const bool want_labels = options.labels.enabled && !plan.mates.empty();
+    std::unique_ptr<AABBTreeIndirect::Tree3f> tree;
+    std::unique_ptr<MaterialDepth>            depth;
+    if (want_dowels || want_labels) {
+        tree  = std::make_unique<AABBTreeIndirect::Tree3f>(AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.vertices, mesh.indices));
+        depth = std::make_unique<MaterialDepth>(MaterialDepth{ mesh, *tree, {} });
+    }
+    if (want_dowels)
+        place_dowels(plan, *depth, positions, cancel_point);
+    // 6b. P5: matching labels on both faces of every pair, clear of the dowels.
+    if (want_labels)
+        place_labels(plan, depth.get(), cancel_point);
 
     // 7. Model-wide warnings.
     if (hollow_plane >= 0)
@@ -1282,7 +2486,7 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
     if (const size_t open = its_num_open_edges(mesh); open > 0)
         plan.warnings.push_back({ SplitWarning::Kind::ModelNotWatertight, -1, -1, double(open) });
 
-    plan.valid = plan.part_count() > 0;
+    plan.valid = plan.piece_count() > 0;
     return plan;
 }
 
@@ -1534,6 +2738,154 @@ struct SplitApplyRun
     }
 };
 
+// ---- P5: a cut part split into its pieces ----
+
+// The planned mesh's vertices, to find which piece a vertex of a cut part came from.
+struct PlanVertexCoords
+{
+    const std::vector<Vec3f> *v{ nullptr };
+    float operator()(size_t idx, size_t dim) const { return (*v)[idx][int(dim)]; }
+};
+using PlanVertexTree = KDTreeIndirect<3, float, PlanVertexCoords>;
+
+// What Apply made of a leaf: an object in the scratch model, its section and its piece (-1: none matched).
+struct MadePart
+{
+    ModelObject *object{ nullptr };
+    int          section{ -1 };
+    int          piece{ -1 };
+};
+
+// Splits `leaf` (a cut part of section `section`, whose plan has several pieces) into one object per
+// piece. Each separate shell of each model part is matched to its piece by the plan's vertex_piece (its
+// vertices that the cuts did not make are the planned mesh's own), else by the pieces' boxes. A model
+// part keeps the shells of its piece (paint carried over); holes, labels and modifiers go with every
+// piece they touch. Discarded pieces make nothing.
+static void split_leaf(ModelObject &leaf, int section, const SplitPlan &plan, const std::vector<int> &pieces,
+                       const std::vector<Vec3f> &plan_vertices, const PlanVertexTree &tree, Model &scratch, std::vector<MadePart> &made)
+{
+    struct Patch
+    {
+        size_t           volume{ 0 };
+        std::vector<int> faces;
+        int              piece{ -1 };
+        BoundingBoxf3    bbox;
+    };
+    const Transform3d  inst = leaf.instances.front()->get_transformation().get_matrix();
+    std::vector<Patch> patches;
+    for (size_t vi = 0; vi < leaf.volumes.size(); ++vi) {
+        const ModelVolume *v = leaf.volumes[vi];
+        if (!v->is_model_part() || v->mesh().empty())
+            continue;
+        const indexed_triangle_set &its = v->mesh().its;
+        const std::vector<Vec3i32>  nb  = its_face_neighbors(its);
+        const Transform3d           W   = inst * v->get_matrix();
+        std::vector<int>            pid(its.indices.size(), -1);
+        std::vector<int>            stack;
+        for (size_t f = 0; f < its.indices.size(); ++f) {
+            if (pid[f] >= 0)
+                continue;
+            Patch p;
+            p.volume = vi;
+            pid[f]   = int(patches.size());
+            stack.assign(1, int(f));
+            while (!stack.empty()) {
+                const int x = stack.back();
+                stack.pop_back();
+                p.faces.push_back(x);
+                for (int e = 0; e < 3; ++e) {
+                    const int n = nb.empty() ? -1 : nb[size_t(x)][e];
+                    if (n >= 0 && pid[size_t(n)] < 0) {
+                        pid[size_t(n)] = int(patches.size());
+                        stack.push_back(n);
+                    }
+                }
+            }
+            std::sort(p.faces.begin(), p.faces.end());
+            // Its box, and a vote of up to 64 of its vertices for the piece they came from.
+            std::map<int, int> votes;
+            const size_t       stride = std::max<size_t>(1, p.faces.size() * 3 / 64);
+            for (size_t k = 0; k < p.faces.size() * 3; ++k) {
+                const Vec3d w = W * its.vertices[size_t(its.indices[size_t(p.faces[k / 3])][int(k % 3)])].cast<double>();
+                p.bbox.merge(w);
+                if (k % stride != 0)
+                    continue;
+                const Vec3f  wf  = w.cast<float>();
+                const size_t idx = find_closest_point(tree, wf);
+                if (idx >= plan_vertices.size() || (plan_vertices[idx] - wf).squaredNorm() > 1e-6f)
+                    continue;
+                const int vp = plan.vertex_piece[idx];
+                if (vp >= 0 && size_t(vp) < plan.pieces.size() && plan.pieces[size_t(vp)].section == section)
+                    ++votes[vp];
+            }
+            int best = 0;
+            for (const auto &[piece, count] : votes)
+                if (count > best) {
+                    best    = count;
+                    p.piece = piece;
+                }
+            if (p.piece < 0)
+                p.piece = piece_at(plan, pieces, p.bbox.center());
+            patches.push_back(std::move(p));
+        }
+    }
+
+    std::map<int, std::vector<size_t>> groups;
+    for (size_t i = 0; i < patches.size(); ++i)
+        groups[patches[i].piece].push_back(i);
+    if (groups.size() <= 1) {
+        const int piece = groups.empty() ? -1 : groups.begin()->first;
+        if (piece < 0 || !plan.pieces[size_t(piece)].discarded)
+            made.push_back({ &leaf, section, piece });
+        return;
+    }
+    for (const auto &[piece, list] : groups) {
+        if (piece >= 0 && plan.pieces[size_t(piece)].discarded)
+            continue;
+        BoundingBoxf3                 pbb;
+        std::vector<std::vector<int>> keep(leaf.volumes.size());
+        for (size_t pi : list) {
+            pbb.merge(patches[pi].bbox);
+            append(keep[patches[pi].volume], patches[pi].faces);
+        }
+        ModelObject *obj = scratch.add_object(leaf);
+        copy_assembled_poses(leaf, *obj);
+        std::vector<size_t> drop;
+        for (size_t vi = 0; vi < leaf.volumes.size(); ++vi) {
+            const ModelVolume *src = leaf.volumes[vi];
+            ModelVolume       *dst = obj->volumes[vi];
+            if (src->is_model_part() && !src->mesh().empty()) {
+                std::vector<int> &faces = keep[vi];
+                if (faces.empty()) {
+                    drop.push_back(vi);
+                    continue;
+                }
+                if (faces.size() == src->mesh().its.indices.size())
+                    continue;
+                std::sort(faces.begin(), faces.end());
+                indexed_triangle_set sub;
+                sub.vertices = src->mesh().its.vertices;
+                sub.indices.reserve(faces.size());
+                for (int f : faces)
+                    sub.indices.push_back(src->mesh().its.indices[size_t(f)]);
+                its_compactify_vertices(sub);
+                const std::optional<TriangleSelector::SavedPainting> saved = src->save_painting();
+                dst->set_mesh(TriangleMesh(std::move(sub)));
+                dst->restore_painting(saved, false);
+                dst->calculate_convex_hull();
+                dst->invalidate_convex_hull_2d();
+            } else if (!boxes_touch(src->mesh().transformed_bounding_box(inst * src->get_matrix()), pbb, 0.5)) {
+                // A hole, label or modifier of another piece.
+                drop.push_back(vi);
+            }
+        }
+        for (auto it = drop.rbegin(); it != drop.rend(); ++it)
+            obj->delete_volume(*it);
+        obj->invalidate_bounding_box();
+        made.push_back({ obj, section, piece });
+    }
+}
+
 } // namespace split_to_volume_detail
 
 SplitApplyResult split_apply(const ModelObject &object, int instance, const SplitPlan &plan, std::function<bool()> canceled,
@@ -1595,6 +2947,34 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         }
     }
 
+    // P5: every leaf as its pieces (a section of one piece is the leaf itself).
+    std::vector<MadePart>             made;
+    std::unique_ptr<PlanVertexTree>   vertex_tree;
+    std::vector<Vec3f>                plan_vertices;
+    for (const auto &[leaf, cell] : run.leaves) {
+        const int              ci     = plan.cell_index(cell);
+        const std::vector<int> pieces = plan.pieces_of(ci);
+        if (pieces.size() <= 1) {
+            const int p = pieces.empty() ? -1 : pieces.front();
+            if (p < 0 || !plan.pieces[size_t(p)].discarded)
+                made.push_back({ leaf, ci, p });
+            continue;
+        }
+        if (!vertex_tree) {
+            plan_vertices = split_object_mesh(object, instance).vertices;
+            if (plan_vertices.size() != plan.vertex_piece.size())
+                plan_vertices.clear();   // not the mesh the plan was made from: match by the boxes only
+            vertex_tree = std::make_unique<PlanVertexTree>(PlanVertexCoords{ &plan_vertices }, plan_vertices.size());
+        }
+        if (canceled && canceled()) {
+            result.canceled = true;
+            return result;
+        }
+        split_leaf(*leaf, ci, plan, pieces, plan_vertices, *vertex_tree, scratch, made);
+    }
+    result.discarded        = plan.discarded_count();
+    result.discarded_volume = plan.discarded_volume();
+
     // Cut links (D10): linked when dowels exist (or the object already was); the check sum counts the
     // objects of the group, as the Cut tool keeps it.
     CutObjectBase linked;
@@ -1605,9 +2985,9 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
             linked.copy(object.cut_id);
         else
             linked.init();
-        const size_t made = run.leaves.size() + dowels.size();
-        if (made > 1)
-            linked.increase_check_sum(made - 1);
+        const size_t n_made = made.size() + dowels.size();
+        if (n_made > 1)
+            linked.increase_check_sum(n_made - 1);
         linked.increase_connectors_cnt(dowels.size());
     }
     for (ModelObject *d : dowels) {
@@ -1618,21 +2998,41 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         result.dowels.push_back(d);
     }
 
-    for (const auto &[leaf, cell] : run.leaves) {
-        ModelObject *part = result.model->add_object(*leaf);
+    std::vector<ModelObject *> piece_object(plan.pieces.size(), nullptr);
+    for (const MadePart &mp : made) {
+        const ModelObject *leaf = mp.object;
+        ModelObject       *part = result.model->add_object(*leaf);
         copy_assembled_poses(*leaf, *part);
-        const std::string suffix = split_cell_name(cell, plan.counts);
+        // D7, P5: the section's name, with the piece's letter and "_tiny" where the plan has them.
+        const std::string suffix = mp.piece >= 0 ? plan.pieces[size_t(mp.piece)].name : plan.parts[size_t(mp.section)].name;
         if (!suffix.empty())
             part->name = object.name.empty() ? suffix : object.name + " " + suffix;
         if (link)
             part->cut_id.copy(linked);
         else
             part->cut_id.invalidate();
+
+        // P5: this piece's labels, recessed as negative volumes.
+        if (mp.piece >= 0 && piece_object[size_t(mp.piece)] == nullptr) {
+            piece_object[size_t(mp.piece)] = part;
+            const Transform3d to_object = part->instances.front()->get_transformation().get_matrix().inverse();
+            for (int li : plan.pieces[size_t(mp.piece)].labels) {
+                const SplitLabel    &label = plan.labels[size_t(li)];
+                indexed_triangle_set its   = split_label_mesh(label);
+                if (its.indices.empty())
+                    continue;
+                its_transform(its, to_object, true);
+                ModelVolume *v = part->add_volume(TriangleMesh(std::move(its)), ModelVolumeType::NEGATIVE_VOLUME);
+                v->name        = "Label " + label.text;
+                ++result.labels;
+            }
+        }
         part->invalidate_bounding_box();
 
-        const int pi = plan.cell_index(cell);
+        const int pi = mp.section;
         result.parts.push_back(part);
         result.part_index.push_back(pi);
+        result.piece_index.push_back(mp.piece);
 
         // D15: loose pieces stay in the part, with a warning; open edges are reported too (R2).
         indexed_triangle_set merged;
@@ -1645,16 +3045,27 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
             m.transform(v->get_matrix(), true);
             its_merge(merged, m.its);
         }
+        auto warn = [&](SplitWarning::Kind kind, double value) {
+            SplitWarning w{ kind, -1, pi, value };
+            w.piece = mp.piece;
+            result.warnings.push_back(w);
+        };
+        // D15 now applies only to shells kept together on purpose (overlapping bodies, P5).
         if (const size_t pieces = its_number_of_patches(merged); pieces > 1)
-            result.warnings.push_back({ SplitWarning::Kind::LoosePieces, -1, pi, double(pieces) });
+            warn(SplitWarning::Kind::LoosePieces, double(pieces));
         if (open > 0)
-            result.warnings.push_back({ SplitWarning::Kind::OpenEdges, -1, pi, double(open) });
+            warn(SplitWarning::Kind::OpenEdges, double(open));
         // P3 (design 3.7): a very small part, or one with nothing flat to stand on (D11 keeps its pose).
         const double volume = std::abs(double(its_volume(merged)));
-        if (volume < SPLIT_SMALL_PART_VOLUME)
-            result.warnings.push_back({ SplitWarning::Kind::SmallPart, -1, pi, volume });
+        if (volume < plan.small_piece_volume)
+            warn(SplitWarning::Kind::SmallPart, volume);
         else if (const double contact = contact_area_of(merged); contact < SPLIT_MIN_CONTACT_AREA)
-            result.warnings.push_back({ SplitWarning::Kind::NoFlatFace, -1, pi, contact });
+            warn(SplitWarning::Kind::NoFlatFace, contact);
+    }
+    if (result.discarded > 0) {
+        SplitWarning w{ SplitWarning::Kind::DiscardedPieces, -1, -1, double(result.discarded) };
+        w.value2 = result.discarded_volume;
+        result.warnings.push_back(w);
     }
     return result;
 }

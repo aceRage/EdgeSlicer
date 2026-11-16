@@ -97,7 +97,8 @@ static Severity severity(SplitWarning::Kind k)
     case SplitWarning::Kind::PlaneInDetail:
     case SplitWarning::Kind::AdjustImpossible:
     case SplitWarning::Kind::SmallPart:
-    case SplitWarning::Kind::NoFlatFace: return Severity::Warning;
+    case SplitWarning::Kind::NoFlatFace:
+    case SplitWarning::Kind::NoLabel: return Severity::Warning;
     default: return Severity::Info;
     }
 }
@@ -137,8 +138,22 @@ static BoundingBoxf3 plane_box(const SplitPlan &plan, int plane, const SplitCell
 
 wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
 {
-    const std::string part  = w.part >= 0 && size_t(w.part) < plan.parts.size() ? plan.parts[size_t(w.part)].name : std::string();
+    // P5: a warning about a piece names the piece ("X1-Y2_b"), else the section.
+    const std::string part  = w.piece >= 0 && size_t(w.piece) < plan.pieces.size() ? plan.pieces[size_t(w.piece)].name :
+                              w.part >= 0 && size_t(w.part) < plan.parts.size()   ? plan.parts[size_t(w.part)].name :
+                                                                                     std::string();
     const std::string plane = w.plane >= 0 && size_t(w.plane) < plan.planes.size() ? plan.planes[size_t(w.plane)].name() : std::string();
+    // A face by the two pieces it joins ("X1-Y1 | X2-Y1_b"), else by its code or plane.
+    std::string face = plane;
+    if (w.mate >= 0 && size_t(w.mate) < plan.mates.size()) {
+        const SplitMate &m = plan.mates[size_t(w.mate)];
+        const std::string below = m.piece_below >= 0 ? plan.pieces[size_t(m.piece_below)].name : std::string();
+        const std::string above = m.piece_above >= 0 ? plan.pieces[size_t(m.piece_above)].name : std::string();
+        face = m.code + " (" + below + " | " + above + ")";
+    } else if (w.face >= 0 && size_t(w.face) < plan.faces.size()) {
+        const SplitFace &f = plan.faces[size_t(w.face)];
+        face               = f.mate_label.empty() || f.mate_label == " | " ? f.mate_code : f.mate_label;
+    }
     switch (w.kind) {
     case SplitWarning::Kind::NoUsableVolume:
         return _L("The margins leave no room on this printer. Make them smaller.");
@@ -146,7 +161,9 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
         return format_wxstr(_L("This would make %1% parts, more than the %2% Split to Fit makes. Check the margins, or scale the model down first."),
                             int(w.value), SPLIT_MAX_CELLS);
     case SplitWarning::Kind::PartDoesNotFit: {
-        const Vec3d s = w.part >= 0 && size_t(w.part) < plan.parts.size() ? plan.parts[size_t(w.part)].size() : Vec3d::Zero();
+        const Vec3d s = w.piece >= 0 && size_t(w.piece) < plan.pieces.size() ? plan.pieces[size_t(w.piece)].size() :
+                        w.part >= 0 && size_t(w.part) < plan.parts.size()     ? plan.parts[size_t(w.part)].size() :
+                                                                                 Vec3d::Zero();
         return format_wxstr(_L("Part %1% (%2%) does not fit the printer."), part.empty() ? std::string("1") : part,
                             split_fit_gizmo_detail::mm_size(s));
     }
@@ -171,12 +188,6 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
     case SplitWarning::Kind::DowelCanTurn:
     case SplitWarning::Kind::DowelShortened:
     case SplitWarning::Kind::DowelScaledDown: {
-        // The face by the two parts it joins ("X1-Y1 | X2-Y1"), or by its plane.
-        std::string face = plane;
-        if (w.face >= 0 && size_t(w.face) < plan.faces.size()) {
-            const SplitFace &f = plan.faces[size_t(w.face)];
-            face               = f.mate_label.empty() || f.mate_label == " | " ? f.mate_code : f.mate_label;
-        }
         switch (w.kind) {
         case SplitWarning::Kind::NoDowelOnFace:
             return w.value == SPLIT_NO_DOWEL_TOO_THIN ?
@@ -232,6 +243,16 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
     case SplitWarning::Kind::NoFlatFace:
         return format_wxstr(_L("Part %1% has no flat face to stand on (%2% cm2 touches the bed): it needs supports, or turn it by hand."),
                             part, format("%.2f", w.value / 100.));
+    case SplitWarning::Kind::DiscardedPieces:
+        return format_wxstr(_L_PLURAL("%1% small piece (%2% cm3 in all) is left out: \"Discard pieces smaller than\" is on.",
+                                      "%1% small pieces (%2% cm3 in all) are left out: \"Discard pieces smaller than\" is on.", int(w.value)),
+                            int(w.value), format("%.2f", w.value2 / 1000.));
+    case SplitWarning::Kind::LabelSmaller:
+        return format_wxstr(_L("Face %1%: the label is smaller (%2% mm tall) to fit the face."), face, format("%.1f", w.value));
+    case SplitWarning::Kind::LabelPattern:
+        return format_wxstr(_L("Face %1%: no room for the text, so it gets the dot pattern instead."), face);
+    case SplitWarning::Kind::NoLabel:
+        return format_wxstr(_L("Face %1% gets no label: there is no room clear of the edges and the dowels. Mark it by hand."), face);
     }
     return wxString();
 }
@@ -295,6 +316,10 @@ void GLGizmoSplitToFit::on_set_state()
         m_bad_parts.reset();
         m_sites_fill.reset();
         m_sites_axes.reset();
+        for (GLModel &m : m_piece_boxes)
+            m.reset();
+        m_labels.reset();
+        m_mesh_neighbors.clear();
     }
 }
 
@@ -308,12 +333,19 @@ void GLGizmoSplitToFit::load_settings()
 {
     using namespace split_fit_gizmo_detail;
     // P3: the adjustment's settings live for the session only (no app config key for them yet).
-    const bool   adjust       = m_options.adjust_planes;
-    const double adjust_limit = m_options.adjust_limit;
+    const bool              adjust       = m_options.adjust_planes;
+    const double            adjust_limit = m_options.adjust_limit;
+    // P5: the labels and the discard option, for the session too.
+    const SplitLabelOptions labels       = m_options.labels;
+    const bool              discard      = m_options.discard_small;
+    const double            tiny_volume  = m_options.small_piece_volume;
     reset_options();
     if (m_adjust_seen) {
-        m_options.adjust_planes = adjust;
-        m_options.adjust_limit  = adjust_limit;
+        m_options.adjust_planes      = adjust;
+        m_options.adjust_limit       = adjust_limit;
+        m_options.labels             = labels;
+        m_options.discard_small      = discard;
+        m_options.small_piece_volume = tiny_volume;
     }
     m_adjust_seen                = true;
     m_options.margin_xy          = read_double(CFG_MARGIN_XY, 5., 0., 100.);
@@ -368,6 +400,8 @@ void GLGizmoSplitToFit::reset_options()
     m_options.dowels.enabled = true;
     m_options.adjust_planes  = true;
     m_options.adjust_limit   = 10.;
+    // P5: labels on (code, up to 6 mm tall, 0.6 mm deep); small pieces kept (discard off, 1 cm3).
+    m_options.labels.enabled = true;
 }
 
 void GLGizmoSplitToFit::refresh_inputs()
@@ -387,6 +421,8 @@ void GLGizmoSplitToFit::refresh_inputs()
         if (mo->id() != m_mesh_object)
             m_options.pinned.clear();
         m_mesh         = split_object_mesh(*mo, instance);
+        // P5: once per mesh, not per plan.
+        m_mesh_neighbors = its_face_neighbors_par(m_mesh);
         m_mesh_object  = mo->id();
         m_mesh_trafo   = trafo;
         m_mesh_volumes = mo->volumes.size();
@@ -407,7 +443,7 @@ void GLGizmoSplitToFit::update_plan()
     m_preview_dirty = true;
     try {
         const SplitUsableVolume usable = split_usable_volume(m_printer, m_options);
-        m_plan                         = split_plan_grid(m_mesh, usable, m_options);
+        m_plan                         = split_plan_grid(m_mesh, usable, m_options, nullptr, &m_mesh_neighbors);
     } catch (const std::exception &e) {
         BOOST_LOG_TRIVIAL(error) << "Split to Fit: planning failed: " << e.what();
         m_plan = SplitPlan();
@@ -611,7 +647,9 @@ std::string GLGizmoSplitToFit::get_tooltip() const
 void GLGizmoSplitToFit::show_warning(const SplitWarning &w)
 {
     BoundingBoxf3 box;
-    if (w.part >= 0 && size_t(w.part) < m_plan.parts.size() && !m_plan.parts[size_t(w.part)].empty)
+    if (w.piece >= 0 && size_t(w.piece) < m_plan.pieces.size())
+        box = m_plan.pieces[size_t(w.piece)].bbox;
+    else if (w.part >= 0 && size_t(w.part) < m_plan.parts.size() && !m_plan.parts[size_t(w.part)].empty)
         box = m_plan.parts[size_t(w.part)].bbox;
     else if (w.face >= 0 && size_t(w.face) < m_plan.faces.size())
         box = split_fit_gizmo_detail::plane_box(m_plan, m_plan.faces[size_t(w.face)].plane, &m_plan.faces[size_t(w.face)].cell_below);
@@ -640,7 +678,10 @@ void GLGizmoSplitToFit::rebuild_preview()
     m_bad_parts.reset();
     m_sites_fill.reset();
     m_sites_axes.reset();
-    if (m_plan.planes.empty() && m_plan.parts_not_fitting() == 0)
+    for (GLModel &m : m_piece_boxes)
+        m.reset();
+    m_labels.reset();
+    if (m_plan.planes.empty() && m_plan.pieces_not_fitting() == 0)
         return;
 
     const BoundingBoxf3 &bb  = m_plan.model_bbox;
@@ -678,18 +719,83 @@ void GLGizmoSplitToFit::rebuild_preview()
             outline.add_line(ob + k, ob + (k + 1) % 4);
     }
 
-    // The boxes of the parts that would not fit.
-    for (const SplitPart &part : m_plan.parts) {
-        if (part.empty || part.fits)
-            continue;
-        const Vec3d   &mn = part.bbox.min, &mx = part.bbox.max;
-        const unsigned b  = unsigned(bad.vertices_count());
-        for (int k = 0; k < 8; ++k)
-            bad.add_vertex(Vec3f(float((k & 1) ? mx.x() : mn.x()), float((k & 2) ? mx.y() : mn.y()), float((k & 4) ? mx.z() : mn.z())));
-        static const int edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 },
+    static const int box_edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 },
                                           { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
-        for (const auto &e : edges)
-            bad.add_line(b + unsigned(e[0]), b + unsigned(e[1]));
+    auto add_box = [](Geo &g, const BoundingBoxf3 &box) {
+        const Vec3d   &mn = box.min, &mx = box.max;
+        const unsigned b  = unsigned(g.vertices_count());
+        for (int k = 0; k < 8; ++k)
+            g.add_vertex(Vec3f(float((k & 1) ? mx.x() : mn.x()), float((k & 2) ? mx.y() : mn.y()), float((k & 4) ? mx.z() : mn.z())));
+        for (const auto &e : box_edges)
+            g.add_line(b + unsigned(e[0]), b + unsigned(e[1]));
+    };
+
+    // The boxes of the parts (P5: pieces) that would not fit.
+    for (const SplitPiece &piece : m_plan.pieces)
+        if (!piece.discarded && !piece.fits && piece.bbox.defined)
+            add_box(bad, piece.bbox);
+
+    // P5: the pieces of a section that falls apart, each in its own colour (discarded ones grey), so the
+    // loose bits Apply will make into parts of their own show before Apply.
+    {
+        static const ColorRGBA palette[6] = { ColorRGBA(0.16f, 0.62f, 0.95f, 1.f), ColorRGBA(0.85f, 0.33f, 0.85f, 1.f),
+                                              ColorRGBA(0.20f, 0.78f, 0.35f, 1.f), ColorRGBA(0.95f, 0.55f, 0.10f, 1.f),
+                                              ColorRGBA(0.55f, 0.45f, 0.95f, 1.f), ColorRGBA(0.10f, 0.75f, 0.75f, 1.f) };
+        std::vector<Geo> per_colour(7);
+        for (Geo &g : per_colour)
+            g.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
+        for (size_t s = 0; s < m_plan.parts.size(); ++s) {
+            const std::vector<int> list = m_plan.pieces_of(int(s));
+            if (list.size() < 2)
+                continue;
+            for (int i : list) {
+                const SplitPiece &p = m_plan.pieces[size_t(i)];
+                if (p.bbox.defined)
+                    add_box(per_colour[p.discarded ? 6 : size_t(p.index) % 6], p.bbox);
+            }
+        }
+        for (size_t c = 0; c < per_colour.size() && c < m_piece_boxes.size(); ++c)
+            if (per_colour[c].vertices_count() > 0) {
+                m_piece_boxes[c].init_from(std::move(per_colour[c]));
+                m_piece_boxes[c].set_color(c < 6 ? palette[c] : ColorRGBA(0.55f, 0.55f, 0.55f, 1.f));
+            }
+    }
+
+    // P5: the labels, as the outlines of their glyphs on the plane (one of each pair: both sit on the
+    // same spot), drawn as they read from the piece below the plane.
+    {
+        Geo lbl;
+        lbl.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
+        for (const SplitLabel &l : m_plan.labels) {
+            if (!l.below)
+                continue;
+            if (l.mate >= 0 && size_t(l.mate) < m_plan.mates.size()) {
+                const int face = m_plan.mates[size_t(l.mate)].face;
+                if (face >= 0 && size_t(face) < m_plan.faces.size() && m_plan.faces[size_t(face)].plane == m_drag_plane)
+                    continue;   // placed again when the plane is let go
+            }
+            const ExPolygons shapes = l.pattern ? split_label_pattern_shapes(l.number, l.stroke) :
+                                                  split_label_text_shapes(l.text, l.height, l.stroke);
+            auto add_poly = [&](const Polygon &poly) {
+                const unsigned b = unsigned(lbl.vertices_count());
+                for (const Point &pt : poly.points) {
+                    const Vec2d q = unscale(pt);
+                    lbl.add_vertex(Vec3f((l.center + q.x() * l.right + q.y() * l.up).cast<float>()));
+                }
+                const unsigned n = unsigned(poly.points.size());
+                for (unsigned k = 0; k < n; ++k)
+                    lbl.add_line(b + k, b + (k + 1) % n);
+            };
+            for (const ExPolygon &ex : shapes) {
+                add_poly(ex.contour);
+                for (const Polygon &h : ex.holes)
+                    add_poly(h);
+            }
+        }
+        if (lbl.vertices_count() > 0) {
+            m_labels.init_from(std::move(lbl));
+            m_labels.set_color(ColorRGBA(0.98f, 0.76f, 0.12f, 0.95f));
+        }
     }
 
     // P2: each dowel site as a disc of its hole's size on its plane, and its length as a line
@@ -800,6 +906,19 @@ void GLGizmoSplitToFit::on_render()
         glsafe(::glLineWidth(3.0f));
         if (m_sites_axes.is_initialized())
             m_sites_axes.render();
+        glsafe(::glEnable(GL_DEPTH_TEST));
+    }
+    // P5: the pieces' boxes and the labels, over the model as the dowels are.
+    const bool any_piece_box = std::any_of(m_piece_boxes.begin(), m_piece_boxes.end(), [](const GLModel &m) { return m.is_initialized(); });
+    if (any_piece_box || m_labels.is_initialized()) {
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        glsafe(::glLineWidth(2.0f));
+        for (GLModel &m : m_piece_boxes)
+            if (m.is_initialized())
+                m.render();
+        glsafe(::glLineWidth(1.5f));
+        if (m_labels.is_initialized())
+            m_labels.render();
         glsafe(::glEnable(GL_DEPTH_TEST));
     }
 
@@ -1091,6 +1210,65 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
 
     ImGui::Separator();
 
+    // ---- labels (P5) --------------------------------------------------------------------------------
+    SplitLabelOptions &lb = m_options.labels;
+    if (m_imgui->bbl_checkbox(_L("Label the cut faces"), lb.enabled))
+        changed = true;
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Recess the same code into both faces of every pair of parts that fit together, so you can tell which "
+                            "part goes where. The codes are shown on the planes and listed in the Output Log."),
+                         wrap_w);
+    if (lb.enabled) {
+        label(_L("Style"));
+        ImGui::PushItemWidth(field_w * 1.8f);
+        const std::vector<wxString> styles = { _L("Code"), _L("Number"), _L("Dots") };
+        const int                   sel    = std::clamp(int(lb.style), 0, 2);
+        if (ImGui::BeginCombo("##split_label_style", into_u8(styles[size_t(sel)]).c_str())) {
+            for (int i = 0; i < 3; ++i)
+                if (ImGui::Selectable(into_u8(styles[size_t(i)]).c_str(), i == sel)) {
+                    lb.style = SplitLabelStyle(i);
+                    changed  = true;
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Code: the plane and face, like X1.2. Number: a running number for each pair. Dots: a small pattern "
+                                "of dots for the pair's number (the top-left dot is always there). Faces too small for text get the dots."),
+                             wrap_w);
+        input_mm(_L("Text height"), "##split_label_h", lb.height, 4., 30.,
+                 _L("The tallest the text gets. Smaller faces get smaller text, never under 4 mm; below that the dots."));
+        input_mm(_L("Depth"), "##split_label_d", lb.depth, 0.2, 3.,
+                 _L("How deep the label is recessed into each face. 0.6 mm is three 0.2 mm layers."));
+    }
+    // Small pieces: one threshold names them "_tiny", warns about them and, if asked, leaves them out.
+    {
+        bool  discard = m_options.discard_small;
+        if (m_imgui->bbl_checkbox(_L("Discard pieces smaller than"), discard)) {
+            m_options.discard_small = discard;
+            changed                 = true;
+        }
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Leave out crumbs smaller than this that the cuts break off. Off: they are kept as parts of their own, "
+                                "with \"_tiny\" at the end of their names so you can find and delete them by hand."),
+                             wrap_w);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(field_w);
+        double cm3 = m_options.small_piece_volume / 1000.;
+        if (ImGui::InputDouble("##split_small_piece", &cm3, 0.0, 0.0, "%.2f") && std::isfinite(cm3)) {
+            m_options.small_piece_volume = std::clamp(cm3, 0.01, 1000.) * 1000.;
+            changed                      = true;
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Pieces below this volume are marked \"_tiny\" and warned about, and left out when the box is ticked."),
+                             wrap_w);
+        ImGui::SameLine();
+        m_imgui->text(_L("cm3"));
+    }
+
+    ImGui::Separator();
+
     // ---- the result ---------------------------------------------------------------------------------
     // P3 (owner, 2026-11-16): the parts table and the warnings fold into one "Output Log", collapsed by
     // default. The one-line result stays in view, with a count of the warnings, so nothing goes unseen.
@@ -1119,9 +1297,10 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
     };
     if (m_plan.valid) {
         // A rough plate count: the parts' footprints over the usable area, with room between them.
+        // P5: every piece is a part (and takes room on a plate); discarded ones are not.
         double footprint = 0.;
-        for (const SplitPart &p : m_plan.parts)
-            if (!p.empty)
+        for (const SplitPiece &p : m_plan.pieces)
+            if (!p.discarded)
                 footprint += p.size().x() * p.size().y();
         const double bed    = std::max(1., usable.size.x() * usable.size.y());
         const int    plates = std::max(1, int(std::ceil(footprint * 1.3 / bed)));
@@ -1129,10 +1308,18 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         label(_L("Result"));
         if (m_plan.dowel_options.enabled)
             m_imgui->text(format_wxstr(pins ? _L("%1% parts, %2% pins, about %3% plates") : _L("%1% parts, %2% dowels, about %3% plates"),
-                                       m_plan.part_count(), m_plan.dowel_count(), plates));
+                                       m_plan.piece_count(), m_plan.dowel_count(), plates));
         else
-            m_imgui->text(format_wxstr(_L("%1% parts, about %2% plates"), m_plan.part_count(), plates));
+            m_imgui->text(format_wxstr(_L("%1% parts, about %2% plates"), m_plan.piece_count(), plates));
         count_badge();
+        // P5: where the extra parts come from, and what is left out.
+        const size_t extra = m_plan.piece_count() > m_plan.part_count() ? m_plan.piece_count() - m_plan.part_count() : 0;
+        if (extra > 0)
+            ImGuiWrapper::text_colored(grey, format_wxstr(_L_PLURAL("(%1% loose piece is a part of its own)",
+                                                                    "(%1% loose pieces are parts of their own)", extra), extra));
+        if (const size_t gone = m_plan.discarded_count(); gone > 0)
+            ImGuiWrapper::text_colored(amber, format_wxstr(_L_PLURAL("%1% small piece left out (%2% cm3)", "%1% small pieces left out (%2% cm3)", gone),
+                                                           gone, Slic3r::format("%.2f", m_plan.discarded_volume() / 1000.)));
         if (m_plan.planes.empty())
             m_imgui->text_wrapped(_L("The model already fits the printer: there is nothing to split."), wrap_w);
     } else {
@@ -1159,28 +1346,48 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
             m_imgui->tooltip(_L("Every part with its size, and every warning. Click a warning to see where it is."), wrap_w);
     }
     if (log_has_content && m_output_log_open && m_plan.valid) {
+        // P5: one row per piece (the parts Apply makes), with the codes of its faces: an assembly list.
+        // A piece's name column is as wide as the longest name ("X1-Y2-Z1_b_tiny").
         const float row_h  = ImGui::GetTextLineHeightWithSpacing();
-        const float list_h = std::min(row_h * float(m_plan.part_count() + 1), em * 9.f);
-        ImGui::BeginChild("##split_parts", ImVec2(em * 26.f, list_h), true);
-        for (const SplitPart &p : m_plan.parts) {
-            if (p.empty)
-                continue;
-            m_imgui->text(from_u8(p.name.empty() ? mo->name : p.name));
-            ImGui::SameLine(em * 7.f);
-            m_imgui->text(from_u8(mm_size(p.size())));
-            ImGui::SameLine(em * 16.f);
-            if (p.fits)
+        const float list_h = std::min(row_h * float(m_plan.pieces.size() + 1), em * 12.f);
+        float       name_w = em * 6.f;
+        for (const SplitPiece &p : m_plan.pieces)
+            name_w = std::max(name_w, ImGui::CalcTextSize(p.name.c_str()).x + em);
+        const float size_x = name_w, fit_x = size_x + em * 9.f, holes_x = fit_x + em * 5.5f;
+        const float faces_x = m_plan.dowel_options.enabled ? holes_x + em * 4.5f : holes_x;
+        ImGui::BeginChild("##split_parts", ImVec2(std::max(em * 26.f, faces_x + em * 10.f), list_h), true, ImGuiWindowFlags_HorizontalScrollbar);
+        for (const SplitPiece &p : m_plan.pieces) {
+            const ImVec4 text_col = p.discarded ? grey : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            ImGuiWrapper::text_colored(text_col, from_u8(p.name.empty() ? mo->name : p.name));
+            ImGui::SameLine(size_x);
+            ImGuiWrapper::text_colored(text_col, from_u8(mm_size(p.size())));
+            ImGui::SameLine(fit_x);
+            if (p.discarded)
+                ImGuiWrapper::text_colored(grey, _L("left out"));
+            else if (p.fits)
                 m_imgui->text(_L("fits"));
             else
                 ImGuiWrapper::text_colored(red, _L("does not fit"));
+            if (p.discarded)
+                continue;
             if (m_plan.dowel_options.enabled) {
-                // The holes this part gets: one per dowel on each of its faces.
+                // The holes this piece gets: one per dowel of each pair it is in.
                 size_t holes = 0;
-                for (int f : p.faces)
-                    if (f >= 0 && size_t(f) < m_plan.faces.size())
-                        holes += m_plan.faces[size_t(f)].sites.size();
-                ImGui::SameLine(em * 21.f);
+                for (int mi : p.mates)
+                    holes += m_plan.mates[size_t(mi)].sites.size();
+                ImGui::SameLine(holes_x);
                 m_imgui->text(format_wxstr(_L("%1% holes"), holes));
+            }
+            // The codes of the faces it mates on (labelled or not): find the part with the same code.
+            std::string codes;
+            for (int mi : p.mates) {
+                if (!codes.empty())
+                    codes += ", ";
+                codes += m_plan.mates[size_t(mi)].code;
+            }
+            if (!codes.empty()) {
+                ImGui::SameLine(faces_x);
+                m_imgui->text(from_u8(codes));
             }
         }
         ImGui::EndChild();
@@ -1253,10 +1460,10 @@ void GLGizmoSplitToFit::apply()
     Plater *plater = wxGetApp().plater();
 
     // D13: a part that does not fit is allowed, after a question.
-    if (const size_t bad = m_plan.parts_not_fitting(); bad > 0) {
+    if (const size_t bad = m_plan.pieces_not_fitting(); bad > 0) {
         MessageDialog dlg(plater,
                           format_wxstr(_L("%1% of the %2% parts will not fit the printer. Split anyway? You can turn or cut those parts "
-                                          "by hand afterwards."), bad, m_plan.part_count()),
+                                          "by hand afterwards."), bad, m_plan.piece_count()),
                           _L("Split to Fit"), wxYES_NO | wxICON_WARNING);
         if (dlg.ShowModal() != wxID_YES)
             return;
