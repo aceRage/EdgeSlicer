@@ -1130,3 +1130,376 @@ TEST_CASE("Split to Fit P2: a split with dowels survives a project round trip", 
     }
     REQUIRE(loaded_holes == holes);
 }
+
+// =====================================================================================================
+// Phase 3: plane adjustment and the part checks
+// =====================================================================================================
+
+namespace {
+
+// A 60 x 60 bar along X, `length` long, with a 10 x 10 neck from `neck_lo` to `neck_hi` (three
+// boxes touching end to end).
+indexed_triangle_set p3_bar_with_neck(double length, double neck_lo, double neck_hi)
+{
+    indexed_triangle_set its = box_at(neck_lo, 60., 60.);
+    its_merge(its, box_at(neck_hi - neck_lo, 10., 10., Vec3d(neck_lo, 25., 25.)));
+    its_merge(its, box_at(length - neck_hi, 60., 60., Vec3d(neck_hi, 0., 0.)));
+    return its;
+}
+
+SplitOptions p3_adjust_on()
+{
+    SplitOptions opt;
+    opt.adjust_planes = true;
+    return opt;
+}
+
+const SplitWarning *p3_find_plane(const std::vector<SplitWarning> &w, SplitWarning::Kind kind, int plane)
+{
+    const auto it = std::find_if(w.begin(), w.end(), [kind, plane](const SplitWarning &x) { return x.kind == kind && x.plane == plane; });
+    return it == w.end() ? nullptr : &*it;
+}
+
+// Every part on `axis`, between its planes (or a plane and the model's end), as the hard rules see it.
+std::vector<double> p3_spans(const SplitPlan &plan, int axis)
+{
+    std::vector<double> out;
+    double              prev = plan.model_bbox.min[axis];
+    for (double p : plan.plane_positions(axis)) {
+        out.push_back(p - prev);
+        prev = p;
+    }
+    out.push_back(plan.model_bbox.max[axis] - prev);
+    return out;
+}
+
+ExPolygon p3_rect(double x0, double y0, double x1, double y1)
+{
+    ExPolygon ex;
+    ex.contour.points = { Point::new_scale(x0, y0), Point::new_scale(x1, y0), Point::new_scale(x1, y1), Point::new_scale(x0, y1) };
+    return ex;
+}
+
+} // namespace
+
+TEST_CASE("Split to Fit P3: section costs worked by hand", "[SplitToVolume]")
+{
+    SplitOptions opt = p2_dowels_on();   // 6 mm dowels, 3 mm wall margin, limit 10 mm
+    const SplitAdjustConstants &k = opt.adjust;
+    REQUIRE(k.w_small == 1.0);
+    REQUIRE(k.w_nodowel == 2.0);
+    REQUIRE(k.w_busy == 1.0);
+    REQUIRE(k.w_ragged == 0.5);
+    REQUIRE(k.w_away == 0.2);
+
+    SECTION("a 60 x 40 rectangle")
+    {
+        const ExPolygons       sec{ p3_rect(0., 0., 60., 40.) };
+        const SplitSectionCost c = split_section_cost(sec, 2400., 2400., 0., opt);
+        const double           ragged = 200. / (2. * std::sqrt(PI * 2400.)) - 1.;   // 0.1517
+        REQUIRE_THAT(c.area, WithinAbs(2400., 1e-6));
+        REQUIRE(c.small_islands == 0);
+        REQUIRE_THAT(c.nodowel, WithinAbs(0., 1e-12));
+        REQUIRE_THAT(c.busy, WithinAbs(0., 1e-12));
+        REQUIRE_THAT(c.ragged, WithinAbs(ragged, 1e-6));
+        REQUIRE_THAT(c.total, WithinAbs(0.5 * ragged, 1e-6));
+        // The section grows from 2000 to 2600 mm2 across it: busy = 600 / 2400.
+        REQUIRE_THAT(split_section_cost(sec, 2000., 2600., 0., opt).busy, WithinAbs(0.25, 1e-9));
+        // 5 mm from the nominal place with a 10 mm limit: away = 0.5, weighted 0.1.
+        REQUIRE_THAT(split_section_cost(sec, 2400., 2400., -5., opt).total, WithinAbs(0.5 * ragged + 0.1, 1e-6));
+    }
+    SECTION("a rectangle and a small island")
+    {
+        // The 5 x 5 island is under pi * (3 + 3)^2 = 113 mm2 and has no room for a dowel.
+        const ExPolygons       sec{ p3_rect(0., 0., 60., 40.), p3_rect(100., 0., 105., 5.) };
+        const SplitSectionCost c = split_section_cost(sec, 2425., 2425., 0., opt);
+        REQUIRE_THAT(c.area, WithinAbs(2425., 1e-6));
+        REQUIRE(c.small_islands == 1);
+        REQUIRE_THAT(c.nodowel, WithinAbs(25. / 2425., 1e-6));
+        const double ragged = 220. / (2. * std::sqrt(PI * 2425.)) - 1.;
+        REQUIRE_THAT(c.ragged, WithinAbs(ragged, 1e-6));
+        REQUIRE_THAT(c.total, WithinAbs(1. + 2. * 25. / 2425. + 0.5 * ragged, 1e-6));
+    }
+    SECTION("a ring with 2 mm walls")
+    {
+        ExPolygon ring = p3_rect(0., 0., 40., 40.);
+        Polygon   hole;
+        hole.points = { Point::new_scale(2., 2.), Point::new_scale(2., 38.), Point::new_scale(38., 38.), Point::new_scale(38., 2.) };
+        ring.holes.push_back(hole);
+        const ExPolygons       sec{ ring };
+        const SplitSectionCost c = split_section_cost(sec, 304., 304., 0., opt);
+        REQUIRE_THAT(c.area, WithinAbs(1600. - 1296., 1e-6));
+        REQUIRE(c.small_islands == 0);
+        // No room for a dowel anywhere, and an outline far longer than a circle's: both capped at 1.
+        REQUIRE_THAT(c.nodowel, WithinAbs(1., 1e-12));
+        REQUIRE_THAT(c.ragged, WithinAbs(1., 1e-12));
+        REQUIRE_THAT(c.total, WithinAbs(2.5, 1e-9));
+        // With dowels off the dowel term is not counted.
+        opt.dowels.enabled = false;
+        REQUIRE_THAT(split_section_cost(sec, 304., 304., 0., opt).total, WithinAbs(0.5, 1e-9));
+    }
+}
+
+TEST_CASE("Split to Fit P3: a plane moves off a thin neck", "[SplitToVolume]")
+{
+    // 300 mm on a 200 mm printer: one plane, nominally at 150, through a 10 x 10 neck from 145.5 to 152.5.
+    const indexed_triangle_set bar = p3_bar_with_neck(300., 145.5, 152.5);
+    const SplitUsableVolume    u   = usable_box(200., 200., 200.);
+
+    const SplitPlan off = split_plan_grid(bar, u, SplitOptions{});
+    REQUIRE(off.planes.size() == 1);
+    REQUIRE_THAT(off.planes[0].pos, WithinAbs(150., 1e-9));
+    REQUIRE_FALSE(off.planes[0].adjusted);
+    REQUIRE_FALSE(has_warning(off.warnings, SplitWarning::Kind::PlaneMoved));
+
+    const SplitPlan on = split_plan_grid(bar, u, p3_adjust_on());
+    REQUIRE(on.planes.size() == 1);
+    const SplitPlane &pl = on.planes[0];
+    INFO("plane at " << pl.pos);
+    REQUIRE(pl.adjusted);
+    REQUIRE_THAT(pl.nominal, WithinAbs(150., 1e-9));
+    // Out of the neck, at least a millimetre clear of its ends, within the limit; the nearest such
+    // place is 154 (4 mm) rather than 144 (6 mm).
+    REQUIRE((pl.pos <= 145.5 - 1. + 1e-6 || pl.pos >= 152.5 + 1. - 1e-6));
+    REQUIRE(std::abs(pl.pos - 150.) <= 10. + 1e-9);
+    REQUIRE_THAT(pl.pos, WithinAbs(154., 1e-6));
+    REQUIRE_THAT(on.planes[0].section_area, WithinAbs(3600., 1e-3));
+    const SplitWarning *moved = p3_find_plane(on.warnings, SplitWarning::Kind::PlaneMoved, 0);
+    REQUIRE(moved != nullptr);
+    REQUIRE_THAT(moved->value, WithinAbs(4., 1e-6));
+    REQUIRE(moved->detail == int(SplitAdjustReason::ThinPieces));
+    REQUIRE_FALSE(has_warning(on.warnings, SplitWarning::Kind::PlaneInDetail));
+    REQUIRE(on.parts_not_fitting() == 0);
+}
+
+TEST_CASE("Split to Fit P3: a move that would make a part too long is refused", "[SplitToVolume]")
+{
+    // Full size first on a 246 mm printer: planes at 246 and 490 (the 8 mm remainder pulled in to 10).
+    // A neck from 240.5 to 248.5 sits on the first plane; leaving it outwards would make the first
+    // part longer than 246 mm, so it goes inwards and the second plane follows.
+    const indexed_triangle_set bar = p3_bar_with_neck(500., 240.5, 248.5);
+    const SplitUsableVolume    u   = usable_box(246., 200., 200.);
+    SplitOptions               opt = p3_adjust_on();
+    opt.layout                     = SplitLayout::FullSizeFirst;
+
+    const SplitPlan plan = split_plan_grid(bar, u, opt);
+    REQUIRE(plan.planes.size() == 2);
+    REQUIRE_THAT(plan.planes[0].nominal, WithinAbs(246., 1e-9));
+    REQUIRE_THAT(plan.planes[1].nominal, WithinAbs(490., 1e-9));
+    INFO("planes at " << plan.planes[0].pos << " and " << plan.planes[1].pos);
+    // Moved inwards, out of the neck.
+    REQUIRE(plan.planes[0].pos <= 240.5 - 1. + 1e-6);
+    REQUIRE(plan.planes[0].pos >= 246. - 10. - 1e-9);
+    const SplitWarning *refused = p3_find_plane(plan.warnings, SplitWarning::Kind::AdjustRefused, 0);
+    REQUIRE(refused != nullptr);
+    REQUIRE(refused->value > 0.);   // it wanted to go outwards
+    // The second plane moved too, to keep the middle part within 246 mm.
+    REQUIRE(plan.planes[1].adjusted);
+    const SplitWarning *followed = p3_find_plane(plan.warnings, SplitWarning::Kind::PlaneMoved, 1);
+    REQUIRE(followed != nullptr);
+    REQUIRE(followed->detail == int(SplitAdjustReason::KeepFit));
+    for (double s : p3_spans(plan, 0)) {
+        REQUIRE(s <= 246. + 1e-6);
+        REQUIRE(s >= 10. - 1e-6);
+    }
+    REQUIRE(plan.parts_not_fitting() == 0);
+}
+
+TEST_CASE("Split to Fit P3: a plane next to a flat face is pushed away", "[SplitToVolume]")
+{
+    // A 100 x 100 flange to x = 200.3, then a 50 x 50 bar to 400: the even plane at 200 would leave a
+    // 0.3 mm skin of flange on the second part.
+    indexed_triangle_set stepped = box_at(200.3, 100., 100.);
+    its_merge(stepped, box_at(400. - 200.3, 50., 50., Vec3d(200.3, 25., 25.)));
+    const SplitUsableVolume u = usable_box(300., 300., 300.);
+
+    REQUIRE_THAT(split_plan_grid(stepped, u, SplitOptions{}).planes[0].pos, WithinAbs(200., 1e-9));
+
+    const SplitPlan plan = split_plan_grid(stepped, u, p3_adjust_on());
+    REQUIRE(plan.planes.size() == 1);
+    INFO("plane at " << plan.planes[0].pos);
+    REQUIRE(std::abs(plan.planes[0].pos - 200.3) >= 1. - 1e-6);
+    REQUIRE_THAT(plan.planes[0].pos, WithinAbs(199., 1e-6));
+    const SplitWarning *moved = p3_find_plane(plan.warnings, SplitWarning::Kind::PlaneMoved, 0);
+    REQUIRE(moved != nullptr);
+    REQUIRE(moved->detail == int(SplitAdjustReason::FlatFace));
+}
+
+TEST_CASE("Split to Fit P3: the smallest part thickness is never broken", "[SplitToVolume]")
+{
+    // The last plane (pulled in to 490 by full size first) sits in a neck from 487.5 to 492.5: leaving
+    // it outwards would leave a last part under 10 mm, so it may only go inwards.
+    const indexed_triangle_set bar = p3_bar_with_neck(500., 487.5, 492.5);
+    SplitOptions               opt = p3_adjust_on();
+    opt.layout                     = SplitLayout::FullSizeFirst;
+    for (double min_t : { 10., 20. }) {
+        opt.min_part_thickness = min_t;
+        const SplitPlan plan   = split_plan_grid(bar, usable_box(246., 200., 200.), opt);
+        INFO("smallest part " << min_t);
+        REQUIRE(plan.planes.size() == 2);
+        for (double s : p3_spans(plan, 0)) {
+            REQUIRE(s >= min_t - 1e-6);
+            REQUIRE(s <= 246. + 1e-6);
+        }
+        // Out of the neck.
+        REQUIRE(plan.planes[1].pos <= 487.5 - 1. + 1e-6);
+    }
+}
+
+TEST_CASE("Split to Fit P3: a pinned plane does not move", "[SplitToVolume]")
+{
+    const indexed_triangle_set bar = p3_bar_with_neck(300., 145.5, 152.5);
+    SplitOptions               opt = p3_adjust_on();
+    opt.pinned.push_back({ 0, 0, 150. });
+    const SplitPlan plan = split_plan_grid(bar, usable_box(200., 200., 200.), opt);
+    REQUIRE(plan.planes.size() == 1);
+    REQUIRE(plan.planes[0].pinned);
+    REQUIRE_FALSE(plan.planes[0].adjusted);
+    REQUIRE_THAT(plan.planes[0].pos, WithinAbs(150., 1e-9));
+    REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::PlaneMoved));
+    REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::PlaneInDetail));
+
+    // Two planes, one pinned: the other still adjusts.
+    const indexed_triangle_set long_bar = p3_bar_with_neck(450., 297.5, 302.5);
+    SplitOptions               two      = p3_adjust_on();
+    two.pinned.push_back({ 0, 0, 140. });
+    const SplitPlan both = split_plan_grid(long_bar, usable_box(200., 200., 200.), two);
+    REQUIRE(both.planes.size() == 2);
+    REQUIRE_THAT(both.planes[0].pos, WithinAbs(140., 1e-9));
+    REQUIRE_FALSE(both.planes[0].adjusted);
+    REQUIRE(both.planes[1].adjusted);
+    REQUIRE((both.planes[1].pos <= 297.5 - 1. + 1e-6 || both.planes[1].pos >= 302.5 + 1. - 1e-6));
+}
+
+TEST_CASE("Split to Fit P3: adjustment off gives the plan as before; nothing to improve moves nothing", "[SplitToVolume]")
+{
+    const indexed_triangle_set box = box_at(600., 200., 300.);
+    const SplitUsableVolume    u   = split_usable_volume(square_printer(256., 256.), SplitOptions{});
+    const SplitPlan            off = split_plan_grid(box, u, SplitOptions{});
+    const SplitPlan            on  = split_plan_grid(box, u, p3_adjust_on());
+    REQUIRE(off.planes.size() == on.planes.size());
+    for (size_t i = 0; i < off.planes.size(); ++i) {
+        REQUIRE(off.planes[i].pos == off.planes[i].nominal);
+        REQUIRE(on.planes[i].pos == off.planes[i].pos);
+        REQUIRE_FALSE(on.planes[i].adjusted);
+    }
+    REQUIRE(on.parts.size() == off.parts.size());
+    for (size_t i = 0; i < off.parts.size(); ++i) {
+        REQUIRE((on.parts[i].bbox.min - off.parts[i].bbox.min).norm() == 0.);
+        REQUIRE((on.parts[i].bbox.max - off.parts[i].bbox.max).norm() == 0.);
+    }
+    REQUIRE(on.faces.size() == off.faces.size());
+    REQUIRE(on.warnings.size() == off.warnings.size());
+
+    // With dowels too: the same sites.
+    SplitOptions dowels_on = p2_dowels_on();
+    SplitOptions both      = p2_dowels_on();
+    both.adjust_planes     = true;
+    const SplitPlan d_off  = split_plan_grid(box_at(100., 100., 100.), usable_box(60., 60., 60.), dowels_on);
+    const SplitPlan d_on   = split_plan_grid(box_at(100., 100., 100.), usable_box(60., 60., 60.), both);
+    REQUIRE(d_off.sites.size() == d_on.sites.size());
+    for (size_t i = 0; i < d_off.sites.size(); ++i)
+        REQUIRE((d_off.sites[i].pos - d_on.sites[i].pos).norm() < 1e-9);
+}
+
+TEST_CASE("Split to Fit P3: part volumes in the plan", "[SplitToVolume]")
+{
+    // 3 x 3 x 3 cells of a cube: every cell is 100 mm on a side, the middle one has no surface at all.
+    const SplitPlan cube = split_plan_grid(box_at(300., 300., 300.), usable_box(110., 110., 110.), SplitOptions{});
+    double          sum  = 0.;
+    for (const SplitPart &p : cube.parts) {
+        REQUIRE_THAT(p.volume, WithinRel(1e6, 1e-6));
+        REQUIRE_THAT(p.contact_area, WithinRel(1e4, 1e-6));
+        sum += p.volume;
+    }
+    REQUIRE_THAT(sum, WithinRel(2.7e7, 1e-6));
+
+    // The U: five parts that add up to the model.
+    const indexed_triangle_set u_mesh = u_shape();
+    const SplitPlan            u      = split_plan_grid(u_mesh, usable_box(100., 100., 205.), SplitOptions{});
+    double                     usum   = 0.;
+    for (const SplitPart &p : u.parts)
+        if (!p.empty)
+            usum += p.volume;
+    REQUIRE_THAT(usum, WithinRel(double(its_volume(u_mesh)), 1e-4));
+    REQUIRE_FALSE(has_warning(u.warnings, SplitWarning::Kind::SmallPart));
+    REQUIRE_FALSE(has_warning(u.warnings, SplitWarning::Kind::NoFlatFace));
+}
+
+TEST_CASE("Split to Fit P3: a very small part is warned about, before and after Apply", "[SplitToVolume]")
+{
+    // An 8 x 8 bar with a plane pinned 10 mm from its end: a 640 mm3 part.
+    Model        model;
+    ModelObject *mo  = add_object(model, box_at(300., 8., 8.), "Stick");
+    SplitOptions opt;
+    opt.pinned.push_back({ 0, 0, 10. });
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(290., 200., 200.), opt);
+    REQUIRE(plan.part_count() == 2);
+    const SplitWarning *w = p2_find(plan.warnings, SplitWarning::Kind::SmallPart);
+    REQUIRE(w != nullptr);
+    REQUIRE(plan.parts[size_t(w->part)].name == "X1");
+    REQUIRE_THAT(w->value, WithinRel(640., 1e-4));
+    REQUIRE(std::count_if(plan.warnings.begin(), plan.warnings.end(),
+                          [](const SplitWarning &x) { return x.kind == SplitWarning::Kind::SmallPart; }) == 1);
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    const SplitWarning *after = p2_find(res.warnings, SplitWarning::Kind::SmallPart);
+    REQUIRE(after != nullptr);
+    REQUIRE(plan.parts[size_t(after->part)].name == "X1");
+    REQUIRE_THAT(after->value, WithinRel(640., 1e-2));
+}
+
+TEST_CASE("Split to Fit P3: a part with nothing flat to stand on is warned about", "[SplitToVolume]")
+{
+    // A 40 x 40 bar turned 45 degrees about X, standing on an edge: 0.3 mm up it is 0.6 mm wide.
+    indexed_triangle_set diamond = box_at(300., 40., 40., Vec3d(0., -20., -20.));
+    const double         c = std::cos(0.25 * PI), s = std::sin(0.25 * PI);
+    for (Vec3f &v : diamond.vertices) {
+        const double y = v.y(), z = v.z();
+        v.y()          = float(c * y - s * z);
+        v.z()          = float(s * y + c * z + 20. * std::sqrt(2.));
+    }
+    Model           model;
+    ModelObject    *mo   = add_object(model, diamond, "Edge");
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), SplitOptions{});
+    REQUIRE(plan.part_count() == 2);
+    size_t flagged = 0;
+    for (const SplitWarning &w : plan.warnings)
+        if (w.kind == SplitWarning::Kind::NoFlatFace) {
+            ++flagged;
+            REQUIRE_THAT(w.value, WithinAbs(0.6 * 150., 2.));
+        }
+    REQUIRE(flagged == 2);
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    REQUIRE(std::count_if(res.warnings.begin(), res.warnings.end(),
+                          [](const SplitWarning &w) { return w.kind == SplitWarning::Kind::NoFlatFace; }) == 2);
+
+    // The same bar lying flat stands on a whole face: no warning.
+    const SplitPlan flat = split_plan_grid(box_at(300., 40., 40.), usable_box(200., 200., 200.), SplitOptions{});
+    REQUIRE_FALSE(has_warning(flat.warnings, SplitWarning::Kind::NoFlatFace));
+}
+
+TEST_CASE("Split to Fit P3: an open model is warned about before and after Apply", "[SplitToVolume]")
+{
+    // A bar with one triangle of its far end face missing.
+    indexed_triangle_set bar = box_at(300., 60., 60.);
+    const auto           end = std::find_if(bar.indices.begin(), bar.indices.end(), [&bar](const stl_triangle_vertex_indices &t) {
+        return bar.vertices[t[0]].x() > 299.f && bar.vertices[t[1]].x() > 299.f && bar.vertices[t[2]].x() > 299.f;
+    });
+    REQUIRE(end != bar.indices.end());
+    bar.indices.erase(end);
+    REQUIRE(its_num_open_edges(bar) > 0);
+
+    Model           model;
+    ModelObject    *mo   = add_object(model, bar, "Open");
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), SplitOptions{});
+    REQUIRE(has_warning(plan.warnings, SplitWarning::Kind::ModelNotWatertight));
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    const SplitWarning *w = p2_find(res.warnings, SplitWarning::Kind::OpenEdges);
+    REQUIRE(w != nullptr);
+    REQUIRE(plan.parts[size_t(w->part)].name == "X2");
+}
