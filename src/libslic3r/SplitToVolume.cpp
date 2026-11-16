@@ -255,11 +255,20 @@ std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf 
     for (size_t i = 0; i < cand.size(); ++i)
         clr[i] = outline.distance_from_lines<false>(Point::new_scale(cand[i].x(), cand[i].y())) * SCALING_FACTOR;
 
+    // Near-ties (a long face has a whole ridge of points equally far from its outline) go to the
+    // point nearest the middle of the region, so the first dowel sits in the middle, not at one end.
+    Vec2d centre = Vec2d::Zero();
+    for (const Vec2d &c : cand)
+        centre += c;
+    centre /= double(cand.size());
+    static constexpr double TIE = 1e-3;
+
     std::vector<bool> alive(cand.size(), true);
     int               rejects = 0;
     while (int(out.size()) < max_count) {
-        int    best       = -1;
-        double best_score = -1.;
+        int    best        = -1;
+        double best_score  = -1.;
+        double best_centre = 0.;
         for (size_t i = 0; i < cand.size(); ++i) {
             if (!alive[i])
                 continue;
@@ -268,11 +277,13 @@ std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf 
                 d = std::min(d, (cand[i] - p).norm());
             if (!out.empty() && d < min_spacing - 1e-9)
                 continue;
-            const double score = out.empty() ? clr[i] : std::min(clr[i], 0.5 * d);
-            // Ties go to the earlier candidate, so the same face always gives the same sites.
-            if (score > best_score + 1e-9) {
-                best_score = score;
-                best       = int(i);
+            const double score    = out.empty() ? clr[i] : std::min(clr[i], 0.5 * d);
+            const double to_centre = (cand[i] - centre).norm();
+            // Exact ties go to the earlier candidate, so the same face always gives the same sites.
+            if (best < 0 || score > best_score + TIE || (score > best_score - TIE && to_centre < best_centre - 1e-9)) {
+                best_score  = score;
+                best_centre = to_centre;
+                best        = int(i);
             }
         }
         if (best < 0)
