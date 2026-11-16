@@ -2625,9 +2625,10 @@ bool NotificationManager::push_notification_data(std::unique_ptr<NotificationMan
 	bool retval = false;
 	if (this->activate_existing(notification.get())) {
 		if (m_initialized) { // ignore update action - it cant be initialized if canvas and imgui context is not ready
-			// Precise Seam already aggregates all causes; replace it on repeated warning events.
+			// Precise Seam and the head clearance check already aggregate all causes; replace them on repeated warning events.
 			if (notification->get_type() == NotificationType::SlicingWarning &&
-				notification->get_data().sub_msg_id != PrintStateBase::SlicingPreciseSeamWarning) {
+				notification->get_data().sub_msg_id != PrintStateBase::SlicingPreciseSeamWarning &&
+				notification->get_data().sub_msg_id != PrintStateBase::SlicingHeadCollision) {
 				m_pop_notifications.back()->append(notification->get_data().ori_text);
 			} else {
                 m_pop_notifications.back()->update(notification->get_data());

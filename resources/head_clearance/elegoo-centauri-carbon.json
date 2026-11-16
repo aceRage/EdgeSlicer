@@ -1,0 +1,18 @@
+{
+    "schema": "edgeslicer.head_clearance.v1",
+    "id": "elegoo-centauri-carbon",
+    "name": "Elegoo Centauri Carbon toolhead",
+    "printer_models": ["Elegoo Centauri Carbon"],
+    "calibrated": false,
+    "source": "EdgeSlicer estimate, no CAD or measurement available. Nozzle: a generic brass nozzle outline (about 1 mm tip land, cone of roughly 40 degrees half-angle) rounded to whole tenths. Sock, housing and carriage: round-number boxes chosen to be conservative for a CoreXY head of this size. Gantry rod height 36 mm is Elegoo's extruder_clearance_height_to_rod from the Centauri Carbon machine profile; its Y span is estimated. Measure before relying on any of it.",
+    "nozzle": {
+        "estimated": true,
+        "profile": [[0.0, 0.5], [1.0, 1.3], [2.0, 2.1], [4.0, 3.5]]
+    },
+    "boxes": [
+        {"name": "heater block and silicone sock", "min": [-12, -12, 4], "max": [12, 12, 24], "estimated": true},
+        {"name": "housing and part-cooling duct", "min": [-30, -30, 5], "max": [30, 35, 80], "estimated": true},
+        {"name": "carriage", "min": [-35, 15, 20], "max": [35, 60, 100], "estimated": true},
+        {"name": "X gantry", "min": [0, -35, 36], "max": [0, 35, 100], "spans_x": true, "estimated": true}
+    ]
+}
