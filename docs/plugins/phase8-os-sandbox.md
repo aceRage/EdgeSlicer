@@ -15,7 +15,7 @@ channel. Phase 8 wraps that child in an OS sandbox that matches the plugin's Pha
 
 | Platform | Shipping sandbox | Applied where |
 |---|---|---|
-| Linux | Landlock (filesystem) + seccomp-bpf (ptrace/mount/unshare/modules/bpf/execve/inet sockets) | Child, after CPython starts, before `load` / `execute`. Inherited by grandchildren. |
+| Linux | Landlock (filesystem + ABI4 TCP net + ABI6 abstract-unix/signal scopes) + seccomp-bpf (ptrace/mount/unshare/modules/bpf/io_uring/setsid/execve; `socket`/`connect`/`bind`/`listen`/`accept` when network is off; `AF_UNIX` `socket()` always) | Child, after CPython starts, before `load` / `execute`. Inherited by grandchildren. |
 | Windows | AppContainer (no capabilities unless network was granted) + the Phase 7 Job object (`KILL_ON_JOB_CLOSE`, `ACTIVE_PROCESS=1`, no `BREAKAWAY_OK`) | Parent: `CreateAppContainerProfile`, ACLs on the plugin dir / bundled Python / G-code folder, `SECURITY_CAPABILITIES` on `STARTUPINFOEX`. Create suspended, assign job, resume. |
 | macOS | Signed helper with `com.apple.security.app-sandbox` (`scripts/edge-plugin-host.entitlements`) | Code signature. Ad-hoc and Developer ID signing hooks live in `src/CMakeLists.txt`, `scripts/macos_sign_app.sh`, `scripts/sign_and_package.sh`, and `build_release_macos.sh`. |
 
@@ -47,19 +47,29 @@ so Linux CI can catch the Xcode 27.2 break.
 ## Handshake
 
 `hello` may carry a `sandbox` object (plugin dir, Python home, extra grant paths, network/exec).
-`hello_ok` always carries `sandbox: {applied, kind, detail, landlock_abi, network, exec}`.
+`hello_ok` always carries `sandbox: {applied, kind, detail, landlock_abi, network, exec, degraded}`.
 
 `kind` is one of `landlock+seccomp`, `appcontainer`, `app-sandbox`, `seatbelt-probe`, `none`.
+Only the first three are shipping kinds. `seatbelt-probe` with `applied=true` still fail-closes
+(the Don't-run prompt) so a labelled probe cannot skip isolation.
 
-Edge refuses to run the workload when the child reports `applied=false`, unless the user has a
-stored override (see below) or a test-only env override is set.
+`degraded` is true on Linux Landlock ABI < 3 (no `truncate`). The sandbox still applies.
+
+Edge refuses to run the workload when the child reports `applied=false` or a non-shipping
+`kind`, unless the user has a stored override (see below) or a test-only env override is set.
+
+On macOS the parent does **not** prompt from `probe_os_sandbox()` before spawn: Edge itself is
+not in the helper's App Sandbox (`sandbox_check` in the parent is always false, and
+`APP_SANDBOX_CONTAINER_ID` is spoofable). The child reports `kind=app-sandbox` via
+`sandbox_check(getpid(), NULL, 0)` after exec of a signed helper.
 
 The helper is respawned when the sandbox spec changes (different plugin or a different G-code
 write root), so Landlock rules never have to be loosened.
 
-The child does not re-hash the plugin tree on `load`. Edge already evaluated Phase 5 trust
-in-process before sending `load`, and host RPC still rechecks p5 on the Edge side. Re-hashing
-under Landlock missed `trust.json` or picked up execute-time files the pin did not include.
+The child re-hashes the plugin tree on `load`. `plugin_root` is read-only in the OS sandbox
+(writable scratch is `plugin_data` plus a private `TMPDIR` / `PYTHONPYCACHEPREFIX`), and
+`trust.json` is granted as a file, so the pin matches the Edge-side check. Host RPC still
+rechecks p5 on the Edge side.
 A sandbox-unavailable execute is reported as `OS sandbox unavailable; plugin did not run`, not
 as untrusted. The Trust_Echo "untrusted" log on unsigned macOS was the existing unpin-and-refuse
 path after Catch2 `CHECK` continued past a refused execute.
@@ -70,8 +80,12 @@ If the OS sandbox cannot be applied (Landlock ABI 0 / kernel older than 5.13, Ap
 missing, unsigned macOS helper, and so on) Edge **does not** silently fall back.
 
 - Prompt per plugin. Default button is **Don't run**. **Run anyway** is the other button.
-- Choosing Run anyway records the plugin_key on `trust.json` as `unsandboxed` next to the pin
-  allow-list, and the Home card shows **Running unsandboxed**.
+- Choosing Run anyway records `{plugin_key, sha256}` on `trust.json` as `unsandboxed` next to
+  the pin allow-list (a legacy string-only key is ignored). An update of the plugin tree drops
+  the override. The Home card shows **Running unsandboxed** and a **Revoke unsandboxed run**
+  menu item (`plugin_clear_unsandboxed`).
+- The prompt is not held across `io_mutex`. Shutdown aborts a pending `CallAfter` wait with
+  Don't run (`broken_promise` included) so quitting with the dialog up does not hang.
 - Early slicing-pipeline steps (`posSlice` … `psSkirtBrim`) stay in-process with a live `Print *`.
   They do **not** get this prompt. The Home card already says "Early slicing steps run
   unsandboxed in-process".
@@ -90,22 +104,31 @@ Test-only env overrides, ignored in production (same gate as Phase 7's `EDGE_PLU
 Always allowed inside the child:
 
 - bundled Python home (read)
-- the plugin's own directory (read/write, including `__pycache__`)
+- the plugin's own directory (**read-only**; `__pycache__` goes to the private TMPDIR;
+  wheel extract goes to `plugin_data/<plugin_key>/__whl_extracted__`)
 - a private `TMPDIR` (`/tmp/edge-plugin-XXXXXX`)
 - helper directory / shared `python/packages` / `resources_dir` (read)
 - `trust.json` (the sidecar file only, not all of `data_dir`; Landlock file
   rules drop directory-only bits so `add_rule` is not EINVAL)
 - the plugin's `plugin_data` storage directory (read/write)
-- on Linux: `/usr`, `/lib`, `/lib64`, `/etc`, `/dev`, `/proc`, `/sys` (read) so CPython and
-  libpython keep working
+- on Linux: `/usr`, `/lib`, `/lib64`, `/etc`, `/dev`, `/sys`, `/proc/self` plus a few
+  `/proc` files (`cpuinfo`, `meminfo`, `stat`, `filesystems`, `version`). Not all of
+  `/proc` or `/run` (session bus sockets).
+
+`socketpair(AF_UNIX)` stays allowed (asyncio; already-connected pairs). `socket(AF_UNIX)`
+is denied even when network is granted, so a plugin cannot open the session D-Bus, X11
+abstract sockets, or the Flatpak portal. Landlock ABI ≥ 6 also sets
+`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL`. `io_uring_*` is always
+denied (`IORING_OP_SOCKET` would skip the network deny). x32 syscalls (`nr & 0x40000000`)
+are killed. `setsid` is denied so `kill(-pgid)` cannot be escaped.
 
 From the plugin's Phase 4 sidecar:
 
 - `fs_read` / `fs_readwrite` paths (tree `/*` markers stripped)
 - network (`network_http` / `network_socket`) → Windows `internetClient` capability; Linux
-  seccomp allows `AF_INET`/`AF_INET6`. When network is not granted, Landlock ABI ≥ 4 also
-  handles TCP bind/connect with no rules added (so those are denied) and seccomp still
-  denies inet sockets.
+  seccomp allows non-AF_UNIX `socket()` (inet). When network is not granted, Landlock ABI ≥ 4
+  also handles TCP bind/connect with no rules added (so those are denied) and seccomp denies
+  `socket`/`connect`/`bind`/`listen`/`accept` (UDP included, because no `socket()`).
 - process grants → `allow_exec` (otherwise Linux seccomp denies `execve`/`execveat`; Windows
   `ACTIVE_PROCESS=1` already blocks children)
 
@@ -113,19 +136,41 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 
 ## Grandchildren
 
-- Linux: `PR_SET_CHILD_SUBREAPER` on Edge, `setpgid` in parent and child, `kill(-pid, SIGKILL)`
-  on host kill.
+- Linux: `setpgid` in parent and child, `kill(-pid, SIGKILL)` on host kill, `setsid` denied.
+  Edge is **not** a subreaper (no reap path; orphans would become Edge zombies). Init reaps.
 - Windows: the Job object kills every assigned process; `ACTIVE_PROCESS=1` stops them spawning.
-- macOS / POSIX: process group kill (`kill(-pid)`).
+  AppContainer profile names are a fixed-length FNV hash of `plugin_key` (no truncation
+  collisions). Directory ACLs are granted at the folder with inheritance (not a recursive
+  walk), checked fail-closed, and revoked on `close_win_appcontainer`. The 1 GiB job process
+  memory cap is a named constant, not plugin-configurable.
+- macOS / POSIX: process group kill (`kill(-pid)`). The helper exec env is an allow-list
+  (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` / `APP_SANDBOX_CONTAINER_ID` / `LD_*` /
+  `PYTHONPATH`).
+
+## macOS entitlements
+
+`scripts/edge-plugin-host.entitlements` enables App Sandbox, disables library validation
+(bundled CPython), and adds:
+
+- absolute-path read of `/usr/lib`, `/usr/libexec`, `/System`, `/Library/Frameworks`, `/dev`
+- home-relative read of `Library/Application Support/EdgeSlicer/orca_plugins/`
+- home-relative read/write of `Library/Application Support/EdgeSlicer/plugin_data/`
+
+The helper's own bundle (bundled Python at `@executable_path/python`) is readable without
+an extra exception. A user-chosen G-code folder needs a security-scoped bookmark from Edge
+at runtime; that cannot be baked into the entitlements plist. None of this is verified
+without a signed helper showing `kind=app-sandbox`.
 
 ## What can only be verified on a signed/notarised bundle
 
-- macOS App Sandbox actually restricting the helper (`APP_SANDBOX_CONTAINER_ID`). Ad-hoc
-  `codesign --sign - --entitlements scripts/edge-plugin-host.entitlements` is hooked up but
-  does not go through notarisation.
-- Runtime exceptions for the plugin dir and the G-code folder on a sandboxed macOS helper
-  (those paths are not known at sign time).
+- macOS App Sandbox actually restricting the helper (`sandbox_check`, `kind=app-sandbox`).
+  Ad-hoc `codesign --sign - --entitlements scripts/edge-plugin-host.entitlements` is hooked
+  up but does not go through notarisation. `APP_SANDBOX_CONTAINER_ID` is not trusted.
+- Security-scoped G-code folder access on a sandboxed macOS helper (not known at sign time).
 - Windows AppContainer + named-pipe DACL + Job object on a real Windows box.
+- A Linux **desktop session** D-Bus / Flatpak portal / X11 abstract-socket escape (the unit
+  test uses a forked fixture plus `dbus-daemon --session` when that binary exists).
+- The Don't-run / Run anyway GUI prompt (tests use the prompt seam).
 - Flatpak: Landlock+seccomp inside the existing bwrap; no nested bwrap.
 - AppImage: helper next to the binary, same Landlock+seccomp path as a native prefix.
 
