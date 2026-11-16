@@ -6534,32 +6534,28 @@ void GCode::_print_first_layer_extruder_temperatures(
             if (active_temp > 0)
                 file.write(m_writer.set_temperature(active_temp, wait, active_tool));
         } else {
-            // Set temperatures of all the printing extruders.
-            bool is_active   = true;
-            int  target_temp = -1;
-            int  target_tool = -1;
+            // Set temperatures of all the printing extruders, the first printing one last. Every other tool was set
+            // only with ooze prevention (to standby): without it only the highest-numbered tool was, so the tool
+            // that prints first could start cold.
+            int target_temp = -1;
             for (unsigned int tool_id : print.extruders()) {
-                is_active = true;
-                int temp  = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
-                                         ConfigFlowDomain::Filament, tool_id);
-                if (print.config().ooze_prevention.value && tool_id != first_printing_extruder_id) {
-                    is_active = false;
+                int temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
+                                        ConfigFlowDomain::Filament, tool_id);
+                if (tool_id == first_printing_extruder_id) {
+                    target_temp = temp;
+                    continue;
+                }
+                if (print.config().ooze_prevention.value) {
                     if (print.config().idle_temperature.get_at(tool_id) == 0)
                         temp += print.config().standby_temperature_delta.value;
                     else
                         temp = print.config().idle_temperature.get_at(tool_id);
                 }
-                if (temp > 0) {
-                    if (is_active) {
-                        target_temp = temp;
-                        target_tool = tool_id;
-                    } else
-                        file.write(m_writer.set_temperature(temp, wait, tool_id));
-                }
+                if (temp > 0)
+                    file.write(m_writer.set_temperature(temp, wait, tool_id));
             }
-            if (target_temp != -1 && target_tool != -1) {
-                file.write(m_writer.set_temperature(target_temp, wait, target_tool));
-            }
+            if (target_temp > 0)
+                file.write(m_writer.set_temperature(target_temp, wait, first_printing_extruder_id));
         }
     }
 }
