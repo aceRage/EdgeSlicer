@@ -860,7 +860,7 @@ void PrintObject::contour_z()
     if (!this->set_started(posContouring))
         return;
 
-    // EdgeSlicer SPIKE: curved tops share this step and its mesh (CurvedTops.cpp). With
+    // EdgeSlicer: curved tops share this step and its mesh (CurvedTops.cpp). With
     // curved_tops_enabled off (the default) this is exactly the ZAA-only step it was.
     const bool zaa         = this->need_z_contouring();
     const bool curved_tops = m_config.curved_tops_enabled.value && !m_instances.empty();

@@ -184,7 +184,7 @@ public:
     // travel's feedrate, else empty. For G-code that follows a Z move and moves without an F word of its own.
     std::string restore_uncapped_z_feedrate() const;
     double      get_zhop() const { return m_lifted; }
-    // EdgeSlicer SPIKE, curved tops: forget a z-hop lift() asked for but no travel has made yet.
+    // EdgeSlicer, curved tops: forget a z-hop lift() asked for but no travel has made yet.
     void        cancel_pending_lift() { m_to_lift = 0.; }
     // Edge (min_layer_time_pause): G-code that parks the head at `park` (bed coordinates) and brings it back,
     // returned as {there, back} so the caller can put the dwell between them. `there` retracts (unless the

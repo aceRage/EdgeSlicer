@@ -45,7 +45,7 @@ struct ContourZSamples
     // see the clamp in ContourZ.cpp and the emitter in GCode.cpp).
     std::vector<float> z;
 
-    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp). False for every ZAA path, which keeps the
+    // EdgeSlicer, curved tops (CurvedTops.cpp). False for every ZAA path, which keeps the
     // emitter's ZAA behaviour byte-identical. When true:
     //  - z holds a PLACEMENT delta (the path's absolute Z minus its layer's print_z, several mm
     //    below on the deferred conformal layers), not a change of bead height, so the emitter
@@ -87,7 +87,7 @@ private:
 
 using ContourZSamplesPtr = std::shared_ptr<const ContourZSamples>;
 
-// EdgeSlicer SPIKE, curved tops: speed cap for conformal paths, mm/s (see GCode.cpp).
+// EdgeSlicer, curved tops: speed cap for conformal paths, mm/s (see GCode.cpp).
 static constexpr double CURVED_TOPS_MAX_SPEED_MM_S = 40.0;
 
 // ---------------------------------------------------------------------------------------------

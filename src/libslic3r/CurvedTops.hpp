@@ -1,7 +1,8 @@
 #ifndef slic3r_CurvedTops_hpp_
 #define slic3r_CurvedTops_hpp_
 
-// EdgeSlicer SPIKE (2026-11-12): curved (non-planar) top surfaces.
+// EdgeSlicer: curved (non-planar) top surfaces. Experimental, off by default (curved_tops_enabled),
+// and only on printers whose head clearance is known (curved_tops_head_clearance()).
 //
 // The idea and the surface selection rules (top-facing facets under a maximum angle, grouped
 // into surfaces, rejected when too small or taller than the nozzle clearance, deferred conformal
@@ -12,8 +13,8 @@
 // re-implementation on top of EdgeSlicer's Z contouring (ContourZ.hpp), whose per-point Z
 // samples, emitter and guards it reuses.
 //
-// Spike scope: one object, one instance, one nozzle, no raft, no variable layer height. See
-// tests/spike_curved_tops.md for what works, the limits and what productionising would take.
+// Scope: one object, one instance, one nozzle, no raft, no variable layer height. See
+// tests/design_curved_tops.md for how it works, the limits and what is still to do.
 
 namespace Slic3r {
 
@@ -33,11 +34,15 @@ struct CurvedTopsHeadClearance
     double      nozzle_height_mm = 1.5;
     double      max_slope_deg    = 12.0;
     const char *source           = "generic conservative default";
+    // False for the generic default: apply_curved_tops() leaves the object planar on a printer
+    // whose clearance nobody has given.
+    bool        known            = false;
 };
 
-// TODO(head-clearance): replace with the head-clearance model being added on
-// feat/head-clearance-zaa once its loader lands. Until then the Elegoo Centauri Carbon gets a
-// hard-coded, deliberately conservative value and every other printer the generic default.
+// Hard-coded per printer model for now: the Elegoo Centauri Carbon and the Bambu Lab X1 Carbon.
+// Every other printer gets the generic default with known = false. The next step is to take these
+// from the head-clearance model (HeadClearance.hpp, head_clearance_for_printer_model(), data in
+// resources/head_clearance), which the Z contouring head collision check already uses.
 CurvedTopsHeadClearance curved_tops_head_clearance(const PrintConfig &config);
 
 // The user's maximum angle, limited by the head.

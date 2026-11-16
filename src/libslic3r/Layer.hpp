@@ -260,7 +260,7 @@ public:
                     height = patch.merged_height;
         return height;
     }
-    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): set on the object's top layer when it carries the
+    // EdgeSlicer, curved tops (CurvedTops.cpp): set on the object's top layer when it carries the
     // conformal layers. The planar layers under it were emptied on purpose (their material is in the
     // curved block), so the empty Z span below is not a printability gap.
     bool                    curved_tops_block { false };

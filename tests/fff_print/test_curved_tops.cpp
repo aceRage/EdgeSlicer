@@ -1,6 +1,7 @@
-// EdgeSlicer SPIKE: curved tops (src/libslic3r/CurvedTops.cpp).
+// EdgeSlicer: curved tops, experimental (src/libslic3r/CurvedTops.cpp).
 //
 //  * OFF (the default): no conformal path anywhere and the extruded Z never goes back down.
+//  * ON on a printer with no known head clearance: refused, the slice stays planar.
 //  * ON, a 30 mm puck with a 1.2 mm spherical cap: conformal paths are appended to the top layer
 //    and, after the last planar layer, the G-code extrudes below that layer's Z (the curved
 //    layers follow the cap down to its rim).
@@ -126,6 +127,8 @@ void slice_puck(Print &print, Model &model, bool curved_tops,
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
+        // Curved tops run only on a printer with a known head clearance.
+        { "printer_model",              "Elegoo Centauri Carbon" },
         { "layer_height",               "0.2" },
         { "initial_layer_print_height", "0.2" },
         { "sparse_infill_density",      "15%" },
@@ -290,6 +293,21 @@ TEST_CASE("Curved tops: off by default leaves the slice planar", "[CurvedTops]")
             curved += count_curved_paths(&region->fills);
     CHECK(curved == 0);
 
+    CHECK_THAT(extrusion_dip(Test::gcode(print)), WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Curved tops: a printer with no known head clearance stays planar", "[CurvedTops]")
+{
+    Print print;
+    Model model;
+    slice_puck(print, model, true, { { "printer_model", "Bambu Lab X1E" } });
+    const PrintObject *object = print.objects().front();
+    size_t curved = 0;
+    for (const Layer *layer : object->layers())
+        for (const LayerRegion *region : layer->regions())
+            curved += count_curved_paths(&region->fills);
+    CHECK(curved == 0);
+    CHECK_FALSE(object->layers().back()->curved_tops_block);
     CHECK_THAT(extrusion_dip(Test::gcode(print)), WithinAbs(0., 1e-6));
 }
 
@@ -463,6 +481,12 @@ TEST_CASE("Curved tops: head clearance and flow helpers", "[CurvedTops]")
     CHECK_THAT(x1c.nozzle_height_mm, WithinAbs(2.0, 1e-9));
     CHECK_THAT(x1c.max_slope_deg, WithinAbs(20.0, 1e-9));
     CHECK_THAT(x1e.nozzle_height_mm, WithinAbs(generic.nozzle_height_mm, 1e-9));
+    // Only the two measured / chosen heads enable the feature.
+    CHECK_FALSE(generic.known);
+    CHECK(cc1.known);
+    CHECK(x1c.known);
+    CHECK_FALSE(cc2.known);
+    CHECK_FALSE(x1e.known);
 
     CHECK_THAT(curved_tops_effective_max_angle(15., cc1), WithinAbs(15., 1e-9));
     CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(20., 1e-9));

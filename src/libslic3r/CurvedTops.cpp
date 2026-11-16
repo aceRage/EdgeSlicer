@@ -1,6 +1,6 @@
-// EdgeSlicer SPIKE (2026-11-12): curved (non-planar) top surfaces. See CurvedTops.hpp for the
-// credits (fich-l/OrcaSlicer-Nonplanar v0.1, AGPL-3.0; PancakeSlicer, AGPL-3.0, as reference) and
-// tests/spike_curved_tops.md for the findings.
+// EdgeSlicer: curved (non-planar) top surfaces, experimental (2026-11-12). See CurvedTops.hpp for
+// the credits (fich-l/OrcaSlicer-Nonplanar v0.1, AGPL-3.0; PancakeSlicer, AGPL-3.0, as reference)
+// and tests/design_curved_tops.md for the design note.
 //
 // How it works, in the frame Z contouring already uses (mesh Z = print Z + imesh.ground_level()):
 //
@@ -9,7 +9,7 @@
 //     is kept when it is not flat (rises at least one layer), not tiny, and no taller than the
 //     head's nozzle clearance.
 //  2. Clearance. Nothing outside the kept surfaces may stand higher than the lowest curved layer,
-//     otherwise the head would have to dip next to it. The spike simply refuses such objects.
+//     otherwise the head would have to dip next to it. Such objects are refused (left planar).
 //  3. Lowered planar body. Inside a surface, planar material is kept only where its layer's top
 //     is at least N layers below the surface: keep  print_z <= S(x,y) - N*h. Everything else of
 //     those layers (walls, top skins, ironing) is clipped away.
@@ -53,9 +53,9 @@ namespace Slic3r {
 CurvedTopsHeadClearance curved_tops_head_clearance(const PrintConfig &config)
 {
     CurvedTopsHeadClearance head;
-    // TODO(head-clearance): use the head-clearance model from feat/head-clearance-zaa when its
-    // loader commit lands; these numbers are a deliberately conservative placeholder, NOT measured.
-    // Elegoo Centauri Carbon: the nozzle tip is taken to stand only 2 mm proud of the lowest part
+    // TODO(head-clearance): take these from the head-clearance model (HeadClearance.hpp,
+    // head_clearance_for_printer_model()). The CC1 numbers are a deliberately conservative placeholder,
+    // NOT measured. Elegoo Centauri Carbon: the nozzle tip is taken to stand only 2 mm proud of the lowest part
     // of the heater block / silicone sock / part-cooling duct, and the nozzle cone to clear 20
     // degrees. Both should be measured on the owner's CC1 before the limit is relaxed.
     if (config.printer_model.value.rfind("Elegoo Centauri Carbon", 0) == 0 &&
@@ -63,15 +63,17 @@ CurvedTopsHeadClearance curved_tops_head_clearance(const PrintConfig &config)
         head.nozzle_height_mm = 2.0;
         head.max_slope_deg    = 20.0;
         head.source           = "Elegoo Centauri Carbon (hard-coded, conservative, unmeasured)";
+        head.known            = true;
     }
     // Bambu Lab X1 Carbon: owner measured 2.5 mm tip to sock, 2026-11-15. The lead's choice is that
     // minus a 0.5 mm margin. The cone is not measured: the CC1's conservative 20 degrees. Only the X1
-    // Carbon (printer_model exactly as the BBL profiles write it); the X1, X1E, P1S and P1P keep the
-    // generic values until someone measures them.
+    // Carbon (printer_model exactly as the BBL profiles write it); the X1, X1E, P1S and P1P stay
+    // unknown (no curved tops) until someone measures them.
     if (config.printer_model.value == "Bambu Lab X1 Carbon") {
         head.nozzle_height_mm = 2.0;
         head.max_slope_deg    = 20.0;
         head.source           = "Bambu Lab X1 Carbon (owner measured 2.5 mm tip to sock, 2026-11-15; 0.5 mm margin; slope unmeasured)";
+        head.known            = true;
     }
     return head;
 }
@@ -238,7 +240,10 @@ bool apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla:
     for (LayerRegion *region : top_layer->regions())
         remove_previous_conformal(region->fills);
 
-    // Spike guards.
+    // Guards: what this first version handles.
+    const CurvedTopsHeadClearance head = curved_tops_head_clearance(print->config());
+    if (!head.known)
+        return refuse("no known print head clearance for printer model \"" + print->config().printer_model.value + "\"");
     if (print->objects().size() != 1 || object.instances().size() != 1)
         return refuse("more than one object or instance on the plate");
     if (print->config().spiral_mode.value)
@@ -252,7 +257,6 @@ bool apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla:
 
     const int    n_layers = std::max(1, ocfg.curved_tops_layers.value);
     const double h        = ocfg.layer_height.value;
-    const CurvedTopsHeadClearance head      = curved_tops_head_clearance(print->config());
     const double                  max_angle = curved_tops_effective_max_angle(ocfg.curved_tops_max_angle.value, head);
     const double                  cos_max   = std::cos(max_angle * M_PI / 180.0);
     const double                  ground    = imesh.ground_level();

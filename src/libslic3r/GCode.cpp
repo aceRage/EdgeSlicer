@@ -2851,7 +2851,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
             }
 
-            // EdgeSlicer SPIKE: a curved-tops block reaches down into the layers it emptied.
+            // EdgeSlicer: a curved-tops block reaches down into the layers it emptied.
             const bool curved_tops_block = layer_to_print.object_layer != nullptr && layer_to_print.object_layer->curved_tops_block;
             if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between &&
                 ! curved_tops_block)
@@ -3958,7 +3958,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
     m_layer_count = 0;
-    // EdgeSlicer SPIKE, curved tops: the planar layers a curved block emptied on purpose are not
+    // EdgeSlicer, curved tops: the planar layers a curved block emptied on purpose are not
     // printed (no layer change), so they are not counted either; the printer's layer x / total and
     // the progress then end at the real count. Always false with curved tops off.
     auto curved_tops_emptied = [](const Layer *layer) {
@@ -11745,7 +11745,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool   zaa_contoured = path.z_contoured();
     const double zaa_base_z    = m_nominal_z + double(path.z_offset) * double(path.height);
     const double zaa_first_z   = zaa_contoured ? zaa_base_z + double(path.z_contour->z_at(path.first_point())) : zaa_base_z;
-    // EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): a conformal path is reached from above. Lift to
+    // EdgeSlicer, curved tops (CurvedTops.cpp): a conformal path is reached from above. Lift to
     // a Z that clears the whole surface, travel in XY there and only then descend vertically, so
     // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
     const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
@@ -12299,7 +12299,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
-    // EdgeSlicer SPIKE, curved tops: every conformal move also moves Z, and a printer's Z axis is far
+    // EdgeSlicer, curved tops: every conformal move also moves Z, and a printer's Z axis is far
     // slower than XY (Elegoo Centauri Carbon: 20 mm/s, 100-500 mm/s2), so the role speed would only be
     // throttled segment by segment by the firmware, i.e. stutter. Cap the path speed instead.
     if (curved_top)
@@ -12816,7 +12816,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 continue;
             path_length += line_length;
             double new_speed = pre_processed_point.speed * 60.0;
-            // EdgeSlicer SPIKE, curved tops: the overhang speeds are worked out from the role speed, so the
+            // EdgeSlicer, curved tops: the overhang speeds are worked out from the role speed, so the
             // curved paths' cap (see F above) applies to them too.
             if (curved_top)
                 new_speed = std::min(new_speed, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
@@ -13197,7 +13197,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     return gcode;
 }
 
-// EdgeSlicer SPIKE, curved tops (CurvedTops.cpp): the travel to the first point of a conformal path.
+// EdgeSlicer, curved tops (CurvedTops.cpp): the travel to the first point of a conformal path.
 // The nozzle sits on (or just above) curved lines laid moments ago, so the order is fixed:
 //  1. retract, and wipe if enabled, where the nozzle is: the wipe runs back along the line just
 //     laid at that line's own heights (Wipe::update_path), so it has to happen before the lift;
