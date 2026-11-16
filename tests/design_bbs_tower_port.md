@@ -355,3 +355,22 @@ All of the above, on our planner (`generate()`, not `generate_new()`), with thes
 The #1056 warning ("every filament at the plate's layer height") is removed for plates the ladder plans. It stays,
 narrowed, where the ladder is off: sparse layers skipped (`wipe_tower_no_sparse_layers`) or smooth timelapse on a
 mixed-diameter plate, which Bambu also prints at the base height.
+
+### Review fixes (tests/pr_review_2026-11-15_1072.md, lead decisions)
+- **Gate narrowed to rack printers (e):** the merged ladder, the per-diameter bands and the per-nozzle widths run only with
+  `handle_hotend_as_extruder` (H3C). H2D/X2D/H2C with unequal nozzles slice as on main and keep the D2 warning.
+- **(b) side scrape:** `outer_wall_extreme_at()` falls back to the last wall drawn below on a merged tower (a wall slab is
+  drawn once, at its top).
+- **(c) foundation:** no wall, band-fill or purge slab reaches into the foundation layer; it keeps its own wall and brim at
+  the first layer's height (decision 4 completed), so no first-layer void loops are laid on top of it.
+- **(d) grid pitch:** `block_row_pitch()` moves the group gap by the band's tool width, like `get_block_gap_width()`.
+- **(f) contact gaps:** a wall-reserved layer's wall gaps (and the ones it cuts below) move to the layer that draws that
+  wall slab.
+- **(g) estimate:** rack printers only; sized at the first-layer height (every nozzle's first tower layer is laid there and
+  a block is as deep as its deepest layer). Lanes are still not counted.
+- **(i) `capped_wall_grid_width()`:** ported for the merged (rack) tower only: outer wall, sparse grid and its rectangle at
+  min(1.25 x nozzle, tower width) above the first layer. Not on single-diameter towers: Bambu does it there too, but that
+  would change every H3C tower; left for the port plan.
+- **(j)** the wall-height warning is not logged on wall-reserved layers.
+- **(a)** stale X in `post_process_wipe_tower_moves` is fixed on its own branch (fix/tower-purge-stale-x); this PR is stacked
+  on it.

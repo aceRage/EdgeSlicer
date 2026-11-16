@@ -5,7 +5,9 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/Polyline.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <cmath>
@@ -165,9 +167,9 @@ void check_windows(const std::vector<TowerExtrusion> &extrusions, const std::vec
         REQUIRE(e.tool >= 0);
         REQUIRE(size_t(e.tool) < ladders.size());
         const WipeTower::NozzleLadder &w = ladders[e.tool];
-        // Bambu Studio's bridge flow over a sparse band below (need_thick_bridge_flow()): 0.2 mm, laid by a nozzle whose
-        // window ends below that only where the band under it is a sparse grid.
-        if (w.max_height < 0.2f && std::abs(e.height - 0.2) < 1e-6)
+        // Bambu Studio's bridge flow (need_thick_bridge_flow()): purge rows over a sparse band below are tagged 0.2 mm, laid
+        // by a nozzle whose window ends below that. Only purge rows, and only that one height.
+        if (e.purge && w.max_height < 0.2f && std::abs(e.height - 0.2) < 1e-6)
             continue;
         CHECK(e.height + 1e-3 >= w.min_height);
         CHECK(e.height <= w.max_height + 1e-3);
@@ -285,4 +287,174 @@ TEST_CASE("ALM tower: the footprint estimate keeps one band per nozzle at its sl
     CHECK(mixed_depth < plain_depth);
     // Without the per-nozzle fields the estimate is the one it always was.
     CHECK_THAT(WipeTower::estimate_tower_blocks_depth(plain, 35.f, 0.1f, 0.2f, 1.f, 0.4f), WithinAbs(plain_depth, 1e-6));
+}
+
+// ---- Review #1072 (h): geometry, not only tags ----------------------------------------------------------------------------
+
+namespace {
+
+// One extruding move of a tower result, in the tower frame.
+struct TowerSegment
+{
+    int   layer;
+    int   tool;
+    Vec2f a, b;
+    float width, height, e;
+    bool  purge;
+    bool  has_xy; // the move names X or Y (an extruding move without either lays its filament in one spot)
+};
+
+void collect_segments(const std::string &gcode, int layer, int tool_before, int tool_after, const Vec2f &start, const Vec2f &after_change,
+                      float width, float height, std::vector<TowerSegment> &out)
+{
+    static const std::regex height_re(R"(HEIGHT:\s*([0-9.]+))");
+    static const std::regex width_re(R"(WIDTH:\s*([0-9.]+))");
+    static const std::regex word_re(R"(\b([XYE])(-?[0-9.]+))");
+    std::istringstream      in(gcode);
+    std::string             line;
+    int                     tool  = tool_before;
+    bool                    purge = false;
+    Vec2f                   pos   = start;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        std::smatch m;
+        if (line.find("[change_filament_gcode]") != std::string::npos) {
+            tool = tool_after;
+            pos  = after_change;
+            continue;
+        }
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
+            purge = true;
+        else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
+            purge = false;
+        if (!line.empty() && line[0] == ';') {
+            if (std::regex_search(line, m, height_re))
+                height = std::stof(m[1].str());
+            else if (std::regex_search(line, m, width_re))
+                width = std::stof(m[1].str());
+            continue;
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G2 ", 0) != 0 && line.rfind("G3 ", 0) != 0)
+            continue;
+        Vec2f next = pos;
+        float e    = 0.f;
+        bool  xy   = false;
+        for (auto it = std::sregex_iterator(line.begin(), line.end(), word_re); it != std::sregex_iterator(); ++it) {
+            const char  c = (*it)[1].str()[0];
+            const float v = std::stof((*it)[2].str());
+            if (c == 'X') { next.x() = v; xy = true; }
+            else if (c == 'Y') { next.y() = v; xy = true; }
+            else e = v;
+        }
+        if (e > 0.f)
+            out.push_back({ layer, tool, pos, next, width, height, e, purge, xy });
+        pos = next;
+    }
+}
+
+std::vector<TowerSegment> tower_segments(const std::vector<std::vector<WipeTower::ToolChangeResult>> &layers, float base_width)
+{
+    std::vector<TowerSegment> out;
+    for (size_t layer = 0; layer < layers.size(); ++layer)
+        for (const WipeTower::ToolChangeResult &tcr : layers[layer]) {
+            if (tcr.combined_away)
+                continue;
+            collect_segments(tcr.nozzle_change_result.gcode, int(layer), tcr.initial_tool, tcr.initial_tool, tcr.nozzle_change_result.start_pos,
+                             tcr.nozzle_change_result.start_pos, base_width, tcr.layer_height, out);
+            collect_segments(tcr.gcode, int(layer), tcr.initial_tool, tcr.new_tool, tcr.start_pos,
+                             tcr.is_tool_change ? tcr.tool_change_start_pos : tcr.start_pos, base_width, tcr.layer_height, out);
+        }
+    return out;
+}
+
+Polygons segment_area(const TowerSegment &s)
+{
+    if ((s.b - s.a).norm() < 1e-4f)
+        return {};
+    const Polyline pl{ Point::new_scale(s.a.x(), s.a.y()), Point::new_scale(s.b.x(), s.b.y()) };
+    return offset(pl, float(scale_(0.5 * s.width)));
+}
+
+// Every extrusion of the first `layers` printed tower layers that reaches below the top of the material laid on an earlier
+// layer must not lie over it: the area where it does, in mm2.
+double area_over_filled(const PlannedTower &t, const std::vector<TowerSegment> &segments, int layers)
+{
+    std::vector<int> printed;
+    for (size_t l = 0; l < t.result.size() && int(printed.size()) < layers; ++l)
+        if (!t.result[l].empty() && !t.result[l].front().combined_away)
+            printed.push_back(int(l));
+    double   over = 0.;
+    Polygons below;
+    float    below_top = 0.f;
+    for (int layer : printed) {
+        const float z = t.tower->test_plan_z(size_t(layer));
+        Polygons    here;
+        for (const TowerSegment &s : segments) {
+            if (s.layer != layer || s.e <= 0.f)
+                continue;
+            const Polygons a = segment_area(s);
+            if (!below.empty() && z - s.height < below_top - 1e-3f)
+                over += area(intersection(a, below)) * SCALING_FACTOR * SCALING_FACTOR;
+            append(here, a);
+        }
+        if (!here.empty()) {
+            below     = union_(below, here);
+            below_top = z;
+        }
+    }
+    return over;
+}
+
+// The volume of filament laid into each band on each layer above the first, against what the band holds at the tallest
+// height laid into it there (its interior width x its depth on that layer x that height). Largest ratio.
+double worst_band_fill(const PlannedTower &t, const std::vector<TowerSegment> &segments, float filament_area, float tower_width)
+{
+    double worst = 0.;
+    for (const WipeTower::WipeTowerBlock &block : t.tower->blocks()) {
+        for (size_t layer = 1; layer < t.result.size(); ++layer) {
+            if (layer >= block.layer_depths.size() || block.layer_depths[layer] <= 1.f)
+                continue;
+            const float y0 = block.start_depth, y1 = block.start_depth + block.layer_depths[layer];
+            double      volume = 0., height = 0.;
+            for (const TowerSegment &s : segments) {
+                if (s.layer != int(layer) || s.e <= 0.f)
+                    continue;
+                const Vec2f mid = 0.5f * (s.a + s.b);
+                // Interior rows only: the outer wall runs along x = 0 / width and the tower's front / back.
+                if (mid.y() <= y0 || mid.y() >= y1 || mid.x() <= 1.f || mid.x() >= tower_width - 1.f)
+                    continue;
+                volume += double(s.e) * filament_area;
+                height = std::max(height, double(s.height));
+            }
+            if (height <= 0.)
+                continue;
+            worst = std::max(worst, volume / (double(tower_width) * double(y1 - y0) * height));
+        }
+    }
+    return worst;
+}
+
+} // namespace
+
+TEST_CASE("ALM tower, direct: geometry - no row in one spot, nothing over the first layers, bands not over-filled", "[ALMTower]")
+{
+    const std::vector<WipeTower::NozzleLadder> ladders_48{ { 0.08f, 0.28f, 1 }, { 0.16f, 0.56f, 2 } };
+    const std::vector<WipeTower::NozzleLadder> ladders_28{ { 0.04f, 0.14f, 1 }, { 0.16f, 0.56f, 4 } };
+    for (int which = 0; which < 2; ++which) {
+        CAPTURE(which);
+        const auto t = which == 0 ? plan("0.4,0.8", 0.2, 12, 2, &ladders_48) : plan("0.2,0.8", 0.1, 13, 4, &ladders_28);
+        const std::vector<TowerSegment> segments = tower_segments(t->result, 0.5f);
+        REQUIRE(!segments.empty());
+        // Every purge row names where it goes (a short E-only move is an unretract, not a row).
+        for (const TowerSegment &s : segments) {
+            CAPTURE(s.layer, s.tool, s.e);
+            CHECK((!s.purge || s.has_xy || s.e < 3.f));
+        }
+        // Layers 1-2 of the tower: nothing is laid over the material already there.
+        CHECK(area_over_filled(*t, segments, 2) < 0.5);
+        // No band takes more than about what fits into it (lines overlap their neighbours a little).
+        const float area = float(M_PI * 1.75 * 1.75 / 4.);
+        CHECK(worst_band_fill(*t, segments, area, float(t->config.prime_tower_width.value)) < 1.3);
+    }
 }

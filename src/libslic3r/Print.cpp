@@ -3479,12 +3479,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
 
         // Mixed nozzle diameters (H3C rack, H2D/X2D with unequal nozzles): the objects' layers merge into slabs per nozzle
-        // (AdaptiveLayerMerge), and since PR-C so does the Type 1 tower (Bambu Studio 2.9.1's merged ladder). The tower still
-        // purges every filament at the plate's layer height where that ladder does not run, as in Bambu Studio: the Type 2
-        // tower (non-Bambu printers), a tower whose sparse layers are skipped, and smooth timelapse, which needs the tower on
-        // every layer. Warn there when that height is outside the layer height range of a nozzle that purges into the tower.
-        const bool tower_ladder_off = this->wipe_tower_type() == WipeTowerType::Type2 || wipe_tower_sparse_layers_skipped(m_config) ||
-                                      m_config.timelapse_type.value == TimelapseType::tlSmooth;
+        // (AdaptiveLayerMerge), and since PR-C so does the Type 1 tower on a rack printer (H3C; Bambu Studio 2.9.1's merged
+        // ladder). The tower still purges every filament at the plate's layer height where that ladder does not run: the
+        // Type 2 tower (non-Bambu printers), a printer without the rack (H2D / X2D / H2C, lead decision on review #1072), a
+        // tower whose sparse layers are skipped, and smooth timelapse, which needs the tower on every layer. Warn there when that height is outside the layer height range of a nozzle that purges into the tower.
+        const bool tower_ladder_off = this->wipe_tower_type() == WipeTowerType::Type2 || ! hotend_as_extruder(m_config) ||
+                                      wipe_tower_sparse_layers_skipped(m_config) || m_config.timelapse_type.value == TimelapseType::tlSmooth;
         if (tower_ladder_off && extruders.size() > 1 && has_multiple_used_nozzle_diameters(m_config, extruders)) {
             std::vector<double> tower_heights;
             for (const PrintObject *object : m_objects)
@@ -3500,8 +3500,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                         continue;
                     warn(Slic3r::format(L("The prime tower prints every filament at the layer height of %1% mm. Filament %2% prints with a "
                                           "%3% mm nozzle, whose layer height range is %4%-%5% mm. Its prime tower lines may be weak "
-                                          "and the tower may lean or fall. With \"No sparse layers\", smooth timelapse or a non-Bambu "
-                                          "prime tower the tower is not planned in slabs per nozzle: use a layer height inside every "
+                                          "and the tower may lean or fall. With \"No sparse layers\", smooth timelapse, a non-Bambu "
+                                          "prime tower or a printer without a nozzle rack the tower is not planned in slabs per nozzle: use a layer height inside every "
                                           "nozzle's range, or check the tower in a test print."),
                                         float_to_string_decimal_point(height), filament + 1,
                                         float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1)),
@@ -7751,7 +7751,9 @@ void Print::_make_wipe_tower()
         // per-nozzle clamp, widened where it allows a single band height (adaptive_ladder_height_range), the band size in it,
         // and the slab of a process chosen for a coarser nozzle (nozzle_process_band_size). Before set_extruder(): the
         // per-nozzle tower widths are read there. A single-diameter plate is left exactly as before.
-        if (this->uses_multiple_nozzle_diameters() && ! m_objects.empty()) {
+        // Review #1072 (e), lead decision: only on the single-extruder rack (handle_hotend_as_extruder, H3C), the printer Bambu
+        // Studio has its multi-diameter mode for. An H2D / X2D / H2C with unequal nozzles keeps the tower main prints.
+        if (hotend_as_extruder(m_config) && this->uses_multiple_nozzle_diameters() && ! m_objects.empty()) {
             std::vector<unsigned int> used_filaments;
             this->used_printing_filaments(used_filaments);
             const double reference  = this->adaptive_merge_reference_nozzle();

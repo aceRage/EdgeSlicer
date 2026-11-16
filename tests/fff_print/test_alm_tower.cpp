@@ -169,6 +169,9 @@ struct Sliced
     std::set<double>            coarse_change;  // print_z of every tool change to the coarse filament
     std::set<double>            coarse_visit;   // print_z of every tower extrusion of the coarse filament
     double                      first_z = 0.;   // the first layer's print_z
+    size_t                      stale_rows = 0;  // "G1  E.. F" lines: a purge row whose X word the post-processing dropped
+    size_t                      changes_high = 0, scrapes_high = 0; // tool changes above 2 mm, and those that side-scrape
+    double                      first_layer_min_x = 0.;  // left-most extrusion of the tower's first layer (brim < 0)
     double                      tower_top = 0.;
     size_t                      skipped   = 0;  // tower layers merged out (combined_away)
     std::vector<AdaptiveLayerHeightRange> windows;
@@ -183,7 +186,16 @@ std::unique_ptr<Sliced> slice(const DynamicPrintConfig &cfg, double height)
     s->print->apply(s->model, cfg);
     s->print->validate();
     s->print->set_status_silent();
-    REQUIRE(!Test::gcode(*s->print).empty());
+    const std::string gcode = Test::gcode(*s->print);
+    REQUIRE(!gcode.empty());
+    {
+        static const std::regex stale_re(R"(^G1  E[0-9.]+ F)");
+        std::istringstream      in(gcode);
+        std::string             line;
+        while (std::getline(in, line))
+            if (std::regex_search(line, stale_re))
+                ++s->stale_rows;
+    }
 
     const Print &print = *s->print;
     for (const auto &layer : print.wipe_tower_data().tool_changes) {
@@ -199,6 +211,11 @@ std::unique_ptr<Sliced> slice(const DynamicPrintConfig &cfg, double height)
                 s->tower_top = std::max(s->tower_top, double(tcr.print_z));
             if (tcr.new_tool == 1 && tcr.initial_tool != 1)
                 s->coarse_change.insert(r3(tcr.print_z));
+            if (tcr.is_tool_change && tcr.print_z > 2.f) {
+                ++s->changes_high;
+                if (tcr.side_scrape)
+                    ++s->scrapes_high;
+            }
         }
     }
     for (const TowerExtrusion &e : s->extrusions)
@@ -208,6 +225,23 @@ std::unique_ptr<Sliced> slice(const DynamicPrintConfig &cfg, double height)
                 s->coarse_purge[r3(e.z)].insert(e.height);
         }
     s->first_z = r3(print.objects().front()->layers().front()->print_z);
+    {
+        // The first tower layer's wall and brim (the brim runs outside the tower body, x < 0 in the tower frame).
+        static const std::regex xe_re(R"(^G1 [^;]*X(-?[0-9.]+)[^;]*E[0-9.]+)");
+        for (const auto &layer : print.wipe_tower_data().tool_changes) {
+            if (layer.empty() || layer.front().combined_away)
+                continue;
+            for (const WipeTower::ToolChangeResult &tcr : layer) {
+                std::istringstream in(tcr.gcode);
+                std::string        line;
+                std::smatch        m;
+                while (std::getline(in, line))
+                    if (std::regex_search(line, m, xe_re))
+                        s->first_layer_min_x = std::min(s->first_layer_min_x, std::stod(m[1].str()));
+            }
+            break;
+        }
+    }
     for (const PrintObject *object : print.objects()) {
         if (object->model_object()->name != "cube1")
             continue;
@@ -251,7 +285,8 @@ void check_plate(const Sliced &s, double object_height, bool exact_slab)
         if (e.z <= s.first_z + 1e-4)
             continue;
         const AdaptiveLayerHeightRange &w = s.windows[e.tool];
-        if (w.max_height < 0.2 && std::abs(e.height - 0.2) < 1e-6)
+        // Bambu's 0.2 mm bridge flow, only on purge rows over a sparse band, only by a nozzle whose window ends below it.
+        if (e.purge && w.max_height < 0.2 && std::abs(e.height - 0.2) < 1e-6)
             continue;
         CHECK(e.height + 1e-3 >= w.min_height);
         CHECK(e.height <= w.max_height + 1e-3);
@@ -295,6 +330,13 @@ void check_plate(const Sliced &s, double object_height, bool exact_slab)
     CHECK(exact > 1);
     // The tower is as tall as the objects.
     CHECK_THAT(s.tower_top, WithinAbs(object_height, 2e-3));
+    // Geometry (review #1072): every purge row names its X (no row extruded in one spot), every tool change above the
+    // brim side-scrapes (the H3C presets turn it on), and the tower's first layer carries its wall and brim.
+    CHECK(s.stale_rows == 0);
+    REQUIRE(s.changes_high > 0);
+    CAPTURE(s.scrapes_high, s.changes_high);
+    CHECK(double(s.scrapes_high) >= 0.9 * double(s.changes_high));
+    CHECK(s.first_layer_min_x < -0.5);
 }
 
 std::vector<std::string> tower_height_warnings(const DynamicPrintConfig &cfg)
@@ -333,10 +375,23 @@ TEST_CASE("ALM tower: H3C 0.2 + 0.8 - the 0.8 never lays a 0.1 mm tower line", "
     check_plate(*s, 4., true);
 }
 
-TEST_CASE("ALM tower: H2D 0.2 / 0.4 - the 0.4 follows its 0.2 mm slabs", "[ALMTower][PrintGCode]")
+TEST_CASE("ALM tower: H2D 0.2 / 0.4 - no merged ladder off the rack, the tower as main prints it", "[ALMTower][PrintGCode]")
 {
+    // Lead decision on review #1072 (e): the merged ladder runs on the single-extruder rack (H3C) only.
     const auto s = slice(h2d_mixed(), 3.);
-    check_plate(*s, 3., false);
+    REQUIRE(s->print->uses_multiple_nozzle_diameters());
+    CHECK(s->skipped == 0);
+    for (const TowerExtrusion &e : s->extrusions) {
+        CAPTURE(e.tool, e.z, e.height);
+        if (e.z <= s->first_z + 1e-4)
+            continue;
+        // The layer height, or Bambu's 0.2 mm bridge flow (purge and ramming rows over a sparse band), as on main.
+        CHECK((std::abs(e.height - 0.1) < 1e-6 || std::abs(e.height - 0.2) < 1e-6));
+    }
+    // So the mixed-diameter tower warning stays there: a 0.8 at 0.1 mm is below its 0.16 mm minimum.
+    DynamicPrintConfig cfg = h2d_mixed();
+    cfg.set_deserialize_strict({ { "nozzle_diameter", "0.2,0.8" } });
+    CHECK(tower_height_warnings(cfg).size() == 1);
 }
 
 TEST_CASE("ALM tower: H3C 0.4 PLA + 0.8 PETG - contact layers on a merged tower", "[ALMTower][PrintGCode]")
@@ -376,8 +431,9 @@ TEST_CASE("ALM tower: the pre-slice footprint estimate covers the generated mixe
     REQUIRE(depth > 0.);
     const WipeTowerFootprint fp = estimate_wipe_tower_footprint(s->print->full_print_config(), WipeTowerType::Type1, { 0, 1 }, 0.2, height);
     CAPTURE(depth, fp.depth);
-    CHECK(fp.depth >= 0.6 * depth);
-    CHECK(fp.depth <= 1.6 * depth + 1.);
+    // Not shallower than the tower (arrange and the plater box use it before slicing), and not much deeper.
+    CHECK(fp.depth >= 0.9 * depth);
+    CHECK(fp.depth <= 1.4 * depth + 1.);
 }
 
 TEST_CASE("ALM tower: the mixed-diameter tower warning only where the tower is not planned in slabs", "[ALMTower]")

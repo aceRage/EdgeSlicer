@@ -3119,6 +3119,13 @@ bool WipeTower::outer_wall_extreme_at(float z, bool across_is_x, bool positive_s
             pls     = &it->second;
         }
     }
+    // PR-C, review #1072 (b): on a merged tower the outer wall is drawn once per wall slab, at the slab's top; a layer in
+    // between has none of its own. The wall beside it is the last one drawn below.
+    if (pls == nullptr && m_merged_slabs_active) {
+        auto it = m_scrape_walls.upper_bound(z + tol);
+        if (it != m_scrape_walls.begin())
+            pls = &std::prev(it)->second;
+    }
     if (pls == nullptr)
         return false;
     return scrape_polylines_extreme_at(*pls, across_is_x, positive_side, along, out_across);
@@ -3451,6 +3458,17 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     const bool  per_nozzle = m_multi_diameter_print;
     const float pw         = per_nozzle ? tool_line_width(m_current_tool) : m_perimeter_width;
     const float fill_flow  = per_nozzle ? flow_for(m_layer_height, pw) : m_extrusion_flow;
+    // Bambu Studio 2.9.1 capped_wall_grid_width() (WipeTower.hpp:692, 716af893c): the outer wall, the sparse grid and its
+    // rectangle at min(1.25 x the nozzle, the tower line width), positions and spacing still at pw, the first layer at the
+    // full width. Edge: on the mixed-diameter (rack) tower only; Bambu does it on every tower, which would change every
+    // single-diameter H3C tower (review #1072 (i), follow-up for the port plan).
+    const float capped        = per_nozzle && m_current_tool < m_filpar.size() && m_filpar[m_current_tool].nozzle_diameter > 0.f ?
+                                    std::min(pw, m_filpar[m_current_tool].nozzle_diameter * Width_To_Nozzle_Ratio) : pw;
+    const bool  grid_narrowed = capped + WT_EPSILON < pw;
+    auto        narrow        = [&writer, this, capped](float height) {
+        writer.set_extrusion_flow(flow_for(height, capped)).change_analyzer_line_width(capped);
+    };
+    auto        widen         = [&writer, pw](float flow) { writer.set_extrusion_flow(flow).change_analyzer_line_width(pw); };
 
     WipeTowerWriter writer(m_layer_height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(fill_flow)
@@ -3523,8 +3541,14 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             writer.travel(m_left_to_right ? fill_box.ru : fill_box.lu);
 
         // inner perimeter of the sparse section, if there is space for it:
-        if (extrude_fill_wall && (fill_box.ru.y() - fill_box.rd.y() > WT_EPSILON))
+        if (extrude_fill_wall && (fill_box.ru.y() - fill_box.rd.y() > WT_EPSILON)) {
+            const bool narrow_rect = grid_narrowed && !first_layer;
+            if (narrow_rect)
+                narrow(m_layer_height);
             writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, pw, feedrate);
+            if (narrow_rect)
+                widen(fill_flow);
+        }
         // Extrude infill to support the material to be printed above.
         const float dy    = (fill_box.lu.y() - fill_box.ld.y() - pw);
         float       left  = fill_box.lu.x() + 2 * pw;
@@ -3553,6 +3577,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                 writer.extrude(writer.x(), fill_box.lu.y());
             } else {
                 // Extrude an inverse U at the left of the region and the sparse infill.
+                if (grid_narrowed)
+                    narrow(m_layer_height);
                 writer.extrude(fill_box.lu + Vec2f(pw * 2, 0.f), feedrate);
                 const int   n  = 1 + int((right - left) / m_bridging);
                 const float dx = (right - left) / n;
@@ -3561,6 +3587,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                     writer.travel(x, writer.y());
                     writer.extrude(x, i % 2 ? fill_box.rd.y() : fill_box.ru.y());
                 }
+                if (grid_narrowed)
+                    widen(fill_flow);
                 // BBS: add wipe_path for this case: only with finish rectangle
                 finish_rect_wipe_path.clear();
                 finish_rect_wipe_path.emplace_back(writer.pos());
@@ -3588,8 +3616,15 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         wall_first_layer = is_first_layer_for_slab(wall_height);
         feedrate         = calc_tower_feedrate(m_current_tool, wall_first_layer, perimeter_flow);
     }
+    // capped_wall_grid_width(): the outer wall narrowed above the first layer; the brim and chamfer loops keep pw.
+    const bool  wall_narrowed    = extrude_perimeter && grid_narrowed && !wall_first_layer;
+    const float drawn_wall_width = wall_narrowed ? capped : pw;
+    if (wall_narrowed)
+        narrow(wall_height);
     // Bambu Studio finish_layer_new(): the rib wall is needed for the brim loops even when not printed here.
     Polygon outer_wall = print_outer_wall(writer, wt_box, feedrate, extrude_perimeter);
+    if (wall_narrowed)
+        widen(flow_for(wall_height, pw));
     if (extrude_perimeter)
         record_scrape_wall(outer_wall);
 
@@ -3631,7 +3666,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     if (loops_num > 0 && m_use_rib_wall) {
         // Bambu Studio finish_layer_new(): the brim follows the rib wall.
         for (int i = 0; i < loops_num; ++i) {
-            Polygons grown = offset(outer_wall, scaled(spacing));
+            // The wall the first loop surrounds may be narrower than the loops: that loop moves in to stay against it.
+            Polygons grown = offset(outer_wall, scaled(i == 0 ? spacing - 0.5f * (pw - drawn_wall_width) : spacing));
             if (grown.empty())
                 break;
             outer_wall = std::move(grown.front());
@@ -3644,7 +3680,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     } else if (loops_num > 0) {
         box_coordinates box = wt_box;
         for (int i = 0; i < loops_num; ++i) {
-            box.expand(spacing);
+            box.expand(i == 0 ? spacing - 0.5f * (pw - drawn_wall_width) : spacing);
             // Explicit feedrate: the last F in the writer may be a travel.
             if (loop_gaps.empty())
                 writer.rectangle(box, feedrate);
@@ -3711,7 +3747,16 @@ float WipeTower::block_row_pitch(int block_key) const
 {
     // The gaps are kept per lane-independent group (PR-C); on a single-diameter plate that is the category.
     const auto it = m_block_infill_gap_width.find(m_multi_diameter_print ? (block_key & ~0xF) : block_key);
-    return m_layer_info->extra_spacing * (it == m_block_infill_gap_width.end() ? m_perimeter_width : it->second.first);
+    float      gap = it == m_block_infill_gap_width.end() ? m_perimeter_width : it->second.first;
+    // PR-C, review #1072 (d): on a mixed-diameter plate the band's purge rows lie at its own nozzle's pitch
+    // (get_block_gap_width() moves the group gap by the tool's width), so its grid has to as well.
+    if (m_multi_diameter_print)
+        for (size_t f = 0; f < m_filpar.size(); ++f)
+            if (get_gap_key(f) == (block_key & ~0xF)) {
+                gap += tool_line_width(f) - m_perimeter_width;
+                break;
+            }
+    return m_layer_info->extra_spacing * gap;
 }
 
 // Edge (#1052 review S3): rows across fill_box on the lattice origin_y + k * row, strictly inside the box (its rectangle
@@ -3742,6 +3787,10 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
     const float height     = per_nozzle && m_cur_layer_id < block.layer_heights.size() ? block.layer_heights[m_cur_layer_id] : m_layer_height;
     const float pw         = per_nozzle ? tool_line_width(filament_id) : m_perimeter_width;
     const float fill_flow  = per_nozzle ? flow_for(height, pw) : m_extrusion_flow;
+    // Bambu Studio 2.9.1 capped_wall_grid_width() (finish_block(), WipeTower.cpp:4435): the sparse grid and its rectangle at
+    // min(1.25 x the nozzle, the tower line width), not on the first layer. Mixed-diameter (rack) tower only, as above.
+    const float capped        = per_nozzle && filament_id < m_filpar.size() && m_filpar[filament_id].nozzle_diameter > 0.f ?
+                                    std::min(pw, m_filpar[filament_id].nozzle_diameter * Width_To_Nozzle_Ratio) : pw;
     WipeTowerWriter writer(height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(fill_flow)
         .set_z(m_z_pos)
@@ -3765,8 +3814,13 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
 
     std::vector<Vec2f> finish_rect_wipe_path;
     // inner perimeter of the sparse section, if there is space for it:
+    const bool grid_narrowed = capped + WT_EPSILON < pw && !first_layer;
+    if (grid_narrowed)
+        writer.set_extrusion_flow(flow_for(height, capped)).change_analyzer_line_width(capped);
     if (fill_box.ru.y() - fill_box.rd.y() > WT_EPSILON)
         writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, pw, feedrate);
+    if (grid_narrowed)
+        writer.set_extrusion_flow(fill_flow).change_analyzer_line_width(pw);
 
     // Extrude infill to support the material to be printed above.
     const float dy    = (fill_box.lu.y() - fill_box.ld.y() - pw);
@@ -3810,6 +3864,8 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
             writer.extrude(writer.x(), fill_box.lu.y());
         } else {
             // Extrude an inverse U at the left of the region and the sparse infill.
+            if (grid_narrowed)
+                writer.set_extrusion_flow(flow_for(height, capped)).change_analyzer_line_width(capped);
             writer.extrude(fill_box.lu + Vec2f(pw * 2, 0.f), feedrate);
             const int   n  = 1 + int((right - left) / m_bridging);
             const float dx = (right - left) / n;
@@ -3818,6 +3874,8 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
                 writer.travel(x, writer.y());
                 writer.extrude(x, i % 2 ? fill_box.rd.y() : fill_box.ru.y());
             }
+            if (grid_narrowed)
+                writer.set_extrusion_flow(fill_flow).change_analyzer_line_width(pw);
             finish_rect_wipe_path.clear();
             // BBS: add wipe_path for this case: only with finish rectangle
             finish_rect_wipe_path.emplace_back(writer.pos());
@@ -5085,7 +5143,8 @@ void WipeTower::plan_merged_slabs()
         std::vector<float>                      lane_depth(1, 0.f);
         for (const GroupEvent &event : events) {
             const int  step          = event.step;
-            const int  max_available = std::min(step + 1, max_merge_layers);
+            // Edge (review #1072 (c)): no slab reaches into the foundation, laid at the first layer's height by every nozzle.
+            const int  max_available = std::min(m_foundation_required ? std::max(1, step) : step + 1, max_merge_layers);
             SlabChoice in_use, fresh;
             int        unreachable_merge = 1;
             float      unreachable_delta = std::numeric_limits<float>::max();
@@ -5431,7 +5490,10 @@ void WipeTower::plan_merged_block_fill()
         return;
 
     const int               n = int(printed.size());
-    const std::vector<char> reservable(n, 1); // a band left empty is fine, the wall planner keeps the layer alive
+    std::vector<char>       reservable(n, 1); // a band left empty is fine, the wall planner keeps the layer alive
+    // Edge (review #1072 (c)): no band fill swallows the foundation, laid at the first layer's height by every nozzle.
+    if (m_foundation_required)
+        reservable[0] = 0;
     const int               wall_filament = get_wall_filament_for_all_layer();
 
     // Only a layer that lays its bands down through the block bookkeeping reads the merged height back; one
@@ -5936,9 +5998,15 @@ void WipeTower::plan_merged_outer_wall()
 
     // The layer routine draws the wall from the planned height on every layer, so any of them can top a group.
     const std::vector<char>       can_merge_top(n, 1);
-    const double                  bottom_z = tower_bed_z();
+    // Edge (review #1072 (c)): the foundation, the tower's first layer, is laid at the first layer's height by every nozzle,
+    // as the objects' layer 0 is (Edge never merges layer 0). It keeps its own wall and brim, and the wall ladder starts on
+    // top of it; Bambu lets the first wall slab reach down to the bed instead.
+    const int                     first_step = m_foundation_required && n > 1 ? 1 : 0;
+    const double                  bottom_z   = first_step > 0 ? double(m_plan[printed[0]].z) : tower_bed_z();
     std::vector<MergeLadderGroup> groups;
-    if (!plan_band_merge_ladder(printed, 0, n - 1, bottom_z, visitors, reservable, can_merge_top, groups, 0.f, false, 0.f)) {
+    if (n == 1)
+        return;
+    if (!plan_band_merge_ladder(printed, first_step, n - 1, bottom_z, visitors, reservable, can_merge_top, groups, 0.f, false, 0.f)) {
         BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot lay out a wall ladder over the printed tower layers "
                                    << printed.front() << ".." << printed.back()
                                    << "; keeping the existing per-layer wall plan";
@@ -6164,11 +6232,30 @@ void WipeTower::get_all_wall_skip_points()
         return;
     const std::vector<float> y_shifts = layer_y_shifts();
     for (size_t i = 0; i < m_plan.size(); ++i) {
-        // PR-C (Bambu Studio 2.9.1 get_all_wall_skip_points(), WipeTower.cpp:3435-3437): a layer the tower drops, and a layer
-        // whose wall a merged group above prints, cut no gaps.
-        if (layer_is_skipped(int(i)) || (i < m_wall_reserved.size() && m_wall_reserved[i]))
+        // PR-C (Bambu Studio 2.9.1 get_all_wall_skip_points(), WipeTower.cpp:3435-3437): a layer the tower drops cuts no gaps.
+        if (layer_is_skipped(int(i)))
             continue;
         get_wall_skip_points(m_plan[i], int(i), y_shifts);
+    }
+    // Edge (review #1072 (f)): Bambu also skips a layer whose wall a merged group above prints, which loses the gap of a
+    // contact change landing there (and the ones it cuts below). That wall is drawn at the group's top layer, through the
+    // Z of the reserved layer, so its gaps move there: the next layer up that draws a wall.
+    if (m_merged_slabs_active) {
+        for (size_t i = 0; i < m_plan.size() && i < m_wall_reserved.size(); ++i) {
+            if (!m_wall_reserved[i] || m_wall_skip_points[i].empty())
+                continue;
+            size_t j = i + 1;
+            while (j < m_plan.size() && (layer_is_skipped(int(j)) || (j < m_wall_reserved.size() && m_wall_reserved[j])))
+                ++j;
+            if (j < m_plan.size())
+                for (const Vec2f &p : m_wall_skip_points[i]) {
+                    const Vec2f moved(p.x(), p.y() + y_shifts[i] - y_shifts[j]);
+                    std::vector<Vec2f> &points = m_wall_skip_points[j];
+                    if (std::none_of(points.begin(), points.end(), [&moved](const Vec2f &q) { return (moved - q).squaredNorm() < 1e-6f; }))
+                        points.push_back(moved);
+                }
+            m_wall_skip_points[i].clear();
+        }
     }
 }
 
@@ -6677,7 +6764,8 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
         const bool  extrude_outer_wall = !only_generate_wall && !wall_reserved;
         const float wall_height        = merged && m_cur_layer_id < m_wall_slab_height.size() && m_wall_slab_height[m_cur_layer_id] > 0.f ?
                                              m_wall_slab_height[m_cur_layer_id] : m_layer_height;
-        if (wall_idx != -1 && m_merged_slabs_active && !filament_can_print_height(wall_idx, wall_height))
+        // Review #1072 (j): not on a layer whose wall a group above draws (none is drawn here).
+        if (wall_idx != -1 && m_merged_slabs_active && !wall_reserved && !filament_can_print_height(wall_idx, wall_height))
             BOOST_LOG_TRIVIAL(warning) << "WipeTower: no nozzle on layer " << m_cur_layer_id
                                        << " covers the wall layer height, drawing the wall with filament " << wall_idx;
 
