@@ -16,8 +16,10 @@
 // LATER PHASES BUILD ON THIS OUTPUT WITHOUT RESHAPING IT:
 //  - P2 (dowels, built): connector sites per cut face (SplitFace::sites, SplitPlan::sites), placed
 //    by split_plan_grid() when SplitOptions::dowels is on and baked by split_apply().
-//  - P3 (plane adjustment) moves SplitPlane::pos away from SplitPlane::nominal; pinned planes are
-//    already kept where the user put them.
+//  - P3 (plane adjustment, built): with SplitOptions::adjust_planes, split_plan_grid() moves each
+//    free plane up to adjust_limit mm away from SplitPlane::nominal to a cheaper place to cut
+//    (split_section_cost(), design 3.5); pinned planes stay where the user put them. P3 also adds the
+//    part checks (very small part, no flat face to stand on) to the preview and to split_apply().
 //  - The cut-face labels (later phase) emboss SplitFace::mate_code on both faces of a pair: every
 //    face has a stable key and a code the two mating faces share.
 
@@ -125,6 +127,49 @@ struct SplitSite
     std::string name;
 };
 
+// ---- plane adjustment (P3, design 3.5) ------------------------------------------------------------
+
+// The weights of the section cost and the hard rules, in one place so tests can pin them and a retune
+// is one edit. cost = small * n_small + nodowel * f_nodowel + busy * f_busy + ragged * f_ragged + away * f_away.
+struct SplitAdjustConstants
+{
+    double w_small{ 1.0 };    // per island too small for a dowel and its wall margin
+    double w_nodowel{ 2.0 };  // share of the section's material that cannot take a dowel (dowels on only)
+    double w_busy{ 1.0 };     // how fast the section changes around the plane (detail, a sloped or flat face)
+    double w_ragged{ 0.5 };   // how frilly the outline is compared with a circle of the same area
+    double w_away{ 0.2 };     // distance from the plane's nominal position, as a share of the limit
+    double step{ 1.0 };       // mm between candidate positions
+    // Rule 3: no plane within `jump_distance` of a place where the section changes by more than
+    // `jump_ratio` of itself (a cut that shaves a flat face leaves a paper-thin skin).
+    double jump_ratio{ 0.30 };
+    double jump_distance{ 1.0 };
+    // An axis with more planes than this is left as laid out (the search slices every candidate).
+    int    max_planes_per_axis{ 64 };
+};
+
+// The terms of one candidate position's cost (design 3.5), unweighted, and the weighted total.
+struct SplitSectionCost
+{
+    int    small{ 0 };
+    double nodowel{ 0. };
+    double busy{ 0. };
+    double ragged{ 0. };
+    double away{ 0. };
+    double area{ 0. };   // mm2 of material on the section
+    double total{ 0. };
+};
+
+// Why adjustment moved a plane (SplitWarning::detail of PlaneMoved).
+enum class SplitAdjustReason : int {
+    Better        = 0,   // a cheaper place overall
+    ThinPieces    = 1,   // fewer small, thin pieces on the cut face
+    DowelRoom     = 2,   // more of the face has room for a dowel
+    FineDetail    = 3,   // away from fine detail (the section changes fast there)
+    RaggedOutline = 4,   // a simpler outline
+    FlatFace      = 5,   // the nominal place was too close to a flat face (rule 3)
+    KeepFit       = 6,   // moved so a neighbouring part stays within the usable size
+};
+
 struct SplitOptions
 {
     // D2: 5 mm each side in X / Y (brim / skirt allowance and the arranger's own shrink), 5 mm at the top.
@@ -142,7 +187,19 @@ struct SplitOptions
     std::vector<SplitPinnedPlane> pinned;
     // P2: automatic dowels on the cut faces.
     SplitDowelOptions dowels;
+    // P3: move each plane (not the pinned ones) up to `adjust_limit` mm to a better place to cut
+    // (design 3.5). The panel turns it on by default (D4); the planner's own default is off, so a
+    // plan made without asking for it is exactly P2's.
+    bool   adjust_planes{ false };
+    double adjust_limit{ 10. };
+    SplitAdjustConstants adjust;
 };
+
+// The cost of cutting through `section` (scaled ExPolygons, as slice_mesh_ex() gives them), with
+// `area_before` / `area_after` the material areas one step before and after (mm2), `shift` mm from
+// the plane's nominal place. Pure: the planner's search and the tests both call it.
+SplitSectionCost split_section_cost(const ExPolygons &section, double area_before, double area_after, double shift,
+                                    const SplitOptions &options);
 
 // What a part may measure, and where on the bed that box came from.
 struct SplitUsableVolume
@@ -171,6 +228,7 @@ struct SplitPlane
     double pos{ 0. };           // grid frame, mm: where the cut goes
     double nominal{ 0. };       // where the layout put it (P3's adjustment moves pos away from this)
     bool   pinned{ false };     // the user moved it
+    bool   adjusted{ false };   // P3: the automatic adjustment moved it (pos != nominal)
     double section_area{ 0. };  // mm2 of material the plane cuts through (0: it misses the model)
     // "X1", "Y2", "Z1": the axis letter and the 1-based index.
     std::string name() const;
@@ -190,6 +248,10 @@ struct SplitPart
     bool          fits{ false };
     // Ids of the cut faces of this part (SplitFace::id).
     std::vector<int> faces;
+    // P3: material volume in the cell (mm3; exact for a watertight model), and the area it stands on
+    // when dropped to the bed as it is: its section SPLIT_CONTACT_HEIGHT above its lowest point (mm2).
+    double        volume{ 0. };
+    double        contact_area{ 0. };
 
     Vec3d size() const { return bbox.defined ? bbox.size() : Vec3d::Zero(); }
 };
@@ -240,17 +302,32 @@ struct SplitWarning
         DowelCanTurn,        // one round dowel on the face: the parts can turn on it
         DowelShortened,      // value: the shortest dowel on the face, mm (whole length)
         DowelScaledDown,     // value: the dowel diameter used on the face, mm
+        // Plane adjustment (P3, design 3.5). plane says which.
+        PlaneMoved,          // value: the shift from the nominal place, mm (signed); detail: SplitAdjustReason
+        AdjustRefused,       // value: the shift it wanted, mm (signed); refused, a part would exceed the usable size
+        PlaneInDetail,       // value: the limit, mm; the plane still cuts fine detail, nothing better within it
+        AdjustImpossible,    // value: the axis; no placement keeps every part within the rules, planes left as laid out
+        // Preview and after Apply (P3, design 3.7). part says which.
+        SmallPart,           // value: the part's volume, mm3 (below SPLIT_SMALL_PART_VOLUME)
+        NoFlatFace,          // value: the area it stands on, mm2 (below SPLIT_MIN_CONTACT_AREA)
     };
     Kind   kind{ Kind::NoUsableVolume };
     int    plane{ -1 };
     int    part{ -1 };
     double value{ 0. };
     int    face{ -1 };       // P2: index in SplitPlan::faces, or -1
+    int    detail{ 0 };      // P3: PlaneMoved's SplitAdjustReason
 };
 
 // SplitWarning::value of NoDowelOnFace.
 constexpr double SPLIT_NO_DOWEL_TOO_SMALL = 0.;   // no room inside the face's outline
 constexpr double SPLIT_NO_DOWEL_TOO_THIN  = 1.;   // room on the face, but too little material behind it
+
+// P3 part checks (design 3.7): a part below 1 cm3 is very small; a part whose section 0.3 mm above its
+// lowest point is below 1 cm2 has no flat face to stand on (it needs supports or turning by hand, D11).
+constexpr double SPLIT_SMALL_PART_VOLUME = 1000.;
+constexpr double SPLIT_MIN_CONTACT_AREA  = 100.;
+constexpr double SPLIT_CONTACT_HEIGHT    = 0.3;
 
 struct SplitPlan
 {
@@ -314,7 +391,7 @@ struct SplitApplyResult
     // P2: the loose dowels (or pins), one object each, owned by `model`, in SplitPlan::sites order,
     // named "<object>-Dowel-<site>" ("-Pin-"), standing where they sit in the assembled model.
     std::vector<ModelObject*> dowels;
-    std::vector<SplitWarning> warnings;   // the after-Apply ones (LoosePieces, OpenEdges)
+    std::vector<SplitWarning> warnings;   // the after-Apply ones (LoosePieces, OpenEdges, SmallPart, NoFlatFace)
     bool                      canceled{ false };
 
     SplitApplyResult();

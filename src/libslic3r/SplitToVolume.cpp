@@ -299,6 +299,47 @@ std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf 
     return out;
 }
 
+// ---- plane adjustment (P3) ----------------------------------------------------------------------------
+
+SplitSectionCost split_section_cost(const ExPolygons &section, double area_before, double area_after, double shift,
+                                    const SplitOptions &options)
+{
+    using namespace split_to_volume_detail;
+    const SplitAdjustConstants &k = options.adjust;
+    const SplitDowelOptions    &d = options.dowels;
+    SplitSectionCost            c;
+
+    // An island smaller than a dowel with its wall margin all round is a thin piece.
+    const double r          = 0.5 * std::max(0., d.diameter);
+    const double small_area = PI * (r + d.wall_margin) * (r + d.wall_margin);
+    // Where a full-size dowel's centre may go: inset by the wall margin and the hole's footprint.
+    const bool   dowels     = d.enabled && d.diameter > 0. && d.length > 0.;
+    const float  inset      = dowels ? float(scale_(d.wall_margin + site_footprint_radius(d, d.diameter, 0.5 * d.length))) : 0.f;
+
+    double perimeter = 0., takes_dowel = 0.;
+    for (const ExPolygon &ex : section) {
+        const double a = ex.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (a < MIN_FACE_AREA)
+            continue;
+        c.area += a;
+        perimeter += ex.contour.length() * SCALING_FACTOR;
+        for (const Polygon &h : ex.holes)
+            perimeter += h.length() * SCALING_FACTOR;
+        if (a < small_area)
+            ++c.small;
+        if (dowels && !offset_ex(ex, -inset).empty())
+            takes_dowel += a;
+    }
+    if (dowels && c.area > 0.)
+        c.nodowel = std::clamp(1. - takes_dowel / c.area, 0., 1.);
+    c.busy = std::min(1., std::abs(area_after - area_before) / std::max(c.area, 1.));
+    if (c.area > 0.)
+        c.ragged = std::clamp(perimeter / (2. * std::sqrt(PI * c.area)) - 1., 0., 1.);
+    c.away  = options.adjust_limit > 0. ? std::min(1., std::abs(shift) / options.adjust_limit) : 0.;
+    c.total = k.w_small * double(c.small) + k.w_nodowel * c.nodowel + k.w_busy * c.busy + k.w_ragged * c.ragged + k.w_away * c.away;
+    return c;
+}
+
 // ---- names ------------------------------------------------------------------------------------------
 
 std::string SplitPlane::name() const
@@ -658,6 +699,239 @@ static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, cons
     }
 }
 
+// Sections of `mesh` across `axis` at every position of `zs`, as material areas and outlines.
+// `zs` need not be sorted or unique.
+struct AxisSections
+{
+    std::vector<float>      zs;      // sorted, unique
+    std::vector<ExPolygons> slices;
+    std::vector<double>     areas;   // mm2
+
+    size_t index(double z) const
+    {
+        const float f  = float(z);
+        auto        it = std::lower_bound(zs.begin(), zs.end(), f);
+        if (it == zs.end())
+            --it;
+        return size_t(it - zs.begin());
+    }
+};
+
+static AxisSections slice_axis(const indexed_triangle_set &mesh, int axis, std::vector<float> zs, const std::function<void()> &cancel_point)
+{
+    AxisSections out;
+    std::sort(zs.begin(), zs.end());
+    zs.erase(std::unique(zs.begin(), zs.end()), zs.end());
+    out.zs = std::move(zs);
+    if (out.zs.empty())
+        return out;
+    MeshSlicingParamsEx params;
+    params.trafo = axis_to_z(axis);
+    out.slices   = slice_mesh_ex(mesh, out.zs, params, [&cancel_point]() { cancel_point(); });
+    out.slices.resize(out.zs.size());
+    out.areas.reserve(out.slices.size());
+    for (const ExPolygons &s : out.slices) {
+        double a = 0.;
+        for (const ExPolygon &ex : s)
+            if (const double ea = ex.area() * SCALING_FACTOR * SCALING_FACTOR; ea >= MIN_FACE_AREA)
+                a += ea;
+        out.areas.push_back(a);
+    }
+    return out;
+}
+
+// Design 3.5: per axis, every free plane tries positions nominal + k * step (|k| * step <= limit);
+// each is costed from its section (split_section_cost()) and the hard rules decide which ones may be
+// combined: every part between two planes (or a plane and the model's end) no longer than the usable
+// size (rule 1) and no thinner than the smallest part (rule 2), and no plane near a jump in the section
+// (rule 3). Dynamic programming over the planes in order finds the cheapest combination. Pinned planes
+// stay where the user put them. Writes the new positions into plan.planes and the adjustment warnings.
+static void adjust_planes(SplitPlan &plan, const indexed_triangle_set &mesh, const SplitOptions &options,
+                          const std::function<void()> &cancel_point)
+{
+    const SplitAdjustConstants &kc    = options.adjust;
+    const double                limit = std::clamp(options.adjust_limit, 0., 100.);
+    const double                step  = kc.step > 0. ? kc.step : 1.;
+    const int                   K     = int(std::floor(limit / step + 1e-9));
+    if (K <= 0)
+        return;
+    const double hs = 0.5 * step;            // sections are taken every half step
+    const int    H  = 2 * K + 2;             // half steps each side of the nominal place
+    const int    J  = std::clamp(int(std::lround(kc.jump_distance / hs)), 0, 2);
+    const double inf = std::numeric_limits<double>::infinity();
+    const Vec3d  lo  = plan.model_bbox.min;
+    const Vec3d  hi  = plan.model_bbox.max;
+
+    // Candidate order k = 0, -1, +1, -2, +2, ...: an exact tie goes to the smaller move.
+    std::vector<int> ks{ 0 };
+    for (int k = 1; k <= K; ++k) {
+        ks.push_back(-k);
+        ks.push_back(k);
+    }
+
+    for (int a = 0; a < 3; ++a) {
+        std::vector<int> idx;
+        for (size_t i = 0; i < plan.planes.size(); ++i)
+            if (plan.planes[i].axis == a)
+                idx.push_back(int(i));
+        if (idx.empty() || int(idx.size()) > kc.max_planes_per_axis)
+            continue;
+        if (std::all_of(idx.begin(), idx.end(), [&plan](int i) { return plan.planes[size_t(i)].pinned; }))
+            continue;
+
+        const double U     = plan.usable.size[a];
+        const double min_t = std::min(options.min_part_thickness, 0.5 * U);
+        auto         span_ok = [U, min_t](double span) { return span <= U + POS_EPS && span >= min_t - POS_EPS; };
+        auto         fits_U  = [U](double span) { return span <= U + POS_EPS; };
+
+        // The planes as laid out must already keep to the rules; a user's plane that made a part too
+        // long is reported as a part that does not fit, and this axis is left alone.
+        {
+            double prev = lo[a];
+            bool   ok   = true;
+            for (int i : idx) {
+                ok   = ok && span_ok(plan.planes[size_t(i)].pos - prev);
+                prev = plan.planes[size_t(i)].pos;
+            }
+            if (!ok || !span_ok(hi[a] - prev))
+                continue;
+        }
+
+        // Every section the free planes need, in one slicing pass.
+        std::vector<float> zs;
+        for (int i : idx) {
+            const SplitPlane &pl = plan.planes[size_t(i)];
+            if (!pl.pinned)
+                for (int j = -H; j <= H; ++j)
+                    zs.push_back(float(pl.nominal + double(j) * hs));
+        }
+        const AxisSections sec = slice_axis(mesh, a, std::move(zs), cancel_point);
+        cancel_point();
+
+        struct Cand
+        {
+            double           pos{ 0. };
+            int              k{ 0 };
+            bool             jump{ false };   // rule 3
+            SplitSectionCost cost;
+        };
+        std::vector<std::vector<Cand>> cands(idx.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            const SplitPlane &pl = plan.planes[size_t(idx[i])];
+            if (pl.pinned) {
+                Cand c;
+                c.pos = pl.pos;
+                cands[i].push_back(c);
+                continue;
+            }
+            auto area_at = [&](int j) { return sec.areas[sec.index(pl.nominal + double(j) * hs)]; };
+            for (int k : ks) {
+                Cand c;
+                c.k   = k;
+                c.pos = pl.nominal + double(k) * step;
+                for (int j = 2 * k - J; j < 2 * k + J; ++j) {
+                    const double a0 = area_at(j), a1 = area_at(j + 1);
+                    const double big = std::max(a0, a1);
+                    if (big >= MIN_FACE_AREA && std::abs(a1 - a0) > kc.jump_ratio * big)
+                        c.jump = true;
+                }
+                c.cost = split_section_cost(sec.slices[sec.index(pl.nominal + double(2 * k) * hs)], area_at(2 * k - 2), area_at(2 * k + 2),
+                                            double(k) * step, options);
+                cands[i].push_back(c);
+            }
+        }
+
+        // Dynamic programming over the planes in order.
+        std::vector<std::vector<double>> best(idx.size());
+        std::vector<std::vector<int>>    from(idx.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            best[i].assign(cands[i].size(), inf);
+            from[i].assign(cands[i].size(), -1);
+            for (size_t c = 0; c < cands[i].size(); ++c) {
+                const Cand &cd = cands[i][c];
+                if (cd.jump)
+                    continue;
+                if (i == 0) {
+                    if (span_ok(cd.pos - lo[a]))
+                        best[i][c] = cd.cost.total;
+                    continue;
+                }
+                for (size_t p = 0; p < cands[i - 1].size(); ++p)
+                    if (best[i - 1][p] < inf && span_ok(cd.pos - cands[i - 1][p].pos) && best[i - 1][p] + cd.cost.total < best[i][c] - 1e-12) {
+                        best[i][c] = best[i - 1][p] + cd.cost.total;
+                        from[i][c] = int(p);
+                    }
+            }
+        }
+        int    last = -1;
+        double total = inf;
+        for (size_t c = 0; c < cands.back().size(); ++c)
+            if (best.back()[c] < inf && span_ok(hi[a] - cands.back()[c].pos) && best.back()[c] < total - 1e-12) {
+                total = best.back()[c];
+                last  = int(c);
+            }
+        if (last < 0) {
+            // Rule 3 ruled out every combination: the planes stay as laid out.
+            plan.warnings.push_back({ SplitWarning::Kind::AdjustImpossible, idx.front(), -1, double(a) });
+            continue;
+        }
+        std::vector<int> chosen(idx.size(), 0);
+        for (int i = int(idx.size()) - 1, c = last; i >= 0; --i) {
+            chosen[size_t(i)] = c;
+            c                 = from[size_t(i)][size_t(c)];
+        }
+
+        for (size_t i = 0; i < idx.size(); ++i) {
+            SplitPlane &pl = plan.planes[size_t(idx[i])];
+            if (pl.pinned)
+                continue;
+            const Cand &ch  = cands[i][size_t(chosen[i])];
+            const Cand &nom = cands[i].front();   // k = 0
+            pl.pos          = ch.pos;
+            pl.adjusted     = ch.k != 0;
+            const double prev = i == 0 ? lo[a] : cands[i - 1][size_t(chosen[i - 1])].pos;
+            const double next = i + 1 == idx.size() ? hi[a] : cands[i + 1][size_t(chosen[i + 1])].pos;
+
+            if (pl.adjusted) {
+                SplitAdjustReason why = SplitAdjustReason::Better;
+                if (nom.jump)
+                    why = SplitAdjustReason::FlatFace;
+                else if (nom.cost.total <= ch.cost.total + 1e-12)
+                    why = SplitAdjustReason::KeepFit;   // moved for a neighbour, not for its own section
+                else {
+                    // The term that gained the most.
+                    const double gains[4] = { kc.w_small * double(nom.cost.small - ch.cost.small), kc.w_nodowel * (nom.cost.nodowel - ch.cost.nodowel),
+                                              kc.w_busy * (nom.cost.busy - ch.cost.busy), kc.w_ragged * (nom.cost.ragged - ch.cost.ragged) };
+                    static const SplitAdjustReason reasons[4] = { SplitAdjustReason::ThinPieces, SplitAdjustReason::DowelRoom,
+                                                                  SplitAdjustReason::FineDetail, SplitAdjustReason::RaggedOutline };
+                    double top = 1e-9;
+                    for (int t = 0; t < 4; ++t)
+                        if (gains[t] > top) {
+                            top = gains[t];
+                            why = reasons[t];
+                        }
+                }
+                SplitWarning w{ SplitWarning::Kind::PlaneMoved, idx[i], -1, ch.pos - pl.nominal };
+                w.detail = int(why);
+                plan.warnings.push_back(w);
+            }
+
+            // The cheapest place rule 3 allows, if rule 1 alone kept the plane from it.
+            const Cand *free_best = nullptr;
+            for (const Cand &c : cands[i])
+                if (!c.jump && (free_best == nullptr || c.cost.total < free_best->cost.total - 1e-12))
+                    free_best = &c;
+            if (free_best != nullptr && free_best->cost.total < ch.cost.total - 1e-9 &&
+                (!fits_U(free_best->pos - prev) || !fits_U(next - free_best->pos)))
+                plan.warnings.push_back({ SplitWarning::Kind::AdjustRefused, idx[i], -1, free_best->pos - pl.nominal });
+
+            // Still through fine detail or thin pieces: nothing better within the limit.
+            if (ch.cost.busy >= 0.5 || ch.cost.small > 0)
+                plan.warnings.push_back({ SplitWarning::Kind::PlaneInDetail, idx[i], -1, limit });
+        }
+    }
+}
+
 } // namespace split_to_volume_detail
 
 SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVolume &usable, const SplitOptions &options,
@@ -754,6 +1028,13 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
         positions[a] = plan.plane_positions(a);
     }
 
+    // 2b. P3: move the free planes to better places to cut (design 3.5). Order along each axis is kept.
+    if (options.adjust_planes) {
+        adjust_planes(plan, mesh, options, cancel_point);
+        for (int a = 0; a < 3; ++a)
+            positions[a] = plan.plane_positions(a);
+    }
+
     // 3. Sections of every plane: material area, the hollow check (D6), and what the faces see.
     //    One slice_mesh_ex() call per axis, the mesh turned so the axis is Z.
     std::vector<ExPolygons> sections(plan.planes.size());
@@ -804,6 +1085,14 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
     auto cell_lo = [&](int a, int c) { return c == 0 ? lo[a] : positions[a][size_t(c) - 1]; };
     auto cell_hi = [&](int a, int c) { return c == plan.counts[a] - 1 ? hi[a] : positions[a][size_t(c)]; };
 
+    // P3: each cell's material volume by the divergence theorem: the signed tetrahedra of the surface
+    // clipped to the cell (from the model's centre), plus the caps on the cell's planes (step 5).
+    std::vector<double> volumes(plan.parts.size(), 0.);
+    const Vec3d         origin = plan.model_bbox.center();
+    auto tet = [&origin](const Vec3d &p0, const Vec3d &p1, const Vec3d &p2) {
+        return (p0 - origin).dot((p1 - origin).cross(p2 - origin)) / 6.;
+    };
+
     std::vector<Vec3d> poly;
     for (size_t f = 0; f < mesh.indices.size(); ++f) {
         if ((f & 0xFFFF) == 0)
@@ -820,9 +1109,11 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
             single          = single && c0[a] == c1[a];
         }
         if (single) {
-            BoundingBoxf3 &bb = boxes[size_t(plan.cell_index({ { c0[0], c0[1], c0[2] } }))];
+            const size_t   ci = size_t(plan.cell_index({ { c0[0], c0[1], c0[2] } }));
+            BoundingBoxf3 &bb = boxes[ci];
             for (const Vec3d &p : v)
                 bb.merge(p);
+            volumes[ci] += tet(v[0], v[1], v[2]);
             continue;
         }
         for (int k = c0[2]; k <= c1[2]; ++k)
@@ -838,9 +1129,12 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
                     }
                     if (poly.empty())
                         continue;
-                    BoundingBoxf3 &bb = boxes[size_t(plan.cell_index({ { i, j, k } }))];
+                    const size_t   ci = size_t(plan.cell_index({ { i, j, k } }));
+                    BoundingBoxf3 &bb = boxes[ci];
                     for (const Vec3d &p : poly)
                         bb.merge(p);
+                    for (size_t q = 1; q + 1 < poly.size(); ++q)
+                        volumes[ci] += tet(poly[0], poly[q], poly[q + 1]);
                 }
     }
 
@@ -912,10 +1206,16 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
                 above[a]        = pl.index + 1;
                 const int pb    = plan.cell_index(below);
                 const int pa    = plan.cell_index(above);
-                if (plan.parts[size_t(pb)].empty || plan.parts[size_t(pa)].empty)
+                if (plan.parts[size_t(pb)].empty && plan.parts[size_t(pa)].empty)
                     continue;
                 const Polygon rect = scaled_rect(cell_lo(ua, below[ua]), cell_lo(va, below[va]), cell_hi(ua, below[ua]), cell_hi(va, below[va]));
                 const double  area = expolygons_area_mm2(intersection_ex(sections[pi], Polygons{ rect }));
+                // P3: the cap closes both cells' volumes (outward normal +axis below the plane, -axis above).
+                const double cap = (pl.pos - origin[a]) * area / 3.;
+                volumes[size_t(pb)] += cap;
+                volumes[size_t(pa)] -= cap;
+                if (plan.parts[size_t(pb)].empty || plan.parts[size_t(pa)].empty)
+                    continue;
                 if (area < MIN_FACE_AREA)
                     continue;
                 SplitFace face;
@@ -944,6 +1244,31 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
                 plan.parts[size_t(pa)].faces.push_back(face.id);
                 plan.faces.push_back(std::move(face));
             }
+    }
+
+    // 5b. P3 part checks (design 3.7): volume, and the area each part stands on when dropped to the bed
+    //     as it is (its section a little above its lowest point, inside its cell). Only for a split.
+    if (!plan.planes.empty()) {
+        std::vector<float> heights;
+        auto contact_z = [](const SplitPart &p) { return p.bbox.min.z() + std::min(SPLIT_CONTACT_HEIGHT, 0.5 * p.size().z()); };
+        for (SplitPart &p : plan.parts)
+            if (!p.empty)
+                heights.push_back(float(contact_z(p)));
+        const AxisSections bottoms = slice_axis(mesh, 2, std::move(heights), cancel_point);
+        for (size_t ci = 0; ci < plan.parts.size(); ++ci) {
+            SplitPart &p = plan.parts[ci];
+            if (p.empty)
+                continue;
+            p.volume              = std::max(0., volumes[ci]);
+            const SplitCell &cell = p.cell;
+            const Polygon    rect = scaled_rect(cell_lo(0, cell[0]), cell_lo(1, cell[1]), cell_hi(0, cell[0]), cell_hi(1, cell[1]));
+            if (!bottoms.zs.empty())
+                p.contact_area = expolygons_area_mm2(intersection_ex(bottoms.slices[bottoms.index(contact_z(p))], Polygons{ rect }));
+            if (p.volume < SPLIT_SMALL_PART_VOLUME)
+                plan.warnings.push_back({ SplitWarning::Kind::SmallPart, -1, int(ci), p.volume });
+            else if (p.contact_area < SPLIT_MIN_CONTACT_AREA)
+                plan.warnings.push_back({ SplitWarning::Kind::NoFlatFace, -1, int(ci), p.contact_area });
+        }
     }
 
     // 6. Dowel sites (P2, design 3.6), face by face.
@@ -1030,6 +1355,24 @@ static double clear_of_vertices(const ModelObject &piece, int axis, double pos)
             return pos - double(k) * STEP;
     }
     return pos;
+}
+
+// P3: the area a mesh stands on when dropped to the bed as it is: its section SPLIT_CONTACT_HEIGHT
+// above its lowest point (mm2).
+static double contact_area_of(const indexed_triangle_set &its)
+{
+    if (its.vertices.empty())
+        return 0.;
+    float zmin = std::numeric_limits<float>::max(), zmax = std::numeric_limits<float>::lowest();
+    for (const Vec3f &v : its.vertices) {
+        zmin = std::min(zmin, v.z());
+        zmax = std::max(zmax, v.z());
+    }
+    const float z = zmin + float(std::min(SPLIT_CONTACT_HEIGHT, 0.5 * double(zmax - zmin)));
+    const std::vector<float>      zs{ z };
+    MeshSlicingParamsEx           params;
+    const std::vector<ExPolygons> s = slice_mesh_ex(its, zs, params);
+    return s.empty() ? 0. : expolygons_area_mm2(s.front());
 }
 
 static size_t model_part_open_edges(const ModelObject &object)
@@ -1306,6 +1649,12 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
             result.warnings.push_back({ SplitWarning::Kind::LoosePieces, -1, pi, double(pieces) });
         if (open > 0)
             result.warnings.push_back({ SplitWarning::Kind::OpenEdges, -1, pi, double(open) });
+        // P3 (design 3.7): a very small part, or one with nothing flat to stand on (D11 keeps its pose).
+        const double volume = std::abs(double(its_volume(merged)));
+        if (volume < SPLIT_SMALL_PART_VOLUME)
+            result.warnings.push_back({ SplitWarning::Kind::SmallPart, -1, pi, volume });
+        else if (const double contact = contact_area_of(merged); contact < SPLIT_MIN_CONTACT_AREA)
+            result.warnings.push_back({ SplitWarning::Kind::NoFlatFace, -1, pi, contact });
     }
     return result;
 }
