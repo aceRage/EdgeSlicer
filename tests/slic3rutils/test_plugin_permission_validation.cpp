@@ -333,17 +333,25 @@ TEST_CASE("permission rejections report a reason", "[PluginPermissions]")
 TEST_CASE("permission mutation adds a normalized filesystem grant", "[PluginPermissions]")
 {
     PluginPermissions stored;
+#ifdef _WIN32
+    const std::string raw      = "  C:\\tmp\\plugin-data\\*  ";
+    const std::string expected = "C:\\tmp\\plugin-data\\*";
+#else
+    const std::string raw      = "  /tmp/plugin-data/*  ";
+    const std::string expected = "/tmp/plugin-data/*";
+#endif
     const nlohmann::json payload = {
         {"plugin_key", "hello"},
         {"request_id", "perm-1"},
         {"operation", "add"},
         {"category", "fs_read"},
-        {"value", "  /tmp/plugin-data/*  "},
+        {"value", raw},
     };
     const auto parsed = Slic3r::GUI::parse_permission_mutation(payload, stored);
+    INFO("permission error: " << parsed.error.ToStdString());
     REQUIRE(parsed.ok);
     REQUIRE(parsed.mutation.add.size() == 1);
-    CHECK(parsed.mutation.add.front().value == "/tmp/plugin-data/*");
+    CHECK(parsed.mutation.add.front().value == expected);
     CHECK_FALSE(parsed.needs_full_access_confirm);
 }
 
