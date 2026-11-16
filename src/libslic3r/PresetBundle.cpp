@@ -4473,10 +4473,11 @@ DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filamen
     const Preset* print_parent_preset =  this->prints.get_preset_parent(plate_preset);
     // A system process has no "inherits", so get_preset_parent() finds no parent for it and an
     // edited system process was saved with no "different_settings_to_system" entry. On open,
-    // load_external_preset() then put every changed value back to the system preset's (curved
-    // tops hand test 2026-11-15: curved_tops_enabled lost on every open). Before Per-nozzle process
-    // P8 this was get_selected_preset_parent(), which is the system preset itself for a system
-    // selection (and the default preset for a user preset of its own); keep that reference.
+    // load_external_preset() then put every changed value back to the system preset's (hand
+    // test 2026-11-15, PR #1021). Before Per-nozzle process P8 this was get_selected_preset_parent(),
+    // which is the system preset itself for a system selection (and the default preset for a user
+    // preset of its own); keep that reference. While a tool's profile is shown, the selected preset
+    // is the tool's, so the plate's own stored preset is the reference.
     if (print_parent_preset == nullptr && plate_preset.inherits().empty()) {
         if (m_tool_view.extruder < 0) {
             print_parent_preset = this->prints.get_selected_preset_parent();

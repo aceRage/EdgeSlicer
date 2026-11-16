@@ -14,8 +14,8 @@
 // turned except split_apply(), which says so where it matters.
 //
 // LATER PHASES BUILD ON THIS OUTPUT WITHOUT RESHAPING IT:
-//  - P2 (dowels) adds connector sites per cut face: SplitFace is already one plane's section clipped
-//    to one pair of neighbouring cells, which is exactly where a site belongs.
+//  - P2 (dowels, built): connector sites per cut face (SplitFace::sites, SplitPlan::sites), placed
+//    by split_plan_grid() when SplitOptions::dowels is on and baked by split_apply().
 //  - P3 (plane adjustment) moves SplitPlane::pos away from SplitPlane::nominal; pinned planes are
 //    already kept where the user put them.
 //  - The cut-face labels (later phase) emboss SplitFace::mate_code on both faces of a pair: every
@@ -71,6 +71,60 @@ struct SplitPinnedPlane
     double pos{ 0. };   // grid frame, mm
 };
 
+// ---- automatic dowels (P2, design 3.6) ------------------------------------------------------------
+
+// D16: only the loose, symmetric connectors (no Plug / Snap in v1).
+enum class SplitConnectorType : int {
+    Dowel = 0,   // the Cut tool's Dowel: a loose prism, half in each part
+    Pin   = 1,   // the push-fit Pin (PushFit.hpp): a loose printed pin
+};
+
+// The Cut tool's connector shapes for a Dowel (a Pin is always round).
+enum class SplitDowelShape : int { Round = 0, Square = 1, Hexagon = 2, Triangle = 3 };
+
+struct SplitDowelOptions
+{
+    // The panel turns dowels on by default (D3); the planner's own default is off, so a plan made
+    // without asking for them is exactly P1's.
+    bool               enabled{ false };
+    SplitConnectorType type{ SplitConnectorType::Dowel };
+    SplitDowelShape    shape{ SplitDowelShape::Round };
+    // D3: 6 mm diameter, 20 mm long (10 mm into each part), up to 3 per cut face.
+    double diameter{ 6. };
+    double length{ 20. };
+    int    max_per_face{ 3 };
+    // No dowel centre closer than wall_margin + footprint radius to the face's outline.
+    double wall_margin{ 3. };
+    // Dowels on one face at least this far apart, centre to centre.
+    double min_spacing{ 20. };
+    // Radial clearance of each hole (mm per side); the depth tolerance is the Cut tool's default.
+    double tolerance{ 0.1 };
+    double depth_tolerance{ 0.1 };
+    // A face with no room for the full size tries 0.75 and 0.5 of it (never below 2 mm diameter).
+    bool   scale_down{ true };
+    // No dowel body (with its hole) comes closer than this to another cut plane (design 3.6, R1, R6).
+    double corner_keepout{ 2. };
+    // Material left beyond the end of a hole, along the dowel (the depth check).
+    double min_material{ 1.5 };
+};
+
+// One dowel site on a cut face. The dowel straddles the plane: half_length into each part.
+struct SplitSite
+{
+    int         face{ -1 };       // index in SplitPlan::faces
+    int         plane{ -1 };      // index in SplitPlan::planes
+    int         island{ 0 };      // which piece of material on the face, 0 = the largest
+    Vec3d       pos{ Vec3d::Zero() }; // grid frame, on the plane
+    double      diameter{ 0. };   // nominal (the dowel itself; holes add the tolerance)
+    double      half_length{ 0. };
+    double      footprint_radius{ 0. }; // the hole's radius round the axis, mm (labels keep clear of it)
+    bool        shortened{ false };     // the depth check made it shorter than asked
+    bool        scaled_down{ false };   // smaller than asked, to fit a small face
+    // "X1.2-1": the face's mate code and the 1-based dowel number. Holes are "<name>_A" / "_B",
+    // the dowel object "<object>-Dowel-<name>" ("-Pin-" for a Pin).
+    std::string name;
+};
+
 struct SplitOptions
 {
     // D2: 5 mm each side in X / Y (brim / skirt allowance and the arranger's own shrink), 5 mm at the top.
@@ -86,6 +140,8 @@ struct SplitOptions
     bool nozzle_reach{ false };
     // Planes the user moved; empty for a fresh plan.
     std::vector<SplitPinnedPlane> pinned;
+    // P2: automatic dowels on the cut faces.
+    SplitDowelOptions dowels;
 };
 
 // What a part may measure, and where on the bed that box came from.
@@ -158,7 +214,9 @@ struct SplitFace
     std::string mate_code;
     // Human readable: "X1-Y1 | X2-Y1" (the two part names either side).
     std::string mate_label;
-    // P2 adds the connector sites of this face here.
+    // P2: the dowel sites of this face (indices in SplitPlan::sites), and its pieces of material.
+    std::vector<int> sites;
+    int              islands{ 0 };
 };
 
 struct SplitWarning
@@ -176,12 +234,23 @@ struct SplitWarning
         // After Apply
         LoosePieces,         // part: which; value: number of separate pieces (D15: kept, warned)
         OpenEdges,           // part: which; value: number of open edges after the cut
+        // Preview, dowels (P2). face / plane say where.
+        NoDowelOnFace,       // value: SPLIT_NO_DOWEL_TOO_SMALL or SPLIT_NO_DOWEL_TOO_THIN
+        IslandsWithoutDowel, // value: pieces of the face that got no dowel (the face has some)
+        DowelCanTurn,        // one round dowel on the face: the parts can turn on it
+        DowelShortened,      // value: the shortest dowel on the face, mm (whole length)
+        DowelScaledDown,     // value: the dowel diameter used on the face, mm
     };
     Kind   kind{ Kind::NoUsableVolume };
     int    plane{ -1 };
     int    part{ -1 };
     double value{ 0. };
+    int    face{ -1 };       // P2: index in SplitPlan::faces, or -1
 };
+
+// SplitWarning::value of NoDowelOnFace.
+constexpr double SPLIT_NO_DOWEL_TOO_SMALL = 0.;   // no room inside the face's outline
+constexpr double SPLIT_NO_DOWEL_TOO_THIN  = 1.;   // room on the face, but too little material behind it
 
 struct SplitPlan
 {
@@ -194,7 +263,12 @@ struct SplitPlan
     std::vector<SplitPart>    parts;         // every cell, flat index: x + nx * (y + ny * z)
     std::vector<SplitFace>    faces;
     std::vector<SplitWarning> warnings;
+    // P2: every dowel site, face by face (empty when dowels are off), and the options they were
+    // placed with (split_apply() builds the connectors from them).
+    std::vector<SplitSite>    sites;
+    SplitDowelOptions         dowel_options;
 
+    size_t      dowel_count() const { return sites.size(); }
     size_t      cell_count() const { return parts.size(); }
     size_t      part_count() const;          // non-empty cells
     size_t      parts_not_fitting() const;
@@ -210,6 +284,16 @@ constexpr int SPLIT_MAX_CELLS = 1000;
 
 // D7 cell name for `counts` cells per axis: "X2-Y1-Z1", uncut axes left out.
 std::string split_cell_name(const SplitCell &cell, const std::array<int, 3> &counts);
+
+// P2, design 3.6: up to `max_count` dowel centres (mm) inside `island` (scaled, like every
+// ExPolygon), each at least `inset` mm from its outline and inside `allowed` (mm; the corner
+// keep-out bands are already taken off it), at least `min_spacing` apart. Greedy farthest-point
+// picks on a square grid: the first is the point farthest from the outline, each next one the
+// point that best keeps away from both the outline and the picks so far. `accept` (the depth check)
+// may refuse a pick: the next best point is tried instead, up to `max_rejects` refusals.
+std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf &allowed, double inset, int max_count,
+                                    double min_spacing, const std::function<bool(const Vec2d &)> &accept = nullptr,
+                                    int max_rejects = 40);
 
 // The plan for `mesh` (grid frame). `throw_on_cancel` is called now and then and may throw.
 SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVolume &usable, const SplitOptions &options,
@@ -227,6 +311,9 @@ struct SplitApplyResult
     std::unique_ptr<Model>    model;
     std::vector<ModelObject*> parts;      // owned by `model`, in plan part order
     std::vector<int>          part_index; // per entry of `parts`: index in SplitPlan::parts
+    // P2: the loose dowels (or pins), one object each, owned by `model`, in SplitPlan::sites order,
+    // named "<object>-Dowel-<site>" ("-Pin-"), standing where they sit in the assembled model.
+    std::vector<ModelObject*> dowels;
     std::vector<SplitWarning> warnings;   // the after-Apply ones (LoosePieces, OpenEdges)
     bool                      canceled{ false };
 
@@ -242,9 +329,17 @@ struct SplitApplyResult
 // `progress` gets (cuts done, cuts in all); `canceled` is polled before every cut and stops the
 // apply (result.canceled, no parts). Names per D7: "<object name> X2-Y1-Z1".
 //
-// Cut links: a plain split is not a linked cut group (D10, no dowels in P1). An object that was
-// already part of a linked group hands its id on: every part gets it, the check sum grown by
-// parts - 1, which is what a series of plain cuts on that object would have done.
+// Cut links: a plain split is not a linked cut group (D10). With dowels (P2) every part and every
+// dowel object shares one cut id, its check sum the number of objects, as the Cut tool does for a
+// cut with connectors. An object that was already part of a linked group hands its id on: every
+// part (and dowel) gets it, the check sum grown by the objects made - 1, which is what a series of
+// cuts on that object would have done.
+//
+// Dowels (P2): each plane's sites are baked as Dowel / Pin connectors into the piece just before
+// that plane cuts it, so every part gets its holes as negative volumes and each dowel becomes an
+// object of its own. Earlier holes are handed on by the later cuts (by bounding box,
+// process_modifier_cut()); the planner's corner keep-out keeps every hole clear of every other
+// plane, so each hole lands in exactly one part.
 SplitApplyResult split_apply(const ModelObject &object, int instance, const SplitPlan &plan,
                              std::function<bool()> canceled = nullptr,
                              std::function<void(int, int)> progress = nullptr);

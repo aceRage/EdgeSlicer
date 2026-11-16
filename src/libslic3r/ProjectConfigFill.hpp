@@ -300,11 +300,11 @@ inline size_t fill_cli_system_preset(DynamicPrintConfig             &project,
     return fill_missing_project_keys(project, *sys, options, filled_keys, present_keys);
 }
 
-// A setting given on the CLI command line (`--curved-tops-enabled 1`) overrides the loaded presets,
+// A setting given on the CLI command line (`--top-shell-layers 9`) overrides the loaded presets,
 // but the project's "different_settings_to_system" ([process, filament 1..n, printer]) did not say
 // so. The GUI's project loader (PresetCollection::load_external_preset) puts every key that list
 // does not name back to the system preset's value, so a project exported by the CLI opened in the
-// GUI with the override silently gone (curved tops spike, hand test 2026-11-15). Record each
+// GUI with the override silently gone (hand test 2026-11-15, PR #1021). Record each
 // override in the slot of the preset type it belongs to. Returns how many slot entries changed.
 inline size_t record_cli_overrides_as_different(DynamicPrintConfig             &project,
                                                 const DynamicPrintConfig       &overrides,

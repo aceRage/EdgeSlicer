@@ -244,6 +244,8 @@ set(lisbslic3r_sources
     ContourZ.hpp
     CurvedTops.cpp
     CurvedTops.hpp
+    HeadClearance.cpp
+    HeadClearance.hpp
     ExtrusionEntity.cpp
     ExtrusionEntity.hpp
     ExtrusionSimulator.cpp
@@ -377,6 +379,8 @@ set(lisbslic3r_sources
     GCode/AvoidCrossingPerimeters.hpp
     GCode/ConflictChecker.cpp
     GCode/ConflictChecker.hpp
+    GCode/HeadCollisionCheck.cpp
+    GCode/HeadCollisionCheck.hpp
     GCode/CoolingBuffer.cpp
     GCode/CoolingBuffer.hpp
     GCode.cpp

@@ -73,8 +73,11 @@ void SplitToFitJob::finalize(bool canceled, std::exception_ptr &eptr)
     // D11: keep the model's orientation, parts dropped to the bed. Every part is moved off the plates
     // first, so the arrange below places all of them (it arranges only what is on no plate) instead of
     // leaving a part where it happened to land on plate 1, under the part above it.
+    // P2: the loose dowels go with them and are arranged too.
+    ModelObjectPtrs all = m_result.parts;
+    all.insert(all.end(), m_result.dowels.begin(), m_result.dowels.end());
     double next_x = -10000.;
-    for (ModelObject *part : m_result.parts) {
+    for (ModelObject *part : all) {
         part->ensure_on_bed();
         const BoundingBoxf3 bb = part->instance_bounding_box(0);
         Vec3d               off = part->instances.front()->get_offset();
@@ -88,9 +91,10 @@ void SplitToFitJob::finalize(bool canceled, std::exception_ptr &eptr)
     {
         // One undo step for the whole split: the arrange queued below takes no snapshot of its own.
         Plater::TakeSnapshot snapshot(m_plater, _u8L("Split to Fit"));
-        m_plater->apply_cut_object_to_model(size_t(obj_idx), m_result.parts);
+        m_plater->apply_cut_object_to_model(size_t(obj_idx), all);
 
-        // An object that was already in a linked cut group passes the grown group on to every member.
+        // A split with dowels is one linked cut group (D10); an object that was already in a linked
+        // cut group passes the grown group on to every member.
         const CutObjectBase &cut_id = m_result.parts.front()->cut_id;
         if (!cut_id.id().invalid())
             for (ModelObject *o : model.objects)
@@ -99,6 +103,11 @@ void SplitToFitJob::finalize(bool canceled, std::exception_ptr &eptr)
     }
 
     std::string summary = (boost::format(_u8L("\"%1%\" was split into %2% parts.")) % m_name % m_result.parts.size()).str();
+    if (!m_result.dowels.empty())
+        summary += " " + (boost::format(m_plan.dowel_options.type == SplitConnectorType::Pin ? _u8L("%1% pins to print were added.") :
+                                                                                               _u8L("%1% dowels to print were added.")) %
+                          m_result.dowels.size())
+                             .str();
     for (const SplitWarning &w : m_result.warnings)
         summary += "\n" + into_u8(split_warning_text(w, m_plan));
     if (m_result.warnings.empty())

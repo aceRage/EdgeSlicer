@@ -1,0 +1,19 @@
+{
+    "schema": "edgeslicer.head_clearance.v1",
+    "id": "bambu-x1",
+    "name": "Bambu Lab X1 series toolhead",
+    "printer_models": ["Bambu Lab X1 Carbon", "Bambu Lab X1", "Bambu Lab X1E"],
+    "calibrated": false,
+    "source": "Nozzle outline and housing boxes adapted from PancakeSlicer head envelope bambu-x1-p1 (AGPL-3.0, github.com/ZimengXiong/PancakeSlicer, engine/resources/nonplanar/heads, clone 174a578f43), whose nozzle bands come from a community hotend CAD (printables.com/model/533213) and whose housing, duct, sock and carriage boxes are that author's estimates. The nozzle profile here is the outer radius of each of their bands taken at the band's lower edge (conservative). Gantry rod height 34 mm is Bambu's extruder_clearance_height_to_rod from the BBL machine profile; its Y span is estimated. Not measured on a printer.",
+    "nozzle": {
+        "estimated": true,
+        "profile": [[0.0, 0.3], [0.05, 0.48], [0.25, 0.65], [0.5, 0.83], [0.75, 1.0], [1.0, 1.18], [1.25, 1.35], [1.5, 1.53], [1.75, 2.0], [2.0, 2.1], [2.25, 2.2], [2.5, 2.33], [2.75, 2.46], [3.0, 2.81], [3.5, 4.2]]
+    },
+    "boxes": [
+        {"name": "heater block and silicone sock", "min": [-12, -12, 4], "max": [12, 12, 24], "estimated": true},
+        {"name": "hotend body", "min": [-14.25, -7.85, 15], "max": [10.75, 7.85, 40], "estimated": true},
+        {"name": "front housing and part-cooling ducts", "min": [-35, -35, 5], "max": [35, 40, 80], "estimated": true},
+        {"name": "carriage", "min": [-35, 15, 20], "max": [35, 60, 100], "estimated": true},
+        {"name": "X gantry", "min": [0, -33, 34], "max": [0, 33, 100], "spans_x": true, "estimated": true}
+    ]
+}
