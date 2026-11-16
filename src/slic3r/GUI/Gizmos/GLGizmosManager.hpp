@@ -99,6 +99,9 @@ public:
         // Exact B-rep fillet / chamfer / shell of a CAD part (GLGizmoCadFillet). Not in the
         // toolbar: opened from the part's context menu and from the Edit gizmo.
         CadFillet,
+        // Split to Fit (GLGizmoSplitToFit): cut an object into parts that each fit the printer.
+        // Appended after CadFillet so the EType values before it are unchanged.
+        SplitToFit,
         //SlaSupports,
         // BBS
         //FaceRecognition,
