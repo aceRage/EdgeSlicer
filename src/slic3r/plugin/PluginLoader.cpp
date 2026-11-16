@@ -26,6 +26,9 @@
 #include <boost/filesystem/file_status.hpp>
 #include <boost/log/trivial.hpp>
 #include <slic3r/Utils/BoostProcessCompat.hpp>
+#ifdef _WIN32
+#include <boost/process/windows.hpp>
+#endif
 #include <boost/process/env.hpp>
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include <optional>

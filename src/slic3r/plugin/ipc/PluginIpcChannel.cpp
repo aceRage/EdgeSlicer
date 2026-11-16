@@ -9,6 +9,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <cerrno>
@@ -22,7 +25,7 @@ namespace {
 
 int remaining_ms(const std::chrono::steady_clock::time_point& deadline)
 {
-    if (deadline == std::chrono::steady_clock::time_point::max())
+    if (deadline == (std::chrono::steady_clock::time_point::max)())
         return -1;
     const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
     if (left.count() <= 0)
@@ -35,7 +38,7 @@ int remaining_ms(const std::chrono::steady_clock::time_point& deadline)
 std::chrono::steady_clock::time_point deadline_from_timeout(int timeout_ms)
 {
     if (timeout_ms < 0)
-        return std::chrono::steady_clock::time_point::max();
+        return (std::chrono::steady_clock::time_point::max)();
     return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 }
 

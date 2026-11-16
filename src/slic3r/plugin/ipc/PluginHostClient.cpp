@@ -349,7 +349,7 @@ struct PluginHostClient::Impl
                            nlohmann::json&    result,
                            std::string&       error)
     {
-        const auto deadline = timeout_ms < 0 ? std::chrono::steady_clock::time_point::max() :
+        const auto deadline = timeout_ms < 0 ? (std::chrono::steady_clock::time_point::max)() :
                                                std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
             {

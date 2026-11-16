@@ -16,6 +16,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <csignal>
@@ -42,9 +45,12 @@ std::wstring parse_pipe_arg(int argc, char** argv)
     for (int i = 1; i < argc - 1; ++i) {
         if (std::strcmp(argv[i], "--ipc-pipe") == 0) {
             const int n = ::MultiByteToWideChar(CP_UTF8, 0, argv[i + 1], -1, nullptr, 0);
-            std::wstring out(n > 0 ? n - 1 : 0, L'\0');
-            if (n > 1)
-                ::MultiByteToWideChar(CP_UTF8, 0, argv[i + 1], -1, out.data(), n);
+            if (n <= 0)
+                return {};
+            std::wstring out(static_cast<size_t>(n), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, argv[i + 1], -1, out.data(), n);
+            if (!out.empty() && out.back() == L'\0')
+                out.pop_back();
             return out;
         }
     }
