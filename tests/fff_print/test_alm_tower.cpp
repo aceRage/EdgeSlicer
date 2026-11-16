@@ -282,6 +282,9 @@ void check_plate(const Sliced &s, double object_height, bool exact_slab)
         CAPTURE(slab);
         for (double h : purges->second) {
             CAPTURE(h);
+            // Bambu Studio's bridge flow over the sparse band below a slab thinner than 0.2 mm (need_thick_bridge_flow()).
+            if (slab < 0.2 - 1e-6 && std::abs(h - 0.2) < 1e-6)
+                continue;
             if (exact_slab)
                 CHECK(std::abs(h - slab) < 2e-3);
             else
@@ -340,13 +343,15 @@ TEST_CASE("ALM tower: H3C 0.4 PLA + 0.8 PETG - contact layers on a merged tower"
 {
     const auto s = slice(h3c_mixed("0.4", "Bambu PETG HF @BBL H3C 0.8 nozzle"), 4.);
     check_plate(*s, 4., true);
-    // Two categories, so the tower has a contact layer somewhere (Orca #10780 Contact), and every tower layer is either
-    // printed or merged out.
-    bool contact = false;
+    // Two categories in two bands: with merged fill a category stays on the tower while its column does (Bambu Studio
+    // generate_wipe_tower_blocks()), so the PETG band printed every other layer reads as one material, not as a contact
+    // on every PETG layer.
+    size_t layers = 0;
     for (const auto &layer : s->print->wipe_tower_data().tool_changes)
         for (const WipeTower::ToolChangeResult &tcr : layer)
-            contact |= tcr.is_contact;
-    CHECK(contact);
+            if (!tcr.combined_away && tcr.is_contact && tcr.print_z > 0.25)
+                ++layers;
+    CHECK(layers < s->coarse_change.size());
 }
 
 TEST_CASE("ALM tower: a single-diameter plate's tower is planned as before", "[ALMTower][PrintGCode]")
