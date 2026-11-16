@@ -69,8 +69,20 @@ std::string read_sidecar_text(const fs::path& plugin_dir, const std::string& fil
 // clean up a tree past MAX_PATH even with LongPathsEnabled off. Identity on other platforms.
 fs::path to_extended_path(const fs::path& p)
 {
-    // Orca's extended_path() is a Windows MAX_PATH helper Edge does not ship.
+#ifdef _WIN32
+    boost::system::error_code ec;
+    fs::path abs = fs::absolute(p, ec);
+    if (ec)
+        abs = p;
+    std::wstring w = abs.lexically_normal().wstring();
+    if (w.size() >= 4 && w.compare(0, 4, L"\\\\?\\") == 0)
+        return fs::path(w);
+    if (w.size() >= 2 && w[0] == L'\\' && w[1] == L'\\')
+        return fs::path(std::wstring(L"\\\\?\\UNC\\") + w.substr(2));
+    return fs::path(std::wstring(L"\\\\?\\") + w);
+#else
     return p;
+#endif
 }
 
 // Brings the plugin system up for a case that drives a real plugin load, and tears it down
@@ -934,8 +946,9 @@ TEST_CASE("extract_zip_to_directory writes entries under a destination longer th
     REQUIRE(destination.string().size() > 260);
 
     std::string error;
-    REQUIRE(extract_zip_to_directory(wheel, destination, error));
+    const bool extracted = extract_zip_to_directory(wheel, destination, error);
     INFO("extract error: " << error);
+    REQUIRE(extracted);
     CHECK(error.empty());
 
     // Verify through a long-path-capable path, otherwise the check itself is bounded by MAX_PATH.
