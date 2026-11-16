@@ -2587,12 +2587,24 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // over cut walls (a cancel), regenerate the object's walls: posPerimeters invalidates the fills
     // and posContouring after it, so the block is planned again on uncut layers. Objects without
     // curved tops on are not looked at, so a print without the feature invalidates exactly as before.
+    // Review r2: the record holds verdicts, not counts, and an object that was refused (walls not cut,
+    // so its G-code is already the planar one) and is still refused by a setting is left alone: adding
+    // a part to a plate where every part is refused re-slices nothing. (Its refusal text may then name
+    // the earlier reason until the object is sliced again.) The record is read under the state mutex
+    // this function holds; the slicing thread writes it under the same mutex.
+    int multi_filament = -1; // computed once, for the first object that needs it
     for (PrintObject *object : m_objects) {
         if (!object->config().curved_tops_enabled.value)
             continue;
-        const bool ran        = !object->curved_tops_guard_inputs_used().empty();
         const bool unfinished = object->curved_tops_clipped() && !object->is_step_done_unguarded(posContouring);
-        if ((ran && object->curved_tops_guard_inputs_used() != curved_tops_guard_inputs(*object)) || unfinished)
+        bool       regenerate = unfinished;
+        if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
+            if (multi_filament < 0)
+                multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
+            if (object->curved_tops_guard_inputs_used() != curved_tops_guard_inputs(*object, multi_filament))
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament);
+        }
+        if (regenerate)
             update_apply_status(object->invalidate_step(posPerimeters));
     }
 

@@ -294,33 +294,76 @@ bool has_curved_tops_block(const PrintObject &object)
     return !object.layers().empty() && object.layers().back()->curved_tops_block;
 }
 
-std::string curved_tops_guard_inputs(const PrintObject &object)
+namespace {
+
+// The settings side of every guard in apply_curved_tops(), each reduced to what decides the verdict
+// (review r2): "alone on the plate" rather than the object and copy counts, "more than one filament"
+// rather than which ones, "a skirt that blocks" rather than its numbers. A change that cannot change
+// any verdict then changes nothing here, so adding the 20th part to a plate does not re-slice the
+// other 19. Left out on purpose: what only slicing produces (layer count, the sub-layer plan) and the
+// mesh, whose changes re-slice the object anyway.
+struct GuardSettings
 {
-    // Keep in step with the guards in apply_curved_tops(). Left out on purpose: what only slicing
-    // produces (layer count, the sub-layer plan) and the mesh, whose changes re-slice anyway.
+    std::string head;
+    bool        head_usable { false };
+    bool        not_alone { false }, by_object { false }, zaa { false }, spiral { false }, raft { false }, vlh { false };
+    bool        multi_filament { false }, smooth_tower { false }, local_z { false }, nozzles { false }, skirt { false };
+    bool        support { false };
+    double      printable_height { 0. };
+    int         layers { 0 };
+    double      angle { 0. }, layer_height { 0. };
+
+    bool blocked() const
+    {
+        return !head_usable || not_alone || by_object || zaa || spiral || raft || vlh || multi_filament || smooth_tower || local_z ||
+               nozzles || skirt || support;
+    }
+};
+
+GuardSettings guard_settings(const PrintObject &object, int multi_filament)
+{
     const Print             &print = *object.print();
     const PrintConfig       &pcfg  = print.config();
     const PrintObjectConfig &ocfg  = object.config();
-    std::ostringstream       out;
     const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg);
-    out << "head=" << (head.head ? head.head->id : std::string("-")) << ',' << head.usable << ';';
-    out << "model=" << pcfg.printer_model.value << ';';
-    out << "objects=" << print.objects().size() << ':';
-    for (const PrintObject *o : print.objects())
-        out << o->instances().size() << ',';
-    out << ";seq=" << int(pcfg.print_sequence.value) << ";spiral=" << pcfg.spiral_mode.value
-        << ";timelapse=" << int(pcfg.timelapse_type.value) << ";tower=" << print.has_wipe_tower() << ";extruders=";
-    for (unsigned int e : print.extruders(true))
-        out << e << ',';
-    out << ";localz=" << pcfg.dithering_local_z_mode.value << ";nozzles=" << print.uses_multiple_nozzle_diameters()
-        << ";skirt=" << pcfg.skirt_loops.value << ',' << pcfg.skirt_height.value << ',' << int(pcfg.draft_shield.value)
-        << ";height=" << pcfg.printable_height.value;
-    out << ";raft=" << ocfg.raft_layers.value
-        << ";vlh=" << (object.model_object() != nullptr && !object.model_object()->layer_height_profile.empty())
-        << ";support=" << object.has_support_material() << ";stab=" << object.has_stabilizers()
-        << ";zaa=" << object.need_z_contouring() << ";ct=" << ocfg.curved_tops_layers.value << ',' << ocfg.curved_tops_max_angle.value
-        << ',' << ocfg.layer_height.value;
+    GuardSettings s;
+    s.head             = (head.head ? head.head->id : std::string("-")) + "|" + pcfg.printer_model.value;
+    s.head_usable      = head.usable;
+    s.not_alone        = print.objects().size() != 1 || object.instances().size() != 1;
+    s.by_object        = pcfg.print_sequence.value == PrintSequence::ByObject;
+    s.zaa              = object.need_z_contouring();
+    s.spiral           = pcfg.spiral_mode.value;
+    s.raft             = ocfg.raft_layers.value > 0;
+    s.vlh              = object.model_object() != nullptr && !object.model_object()->layer_height_profile.empty();
+    s.multi_filament   = multi_filament >= 0 ? multi_filament > 0 : print.extruders(true).size() > 1;
+    s.smooth_tower     = print.has_wipe_tower() && pcfg.timelapse_type.value == TimelapseType::tlSmooth;
+    s.local_z          = pcfg.dithering_local_z_mode.value;
+    s.nozzles          = print.uses_multiple_nozzle_diameters();
+    s.skirt            = pcfg.skirt_loops.value > 0 && (pcfg.draft_shield.value != dsDisabled || pcfg.skirt_height.value > 1);
+    s.support          = object.has_support_material() || object.has_stabilizers();
+    s.printable_height = pcfg.printable_height.value;
+    s.layers           = ocfg.curved_tops_layers.value;
+    s.angle            = ocfg.curved_tops_max_angle.value;
+    s.layer_height     = ocfg.layer_height.value;
+    return s;
+}
+
+} // namespace
+
+std::string curved_tops_guard_inputs(const PrintObject &object, int multi_filament)
+{
+    const GuardSettings s = guard_settings(object, multi_filament);
+    std::ostringstream  out;
+    out << "head=" << s.head << ',' << s.head_usable << ";alone=" << !s.not_alone << ";seq=" << s.by_object << ";zaa=" << s.zaa
+        << ";spiral=" << s.spiral << ";raft=" << s.raft << ";vlh=" << s.vlh << ";filaments=" << s.multi_filament
+        << ";tower=" << s.smooth_tower << ";localz=" << s.local_z << ";nozzles=" << s.nozzles << ";skirt=" << s.skirt
+        << ";support=" << s.support << ";height=" << s.printable_height << ";ct=" << s.layers << ',' << s.angle << ',' << s.layer_height;
     return out.str();
+}
+
+bool curved_tops_blocked_by_settings(const PrintObject &object, int multi_filament)
+{
+    return guard_settings(object, multi_filament).blocked();
 }
 
 CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla::IndexedMesh &imesh)

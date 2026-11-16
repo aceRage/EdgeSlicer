@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -1052,6 +1053,120 @@ TEST_CASE("Curved tops: adding a copy or an object after a curved slice refuses,
     const std::string gcode_again = Test::gcode(print);
     CHECK(top_block(print));
     CHECK(gcode_without_curved_tops_key(gcode_again) == gcode_without_curved_tops_key(gcode_curved));
+}
+
+// Review r2: curved tops is a process setting, so on a multi-part plate every part has it on and is
+// refused. Adding a third part, or a third copy, must not regenerate the walls or fills of any part
+// (they all stay refused and planar) - and with curved tops off everywhere nothing differs from main.
+TEST_CASE("Curved tops: adding a part or a copy to a refused plate re-slices nothing else", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const bool curved     = GENERATE(true, false);
+    const bool add_object = GENERATE(true, false);
+    INFO("curved tops " << (curved ? "on" : "off") << ", adding " << (add_object ? "a third object" : "a third copy"));
+    const DynamicPrintConfig config = puck_config(curved, {});
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2), make_capped_puck(15., 4., 1.2) }, print, model, config);
+    // Two copies of the first object to start with, so the copy case goes from 2 to 3.
+    const Vec3d far = model.objects.front()->instances.front()->get_offset() + Vec3d(0., 45., 0.);
+    if (!add_object) {
+        model.objects.front()->add_instance()->set_offset(far);
+        print.apply(model, config);
+    }
+    Test::gcode(print);
+    REQUIRE(print.objects().size() == 2);
+    for (const PrintObject *object : print.objects()) {
+        CHECK_FALSE(object->layers().back()->curved_tops_block);
+        if (curved)
+            CHECK_FALSE(curved_tops_unavailable_warning(*object).empty());
+    }
+
+    if (add_object) {
+        ModelObject *third = model.add_object(*model.objects.back());
+        third->instances.front()->set_offset(far);
+    } else
+        model.objects.front()->add_instance()->set_offset(far + Vec3d(45., 0., 0.));
+    print.apply(model, config);
+    // The parts that were there keep their walls and fills.
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("object " << i);
+        const PrintObject *object = print.get_object(i);
+        CHECK(object->is_step_done(posPerimeters));
+        CHECK(object->is_step_done(posInfill));
+    }
+    CHECK_NOTHROW(Test::gcode(print));
+    for (const PrintObject *object : print.objects())
+        CHECK_FALSE(object->layers().back()->curved_tops_block);
+}
+
+// Control for the raft case left out of the re-slice test: the same two re-slices with curved tops
+// off, against a fresh slice. Records what it finds (stdout and a Catch warning) and asserts nothing:
+// it tells whether the one 0.00001 E split segment in the raft's first loop is re-slice history in the
+// raft code, with or without curved tops.
+TEST_CASE("Curved tops: raft re-slice control (records only)", "[CurvedTops][RaftControl]")
+{
+    const ResourcesDirGuard resources;
+    const ConfigItems raft = { { "raft_layers", "2" } };
+    const auto        g    = [](Print &print) { return gcode_without_curved_tops_key(Test::gcode(print)); };
+    // "same", or the first differing line of each side.
+    const auto        count_diff = [](const std::string &a, const std::string &b) -> std::string {
+        if (a == b)
+            return "same";
+        std::istringstream ia(a), ib(b);
+        std::string        la, lb;
+        for (size_t n = 1;; ++n) {
+            const bool ok_a = bool(std::getline(ia, la));
+            const bool ok_b = bool(std::getline(ib, lb));
+            if (!ok_a && !ok_b)
+                return "differs (only in line ending)";
+            if (!ok_a || !ok_b || la != lb)
+                return "differs from line " + std::to_string(n) + ": [" + (ok_a ? la : std::string("<end>")) + "] vs [" +
+                       (ok_b ? lb : std::string("<end>")) + "]";
+        }
+    };
+
+    // Fresh feature-off raft slice.
+    Print fresh;
+    Model fresh_model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, fresh, fresh_model, puck_config(false, raft));
+    const std::string fresh_off = g(fresh);
+
+    // Feature off both times: plain slice, then raft on.
+    Print off;
+    Model off_model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, off, off_model, puck_config(false, {}));
+    g(off);
+    off.apply(off_model, puck_config(false, raft));
+    const std::string reslice_off = g(off);
+    // Feature off both times, second step through the same "change a key that invalidates everything"
+    // path the curved run takes when curved tops is turned off: slice with raft, toggle curved tops on
+    // and off again with raft on.
+    off.apply(off_model, puck_config(true, raft));
+    g(off);
+    off.apply(off_model, puck_config(false, raft));
+    const std::string reslice_off_toggled = g(off);
+
+    // The pair the re-slice test compared: curved slice, raft on (refused), then curved tops off.
+    Print on;
+    Model on_model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, on, on_model, puck_config(true, {}));
+    g(on);
+    on.apply(on_model, puck_config(true, raft));
+    const std::string reslice_on = g(on);
+    on.apply(on_model, puck_config(false, raft));
+    const std::string reslice_on_then_off = g(on);
+
+    std::ostringstream report;
+    report << "RAFT_CONTROL off-reslice vs fresh: " << count_diff(reslice_off, fresh_off)
+           << "; off-reslice-toggled vs fresh: " << count_diff(reslice_off_toggled, fresh_off)
+           << "; on-reslice (refused) vs fresh: " << count_diff(reslice_on, fresh_off)
+           << "; on-reslice-then-off vs fresh: " << count_diff(reslice_on_then_off, fresh_off)
+           << "; on-reslice vs on-reslice-then-off: " << count_diff(reslice_on, reslice_on_then_off);
+    std::cout << report.str() << std::endl;
+    WARN(report.str());
+    SUCCEED();
 }
 
 // Review finding g: posContouring left unfinished over walls a curved run already cut (a cancel during

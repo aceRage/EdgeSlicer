@@ -106,8 +106,15 @@ bool has_curved_tops_block(const PrintObject &object);
 // Every value a guard of apply_curved_tops() reads (print, object, the other objects and copies),
 // as one string. PrintObject::contour_z() records it; Print::apply() compares it after each change
 // and regenerates the object's walls (and so re-plans the curved block) when it differs, because
-// most of these settings do not invalidate posContouring by themselves.
-std::string curved_tops_guard_inputs(const PrintObject &object);
+// most of these settings do not invalidate posContouring by themselves. Each value is reduced to what
+// decides a verdict (alone on the plate or not, one filament or more...), so changes that cannot change
+// the outcome do not re-slice. multi_filament: Print::extruders(true).size() > 1 when the caller has it
+// (computed once per apply), -1 to compute it here.
+std::string curved_tops_guard_inputs(const PrintObject &object, int multi_filament = -1);
+
+// True when a setting alone (not the mesh or the slice) makes apply_curved_tops() refuse this object.
+// Print::apply() leaves a refused object (planar, walls not cut) alone while this holds.
+bool curved_tops_blocked_by_settings(const PrintObject &object, int multi_filament = -1);
 
 } // namespace Slic3r
 

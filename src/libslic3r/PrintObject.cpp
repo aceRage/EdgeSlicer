@@ -337,6 +337,19 @@ void PrintObject::_transform_hole_to_polyholes()
 // 1) Merges typed region slices into stInternal type.
 // 2) Increases an "extra perimeters" counter at region slices where needed.
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
+// EdgeSlicer, curved tops: written on the slicing thread, read by Print::apply() under the state mutex.
+void PrintObject::set_curved_tops_clipped(bool clipped)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_clipped = clipped;
+}
+
+void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_guard_inputs = std::move(inputs);
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -346,7 +359,7 @@ void PrintObject::make_perimeters()
         return;
     // Curved tops: the walls are regenerated whole here (the fills follow in posInfill, which this
     // step invalidates), so nothing an earlier curved-tops run cut is left.
-    m_curved_tops_clipped = false;
+    this->set_curved_tops_clipped(false);
 
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
@@ -905,7 +918,7 @@ void PrintObject::contour_z()
     if (curved_tops) {
         // A refusal leaves the object planar; every refusal and every block is reported to the user.
         // What the guards read is recorded, so Print::apply() regenerates the walls when it changes.
-        m_curved_tops_guard_inputs = curved_tops_guard_inputs(*this);
+        this->set_curved_tops_guard_inputs_used(curved_tops_guard_inputs(*this));
         const bool             clipped_before = m_curved_tops_clipped;
         const CurvedTopsResult ct             = apply_curved_tops(*this, mesh, imesh);
         // Safety net (review finding g): this step running again over layers an earlier, unfinished run

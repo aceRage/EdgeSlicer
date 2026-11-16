@@ -785,9 +785,13 @@ public:
     // under a curved block; only the perimeter step brings them back. clipped: they are cut now (reset
     // when the walls are regenerated). guard inputs: every value a curved-tops guard read on the last
     // run (curved_tops_guard_inputs()); Print::apply() regenerates the walls when they change.
+    // Both are written by the slicing thread under the print's state mutex (the setters lock it) and
+    // read by Print::apply(), which holds that mutex; the getters do not lock (call them from apply()
+    // or with the slicing stopped).
     bool               curved_tops_clipped() const { return m_curved_tops_clipped; }
-    void               set_curved_tops_clipped(bool clipped) { m_curved_tops_clipped = clipped; }
+    void               set_curved_tops_clipped(bool clipped);
     const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
+    void               set_curved_tops_guard_inputs_used(std::string inputs);
 
   private:
     // to be called from Print only.
