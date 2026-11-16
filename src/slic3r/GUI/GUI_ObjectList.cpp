@@ -6501,12 +6501,10 @@ void ObjectList::repair_by_remesh()
 
     size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
     auto remesh_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
-        RemeshOptions o = opts;
-        // An untouched voxel field means "auto", and auto is per part - so a
-        // multi-part selection still gets each part's own scale-appropriate value
-        // rather than the first part's.
-        if (std::abs(o.voxel_size - auto_voxel) < 1e-9)
-            o.voxel_size = 0.;
+        // An untouched voxel field means "auto" (the dialog gives voxel_size 0), and auto
+        // is per part - so a multi-part selection still gets each part's own
+        // scale-appropriate value rather than the first part's.
+        const RemeshOptions &o = opts;
         RemeshReport rep;
         indexed_triangle_set its = remesh_with_options(mv.mesh().its, o, &remesh_by_voxels,
                                                        volume_bed_direction(mo, mv), &rep);

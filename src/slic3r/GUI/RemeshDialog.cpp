@@ -195,6 +195,14 @@ RemeshDialog::RemeshDialog(wxWindow *parent, double auto_voxel, size_t triangles
     dlg_btns->GetOK()->SetLabel(_L("Remesh"));
     dlg_btns->GetOK()->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
         m_options = current_options();
+        // The field left at the size offered for this part means "auto", and auto is per
+        // part: voxel_size 0 lets remesh_with_options() size each part of the selection
+        // by itself, and no size is kept for next time. Compared as the text shown, as
+        // the field holds the auto size to three figures only.
+        wxString voxel_txt = m_voxel_input->GetTextCtrl()->GetValue();
+        voxel_txt.Trim().Trim(false);
+        if (voxel_txt == num_str(m_auto_voxel))
+            m_options.voxel_size = 0.;
         save_to_config();
         EndModal(wxID_OK);
     });
@@ -269,7 +277,11 @@ void RemeshDialog::save_to_config() const
     AppConfig *cfg = wxGetApp().app_config;
     if (cfg == nullptr)
         return;
-    cfg->set(CFG_SECTION, CFG_VOXEL, num_str(m_options.voxel_size).ToStdString());
+    // Auto (0) is not a size to offer again: the next part gets its own.
+    if (m_options.voxel_size > 0.)
+        cfg->set(CFG_SECTION, CFG_VOXEL, num_str(m_options.voxel_size).ToStdString());
+    else
+        cfg->erase(CFG_SECTION, CFG_VOXEL);
     cfg->set(CFG_SECTION, CFG_FLAT, m_options.keep_bottom_flat);
     cfg->set(CFG_SECTION, CFG_MARGIN, num_str(m_options.bottom_margin).ToStdString());
     cfg->set(CFG_SECTION, CFG_SHARP, m_options.preserve_sharp_edges);
