@@ -219,6 +219,21 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
                                                                 unsigned int                     filament_id,
                                                                 const std::vector<unsigned int> &used_filament_ids);
 
+// The layer height limits the plate's layer height is held to when the finest nozzle a used filament prints through is
+// a rack slot of another size than its extruder's mounted nozzle (H3C P4/P9). The printer preset's min/max_layer_height
+// describe the mounted nozzle only, and the finest nozzle prints every layer at the plate's layer height, so its window
+// (adaptive_layer_height_range_for_nozzle) is the limit, as a single nozzle of that size is held to its preset's limits.
+// `used_filaments` are 1-based. Returns false and leaves `out` alone otherwise.
+struct RackLayerHeightLimit
+{
+    double       min_height { 0. };
+    double       max_height { 0. };
+    double       nozzle_diameter { 0. };
+    unsigned int filament_id { 0 }; // 1-based
+};
+bool rack_nozzle_layer_height_limits(const PrintConfig &print_config, const std::vector<unsigned int> &used_filaments,
+                                     RackLayerHeightLimit &out);
+
 // The window a merging nozzle's ladder is actually cut in. The per-nozzle clamp above is kept when it holds two
 // consecutive band heights on the base grid (k and k + 1 layers), which is what lets any long enough run be cut.
 // A clamp that holds one only - a 0.8 with min_layer_height 0.24 at 0.2 layers takes 0.4 slabs and nothing else -

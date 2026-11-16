@@ -3478,10 +3478,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
         }
 
-        // Mixed nozzle diameters (H3C rack): the objects' layers merge into slabs per nozzle (AdaptiveLayerMerge), but the
-        // prime tower still purges every filament at the plate's layer height (Bambu Studio's mixed-diameter tower is not
-        // ported). Warn when that height is outside the layer height range of a nozzle that purges into the tower.
-        if (extruders.size() > 1 && has_multiple_used_nozzle_diameters(m_config, extruders)) {
+        // Mixed nozzle diameters (H3C rack, H2D/X2D with unequal nozzles): the objects' layers merge into slabs per nozzle
+        // (AdaptiveLayerMerge), and since PR-C so does the Type 1 tower on a rack printer (H3C; Bambu Studio 2.9.1's merged
+        // ladder). The tower still purges every filament at the plate's layer height where that ladder does not run: the
+        // Type 2 tower (non-Bambu printers), a printer without the rack (H2D / X2D / H2C, lead decision on review #1072), a
+        // tower whose sparse layers are skipped, and smooth timelapse, which needs the tower on every layer. Warn there when that height is outside the layer height range of a nozzle that purges into the tower.
+        const bool tower_ladder_off = this->wipe_tower_type() == WipeTowerType::Type2 || ! hotend_as_extruder(m_config) ||
+                                      wipe_tower_sparse_layers_skipped(m_config) || m_config.timelapse_type.value == TimelapseType::tlSmooth;
+        if (tower_ladder_off && extruders.size() > 1 && has_multiple_used_nozzle_diameters(m_config, extruders)) {
             std::vector<double> tower_heights;
             for (const PrintObject *object : m_objects)
                 tower_heights.push_back(object->config().layer_height.value);
@@ -3496,8 +3500,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                         continue;
                     warn(Slic3r::format(L("The prime tower prints every filament at the layer height of %1% mm. Filament %2% prints with a "
                                           "%3% mm nozzle, whose layer height range is %4%-%5% mm. Its prime tower lines may be weak "
-                                          "and the tower may lean or fall. Mixed nozzle diameters are not planned on the prime tower "
-                                          "yet: use a layer height inside every nozzle's range, or check the tower in a test print."),
+                                          "and the tower may lean or fall. With \"No sparse layers\", smooth timelapse, a non-Bambu "
+                                          "prime tower or a printer without a nozzle rack the tower is not planned in slabs per nozzle: use a layer height inside every "
+                                          "nozzle's range, or check the tower in a test print."),
                                         float_to_string_decimal_point(height), filament + 1,
                                         float_to_string_decimal_point(nozzle_diameter_for_filament(m_config, filament + 1)),
                                         float_to_string_decimal_point(range.min_height), float_to_string_decimal_point(range.max_height)),
@@ -7739,6 +7744,39 @@ void Print::_make_wipe_tower()
         // Bambu Studio 2.9.1 (Print.cpp:4220): the first tower layer purges at the process' initial_layer_flow_ratio,
         // which loads into bottom_solid_infill_flow_ratio here.
         wipe_tower.set_first_layer_flow_ratio(float(m_default_region_config.bottom_solid_infill_flow_ratio.value));
+
+        // PR-C, the tower side of AdaptiveLayerMerge (Bambu Studio 2.9.1 Print.cpp:4214-4225): on a plate whose filaments print
+        // through more than one nozzle diameter the tower is planned in merged slabs, each nozzle on the Z ladder its objects
+        // are cut in. Each filament's window and band are the ones PrintObject::compute_adaptive_merge_groups() uses: the
+        // per-nozzle clamp, widened where it allows a single band height (adaptive_ladder_height_range), the band size in it,
+        // and the slab of a process chosen for a coarser nozzle (nozzle_process_band_size). Before set_extruder(): the
+        // per-nozzle tower widths are read there. A single-diameter plate is left exactly as before.
+        // Review #1072 (e), lead decision: only on the single-extruder rack (handle_hotend_as_extruder, H3C), the printer Bambu
+        // Studio has its multi-diameter mode for. An H2D / X2D / H2C with unequal nozzles keeps the tower main prints.
+        if (hotend_as_extruder(m_config) && this->uses_multiple_nozzle_diameters() && ! m_objects.empty()) {
+            std::vector<unsigned int> used_filaments;
+            this->used_printing_filaments(used_filaments);
+            const double reference  = this->adaptive_merge_reference_nozzle();
+            const double base       = m_objects.front()->slicing_parameters().layer_height;
+            std::vector<WipeTower::NozzleLadder> ladders(number_of_extruders);
+            for (unsigned int filament = 0; filament < number_of_extruders; ++filament) {
+                const double nozzle = nozzle_diameter_for_filament(m_config, filament + 1);
+                if (nozzle <= EPSILON || reference <= EPSILON || base <= EPSILON)
+                    continue;
+                const AdaptiveLayerHeightRange range = adaptive_ladder_height_range(
+                    adaptive_layer_height_range_for_nozzle(m_config, filament + 1, used_filaments), nozzle, reference, base);
+                size_t band_size = adaptive_layer_band_size(nozzle, reference, base, range);
+                if (nozzle > reference + EPSILON)
+                    band_size = nozzle_process_band_size(nozzle_layer_height_for_filament(m_config, filament + 1), band_size, base,
+                                                         range.min_height, range.max_height);
+                ladders[filament] = { float(range.min_height), float(range.max_height), std::max<size_t>(1, band_size) };
+            }
+            wipe_tower.set_multi_diameter_print(float(base), std::move(ladders));
+            // Bambu Studio set_foundation_required(): the first tower layer also prints object or support.
+            wipe_tower.set_foundation_required(! m_wipe_tower_data.tool_ordering.empty() &&
+                                               (m_wipe_tower_data.tool_ordering.front().has_object ||
+                                                m_wipe_tower_data.tool_ordering.front().has_support));
+        }
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();

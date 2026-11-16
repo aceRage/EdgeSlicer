@@ -9,6 +9,7 @@
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/AdaptiveLayerMerge.hpp"
 #include "Plater.hpp"
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
@@ -255,19 +256,40 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
 // Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
 // smallest minimum and its largest maximum. Per-nozzle process P2 (D9): with mixed nozzle sizes, by the limits of
 // the smallest nozzle the current plate prints with (layer_height_limits_for_nozzles).
-void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
+void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height, wxString* rack_nozzle) const
 {
     PresetBundle*             bundle         = GUI::wxGetApp().preset_bundle;
     const DynamicPrintConfig& printer_config = bundle->printers.get_edited_preset().config;
     std::vector<size_t>       used_nozzles;
-    if (Plater* plater = GUI::wxGetApp().plater(); plater != nullptr && has_mixed_nozzle_diameters(printer_config)) {
+    Plater*                   plater         = GUI::wxGetApp().plater();
+    PartPlate*                plate          = plater != nullptr ? plater->get_partplate_list().get_curr_plate() : nullptr;
+    if (plate != nullptr && has_mixed_nozzle_diameters(printer_config)) {
         const std::vector<size_t> filament_nozzles = bundle->filament_nozzles();
-        if (PartPlate* plate = plater->get_partplate_list().get_curr_plate())
-            for (int filament : plate->get_extruders())
-                if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
-                    used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
+        for (int filament : plate->get_extruders())
+            if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
+                used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
     }
     layer_height_limits_for_nozzles(printer_config, used_nozzles, min_layer_height, max_layer_height);
+    if (rack_nozzle != nullptr)
+        rack_nozzle->clear();
+    // H3C rack (owner hand test 2026-11-16): the plate's layer height is what the finest nozzle in use prints, and a rack
+    // slot of another size than the mounted nozzle has no limits in the printer preset. Held to that nozzle's window, as a
+    // printer of that nozzle size is held to its preset's. Not while a nozzle's own process is shown (its own layer height).
+    if (plate != nullptr && bundle->nozzle_tool_view() < 0) {
+        std::vector<unsigned int> used_filaments;
+        for (int filament : plate->get_extruders())
+            if (filament >= 1)
+                used_filaments.push_back(unsigned(filament));
+        PrintConfig full;
+        full.apply(bundle->full_config(), true);
+        RackLayerHeightLimit limit;
+        if (rack_nozzle_layer_height_limits(full, used_filaments, limit)) {
+            min_layer_height = limit.min_height;
+            max_layer_height = limit.max_height;
+            if (rack_nozzle != nullptr)
+                *rack_nozzle = wxString::Format(_L("the %g mm rack nozzle of filament %u"), limit.nozzle_diameter, limit.filament_id);
+        }
+    }
 }
 
 ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
@@ -285,8 +307,9 @@ ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(d
 // "initial_layer_print_height": both are held to the same printer limits and answer "Ignore" the same way.
 bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const std::string& opt_key)
 {
-    double min_layer_height = 0., max_layer_height = 0.;
-    layer_height_limits(min_layer_height, max_layer_height);
+    double   min_layer_height = 0., max_layer_height = 0.;
+    wxString rack_nozzle;
+    layer_height_limits(min_layer_height, max_layer_height, &rack_nozzle);
     const bool   is_initial   = opt_key == "initial_layer_print_height";
     const double layer_height = config->opt_float(opt_key);
 
@@ -305,16 +328,25 @@ bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const st
         apply(config, &new_conf);
         return true;
     }
-    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key);
-    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key);
+    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key, rack_nozzle);
+    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key, rack_nozzle);
     default: return false;
     }
 }
 
 // "Ignore" keeps the value as the user typed it; update_print_fff_config() no longer clamps it behind the dialog.
-bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key)
+bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key,
+                                                          const wxString& rack_nozzle)
 {
-    wxString msg_text = opt_key == "initial_layer_print_height" ?
+    wxString msg_text;
+    if (!rack_nozzle.empty())
+        // H3C rack: the limit is the finest rack nozzle's, which the printer preset does not list.
+        msg_text = wxString::Format(opt_key == "initial_layer_print_height" ?
+                                        _L("Initial layer height is outside what %s can print, this may cause printing quality issues.") :
+                                        _L("Layer height is outside what %s can print, this may cause printing quality issues."),
+                                    rack_nozzle);
+    else
+        msg_text = opt_key == "initial_layer_print_height" ?
         _(L("Initial layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
             "this may cause printing quality issues.")) :
         _(L("Layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "

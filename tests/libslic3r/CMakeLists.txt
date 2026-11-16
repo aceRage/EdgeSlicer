@@ -224,6 +224,7 @@ add_executable(${_TEST_NAME}_tests
     test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_tower_alm.cpp
     test_bbl_rib_tower.cpp
     test_bbl_h3c.cpp
     test_bs29_keys_import.cpp

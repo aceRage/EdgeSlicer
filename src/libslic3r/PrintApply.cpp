@@ -1017,6 +1017,8 @@ bool verify_update_print_object_regions(
             // Orca #17314: an explicitly chosen sparse infill filament is kept; painting then only colors the surfaces.
             if (paint_sparse_infill && !has_explicit_sparse_infill_filament(layer_range, region.parent, default_region_config))
                 cfg.sparse_infill_filament.value = region.extruder_id;
+            // Per-nozzle process: as generate_print_object_regions() does, a painted role takes its own nozzle's width.
+            restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -1367,6 +1369,9 @@ static PrintObjectRegions* generate_print_object_regions(
                         paint_this_sparse ? painted_extruder_id : cfg.sparse_infill_filament.value;
                     if (paint_this_sparse)
                         cfg.sparse_infill_filament.value = painted_extruder_id;
+                    // Per-nozzle process: the parent's widths were stamped for the parent's filaments; a role the
+                    // paint moved to another nozzle takes that nozzle's width (no-op without per-nozzle processes).
+                    restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
