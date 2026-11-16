@@ -55,6 +55,11 @@ struct HeadCollisionParams
     double cell { 0. };
     size_t max_cells { 4000000 };
     size_t max_reported { 20 };
+    // Curved tops: the steepest surface the planner let the nozzle follow (degrees). For extrusion
+    // moves, material within the nozzle's tip land rising no more than this slope from the tip is the
+    // surface being followed (the neighbouring bead of a sloped line), not a contact. 0 (the default,
+    // and always for Z contouring only prints) = off.
+    double extrusion_surface_slope_deg { 0. };
 };
 
 HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult::MoveVertex> &moves,

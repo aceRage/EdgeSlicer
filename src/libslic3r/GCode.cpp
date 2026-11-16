@@ -3295,8 +3295,19 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
         return;
     }
 
+    // Curved tops: an extruding nozzle follows a surface up to the planner's angle, so its tip land
+    // meets the neighbouring bead of a sloped line (design 2.1: "the tip land ploughing the
+    // neighbouring bead" is a quality limit, not a crash). The check allows exactly that, within the
+    // land only; travels, wipes, the nozzle cone and the boxes are checked as for Z contouring.
+    HeadCollisionParams params;
+    if (!curved_objects.empty()) {
+        const CurvedTopsHeadLimits limits = curved_tops_head_limits(print.config());
+        for (const PrintObject *object : curved_objects)
+            params.extrusion_surface_slope_deg = std::max(params.extrusion_surface_slope_deg,
+                curved_tops_effective_max_angle(object->config().curved_tops_max_angle.value, limits));
+    }
     const auto                t0     = std::chrono::steady_clock::now();
-    const HeadCollisionReport report = check_head_collisions(result.moves, *head, HeadCollisionParams(),
+    const HeadCollisionReport report = check_head_collisions(result.moves, *head, params,
                                                              [&print]() { if (print.canceled()) throw CanceledException(); });
     BOOST_LOG_TRIVIAL(info) << "Head clearance check (" << head->id << "): " << report.moves_checked << " moves, "
                             << report.hit_moves << " with contact, deepest " << report.max_depth << " mm, "

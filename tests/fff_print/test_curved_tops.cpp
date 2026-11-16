@@ -803,39 +803,44 @@ TEST_CASE("Curved tops: wipes in the curved block keep to the curved speed cap",
     CHECK(b.max_block_wipe_f <= CURVED_TOPS_MAX_SPEED_MM_S * 60. + 1e-6);
 }
 
-// D2: the head clearance check runs on a curved-only print (no Z contouring) with the head the
-// planner used, and a contact stops the export. The head here is deliberately wrong in a way the
-// planner's simple rules do not see: a nozzle 12 mm wide whose underside is only 0.1 mm above the
-// tip (the planner counts that as tip land), with every other part 20 mm up. Printing the cap's rim,
-// that underside meets the curved layers already laid over the higher middle. A Z contouring only
-// print with the same head keeps the warning and exports.
+// D2: the head clearance check runs on a curved-only print (no Z contouring) and a contact stops the
+// export. The contact is constructed the way the design's test names it, "a deliberately wrong
+// head": the planner plans with the shipped Centauri Carbon head (sock 2.5 mm up, 2.0 mm rise
+// allowed), and the export then checks against a head whose sock is only 0.5 mm above the tip, so the
+// 1.2 mm cap reaches it while the rim is printed. A Z contouring only print checked against the same
+// wrong head keeps the warning and exports.
 TEST_CASE("Curved tops: a head contact on a curved print stops the export, a Z contouring print only warns", "[CurvedTops]")
 {
     const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("curvedtops_head_%%%%-%%%%");
     boost::filesystem::create_directories(dir / "head_clearance");
     {
-        std::ofstream f((dir / "head_clearance" / "wide-nozzle.json").string());
+        std::ofstream f((dir / "head_clearance" / "low-sock.json").string());
         f << R"({
     "schema": "edgeslicer.head_clearance.v1",
-    "id": "wide-nozzle-test",
+    "id": "low-sock-test",
     "name": "Wrong test head",
     "printer_models": ["Elegoo Centauri Carbon"],
     "calibrated": false,
     "source": "unit test",
-    "nozzle": { "profile": [[0.0, 0.5], [0.1, 12.0]] },
-    "boxes": [ {"name": "body", "min": [-30, -30, 20], "max": [30, 30, 60]} ],
+    "nozzle": { "profile": [[0.0, 0.5], [1.0, 1.3], [2.0, 2.1], [4.0, 3.5]] },
+    "boxes": [ {"name": "low sock", "min": [-12, -12, 0.5], "max": [12, 12, 24]} ],
     "curved_tops": { "verified_printer_models": ["Elegoo Centauri Carbon"], "verified_rise_mm": 1.8, "verified_angle_deg": 10.3 }
 })";
     }
     {
-        const ResourcesDirGuard resources(dir.string());
-        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon") != nullptr);
-        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon")->id == "wide-nozzle-test");
-
+        const ResourcesDirGuard shipped;
         Print print;
         Model model;
         slice_puck(print, model, true);
         REQUIRE(print.objects().front()->layers().back()->curved_tops_block);
+
+        Print print_zaa;
+        Model model_zaa;
+        slice_puck(print_zaa, model_zaa, false, { { "zaa_enabled", "1" } });
+
+        const ResourcesDirGuard wrong(dir.string());
+        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon") != nullptr);
+        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon")->id == "low-sock-test");
         std::string error;
         try {
             Test::gcode(print);
@@ -845,11 +850,9 @@ TEST_CASE("Curved tops: a head contact on a curved print stops the export, a Z c
         INFO("error: " << error);
         CHECK_FALSE(error.empty());
         CHECK(error.find("Curved tops:") != std::string::npos);
+        CHECK(error.find("low sock") != std::string::npos);
         CHECK(error.find("The G-code was not exported") != std::string::npos);
 
-        Print print_zaa;
-        Model model_zaa;
-        slice_puck(print_zaa, model_zaa, false, { { "zaa_enabled", "1" } });
         CHECK_NOTHROW(Test::gcode(print_zaa));
     }
     boost::system::error_code ec;
