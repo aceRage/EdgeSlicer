@@ -85,6 +85,7 @@ TEST_CASE("Plugin audit denies host-managed filenames anywhere", "[audit]")
         CHECK(mgr.is_denied_filename(fs::path(SLIC3R_APP_KEY ".ini")));
         CHECK(mgr.is_denied_filename(fs::path(GCODEVIEWER_APP_KEY ".ini")));
         CHECK(mgr.is_denied_filename(fs::path(".install_state.json")));
+        CHECK(mgr.is_denied_filename(fs::path("trust.json")));
     }
 
     SECTION("companions holding the same secrets are denied by the prefix rule")

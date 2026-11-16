@@ -850,7 +850,8 @@ TEST_CASE("reload after extract-dir tamper still imports hashed wheel bytes", "[
     REQUIRE(first.error.empty());
     CHECK(first.result.message == "from-wheel");
 
-    const fs::path extracted = root / "__whl_extracted__" / "helper_token-1.0-py3-none-any" / "helper_token.py";
+    const fs::path extracted = data.plugin_scratch_dir("Trust_Echo") / "__whl_extracted__" / "helper_token-1.0-py3-none-any" /
+                               "helper_token.py";
     REQUIRE(fs::exists(extracted));
     write_file(extracted, "TOKEN = \"tampered\"\n");
 

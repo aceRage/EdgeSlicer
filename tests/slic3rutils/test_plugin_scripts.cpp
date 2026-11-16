@@ -346,9 +346,8 @@ TEST_CASE("A script on a Run worker holds a model snapshot, not the live Plater 
 
     ScopedDataDir data_dir_guard("plugin-scripts-model-snap");
     allow_current_data_dir_writes();
-    const fs::path plugin_dir = data_dir_guard.plugins_dir() / "Hold_Model";
-    const fs::path held       = plugin_dir / "held";
-    const fs::path go         = plugin_dir / "go";
+    const fs::path held = data_dir_guard.plugin_scratch_dir("Hold_Model") / "held";
+    const fs::path go   = data_dir_guard.plugin_scratch_dir("Hold_Model") / "go";
 
     const std::string source = "# /// script\n"
                                "# requires-python = \">=3.12\"\n"
@@ -503,19 +502,18 @@ TEST_CASE("Unload abandons a sleeping script after the wait bound", "[PluginScri
 
     ScopedDataDir data_dir_guard("plugin-scripts-wait-bound");
     allow_current_data_dir_writes();
-    const fs::path    plugin_dir = data_dir_guard.plugins_dir() / "Sleep_Forever";
-    const fs::path    started    = plugin_dir / "started";
-    const fs::path    stop       = plugin_dir / "stop";
-    const fs::path    done       = plugin_dir / "done";
-    const std::string source     = "# /// script\n"
-                                   "# requires-python = \">=3.12\"\n"
-                                   "#\n"
-                                   "# [tool.orcaslicer.plugin]\n"
-                                   "# name = \"Sleep Forever\"\n"
-                                   "# type = \"script\"\n"
-                                   "# ///\n"
-                                   "import orca, time, os\n"
-                                   "STARTED = r'''" +
+    const fs::path    started = data_dir_guard.plugin_scratch_dir("Sleep_Forever") / "started";
+    const fs::path    stop    = data_dir_guard.plugin_scratch_dir("Sleep_Forever") / "stop";
+    const fs::path    done    = data_dir_guard.plugin_scratch_dir("Sleep_Forever") / "done";
+    const std::string source  = "# /// script\n"
+                                "# requires-python = \">=3.12\"\n"
+                                "#\n"
+                                "# [tool.orcaslicer.plugin]\n"
+                                "# name = \"Sleep Forever\"\n"
+                                "# type = \"script\"\n"
+                                "# ///\n"
+                                "import orca, time, os\n"
+                                "STARTED = r'''" +
                                started.string() +
                                "'''\n"
                                "STOP = r'''" +

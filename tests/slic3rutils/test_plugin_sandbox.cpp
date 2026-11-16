@@ -17,8 +17,12 @@
 #endif
 #include <slic3r/Utils/HomePluginsLogic.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -27,9 +31,17 @@
 #ifndef _WIN32
 #include <cerrno>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#ifndef __NR_io_uring_setup
+#define __NR_io_uring_setup 425
+#endif
+#endif
 #endif
 
 using namespace Slic3r;
@@ -190,6 +202,8 @@ TEST_CASE("macOS Seatbelt probe uses an IPC-safe SBPL and fail-closes without sa
     CHECK(sbpl.find("(deny network*)") == std::string::npos);
     CHECK(sbpl.find("(subpath") != std::string::npos);
     CHECK(std::string(plugin_ipc::mac_seatbelt::sbpl_profile(true)) == sbpl);
+    CHECK_FALSE(plugin_ipc::sandbox_kind_is_shipping(plugin_ipc::k_sandbox_kind_seatbelt_probe));
+    CHECK_FALSE(plugin_ipc::sandbox_kind_is_shipping(plugin_ipc::k_sandbox_kind_none));
 #ifndef __APPLE__
     std::string error;
     CHECK_FALSE(plugin_ipc::mac_seatbelt::apply_probe(false, error));
@@ -203,7 +217,8 @@ TEST_CASE("macOS Seatbelt probe uses an IPC-safe SBPL and fail-closes without sa
 TEST_CASE("fail-closed prompt defaults to Don't run and records Run anyway on trust.json", "[PluginSandbox][fail-closed][PluginTrust]")
 {
     ScopedDataDir data_dir_guard("plugin-sandbox-override");
-    std::string   error;
+    write_plugin(data_dir_guard, "Sandbox_Probe", "print('probe')\n");
+    std::string error;
     REQUIRE_FALSE(plugin_trust::is_unsandboxed("Sandbox_Probe"));
 
     plugin_ipc::set_sandbox_unavailable_prompt_for_testing(
@@ -230,9 +245,22 @@ TEST_CASE("fail-closed prompt defaults to Don't run and records Run anyway on tr
     REQUIRE(plugin_ipc::allow_unsandboxed_run("Sandbox_Probe", "again", applied, error));
     CHECK_FALSE(prompted_again);
 
-    REQUIRE(plugin_trust::clear_unsandboxed("Sandbox_Probe", error));
+    // An update of the plugin tree drops the override.
+    std::ofstream((data_dir_guard.plugins_dir() / "Sandbox_Probe" / "extra.py").string()) << "x = 1\n";
     CHECK_FALSE(plugin_trust::is_unsandboxed("Sandbox_Probe"));
+
+    REQUIRE(plugin_trust::clear_unsandboxed("Sandbox_Probe", error));
     plugin_ipc::set_sandbox_unavailable_prompt_for_testing({});
+}
+
+TEST_CASE("legacy string unsandboxed entries are ignored", "[PluginSandbox][fail-closed][PluginTrust]")
+{
+    ScopedDataDir data_dir_guard("plugin-sandbox-legacy-unsandboxed");
+    write_plugin(data_dir_guard, "Sandbox_Probe", "print('probe')\n");
+    const fs::path sidecar = fs::path(data_dir()) / "orca_plugins" / "trust.json";
+    fs::create_directories(sidecar.parent_path());
+    std::ofstream(sidecar.string()) << R"({"version":1,"publishers":[],"pins":[],"unsandboxed":["Sandbox_Probe"]})" << "\n";
+    CHECK_FALSE(plugin_trust::is_unsandboxed("Sandbox_Probe"));
 }
 
 TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][PluginIpc]")
@@ -264,10 +292,15 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
     if (probe.landlock_abi > 0) {
         CHECK(report.applied);
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_landlock_seccomp);
+        CHECK(plugin_ipc::sandbox_kind_is_shipping(report.kind));
         CHECK(report.landlock_abi == probe.landlock_abi);
+        CHECK(report.degraded == (probe.landlock_abi < 3));
+        if (report.degraded)
+            CHECK(report.detail.find("ABI<3") != std::string::npos);
     } else {
         CHECK_FALSE(report.applied);
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
+        CHECK_FALSE(plugin_ipc::sandbox_kind_is_shipping(report.kind));
     }
 #elif defined(__APPLE__)
     if (probe.app_sandbox) {
@@ -528,13 +561,23 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
     ScopedTemporaryDir plugin_dir("plugin-sandbox-ll-plugin");
     ScopedTemporaryDir home_dir("plugin-sandbox-ll-home");
     ScopedTemporaryDir gcode_dir("plugin-sandbox-ll-gcode");
-    const fs::path     readable = plugin_dir.path() / "ok.txt";
-    const fs::path     secret   = home_dir.path() / "secret.txt";
-    const fs::path     gcode    = gcode_dir.path() / "out.gcode";
-    const fs::path     outside  = home_dir.path() / "out.txt";
+    const fs::path     readable  = plugin_dir.path() / "ok.txt";
+    const fs::path     secret    = home_dir.path() / "secret.txt";
+    const fs::path     gcode     = gcode_dir.path() / "out.gcode";
+    const fs::path     outside   = home_dir.path() / "out.txt";
+    const fs::path     unix_path = home_dir.path() / "escape.sock";
     std::ofstream(readable.string()) << "yes";
     std::ofstream(secret.string()) << "no";
     std::ofstream(gcode.string()) << "; gcode\n";
+
+    int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(listen_fd >= 0);
+    sockaddr_un listen_addr{};
+    listen_addr.sun_family = AF_UNIX;
+    std::snprintf(listen_addr.sun_path, sizeof(listen_addr.sun_path), "%s", unix_path.string().c_str());
+    ::unlink(unix_path.string().c_str());
+    REQUIRE(::bind(listen_fd, reinterpret_cast<sockaddr*>(&listen_addr), sizeof(listen_addr)) == 0);
+    REQUIRE(::listen(listen_fd, 1) == 0);
 
     plugin_ipc::SandboxSpec spec;
     spec.python_home   = PythonInterpreter::bundled_python_home();
@@ -549,9 +592,12 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
     REQUIRE(pid >= 0);
     if (pid == 0) {
         ::close(sv[0]);
+        ::close(listen_fd);
         plugin_ipc::SandboxReport report;
         std::string               error;
-        unsigned char             bits = 0;
+        uint32_t                  bits    = 0;
+        int                       unix_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        int                       abs_fd  = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (plugin_ipc::apply_os_sandbox(spec, report, error) && report.applied) {
             bits |= 1u;
             const int secret_fd = ::open(secret.string().c_str(), O_RDONLY);
@@ -591,6 +637,149 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
                 if (WIFEXITED(st) && WEXITSTATUS(st) == 42)
                     bits |= 64u;
             }
+            if (::socket(AF_UNIX, SOCK_STREAM, 0) < 0)
+                bits |= 128u;
+            if (unix_fd >= 0) {
+                const int rc = ::connect(unix_fd, reinterpret_cast<sockaddr*>(&listen_addr), sizeof(listen_addr));
+                if (rc < 0)
+                    bits |= 256u;
+                ::close(unix_fd);
+            }
+            if (abs_fd >= 0) {
+                sockaddr_un abs_addr{};
+                abs_addr.sun_family  = AF_UNIX;
+                abs_addr.sun_path[0] = '\0';
+                std::memcpy(abs_addr.sun_path + 1, "edge-p8-abs-test", 16);
+                const int rc = ::connect(abs_fd, reinterpret_cast<sockaddr*>(&abs_addr), sizeof(sa_family_t) + 1 + 16);
+                if (rc < 0)
+                    bits |= 512u;
+                ::close(abs_fd);
+            }
+            int pair[2] = {-1, -1};
+            if (::socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0) {
+                bits |= 1024u;
+                ::close(pair[0]);
+                ::close(pair[1]);
+            }
+            const int wplugin = ::open(readable.string().c_str(), O_WRONLY | O_APPEND);
+            if (wplugin < 0)
+                bits |= 2048u;
+            else
+                ::close(wplugin);
+#ifdef __NR_io_uring_setup
+            alignas(64) unsigned char ring[256]{};
+            const long                rc = ::syscall(__NR_io_uring_setup, 1, ring);
+            if (rc < 0 && (errno == EPERM || errno == ENOSYS))
+                bits |= 4096u;
+#else
+            bits |= 4096u;
+#endif
+        }
+        (void) !::write(sv[1], &bits, sizeof(bits));
+        ::_exit(0);
+    }
+    ::close(sv[1]);
+    uint32_t bits = 0;
+    ssize_t  n    = 0;
+    do {
+        n = ::read(sv[0], &bits, sizeof(bits));
+    } while (n < 0 && errno == EINTR);
+    ::close(sv[0]);
+    int wstatus = 0;
+    while (::waitpid(pid, &wstatus, 0) < 0 && errno == EINTR) {}
+    ::close(listen_fd);
+    ::unlink(unix_path.string().c_str());
+    REQUIRE(n == static_cast<ssize_t>(sizeof(bits)));
+    INFO("landlock bits=" << bits);
+    CHECK((bits & 1u) != 0);    // applied
+    CHECK((bits & 2u) != 0);    // secret denied
+    CHECK((bits & 4u) != 0);    // plugin file readable
+    CHECK((bits & 8u) != 0);    // gcode folder writable
+    CHECK((bits & 16u) != 0);   // write outside denied
+    CHECK((bits & 32u) != 0);   // inet socket denied
+    CHECK((bits & 64u) != 0);   // execve denied
+    CHECK((bits & 128u) != 0);  // socket(AF_UNIX) denied
+    CHECK((bits & 256u) != 0);  // connect to unix file socket denied
+    CHECK((bits & 512u) != 0);  // abstract unix connect denied
+    CHECK((bits & 1024u) != 0); // socketpair(AF_UNIX) still allowed
+    CHECK((bits & 2048u) != 0); // plugin_root not writable
+    CHECK((bits & 4096u) != 0); // io_uring_setup denied
+}
+
+TEST_CASE("sandboxed child cannot connect to a dbus-daemon unix socket", "[PluginSandbox][landlock][dbus]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (probe.landlock_abi <= 0)
+        SKIP("Landlock unavailable: " + probe.reason);
+    if (::access("/usr/bin/dbus-daemon", X_OK) != 0 && ::access("/usr/sbin/dbus-daemon", X_OK) != 0)
+        SKIP("dbus-daemon is not installed");
+
+    ScopedTemporaryDir bus_dir("plugin-sandbox-dbus");
+    const fs::path     sock = bus_dir.path() / "bus";
+    const std::string  addr = "unix:path=" + sock.string();
+    fs::create_directories("/opt/cursor/artifacts");
+    const fs::path log_path = "/opt/cursor/artifacts/p8-dbus-b1.log";
+    std::ofstream  log(log_path.string(), std::ios::app);
+    log << "addr=" << addr << "\n";
+
+    const pid_t bus_pid = ::fork();
+    REQUIRE(bus_pid >= 0);
+    if (bus_pid == 0) {
+        const char* daemon = ::access("/usr/bin/dbus-daemon", X_OK) == 0 ? "/usr/bin/dbus-daemon" : "/usr/sbin/dbus-daemon";
+        char*       argv[] = {const_cast<char*>(daemon),
+                              const_cast<char*>("--session"),
+                              const_cast<char*>("--nofork"),
+                              const_cast<char*>("--nopidfile"),
+                              const_cast<char*>("--address"),
+                              const_cast<char*>(addr.c_str()),
+                              nullptr};
+        ::execv(daemon, argv);
+        ::_exit(127);
+    }
+    bool ready = false;
+    for (int i = 0; i < 50; ++i) {
+        boost::system::error_code ec;
+        if (fs::exists(sock, ec)) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    log << "sock_ready=" << ready << " bus_pid=" << bus_pid << "\n";
+    if (!ready) {
+        ::kill(bus_pid, SIGKILL);
+        int st = 0;
+        while (::waitpid(bus_pid, &st, 0) < 0 && errno == EINTR) {}
+        SKIP("dbus-daemon did not create " + sock.string());
+    }
+
+    plugin_ipc::SandboxSpec spec;
+    spec.python_home   = PythonInterpreter::bundled_python_home();
+    spec.allow_network = false;
+    spec.allow_exec    = false;
+
+    int sv[2] = {-1, -1};
+    REQUIRE(::pipe(sv) == 0);
+    const pid_t pid = ::fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        ::close(sv[0]);
+        plugin_ipc::SandboxReport report;
+        std::string               error;
+        unsigned char             bits = 0;
+        int                       pre  = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (plugin_ipc::apply_os_sandbox(spec, report, error) && report.applied) {
+            bits |= 1u;
+            if (::socket(AF_UNIX, SOCK_STREAM, 0) < 0)
+                bits |= 2u;
+            if (pre >= 0) {
+                sockaddr_un un{};
+                un.sun_family = AF_UNIX;
+                std::snprintf(un.sun_path, sizeof(un.sun_path), "%s", sock.string().c_str());
+                if (::connect(pre, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0)
+                    bits |= 4u;
+                ::close(pre);
+            }
         }
         (void) !::write(sv[1], &bits, 1);
         ::_exit(0);
@@ -604,14 +793,81 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
     ::close(sv[0]);
     int wstatus = 0;
     while (::waitpid(pid, &wstatus, 0) < 0 && errno == EINTR) {}
+    ::kill(bus_pid, SIGKILL);
+    int bus_st = 0;
+    while (::waitpid(bus_pid, &bus_st, 0) < 0 && errno == EINTR) {}
+    log << "child_bits=" << static_cast<int>(bits) << " child_wait=" << wstatus << "\n";
+    log.close();
     REQUIRE(n == 1);
-    INFO("landlock bits=" << static_cast<int>(bits));
-    CHECK((bits & 1u) != 0);  // applied
-    CHECK((bits & 2u) != 0);  // secret denied
-    CHECK((bits & 4u) != 0);  // plugin file readable
-    CHECK((bits & 8u) != 0);  // gcode folder writable
-    CHECK((bits & 16u) != 0); // write outside denied
-    CHECK((bits & 32u) != 0); // inet socket denied
-    CHECK((bits & 64u) != 0); // execve denied
+    CHECK((bits & 1u) != 0);
+    CHECK((bits & 2u) != 0);
+    CHECK((bits & 4u) != 0);
 }
 #endif
+
+TEST_CASE("shutdown while a sandbox prompt is pending does not hang", "[PluginSandbox][fail-closed]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    PluginHostClient::set_allow_env_overrides_for_testing(true);
+    ScopedEnvVar force(plugin_ipc::k_env_sandbox_force_unavailable, "1");
+
+    ScopedDataDir data_dir_guard("plugin-sandbox-prompt-shutdown");
+    write_plugin(data_dir_guard, "Ipc_Echo", R"PY(# /// script
+# requires-python = ">=3.12"
+# [tool.orcaslicer.plugin]
+# name = "Echo"
+# type = "script"
+# ///
+import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        return orca.ExecutionResult.success("echo")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY");
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Ipc_Echo", error));
+
+    std::atomic<bool> in_prompt{false};
+    plugin_ipc::set_sandbox_unavailable_prompt_for_testing([&in_prompt](const std::string&, const std::string&) {
+        in_prompt.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!plugin_ipc::sandbox_unavailable_prompt_aborted() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return plugin_ipc::SandboxUnavailableChoice::DontRun;
+    });
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    done = false;
+    ScriptCompletion        completion;
+    REQUIRE(PluginHostClient::instance().start_script("Ipc_Echo", "Echo", [&](const ScriptCompletion& c) {
+        std::lock_guard<std::mutex> lock(mutex);
+        completion = c;
+        done       = true;
+        cv.notify_all();
+    }));
+    const auto entered = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_prompt.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < entered)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    REQUIRE(in_prompt.load(std::memory_order_acquire));
+    PluginHostClient::instance().shutdown();
+    std::unique_lock<std::mutex> lock(mutex);
+    CHECK(cv.wait_for(lock, std::chrono::seconds(5), [&] { return done; }));
+    CHECK_FALSE(completion.error.empty());
+
+    plugin_ipc::set_sandbox_unavailable_prompt_for_testing({});
+    PluginHostClient::set_allow_env_overrides_for_testing(false);
+}

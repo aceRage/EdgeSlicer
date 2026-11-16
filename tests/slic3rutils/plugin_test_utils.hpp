@@ -150,6 +150,13 @@ struct ScopedDataDir
 
     // The plugin manager scans {data_dir}/orca_plugins.
     boost::filesystem::path plugins_dir() const { return dir / "orca_plugins"; }
+    // Writable scratch granted to the sandbox (plugin_root is read-only).
+    boost::filesystem::path plugin_scratch_dir(const std::string& plugin_key) const
+    {
+        const boost::filesystem::path scratch = plugins_dir() / "plugin_data" / plugin_key;
+        boost::filesystem::create_directories(scratch);
+        return scratch;
+    }
 
     ScopedDataDir(const ScopedDataDir&)            = delete;
     ScopedDataDir& operator=(const ScopedDataDir&) = delete;
@@ -203,7 +210,17 @@ inline bool allow_unsandboxed_for_test_if_needed(const std::string& plugin_key, 
 {
     if (test_os_sandbox_will_apply() || plugin_ipc::sandbox_env_force_unavailable())
         return true;
-    return plugin_trust::allow_unsandboxed(plugin_key, error);
+    PluginDescriptor descriptor;
+    if (!PluginManager::instance().try_get_plugin_descriptor(plugin_key, descriptor)) {
+        error = "plugin not discovered: " + plugin_key;
+        return false;
+    }
+    const boost::filesystem::path root = descriptor.plugin_root.empty() ? boost::filesystem::path(descriptor.entry_path) :
+                                                                          boost::filesystem::path(descriptor.plugin_root);
+    const std::string             hash = plugin_trust::sha256_plugin_tree(root, error);
+    if (hash.empty())
+        return false;
+    return plugin_trust::allow_unsandboxed(plugin_key, hash, error);
 }
 
 // Phase 5: enable/run refuse an unpinned local package. Existing Catch2 loads pin the discovered

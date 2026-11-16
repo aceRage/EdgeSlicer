@@ -416,7 +416,7 @@ TEST_CASE("Killing the host mid-execute fails the run and a later run respawns",
 
     ScopedDataDir data_dir_guard("plugin-ipc-kill");
     PluginAuditManager::instance().add_global_allowed_root(data_dir());
-    const fs::path marker = data_dir_guard.plugins_dir() / "Ipc_Kill" / "running";
+    const fs::path marker = data_dir_guard.plugin_scratch_dir("Ipc_Kill") / "running";
     std::string    source = KILL_MARKER_SOURCE_PREFIX;
     const auto     pos    = source.find("__MARKER_PATH__");
     REQUIRE(pos != std::string::npos);
@@ -735,7 +735,7 @@ TEST_CASE("Cancel of a hung host run returns before the execute timeout", "[Plug
     PluginHostClient::set_execute_timeout_for_testing(plugin_ipc::k_default_timeout_ms);
     ScopedDataDir data_dir_guard("plugin-ipc-cancel");
     PluginAuditManager::instance().add_global_allowed_root(data_dir());
-    const fs::path marker = data_dir_guard.plugins_dir() / "Ipc_Hang" / "running";
+    const fs::path marker = data_dir_guard.plugin_scratch_dir("Ipc_Hang") / "running";
     std::string    source = KILL_MARKER_SOURCE_PREFIX;
     const auto     pos    = source.find("__MARKER_PATH__");
     REQUIRE(pos != std::string::npos);
@@ -933,11 +933,11 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     ScopedTemporaryDir gcode_dir("ipc-concurrent-gcode");
     const fs::path     gcode = gcode_dir.path() / "box.gcode";
     const fs::path     probe = gcode_dir.path() / "from_script.txt";
-    // Coordination files live inside each plugin dir so Landlock write grants cover them.
-    const fs::path script_started = data_dir_guard.plugins_dir() / "Ipc_Probe" / "script_started";
-    const fs::path script_go      = data_dir_guard.plugins_dir() / "Ipc_Probe" / "script_go";
-    const fs::path stamp_started  = data_dir_guard.plugins_dir() / "PipelineStamp" / "stamp_started";
-    const fs::path stamp_go       = data_dir_guard.plugins_dir() / "PipelineStamp" / "stamp_go";
+    // Coordination files live in plugin_data: plugin_root is read-only in the OS sandbox.
+    const fs::path script_started = data_dir_guard.plugin_scratch_dir("Ipc_Probe") / "script_started";
+    const fs::path script_go      = data_dir_guard.plugin_scratch_dir("Ipc_Probe") / "script_go";
+    const fs::path stamp_started  = data_dir_guard.plugin_scratch_dir("PipelineStamp") / "stamp_started";
+    const fs::path stamp_go       = data_dir_guard.plugin_scratch_dir("PipelineStamp") / "stamp_go";
     write_file(gcode, "G1 X10 Y10 E0.1\n");
 
     std::string stamp_src = WAIT_STAMP_SOURCE_PREFIX;
