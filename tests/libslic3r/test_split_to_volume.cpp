@@ -1198,7 +1198,7 @@ TEST_CASE("Split to Fit P3: section costs worked by hand", "[SplitToVolume]")
         const SplitSectionCost c = split_section_cost(sec, 2400., 2400., 0., opt);
         const double           ragged = 200. / (2. * std::sqrt(PI * 2400.)) - 1.;   // 0.1517
         REQUIRE_THAT(c.area, WithinAbs(2400., 1e-6));
-        REQUIRE(c.small == 0);
+        REQUIRE(c.small_islands == 0);
         REQUIRE_THAT(c.nodowel, WithinAbs(0., 1e-12));
         REQUIRE_THAT(c.busy, WithinAbs(0., 1e-12));
         REQUIRE_THAT(c.ragged, WithinAbs(ragged, 1e-6));
@@ -1214,7 +1214,7 @@ TEST_CASE("Split to Fit P3: section costs worked by hand", "[SplitToVolume]")
         const ExPolygons       sec{ p3_rect(0., 0., 60., 40.), p3_rect(100., 0., 105., 5.) };
         const SplitSectionCost c = split_section_cost(sec, 2425., 2425., 0., opt);
         REQUIRE_THAT(c.area, WithinAbs(2425., 1e-6));
-        REQUIRE(c.small == 1);
+        REQUIRE(c.small_islands == 1);
         REQUIRE_THAT(c.nodowel, WithinAbs(25. / 2425., 1e-6));
         const double ragged = 220. / (2. * std::sqrt(PI * 2425.)) - 1.;
         REQUIRE_THAT(c.ragged, WithinAbs(ragged, 1e-6));
@@ -1229,7 +1229,7 @@ TEST_CASE("Split to Fit P3: section costs worked by hand", "[SplitToVolume]")
         const ExPolygons       sec{ ring };
         const SplitSectionCost c = split_section_cost(sec, 304., 304., 0., opt);
         REQUIRE_THAT(c.area, WithinAbs(1600. - 1296., 1e-6));
-        REQUIRE(c.small == 0);
+        REQUIRE(c.small_islands == 0);
         // No room for a dowel anywhere, and an outline far longer than a circle's: both capped at 1.
         REQUIRE_THAT(c.nodowel, WithinAbs(1., 1e-12));
         REQUIRE_THAT(c.ragged, WithinAbs(1., 1e-12));

@@ -150,7 +150,7 @@ struct SplitAdjustConstants
 // The terms of one candidate position's cost (design 3.5), unweighted, and the weighted total.
 struct SplitSectionCost
 {
-    int    small{ 0 };
+    int    small_islands{ 0 };
     double nodowel{ 0. };
     double busy{ 0. };
     double ragged{ 0. };

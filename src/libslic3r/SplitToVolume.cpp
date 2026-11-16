@@ -326,7 +326,7 @@ SplitSectionCost split_section_cost(const ExPolygons &section, double area_befor
         for (const Polygon &h : ex.holes)
             perimeter += h.length() * SCALING_FACTOR;
         if (a < small_area)
-            ++c.small;
+            ++c.small_islands;
         if (dowels && !offset_ex(ex, -inset).empty())
             takes_dowel += a;
     }
@@ -336,7 +336,7 @@ SplitSectionCost split_section_cost(const ExPolygons &section, double area_befor
     if (c.area > 0.)
         c.ragged = std::clamp(perimeter / (2. * std::sqrt(PI * c.area)) - 1., 0., 1.);
     c.away  = options.adjust_limit > 0. ? std::min(1., std::abs(shift) / options.adjust_limit) : 0.;
-    c.total = k.w_small * double(c.small) + k.w_nodowel * c.nodowel + k.w_busy * c.busy + k.w_ragged * c.ragged + k.w_away * c.away;
+    c.total = k.w_small * double(c.small_islands) + k.w_nodowel * c.nodowel + k.w_busy * c.busy + k.w_ragged * c.ragged + k.w_away * c.away;
     return c;
 }
 
@@ -900,7 +900,7 @@ static void adjust_planes(SplitPlan &plan, const indexed_triangle_set &mesh, con
                     why = SplitAdjustReason::KeepFit;   // moved for a neighbour, not for its own section
                 else {
                     // The term that gained the most.
-                    const double gains[4] = { kc.w_small * double(nom.cost.small - ch.cost.small), kc.w_nodowel * (nom.cost.nodowel - ch.cost.nodowel),
+                    const double gains[4] = { kc.w_small * double(nom.cost.small_islands - ch.cost.small_islands), kc.w_nodowel * (nom.cost.nodowel - ch.cost.nodowel),
                                               kc.w_busy * (nom.cost.busy - ch.cost.busy), kc.w_ragged * (nom.cost.ragged - ch.cost.ragged) };
                     static const SplitAdjustReason reasons[4] = { SplitAdjustReason::ThinPieces, SplitAdjustReason::DowelRoom,
                                                                   SplitAdjustReason::FineDetail, SplitAdjustReason::RaggedOutline };
@@ -926,7 +926,7 @@ static void adjust_planes(SplitPlan &plan, const indexed_triangle_set &mesh, con
                 plan.warnings.push_back({ SplitWarning::Kind::AdjustRefused, idx[i], -1, free_best->pos - pl.nominal });
 
             // Still through fine detail or thin pieces: nothing better within the limit.
-            if (ch.cost.busy >= 0.5 || ch.cost.small > 0)
+            if (ch.cost.busy >= 0.5 || ch.cost.small_islands > 0)
                 plan.warnings.push_back({ SplitWarning::Kind::PlaneInDetail, idx[i], -1, limit });
         }
     }
