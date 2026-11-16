@@ -32,7 +32,8 @@ struct TowerExtrusion
     int    tool;
     double z;
     double height;
-    bool   purge; // inside the purge of a tool change ("; CP TOOLCHANGE WIPE" .. "; CP TOOLCHANGE END")
+    bool   purge;  // inside the purge of a tool change ("; CP TOOLCHANGE WIPE" .. "; CP TOOLCHANGE END")
+    bool   bridge; // after a mid-block switch to 0.2 mm: Bambu's bridge flow (need_thick_bridge_flow()) over a sparse band
 };
 
 // The extruding moves of one tower result. The G-code before "[change_filament_gcode]" runs with the outgoing filament, the
@@ -43,8 +44,10 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
     static const std::regex e_re(R"(\bE([0-9.]+))");
     std::istringstream      in(gcode);
     std::string             line;
-    int                     tool  = tool_before;
-    bool                    purge = false;
+    int                     tool     = tool_before;
+    bool                    purge    = false;
+    bool                    bridge   = false;
+    bool                    extruded = false; // since the writer's own height tag at the start of its block
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
@@ -53,17 +56,23 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
             tool = tool_after;
             continue;
         }
+        if (line.find("WIPE_TOWER_START") != std::string::npos)
+            extruded = false;
         if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
             purge = true;
         else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
             purge = false;
-        if (line.size() > 0 && line[0] == ';' && std::regex_search(line, m, height_re)) {
+        if (!line.empty() && line[0] == ';' && std::regex_search(line, m, height_re)) {
             height = std::stod(m[1].str());
+            bridge = extruded && std::abs(height - 0.2) < 1e-6;
             continue;
         }
         if (line.rfind("G1 ", 0) == 0 && (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
             std::regex_search(line, m, e_re) && std::stod(m[1].str()) > 0.)
-            out.push_back({ tool, z, r3(height), purge });
+        {
+            out.push_back({ tool, z, r3(height), purge, bridge });
+            extruded = true;
+        }
     }
 }
 
@@ -169,7 +178,7 @@ void check_windows(const std::vector<TowerExtrusion> &extrusions, const std::vec
         const WipeTower::NozzleLadder &w = ladders[e.tool];
         // Bambu Studio's bridge flow (need_thick_bridge_flow()): purge rows over a sparse band below are tagged 0.2 mm, laid
         // by a nozzle whose window ends below that. Only purge rows, and only that one height.
-        if (e.purge && w.max_height < 0.2f && std::abs(e.height - 0.2) < 1e-6)
+        if (e.bridge && w.max_height < 0.2f)
             continue;
         CHECK(e.height + 1e-3 >= w.min_height);
         CHECK(e.height <= w.max_height + 1e-3);

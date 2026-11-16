@@ -854,7 +854,10 @@ public:
 
     WipeTowerWriter &rectangle_fill_box(const WipeTower* wipe_tower, const Vec2f &ld, float width, float height, const float f = 0.f)
     {
-        bool need_change_flow = wipe_tower->need_thick_bridge_flow(ld.y());
+        bool        need_change_flow = wipe_tower->need_thick_bridge_flow(ld.y());
+        // PR-C: back to the flow this writer had (a mixed-diameter fill runs at its own width and slab; on any other tower
+        // that is the tower's flow, as before).
+        const float own_flow         = m_extrusion_flow;
 
         Vec2f corners[4];
         corners[0]           = ld;
@@ -882,7 +885,7 @@ public:
                     append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
                     flow_changed = true;
                 } else if (i == 2 && flow_changed) {
-                    set_extrusion_flow(wipe_tower->get_extrusion_flow());
+                    set_extrusion_flow(own_flow);
                     append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
                 }
             }
@@ -3559,7 +3562,15 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                           "; CP EMPTY GRID START\n")
                   .comment_with_value(" layer #", m_num_layer_changes + 1);
             if (box_grid) {
-                grid_fill(writer, fill_box, fill_box_origins[box_idx], block_row_pitch(fill_box_categories[box_idx]), feedrate);
+                // PR-C (review #1072 (d)): a band topped up by another nozzle than its own lays its purge pitch's rows at no
+                // more than that pitch, or it is over-filled (a 1 mm line at a 0.25 mm pitch is four times the volume).
+                const float row         = block_row_pitch(fill_box_categories[box_idx]);
+                const bool  narrow_rows = per_nozzle && row + WT_EPSILON < pw;
+                if (narrow_rows)
+                    writer.set_extrusion_flow(flow_for(m_layer_height, std::max(row, m_perimeter_width))).change_analyzer_line_width(std::max(row, m_perimeter_width));
+                grid_fill(writer, fill_box, fill_box_origins[box_idx], row, feedrate);
+                if (narrow_rows)
+                    writer.set_extrusion_flow(fill_flow).change_analyzer_line_width(pw);
             } else if (solid_infill) {
                 float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
                 if (first_layer) {          // the infill should touch perimeters
@@ -3846,7 +3857,14 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
         const bool grid = !solid_infill && next_layer_purges_into(block.block_key);
 
         if (grid) {
-            grid_fill(writer, fill_box, fill_box.ld.y(), block_row_pitch(block.block_key), feedrate);
+            // PR-C (review #1072 (d)): rows of the band's purge pitch, at no more than that pitch when another nozzle fills it.
+            const float row         = block_row_pitch(block.block_key);
+            const bool  narrow_rows = per_nozzle && row + WT_EPSILON < pw;
+            if (narrow_rows)
+                writer.set_extrusion_flow(flow_for(height, std::max(row, m_perimeter_width))).change_analyzer_line_width(std::max(row, m_perimeter_width));
+            grid_fill(writer, fill_box, fill_box.ld.y(), row, feedrate);
+            if (narrow_rows)
+                writer.set_extrusion_flow(fill_flow).change_analyzer_line_width(pw);
         } else if (solid_infill) {
             float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
             if (first_layer) {          // the infill should touch perimeters
