@@ -1,7 +1,8 @@
-// Split to Fit, phases 1 and 2: the planner, the apply and the automatic dowels
-// (tests/design_split_to_build_volume.md).
+// Split to Fit, phases 1 to 3 and 5: the planner, the apply, the automatic dowels, plane adjustment,
+// loose parts and matching cut-face labels (tests/design_split_to_build_volume.md).
 #include <catch2/catch.hpp>
 
+#include <libslic3r/ClipperUtils.hpp>
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/Format/bbs_3mf.hpp>
 #include <libslic3r/Geometry.hpp>
@@ -18,7 +19,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -347,6 +350,11 @@ TEST_CASE("Split to Fit: a solid interior cell is a whole part", "[SplitToVolume
     // 3 x 3 x 3 cells of a cube: the middle one has no surface at all, yet it is full.
     const SplitPlan plan = split_plan_grid(box_at(300., 300., 300.), usable_box(110., 110., 110.), SplitOptions{});
     REQUIRE(plan.part_count() == 27);
+    // P5: every cell is one piece, the middle one too (six caps and no surface).
+    REQUIRE(plan.piece_count() == 27);
+    REQUIRE(plan.mates.size() == 54);
+    for (const SplitPiece &p : plan.pieces)
+        REQUIRE_THAT(p.volume, WithinRel(1e6, 1e-6));
     const SplitPart &middle = plan.parts[size_t(plan.cell_index({ { 1, 1, 1 } }))];
     REQUIRE_FALSE(middle.empty);
     REQUIRE_THAT(middle.size().x(), WithinAbs(100., 1e-3));
@@ -506,23 +514,73 @@ TEST_CASE("Split to Fit: apply a 2 x 2 x 2 split of a block", "[SplitToVolume]")
     check_apply(box_at(100., 100., 100.), usable_box(60., 60., 60.), 8);
 }
 
-TEST_CASE("Split to Fit: apply keeps loose pieces in their part and warns", "[SplitToVolume]")
+TEST_CASE("Split to Fit P5: loose pieces of a section become parts of their own", "[SplitToVolume]")
 {
-    Model        model;
-    ModelObject *mo = add_object(model, u_shape(), "U");
-    // One Z plane at 150 only: the top cell holds both pillar tops.
-    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(400., 400., 205.), SplitOptions{});
-    REQUIRE(plan.part_count() == 2);
+    // P5 (owner, 2026-11-16) replaces D15 for pieces that fell apart: one Z plane at 150 only, so the
+    // top section holds both pillar tops, which only met through the base below.
+    Model                      model;
+    ModelObject               *mo   = add_object(model, u_shape(), "U");
+    const indexed_triangle_set mesh = split_object_mesh(*mo, 0);
+    const SplitPlan            plan = split_plan_grid(mesh, usable_box(400., 400., 205.), SplitOptions{});
+    REQUIRE(plan.part_count() == 2);   // sections
+    REQUIRE(plan.piece_count() == 3);  // parts
+    REQUIRE(plan.pieces.size() == 3);
+    REQUIRE(plan.pieces[0].name == "Z1");
+    REQUIRE(plan.pieces[0].id == "Z1_a");
+    REQUIRE(plan.pieces[1].name == "Z2_a");
+    REQUIRE(plan.pieces[2].name == "Z2_b");
+    REQUIRE(plan.pieces[2].id == "Z2_b");
+    double sum = 0.;
+    for (const SplitPiece &p : plan.pieces) {
+        REQUIRE(p.fits);
+        REQUIRE_FALSE(p.tiny);
+        sum += p.volume;
+    }
+    // Each pillar top is 50 x 50 x 150, on its own.
+    for (int i : { 1, 2 }) {
+        REQUIRE_THAT(plan.pieces[size_t(i)].volume, WithinRel(50. * 50. * 150., 1e-6));
+        REQUIRE_THAT(plan.pieces[size_t(i)].size().x(), WithinAbs(50., 1e-3));
+        REQUIRE_THAT(plan.pieces[size_t(i)].size().z(), WithinAbs(150., 1e-3));
+    }
+    REQUIRE_THAT(sum, WithinRel(double(its_volume(mesh)), 1e-6));
+    // One face, two pairs (one per pillar), with the face's code and a letter each.
+    REQUIRE(plan.faces.size() == 1);
+    REQUIRE(plan.mates.size() == 2);
+    std::set<std::string> codes;
+    std::set<int>         tops;
+    for (const SplitMate &m : plan.mates) {
+        REQUIRE(m.piece_below == 0);
+        tops.insert(m.piece_above);
+        codes.insert(m.code);
+        REQUIRE(m.patches.size() == 1);
+        REQUIRE_THAT(m.area, WithinRel(2500., 1e-6));
+    }
+    REQUIRE(tops == std::set<int>{ 1, 2 });
+    REQUIRE(codes == std::set<std::string>{ "Z1.1A", "Z1.1B" });
+    // Every vertex of the model lies in some piece.
+    REQUIRE(std::none_of(plan.vertex_piece.begin(), plan.vertex_piece.end(), [](int p) { return p < 0; }));
+
     const SplitApplyResult res = split_apply(*mo, 0, plan);
-    REQUIRE(res.parts.size() == 2);
-    const auto it = std::find_if(res.warnings.begin(), res.warnings.end(),
-                                 [](const SplitWarning &w) { return w.kind == SplitWarning::Kind::LoosePieces; });
-    REQUIRE(it != res.warnings.end());
-    REQUIRE(plan.parts[size_t(it->part)].name == "Z2");
-    REQUIRE_THAT(it->value, WithinAbs(2., 1e-9));
-    // The bottom part is one piece: no warning for it.
-    REQUIRE(std::count_if(res.warnings.begin(), res.warnings.end(),
-                          [](const SplitWarning &w) { return w.kind == SplitWarning::Kind::LoosePieces; }) == 1);
+    REQUIRE(res.parts.size() == 3);
+    double                applied = 0.;
+    std::set<std::string> names;
+    for (size_t i = 0; i < res.parts.size(); ++i) {
+        const ModelObject *part = res.parts[i];
+        REQUIRE(open_edges(*part) == 0);
+        REQUIRE(res.piece_index[i] == int(i));
+        REQUIRE_THAT(world_volume(*part), WithinRel(plan.pieces[i].volume, 1e-4));
+        names.insert(part->name);
+        applied += world_volume(*part);
+        // Each part is one piece now.
+        indexed_triangle_set merged;
+        for (const ModelVolume *v : part->volumes)
+            if (v->is_model_part())
+                its_merge(merged, v->mesh().its);
+        REQUIRE(its_number_of_patches(merged) == 1);
+    }
+    REQUIRE(names == std::set<std::string>{ "U Z1", "U Z2_a", "U Z2_b" });
+    REQUIRE_THAT(applied, WithinRel(world_volume(*mo), 1e-4));
+    REQUIRE_FALSE(has_warning(res.warnings, SplitWarning::Kind::LoosePieces));
 }
 
 TEST_CASE("Split to Fit: apply skips empty cells", "[SplitToVolume]")
@@ -1502,4 +1560,360 @@ TEST_CASE("Split to Fit P3: an open model is warned about before and after Apply
     const SplitWarning *w = p2_find(res.warnings, SplitWarning::Kind::OpenEdges);
     REQUIRE(w != nullptr);
     REQUIRE(plan.parts[size_t(w->part)].name == "X2");
+}
+
+// =====================================================================================================
+// Phase 5: loose parts and matching cut-face labels
+// =====================================================================================================
+
+namespace {
+
+size_t p5_count(const std::vector<SplitWarning> &w, SplitWarning::Kind kind)
+{
+    return size_t(std::count_if(w.begin(), w.end(), [kind](const SplitWarning &x) { return x.kind == kind; }));
+}
+
+// The negative volumes of an object by name.
+std::set<std::string> p5_negative_names(const ModelObject &o)
+{
+    std::set<std::string> out;
+    for (const ModelVolume *v : o.volumes)
+        if (v->is_negative_volume())
+            out.insert(v->name);
+    return out;
+}
+
+double p5_area(const ExPolygons &ex)
+{
+    double a = 0.;
+    for (const ExPolygon &e : ex)
+        a += e.area();
+    return a * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+// Distance from point `p` to the box [lo, hi] (2D).
+double p5_box_distance(const Vec2d &p, const Vec2d &lo, const Vec2d &hi)
+{
+    const double dx = std::max({ lo.x() - p.x(), 0., p.x() - hi.x() });
+    const double dy = std::max({ lo.y() - p.y(), 0., p.y() - hi.y() });
+    return std::hypot(dx, dy);
+}
+
+} // namespace
+
+TEST_CASE("Split to Fit P5: dowels are planned per pair of pieces, holes in both", "[SplitToVolume]")
+{
+    Model        model;
+    ModelObject *mo = add_object(model, u_shape(), "U");
+    SplitOptions opt;
+    opt.dowels.enabled   = true;
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(400., 400., 205.), opt);
+    REQUIRE(plan.piece_count() == 3);
+    REQUIRE(plan.mates.size() == 2);
+    for (const SplitMate &m : plan.mates) {
+        INFO("pair " << m.code);
+        // Each pillar's patch gets its own dowels (the cap is per pair, not per face).
+        REQUIRE_FALSE(m.sites.empty());
+        for (int si : m.sites) {
+            const SplitSite &s = plan.sites[size_t(si)];
+            REQUIRE(s.mate == m.id);
+            REQUIRE(s.name.rfind(m.code + "-", 0) == 0);
+            REQUIRE(m.patches.front().contains(Point::new_scale(s.pos.x(), s.pos.y())));
+        }
+    }
+    REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::NoDowelOnFace));
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 3);
+    REQUIRE(res.dowels.size() == plan.sites.size());
+    std::vector<const ModelObject *> of_piece(plan.pieces.size(), nullptr);
+    for (size_t i = 0; i < res.parts.size(); ++i)
+        of_piece[size_t(res.piece_index[i])] = res.parts[i];
+    for (const SplitMate &m : plan.mates)
+        for (int si : m.sites) {
+            const std::string &name = plan.sites[size_t(si)].name;
+            // The hole above the plane is in the pillar top of this pair, the one below in the base,
+            // and the other pillar top has none of this pair's holes.
+            REQUIRE(p5_negative_names(*of_piece[size_t(m.piece_above)]).count(name + "_A") == 1);
+            REQUIRE(p5_negative_names(*of_piece[size_t(m.piece_below)]).count(name + "_B") == 1);
+            const int other = m.piece_above == 1 ? 2 : 1;
+            REQUIRE(p5_negative_names(*of_piece[size_t(other)]).count(name + "_A") == 0);
+        }
+    for (const ModelObject *p : res.parts)
+        REQUIRE(open_edges(*p) == 0);
+}
+
+TEST_CASE("Split to Fit P5: tiny pieces are named, warned about, and discarded only when asked", "[SplitToVolume]")
+{
+    Model                      model;
+    ModelObject               *mo   = add_object(model, u_shape(), "U");
+    const indexed_triangle_set mesh = split_object_mesh(*mo, 0);
+    const double               whole = world_volume(*mo);
+    // A plane pinned 0.2 mm under the top: the two pillar tips are 50 x 50 x 0.2 = 500 mm3 each.
+    SplitOptions opt;
+    opt.pinned.push_back({ 2, 0, 299.8 });
+    const SplitUsableVolume usable = usable_box(400., 400., 299.9);
+
+    SECTION("kept (the default): named _tiny and warned about")
+    {
+        const SplitPlan plan = split_plan_grid(mesh, usable, opt);
+        REQUIRE(plan.piece_count() == 3);
+        REQUIRE(plan.discarded_count() == 0);
+        std::set<std::string> names;
+        for (const SplitPiece &p : plan.pieces)
+            names.insert(p.name);
+        REQUIRE(names == std::set<std::string>{ "Z1", "Z2_a_tiny", "Z2_b_tiny" });
+        REQUIRE(p5_count(plan.warnings, SplitWarning::Kind::SmallPart) == 2);
+        for (const SplitWarning &w : plan.warnings)
+            if (w.kind == SplitWarning::Kind::SmallPart) {
+                REQUIRE(w.piece >= 0);
+                REQUIRE(plan.pieces[size_t(w.piece)].tiny);
+                REQUIRE_THAT(w.value, WithinRel(500., 1e-3));
+            }
+        REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::DiscardedPieces));
+
+        const SplitApplyResult res = split_apply(*mo, 0, plan);
+        REQUIRE(res.parts.size() == 3);
+        REQUIRE(res.discarded == 0);
+        std::set<std::string> made;
+        for (const ModelObject *p : res.parts)
+            made.insert(p->name);
+        REQUIRE(made == std::set<std::string>{ "U Z1", "U Z2_a_tiny", "U Z2_b_tiny" });
+        REQUIRE(p5_count(res.warnings, SplitWarning::Kind::SmallPart) == 2);
+    }
+    SECTION("discarded: left out, counted, their volume reported")
+    {
+        SplitOptions discard  = opt;
+        discard.discard_small = true;
+        const SplitPlan plan  = split_plan_grid(mesh, usable, discard);
+        REQUIRE(plan.pieces.size() == 3);
+        REQUIRE(plan.piece_count() == 1);
+        REQUIRE(plan.discarded_count() == 2);
+        REQUIRE_THAT(plan.discarded_volume(), WithinRel(1000., 1e-3));
+        const SplitWarning *w = p2_find(plan.warnings, SplitWarning::Kind::DiscardedPieces);
+        REQUIRE(w != nullptr);
+        REQUIRE_THAT(w->value, WithinAbs(2., 1e-9));
+        REQUIRE_THAT(w->value2, WithinRel(1000., 1e-3));
+        REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::SmallPart));
+        // A pair with a discarded piece is no pair.
+        REQUIRE(plan.mates.empty());
+
+        const SplitApplyResult res = split_apply(*mo, 0, plan);
+        REQUIRE(res.parts.size() == 1);
+        REQUIRE(res.parts.front()->name == "U Z1");
+        REQUIRE(res.discarded == 2);
+        REQUIRE_THAT(res.discarded_volume, WithinRel(1000., 1e-3));
+        REQUIRE(has_warning(res.warnings, SplitWarning::Kind::DiscardedPieces));
+        REQUIRE_THAT(world_volume(*res.parts.front()), WithinRel(whole - 1000., 1e-4));
+    }
+    SECTION("one threshold: below it a piece is tiny, above it not")
+    {
+        SplitOptions lower       = opt;
+        lower.small_piece_volume = 400.;
+        lower.discard_small      = true;
+        const SplitPlan plan     = split_plan_grid(mesh, usable, lower);
+        REQUIRE(plan.piece_count() == 3);
+        REQUIRE(plan.discarded_count() == 0);
+        for (const SplitPiece &p : plan.pieces)
+            REQUIRE(p.name.find("_tiny") == std::string::npos);
+        REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::SmallPart));
+    }
+}
+
+TEST_CASE("Split to Fit P5: overlapping bodies stay one piece", "[SplitToVolume]")
+{
+    // Two 100 mm bars overlapping by 50 mm, as two shells of one mesh (a model made of overlapping
+    // bodies): split once across X, each section is one piece, not two.
+    indexed_triangle_set two = box_at(100., 40., 40.);
+    its_merge(two, box_at(100., 40., 40., Vec3d(50., 0., 0.)));
+    const SplitPlan plan = split_plan_grid(two, usable_box(100., 100., 100.), SplitOptions{});
+    REQUIRE(plan.part_count() == 2);
+    REQUIRE(plan.piece_count() == 2);
+
+    // Two bars side by side with a gap are two pieces in each section.
+    indexed_triangle_set apart = box_at(150., 40., 40.);
+    its_merge(apart, box_at(150., 40., 40., Vec3d(0., 60., 0.)));
+    const SplitPlan sep = split_plan_grid(apart, usable_box(100., 120., 100.), SplitOptions{});
+    REQUIRE(sep.part_count() == 2);
+    REQUIRE(sep.piece_count() == 4);
+}
+
+TEST_CASE("Split to Fit P5: label shapes", "[SplitToVolume]")
+{
+    double           w = 0.;
+    const ExPolygons s = split_label_text_shapes("X1.2", 6., 0.84, &w);
+    // One shape per character: X, 1, the dot and 2.
+    REQUIRE(s.size() == 4);
+    const BoundingBox bb = get_extents(s);
+    REQUIRE_THAT(unscale<double>(bb.max.y() - bb.min.y()), WithinAbs(6., 0.02));
+    REQUIRE_THAT(unscale<double>(bb.max.x() - bb.min.x()), WithinAbs(w, 0.02));
+    REQUIRE_THAT(unscale<double>(bb.min.x() + bb.max.x()), WithinAbs(0., 0.02));
+    // Every letter and digit of a code has a glyph; anything else is a gap.
+    for (char c : std::string("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-"))
+        REQUIRE_FALSE(split_label_text_shapes(std::string(1, c), 4., 0.8).empty());
+    REQUIRE(split_label_text_shapes("?", 4., 0.8).empty());
+
+    // The dots: the marker and the number's bits, 5 strokes across.
+    double           size = 0.;
+    const ExPolygons five = split_label_pattern_shapes(5, 0.8, &size);
+    REQUIRE_THAT(size, WithinAbs(4., 1e-9));
+    REQUIRE(five.size() == 3);
+    REQUIRE_THAT(p5_area(five), WithinRel(3. * 0.64, 1e-6));
+    REQUIRE(split_label_pattern_shapes(255, 0.8).size() == 9);
+}
+
+TEST_CASE("Split to Fit P5: matching labels on both faces of every pair", "[SplitToVolume]")
+{
+    Model        model;
+    ModelObject *mo = add_object(model, box_at(100., 100., 100.), "Block");
+    SplitOptions opt;
+    opt.dowels.enabled   = true;
+    opt.labels.enabled   = true;
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(60., 60., 200.), opt);
+    REQUIRE(plan.piece_count() == 4);
+    REQUIRE(plan.mates.size() == plan.faces.size());
+    REQUIRE(plan.labels.size() == 2 * plan.mates.size());
+    REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::NoLabel));
+
+    const SplitLabelOptions &lo = plan.label_options;
+    for (const SplitMate &m : plan.mates) {
+        INFO("pair " << m.code);
+        REQUIRE(m.labels.size() == 2);
+        const SplitLabel &b = plan.labels[size_t(m.labels[0])];
+        const SplitLabel &t = plan.labels[size_t(m.labels[1])];
+        // The same text on both, one on each piece.
+        REQUIRE(b.text == m.code);
+        REQUIRE(t.text == b.text);
+        REQUIRE(b.below);
+        REQUIRE_FALSE(t.below);
+        REQUIRE(b.piece == m.piece_below);
+        REQUIRE(t.piece == m.piece_above);
+        REQUIRE((b.center - t.center).norm() < 1e-9);
+        // Each reads right from outside its own piece: opposite normals, the same up, opposite right.
+        REQUIRE((b.normal + t.normal).norm() < 1e-9);
+        REQUIRE((b.up - t.up).norm() < 1e-9);
+        REQUIRE((b.right + t.right).norm() < 1e-9);
+        REQUIRE((b.right - b.up.cross(b.normal)).norm() < 1e-9);
+        REQUIRE(b.height <= lo.height + 1e-9);
+        REQUIRE(b.stroke >= lo.min_stroke - 1e-9);
+
+        // Inside the patch with the margin, and clear of every dowel hole on the face.
+        const SplitFace  &face = plan.faces[size_t(m.face)];
+        const int         a = plan.planes[size_t(face.plane)].axis, ua = (a + 1) % 3, va = (a + 2) % 3;
+        const ExPolygons  inner = offset_ex(m.patches.front(), -float(scale_(lo.margin - 0.01)));
+        Vec2d             blo(std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+        Vec2d             bhi(std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest());
+        for (int sx : { -1, 1 })
+            for (int sy : { -1, 1 }) {
+                const Vec3d c = b.center + 0.5 * double(sx) * b.width * b.right + 0.5 * double(sy) * b.height * b.up;
+                const Vec2d q(c[ua], c[va]);
+                blo = blo.cwiseMin(q);
+                bhi = bhi.cwiseMax(q);
+                bool inside = false;
+                for (const ExPolygon &ex : inner)
+                    inside = inside || ex.contains(Point::new_scale(q.x(), q.y()));
+                REQUIRE(inside);
+            }
+        REQUIRE_FALSE(face.sites.empty());
+        for (int si : face.sites) {
+            const SplitSite &s = plan.sites[size_t(si)];
+            REQUIRE(p5_box_distance(Vec2d(s.pos[ua], s.pos[va]), blo, bhi) >= s.footprint_radius + lo.dowel_clearance - 1e-3);
+        }
+
+        // The recesses: closed, as big as the shapes, `depth` into their own piece and 0.2 mm out.
+        const indexed_triangle_set mb = split_label_mesh(b);
+        const indexed_triangle_set mt = split_label_mesh(t);
+        REQUIRE(its_num_open_edges(mb) == 0);
+        REQUIRE(its_num_open_edges(mt) == 0);
+        const ExPolygons shapes = b.pattern ? split_label_pattern_shapes(b.number, b.stroke) : split_label_text_shapes(b.text, b.height, b.stroke);
+        REQUIRE_THAT(double(its_volume(mb)), WithinRel(p5_area(shapes) * (b.depth + 0.2), 1e-3));
+        REQUIRE_THAT(double(its_volume(mt)), WithinRel(p5_area(shapes) * (t.depth + 0.2), 1e-3));
+        const double  pos = plan.planes[size_t(face.plane)].pos;
+        BoundingBoxf3 bbb, tbb;
+        for (const Vec3f &v : mb.vertices)
+            bbb.merge(v.cast<double>());
+        for (const Vec3f &v : mt.vertices)
+            tbb.merge(v.cast<double>());
+        REQUIRE_THAT(bbb.min[a], WithinAbs(pos - b.depth, 1e-4));   // into the piece below
+        REQUIRE_THAT(bbb.max[a], WithinAbs(pos + 0.2, 1e-4));
+        REQUIRE_THAT(tbb.max[a], WithinAbs(pos + t.depth, 1e-4));   // into the piece above
+        REQUIRE_THAT(tbb.min[a], WithinAbs(pos - 0.2, 1e-4));
+        // Mirror images: the label above is the one below turned half a turn about `up` (a reflection in
+        // the plane and one across the text), so each reads right from its own side.
+        const Transform3d half_turn = Geometry::translation_transform(b.center) * Geometry::rotation_transform(PI * b.up) *
+                                      Geometry::translation_transform(-b.center);
+        for (size_t i = 0; i < mb.vertices.size(); i += 7) {
+            const Vec3d p = half_turn * mb.vertices[i].cast<double>();
+            double      d = std::numeric_limits<double>::max();
+            for (const Vec3f &q : mt.vertices)
+                d = std::min(d, (q.cast<double>() - p).norm());
+            REQUIRE(d < 1e-3);
+        }
+    }
+
+    // Apply: every label is a closed negative volume on its piece; the parts stay watertight.
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 4);
+    REQUIRE(res.labels == plan.labels.size());
+    for (size_t i = 0; i < res.parts.size(); ++i) {
+        const ModelObject *part = res.parts[i];
+        REQUIRE(open_edges(*part) == 0);
+        const SplitPiece &piece = plan.pieces[size_t(res.piece_index[i])];
+        size_t            labels = 0;
+        for (const ModelVolume *v : part->volumes)
+            if (v->is_negative_volume() && v->name.rfind("Label ", 0) == 0) {
+                ++labels;
+                REQUIRE(its_num_open_edges(v->mesh().its) == 0);
+            }
+        REQUIRE(labels == piece.labels.size());
+        // Its faces' codes are what its labels say.
+        for (int li : piece.labels)
+            REQUIRE(p5_negative_names(*part).count("Label " + plan.labels[size_t(li)].text) == 1);
+    }
+}
+
+TEST_CASE("Split to Fit P5: a small face gets the dots, a tiny one no label", "[SplitToVolume]")
+{
+    SplitOptions opt;
+    opt.labels.enabled = true;
+    // An 8 x 8 bar: no room for text, room for the 4 mm dot pattern.
+    const SplitPlan bar = split_plan_grid(box_at(300., 8., 8.), usable_box(200., 200., 200.), opt);
+    REQUIRE(bar.mates.size() == 1);
+    REQUIRE(bar.labels.size() == 2);
+    REQUIRE(bar.labels[0].pattern);
+    REQUIRE(bar.labels[0].number == 1);
+    REQUIRE(has_warning(bar.warnings, SplitWarning::Kind::LabelPattern));
+    REQUIRE(its_num_open_edges(split_label_mesh(bar.labels[0])) == 0);
+
+    // A 4 x 4 bar: nothing fits; it is said, not skipped silently.
+    const SplitPlan thin = split_plan_grid(box_at(300., 4., 4.), usable_box(200., 200., 200.), opt);
+    REQUIRE(thin.mates.size() == 1);
+    REQUIRE(thin.labels.empty());
+    const SplitWarning *w = p2_find(thin.warnings, SplitWarning::Kind::NoLabel);
+    REQUIRE(w != nullptr);
+    REQUIRE(w->mate == 0);
+}
+
+TEST_CASE("Split to Fit P5: time of a plan on a big mesh", "[SplitToVolume][slow]")
+{
+    // About a million triangles; the piece search runs once per plan (the gizmo plans again when a
+    // plane is let go, not on every mouse move). Reported, not checked: the build machine is shared.
+    const indexed_triangle_set sphere = its_make_sphere(150., 2. * PI / 1000.);
+    using clock                       = std::chrono::steady_clock;
+    auto t0                           = clock::now();
+    const std::vector<Vec3i32> nb     = its_face_neighbors_par(sphere);
+    auto t1                           = clock::now();
+    const SplitPlan plain             = split_plan_grid(sphere, usable_box(200., 200., 200.), SplitOptions{}, nullptr, &nb);
+    auto t2                           = clock::now();
+    SplitOptions all;
+    all.dowels.enabled   = true;
+    all.labels.enabled   = true;
+    const SplitPlan full = split_plan_grid(sphere, usable_box(200., 200., 200.), all, nullptr, &nb);
+    auto t3              = clock::now();
+    auto ms              = [](clock::duration d) { return std::chrono::duration_cast<std::chrono::milliseconds>(d).count(); };
+    WARN("Split to Fit P5 timing, " << sphere.indices.size() << " triangles: face neighbours " << ms(t1 - t0) << " ms, plan "
+                                    << ms(t2 - t1) << " ms, plan with dowels and labels " << ms(t3 - t2) << " ms");
+    REQUIRE(plain.piece_count() == 8);
+    REQUIRE(full.piece_count() == 8);
+    REQUIRE(full.labels.size() == 2 * full.mates.size());
 }

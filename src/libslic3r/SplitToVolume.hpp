@@ -20,8 +20,12 @@
 //    free plane up to adjust_limit mm away from SplitPlane::nominal to a cheaper place to cut
 //    (split_section_cost(), design 3.5); pinned planes stay where the user put them. P3 also adds the
 //    part checks (very small part, no flat face to stand on) to the preview and to split_apply().
-//  - The cut-face labels (later phase) emboss SplitFace::mate_code on both faces of a pair: every
-//    face has a stable key and a code the two mating faces share.
+//  - P5 (loose parts and cut-face labels, built; design 7.5 and "P5 as built"): every section (grid
+//    cell) is split into its pieces, the connected pieces of material inside it (SplitPiece). Each
+//    piece is its own part with its own size, volume and checks, and Apply makes each one an object
+//    of its own. Where two pieces meet on a cut face they form a mating pair (SplitMate): dowels are
+//    planned per pair, and with SplitOptions::labels both pieces get the same code recessed into
+//    their patch of the face (SplitLabel), laid out so it reads right on each side.
 
 #include "BoundingBox.hpp"
 #include "ExPolygon.hpp"
@@ -115,14 +119,15 @@ struct SplitSite
 {
     int         face{ -1 };       // index in SplitPlan::faces
     int         plane{ -1 };      // index in SplitPlan::planes
-    int         island{ 0 };      // which piece of material on the face, 0 = the largest
+    int         island{ 0 };      // which patch of the mating pair, 0 = the largest
+    int         mate{ -1 };       // P5: index in SplitPlan::mates (the two pieces it joins)
     Vec3d       pos{ Vec3d::Zero() }; // grid frame, on the plane
     double      diameter{ 0. };   // nominal (the dowel itself; holes add the tolerance)
     double      half_length{ 0. };
     double      footprint_radius{ 0. }; // the hole's radius round the axis, mm (labels keep clear of it)
     bool        shortened{ false };     // the depth check made it shorter than asked
     bool        scaled_down{ false };   // smaller than asked, to fit a small face
-    // "X1.2-1": the face's mate code and the 1-based dowel number. Holes are "<name>_A" / "_B",
+    // "X1.2-1": the mating pair's code and the 1-based dowel number. Holes are "<name>_A" / "_B",
     // the dowel object "<object>-Dowel-<name>" ("-Pin-" for a Pin).
     std::string name;
 };
@@ -170,6 +175,33 @@ enum class SplitAdjustReason : int {
     KeepFit       = 6,   // moved so a neighbouring part stays within the usable size
 };
 
+// ---- cut-face labels (P5, design 7.5) -------------------------------------------------------------
+
+enum class SplitLabelStyle : int {
+    Code    = 0,   // the pair's code, e.g. "X1.2" (default)
+    Number  = 1,   // a running number: the pair's id + 1
+    Pattern = 2,   // a 3 x 3 dot pattern of the running number, for people who prefer no text
+};
+
+struct SplitLabelOptions
+{
+    // The panel turns labels on by default; the planner's own default is off, so a plan made without
+    // asking for them is exactly P3's.
+    bool            enabled{ false };
+    SplitLabelStyle style{ SplitLabelStyle::Code };
+    // Text height (mm, the whole glyph including its stroke). Smaller patches get smaller text down to
+    // min_height, then the dot pattern, then no label (each with a note).
+    double          height{ 6. };
+    double          min_height{ 4. };
+    // Recessed this deep into each face (mm): three 0.2 mm layers.
+    double          depth{ 0.6 };
+    // Narrowest stroke / dot (mm): two 0.4 mm lines.
+    double          min_stroke{ 0.8 };
+    // Kept this far inside the patch's outline (mm), and this far from every dowel hole on the face.
+    double          margin{ 1.5 };
+    double          dowel_clearance{ 2. };
+};
+
 struct SplitOptions
 {
     // D2: 5 mm each side in X / Y (brim / skirt allowance and the arranger's own shrink), 5 mm at the top.
@@ -193,6 +225,13 @@ struct SplitOptions
     bool   adjust_planes{ false };
     double adjust_limit{ 10. };
     SplitAdjustConstants adjust;
+    // P5: a piece below this volume (mm3) is very small: it is warned about, its name ends in "_tiny",
+    // and with discard_small it is left out of the result altogether (default off: nothing vanishes
+    // unless asked). One threshold for all three, so they always agree.
+    double small_piece_volume{ 1000. };
+    bool   discard_small{ false };
+    // P5: matching labels recessed into both faces of every mating pair.
+    SplitLabelOptions labels;
 };
 
 // The cost of cutting through `section` (scaled ExPolygons, as slice_mesh_ex() gives them), with
@@ -308,16 +347,103 @@ struct SplitWarning
         PlaneInDetail,       // value: the limit, mm; the plane still cuts fine detail, nothing better within it
         AdjustImpossible,    // value: the axis; no placement keeps every part within the rules, planes left as laid out
         // Preview and after Apply (P3, design 3.7). part says which.
-        SmallPart,           // value: the part's volume, mm3 (below SPLIT_SMALL_PART_VOLUME)
-        NoFlatFace,          // value: the area it stands on, mm2 (below SPLIT_MIN_CONTACT_AREA)
+        SmallPart,           // value: the volume, mm3 (below SplitOptions::small_piece_volume); P5: piece says which
+        NoFlatFace,          // value: the area it stands on, mm2 (below SPLIT_MIN_CONTACT_AREA); P5: piece says which
+        // P5, loose parts and labels.
+        DiscardedPieces,     // value: how many pieces "Discard pieces smaller than" left out; value2: their volume, mm3
+        LabelSmaller,        // mate: which pair; value: the text height used, mm (smaller than asked, to fit)
+        LabelPattern,        // mate: which pair; no room for text: the dot pattern is used
+        NoLabel,             // mate: which pair; value: SPLIT_NO_LABEL_TOO_SMALL
     };
     Kind   kind{ Kind::NoUsableVolume };
     int    plane{ -1 };
-    int    part{ -1 };
+    int    part{ -1 };       // index in SplitPlan::parts (the section)
     double value{ 0. };
     int    face{ -1 };       // P2: index in SplitPlan::faces, or -1
     int    detail{ 0 };      // P3: PlaneMoved's SplitAdjustReason
+    int    piece{ -1 };      // P5: index in SplitPlan::pieces, or -1
+    int    mate{ -1 };       // P5: index in SplitPlan::mates, or -1
+    double value2{ 0. };
 };
+
+// SplitWarning::value of NoLabel.
+constexpr double SPLIT_NO_LABEL_TOO_SMALL = 0.;   // no room on the patch, even for the dot pattern
+
+// ---- pieces, mating pairs and labels (P5) --------------------------------------------------------
+
+// One connected piece of material inside a section (grid cell): what Apply makes into one object.
+// A section of one piece has one SplitPiece, named like the section.
+struct SplitPiece
+{
+    int           section{ -1 };   // index in SplitPlan::parts
+    int           index{ 0 };      // 0-based within its section, largest volume first
+    // Stable id: the section name and a letter, "X1-Y2-Z1_b" ("X1-Y2-Z1_a" for a single piece).
+    std::string   id;
+    // The part's name: the section name, plus "_b" when the section has more than one piece, plus
+    // "_tiny" below SplitOptions::small_piece_volume ("X1-Y2-Z1_b_tiny").
+    std::string   name;
+    BoundingBoxf3 bbox;            // grid frame
+    bool          fits{ false };
+    double        volume{ 0. };    // mm3
+    double        contact_area{ 0. }; // mm2 (as SplitPart::contact_area)
+    bool          tiny{ false };   // below the small-piece volume
+    bool          discarded{ false }; // left out ("Discard pieces smaller than")
+    std::vector<int> mates;        // indices in SplitPlan::mates
+    std::vector<int> labels;       // indices in SplitPlan::labels on this piece
+
+    Vec3d size() const { return bbox.defined ? bbox.size() : Vec3d::Zero(); }
+};
+
+// Two pieces that meet on a cut face, through one or more patches of it (a U cut across both legs
+// is one pair with two patches). Dowels and labels are planned per pair.
+struct SplitMate
+{
+    int         id{ -1 };          // index in SplitPlan::mates
+    int         face{ -1 };        // index in SplitPlan::faces
+    int         piece_below{ -1 }; // index in SplitPlan::pieces, on the negative side of the plane
+    int         piece_above{ -1 };
+    double      area{ 0. };        // mm2
+    // The patches (the plane's coordinates, as SplitFace islands: scaled, largest first).
+    ExPolygons  patches;
+    // The code both pieces carry: the face's mate_code ("X1.2"), with a letter when the face joins
+    // more than one pair ("X1.2A", "X1.2B").
+    std::string code;
+    std::vector<int> sites;        // indices in SplitPlan::sites
+    std::vector<int> labels;       // indices in SplitPlan::labels (two, or none)
+};
+
+// One recessed label on one piece's patch of a cut face. The two labels of a pair sit on the same
+// spot of the plane and carry the same text; each is laid out seen from outside its own piece (text
+// upright along +Z on X / Y faces, along +Y on Z faces), so in space they are mirror images and both
+// read right when each part is held face on.
+struct SplitLabel
+{
+    int         mate{ -1 };
+    int         piece{ -1 };
+    bool        below{ true };     // on the piece below the plane (outward normal +axis)
+    std::string text;              // what is written (also for the pattern: its number)
+    bool        pattern{ false };  // the dot pattern instead of text
+    int         number{ 0 };       // the pattern's number
+    Vec3d       center{ Vec3d::Zero() }; // grid frame, on the plane
+    Vec3d       normal{ Vec3d::UnitZ() }; // out of the piece through its face
+    Vec3d       up{ Vec3d::UnitY() };
+    Vec3d       right{ Vec3d::UnitX() };  // up x normal: the reading direction seen from outside
+    double      height{ 0. };      // mm, along `up`
+    double      width{ 0. };       // mm, along `right`
+    double      stroke{ 0. };      // mm
+    double      depth{ 0. };       // mm into the piece
+};
+
+// The label's 2D shapes (scaled coordinates, mm before scaling), centred on the origin, x to the
+// right and y up: `text` in the built-in stroke font (digits, A-Z, '.', '-'; other characters are
+// left as a gap), each glyph `height` tall including its `stroke`. `width` gets the total width.
+ExPolygons split_label_text_shapes(const std::string &text, double height, double stroke, double *width = nullptr);
+// The dot pattern of `number` (1..511): a 3 x 3 grid of square dots of side `stroke` and pitch
+// 2 * stroke, the top-left dot always set (it shows which way up), the other eight the number's bits.
+ExPolygons split_label_pattern_shapes(int number, double stroke, double *size = nullptr);
+// The label's recess as a closed mesh in the grid frame: from 0.2 mm outside the face to `depth`
+// inside the piece. Apply adds it to its piece as a negative volume.
+indexed_triangle_set split_label_mesh(const SplitLabel &label);
 
 // SplitWarning::value of NoDowelOnFace.
 constexpr double SPLIT_NO_DOWEL_TOO_SMALL = 0.;   // no room inside the face's outline
@@ -344,11 +470,28 @@ struct SplitPlan
     // placed with (split_apply() builds the connectors from them).
     std::vector<SplitSite>    sites;
     SplitDowelOptions         dowel_options;
+    // P5: the pieces of every section (in section order, largest first within one), the mating pairs
+    // and the labels; the options they were made with.
+    std::vector<SplitPiece>   pieces;
+    std::vector<SplitMate>    mates;
+    std::vector<SplitLabel>   labels;
+    SplitLabelOptions         label_options;
+    double                    small_piece_volume{ 1000. };
+    // P5: for every vertex of the planned mesh, the piece it lies in (-1: on no piece). Apply uses it to
+    // tell which piece each separate shell of a cut part is.
+    std::vector<int>          vertex_piece;
 
     size_t      dowel_count() const { return sites.size(); }
     size_t      cell_count() const { return parts.size(); }
-    size_t      part_count() const;          // non-empty cells
-    size_t      parts_not_fitting() const;
+    size_t      part_count() const;          // non-empty cells (sections)
+    size_t      parts_not_fitting() const;   // sections; P5: see pieces_not_fitting()
+    // P5: the parts Apply makes: pieces that are not discarded.
+    size_t      piece_count() const;
+    size_t      pieces_not_fitting() const;
+    size_t      discarded_count() const;
+    double      discarded_volume() const;
+    // Pieces of section `section` (indices in `pieces`).
+    std::vector<int> pieces_of(int section) const;
     int         cell_index(const SplitCell &cell) const { return cell[0] + counts[0] * (cell[1] + counts[1] * cell[2]); }
     // Positions of the planes of one axis, in order.
     std::vector<double> plane_positions(int axis) const;
@@ -373,8 +516,10 @@ std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf 
                                     int max_rejects = 40);
 
 // The plan for `mesh` (grid frame). `throw_on_cancel` is called now and then and may throw.
+// `face_neighbors` (its_face_neighbors(mesh)) may be passed in by a caller that plans the same mesh
+// many times (the gizmo); otherwise it is worked out here (P5's piece search needs it).
 SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVolume &usable, const SplitOptions &options,
-                          std::function<void()> throw_on_cancel = nullptr);
+                          std::function<void()> throw_on_cancel = nullptr, const std::vector<Vec3i32> *face_neighbors = nullptr);
 
 // The object's model parts merged into one mesh in the grid frame (instance `instance` applied).
 indexed_triangle_set split_object_mesh(const ModelObject &object, int instance);
@@ -386,8 +531,12 @@ struct SplitApplyResult
     // Owns the parts. Each part is one object with one instance, sitting where it was in the
     // uncut object (world frame), with its assembled pose set.
     std::unique_ptr<Model>    model;
-    std::vector<ModelObject*> parts;      // owned by `model`, in plan part order
-    std::vector<int>          part_index; // per entry of `parts`: index in SplitPlan::parts
+    std::vector<ModelObject*> parts;      // owned by `model`, in plan piece order (P5: one per piece)
+    std::vector<int>          part_index; // per entry of `parts`: index in SplitPlan::parts (the section)
+    std::vector<int>          piece_index; // P5: per entry of `parts`: index in SplitPlan::pieces (-1: not matched)
+    size_t                    labels{ 0 };   // P5: labels added (negative volumes)
+    size_t                    discarded{ 0 }; // P5: pieces left out, and their volume (mm3)
+    double                    discarded_volume{ 0. };
     // P2: the loose dowels (or pins), one object each, owned by `model`, in SplitPlan::sites order,
     // named "<object>-Dowel-<site>" ("-Pin-"), standing where they sit in the assembled model.
     std::vector<ModelObject*> dowels;
@@ -417,6 +566,12 @@ struct SplitApplyResult
 // object of its own. Earlier holes are handed on by the later cuts (by bounding box,
 // process_modifier_cut()); the planner's corner keep-out keeps every hole clear of every other
 // plane, so each hole lands in exactly one part.
+//
+// Pieces (P5): a cut part whose section has several pieces is split into one object per piece (each
+// separate shell of the part is matched to its piece by the plan's vertex_piece; paint is carried
+// over), named "<object name> <piece name>". Holes, labels and modifiers go with the piece they
+// touch. Discarded pieces are left out (result.discarded / discarded_volume). Labels (P5) are added
+// to their piece as negative volumes named "Label <text>".
 SplitApplyResult split_apply(const ModelObject &object, int instance, const SplitPlan &plan,
                              std::function<bool()> canceled = nullptr,
                              std::function<void(int, int)> progress = nullptr);
