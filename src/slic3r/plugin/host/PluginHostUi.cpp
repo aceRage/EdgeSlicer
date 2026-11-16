@@ -15,6 +15,7 @@
 #include <slic3r/GUI/Widgets/WebView.hpp>
 
 #include <nlohmann/json.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/cast.h>
 #include <pybind11/gil.h>
 #include <pybind11/pybind11.h>

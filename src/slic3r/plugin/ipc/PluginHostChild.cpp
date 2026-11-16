@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/gil.h>
 
 namespace Slic3r::plugin_ipc {

@@ -9,6 +9,7 @@
 #include <slic3r/GUI/format.hpp>
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginFsUtils.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>

@@ -22,6 +22,7 @@
 #include <slic3r/GUI/format.hpp>
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include <slic3r/plugin/PluginLoader.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
 #include <slic3r/plugin/PythonPluginInterface.hpp>

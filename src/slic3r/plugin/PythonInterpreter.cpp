@@ -14,6 +14,7 @@
 #include <exception>
 #include <pytypedefs.h>
 #include "PluginFsUtils.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 
 #include <pybind11/embed.h>
@@ -35,7 +36,6 @@
 #include <vector>
 #include <pybind11/cast.h>
 #include <pybind11/pytypes.h>
-#include <Python.h>
 
 namespace Slic3r {
 

@@ -18,6 +18,7 @@
 
 #include <boost/filesystem.hpp>
 #include <nlohmann/json.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/cast.h>
 #include <pybind11/embed.h>
 #include <pybind11/eval.h>

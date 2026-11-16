@@ -1,5 +1,6 @@
 #include "PluginHooks.hpp"
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "PluginManager.hpp"
 #include "PluginResolver.hpp"
 #include "PythonInterpreter.hpp"

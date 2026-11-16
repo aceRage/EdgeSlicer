@@ -1,6 +1,7 @@
 #include "PluginHostBindings.hpp"
 #include "slic3r/plugin/OrcaApiVersion.hpp"
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 

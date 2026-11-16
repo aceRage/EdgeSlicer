@@ -1,5 +1,6 @@
 #pragma once
 #include "libslic3r/libslic3r.h"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include "libslic3r/Config.hpp"   // ConfigBase

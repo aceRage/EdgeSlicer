@@ -48,7 +48,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/Utils/ASCIIFolding.hpp"
 #include "slic3r/plugin/PluginDescriptor.hpp"
-#include <Python.h>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 
 namespace Slic3r {
 

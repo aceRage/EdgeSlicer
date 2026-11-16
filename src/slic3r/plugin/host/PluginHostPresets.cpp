@@ -2,6 +2,7 @@
 #include "slic3r/plugin/PluginBindingUtils.hpp"
 #include "slic3r/plugin/OrcaApiVersion.hpp"
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>

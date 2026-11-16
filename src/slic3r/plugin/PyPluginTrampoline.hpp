@@ -3,6 +3,7 @@
 
 #include "libslic3r/LifecycleEvents.hpp"
 #include <exception>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/embed.h>
 
 #include <boost/log/trivial.hpp>

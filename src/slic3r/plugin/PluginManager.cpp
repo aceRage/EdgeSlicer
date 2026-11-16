@@ -8,6 +8,7 @@
 #include "libslic3r/LifecycleEvents.hpp"
 #include <memory>
 #include <optional>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/embed.h>
 
 #include "OrcaApiVersion.hpp"

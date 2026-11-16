@@ -3,6 +3,7 @@
 // plugin_loader fills and tears down a Plugin, so it needs the complete type. The
 // declaration lives with the registry that owns it; the dependency is .cpp-only, so the
 // service header stays free of the manager.
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "PluginManager.hpp"
 
 #include "OrcaApiVersion.hpp"

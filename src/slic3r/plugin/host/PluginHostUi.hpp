@@ -1,5 +1,6 @@
 #pragma once
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 
 #include <functional>

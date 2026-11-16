@@ -2,6 +2,7 @@
 #define slic3r_ScriptPluginCapability_hpp_
 
 #include "../../PythonPluginInterface.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 
 namespace Slic3r {

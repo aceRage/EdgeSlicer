@@ -3,6 +3,7 @@
 #include "PluginHostUi.hpp"
 
 #include <nlohmann/json.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginManager.hpp>

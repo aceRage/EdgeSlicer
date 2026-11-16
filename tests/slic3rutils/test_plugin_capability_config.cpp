@@ -8,6 +8,7 @@
 #include <slic3r/plugin/PythonPluginInterface.hpp>
 
 #include "plugin_test_utils.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pytypes.h>
 #include <pybind11/eval.h>
 #include <pybind11/gil.h>

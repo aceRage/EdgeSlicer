@@ -18,6 +18,7 @@
 #include <libslic3r/Model.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/embed.h>
 #include <pybind11/gil.h>
 #include <pybind11/pybind11.h>

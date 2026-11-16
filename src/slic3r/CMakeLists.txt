@@ -1222,6 +1222,7 @@ if (EDGE_PYTHON_PLUGINS)
     list(APPEND SLIC3R_GUI_SOURCES
         plugin/PythonInterpreter.cpp
         plugin/PythonInterpreter.hpp
+        plugin/EdgePythonInclude.hpp
         plugin/PythonPluginBridge.cpp
         plugin/PythonPluginBridge.hpp
         plugin/PythonPluginInterface.hpp

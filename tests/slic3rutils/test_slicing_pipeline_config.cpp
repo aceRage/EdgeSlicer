@@ -19,6 +19,7 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
 

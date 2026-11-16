@@ -1,6 +1,7 @@
 #ifndef slic3r_PyPluginPackage_hpp_
 #define slic3r_PyPluginPackage_hpp_
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 
 namespace Slic3r {

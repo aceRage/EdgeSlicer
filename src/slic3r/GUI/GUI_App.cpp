@@ -116,6 +116,7 @@
 #include "GeneratedConfig.hpp"
 
 #ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
 #include "slic3r/plugin/PythonInterpreter.hpp"
 #endif

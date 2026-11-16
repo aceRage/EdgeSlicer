@@ -23,6 +23,7 @@
 #endif
 
 #include "OrcaApiVersion.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "PluginAuditManager.hpp"
 #include "PythonInterpreter.hpp"
 #include "slic3r/GUI/I18N.hpp"

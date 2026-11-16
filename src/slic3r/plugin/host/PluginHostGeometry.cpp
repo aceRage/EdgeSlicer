@@ -1,4 +1,5 @@
 #include "PluginHostBindings.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pytypes.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>

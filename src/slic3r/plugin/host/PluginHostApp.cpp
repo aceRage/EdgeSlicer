@@ -3,6 +3,7 @@
 #include <slic3r/plugin/ipc/PluginIpcProtocol.hpp>
 #include <slic3r/plugin/ipc/PluginHostRpc.hpp>
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>

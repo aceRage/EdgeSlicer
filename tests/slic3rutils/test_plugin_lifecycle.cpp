@@ -16,6 +16,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/cstdlib.hpp>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/cast.h>
 #include <pybind11/gil.h>
 #include <pybind11/pybind11.h>

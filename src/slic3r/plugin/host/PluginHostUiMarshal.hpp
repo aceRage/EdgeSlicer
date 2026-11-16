@@ -5,6 +5,7 @@
 
 #include <slic3r/GUI/GUI_App.hpp>
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/gil.h>
 #include <pybind11/pybind11.h>
 

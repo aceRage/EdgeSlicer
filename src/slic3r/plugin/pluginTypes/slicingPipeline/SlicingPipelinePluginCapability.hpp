@@ -2,6 +2,7 @@
 #include "slic3r/plugin/PythonPluginInterface.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 #include <string>
 

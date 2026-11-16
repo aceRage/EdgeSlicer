@@ -4,6 +4,7 @@
 
 #include <boost/log/trivial.hpp>
 #include <memory>
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "slic3r/plugin/PythonPluginInterface.hpp"

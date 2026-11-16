@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
