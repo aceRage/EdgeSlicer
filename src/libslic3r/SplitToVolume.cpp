@@ -1223,7 +1223,7 @@ static void find_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, const
     plan.vertex_piece.assign(mesh.vertices.size(), -1);
 
     // Each non-empty cell's pieces (indices in `pieces`, after step 8).
-    std::vector<std::vector<int>> section_pieces(size_t(ncell));
+    std::vector<std::vector<int>> section_pieces(static_cast<size_t>(ncell));
     auto make_piece = [&](int ci, const BoundingBoxf3 &bbox, double volume) {
         SplitPiece p;
         p.section = ci;
@@ -1616,7 +1616,7 @@ static void find_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, const
     // 7. Joins the topology does not see: other shells overlapping, caps on their own, voids.
     SplitUnionFind cu;
     cu.init(comps.size());
-    std::vector<std::vector<int>> by_cell(size_t(ncell));
+    std::vector<std::vector<int>> by_cell(static_cast<size_t>(ncell));
     for (size_t i = 0; i < comps.size(); ++i)
         if (comps[i].cell >= 0 && comps[i].cell < ncell)
             by_cell[size_t(comps[i].cell)].push_back(int(i));
