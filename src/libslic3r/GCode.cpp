@@ -2119,6 +2119,15 @@ std::string WipeTowerIntegration::post_process_wipe_tower_moves(const WipeTower:
 
         // If this was a toolchange command, we should change current extruder offset
         if (line == "[change_filament_gcode]") {
+            // Edge: a Type 1 tool change's text continues from tool_change_start_pos (append_tcr travels there after
+            // change_filament_gcode), not from where the part merged before it ended. Track that position and forget
+            // the last written one, so the next move names X and Y: a coordinate equal to the stale position was
+            // dropped, and a purge row was extruded in place (e.g. "G1  E3.6764").
+            if (tcr.is_tool_change) {
+                pos             = tcr.tool_change_start_pos;
+                transformed_pos = trans_pos(pos);
+                old_pos         = Vec2f(-1000.1f, -1000.1f);
+            }
             // BBS
             if (!m_single_extruder_multi_material) {
                 extruder_offset = extruder_offset_at(tcr.new_tool).cast<float>();
