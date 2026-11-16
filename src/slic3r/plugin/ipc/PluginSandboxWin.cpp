@@ -42,6 +42,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
 #endif
 
+#include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
 
 #include <cstdint>
@@ -105,6 +106,9 @@ bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mo
     EXPLICIT_ACCESSW   ea{};
     ea.grfAccessPermissions = write ? (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE) : (GENERIC_READ | GENERIC_EXECUTE);
     ea.grfAccessMode        = mode;
+    // One SetNamedSecurityInfoW. An inheritable ACE does propagate to existing
+    // children (that is the grant). Do not SET then immediately REVOKE — that was
+    // the redundant second walk. Grants live until close_win_appcontainer.
     ea.grfInheritance       = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
@@ -226,7 +230,15 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         g_win.grants.emplace_back(path, write);
         return true;
     };
-    if (!grant_or_fail(spec.python_home, false) || !grant_or_fail(spec.plugin_root, false) || !grant_or_fail(spec.write_root, true)) {
+    // python_home is often under Program Files: a standard user has no WRITE_DAC, and
+    // ALL APPLICATION PACKAGES can already read it. Skip rather than fail the spawn.
+    if (!spec.python_home.empty()) {
+        if (grant_dir_acl(sid, spec.python_home, false, SET_ACCESS))
+            g_win.grants.emplace_back(spec.python_home, false);
+        else
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
+    }
+    if (!grant_or_fail(spec.plugin_root, false) || !grant_or_fail(spec.write_root, true)) {
         clear_win_state();
         return false;
     }
@@ -316,6 +328,8 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
 }
 
 void close_win_appcontainer() { clear_win_state(); }
+
+std::wstring win_appcontainer_profile_name(const std::string& plugin_key) { return profile_name(plugin_key); }
 
 void* win_security_capabilities() { return g_win.ready ? g_win.attr_list : nullptr; }
 

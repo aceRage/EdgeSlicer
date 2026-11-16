@@ -185,7 +185,7 @@ bool HomePlugins::handle(const json& msg)
     } else if (command == "plugin_reveal") {
         if (listed(key))
             reveal(key);
-    }     else if (command == "plugin_run") {
+    } else if (command == "plugin_run") {
         if (listed(key))
             run(key);
     } else if (command == "plugin_clear_unsandboxed") {

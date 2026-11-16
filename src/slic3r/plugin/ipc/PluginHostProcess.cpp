@@ -22,6 +22,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <cwchar>
+#include <cwctype>
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -53,6 +55,91 @@ namespace {
 std::atomic<bool> g_allow_env_overrides{false};
 
 #ifdef _WIN32
+// NTSTATUS / Win32 codes seen when JOB_OBJECT_LIMIT_PROCESS_MEMORY kills the child.
+constexpr DWORD k_status_no_memory         = 0xC0000017u;
+constexpr DWORD k_status_quota_exceeded    = 0xC0000044u;
+constexpr DWORD k_status_commit_limit      = 0xC000012Du;
+constexpr DWORD k_error_not_enough_quota   = 1816u;
+constexpr DWORD k_error_commitment_limit   = 1455u;
+
+bool win_env_entry_allowed(const wchar_t* entry)
+{
+    if (entry == nullptr || entry[0] == L'\0')
+        return false;
+    auto starts = [](const wchar_t* e, const wchar_t* p) {
+        for (; *p != L'\0'; ++p, ++e) {
+            if (*e == L'\0')
+                return false;
+            if (std::towupper(static_cast<wint_t>(*e)) != std::towupper(static_cast<wint_t>(*p)))
+                return false;
+        }
+        return true;
+    };
+    static const wchar_t* prefixes[] = {L"PATH=",
+                                        L"PATHEXT=",
+                                        L"SYSTEMROOT=",
+                                        L"SYSTEMDRIVE=",
+                                        L"WINDIR=",
+                                        L"COMSPEC=",
+                                        L"TEMP=",
+                                        L"TMP=",
+                                        L"USERPROFILE=",
+                                        L"USERNAME=",
+                                        L"USERDOMAIN=",
+                                        L"COMPUTERNAME=",
+                                        L"HOMEDRIVE=",
+                                        L"HOMEPATH=",
+                                        L"NUMBER_OF_PROCESSORS=",
+                                        L"PROCESSOR_ARCHITECTURE=",
+                                        L"PROGRAMFILES=",
+                                        L"PROGRAMFILES(X86)=",
+                                        L"PROGRAMW6432=",
+                                        L"PYTHONNOUSERSITE=",
+                                        L"ALLUSERSPROFILE=",
+                                        L"PUBLIC=",
+                                        L"APPDATA=",
+                                        L"LOCALAPPDATA="};
+    for (const wchar_t* prefix : prefixes) {
+        if (starts(entry, prefix))
+            return true;
+    }
+    return false;
+}
+
+std::vector<wchar_t> scrubbed_helper_env_block()
+{
+    std::vector<std::wstring> kept;
+    bool                      have_nousersite = false;
+    LPWCH                     strings         = ::GetEnvironmentStringsW();
+    if (strings) {
+        for (LPWCH p = strings; *p != L'\0'; p += std::wcslen(p) + 1) {
+            if (!win_env_entry_allowed(p))
+                continue;
+            kept.emplace_back(p);
+            const wchar_t prefix[] = L"PYTHONNOUSERSITE=";
+            bool          match    = true;
+            for (size_t i = 0; prefix[i] != L'\0'; ++i) {
+                if (p[i] == L'\0' || std::towupper(static_cast<wint_t>(p[i])) != prefix[i]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                have_nousersite = true;
+        }
+        ::FreeEnvironmentStringsW(strings);
+    }
+    if (!have_nousersite)
+        kept.emplace_back(L"PYTHONNOUSERSITE=1");
+    std::vector<wchar_t> block;
+    for (const std::wstring& s : kept) {
+        block.insert(block.end(), s.begin(), s.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
 std::wstring quote_arg(const std::wstring& arg)
 {
     if (arg.find_first_of(L" \t\"") == std::wstring::npos)
@@ -247,7 +334,8 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     } else {
         si->cb = sizeof(STARTUPINFOW);
     }
-    const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, si, &pi);
+    std::vector<wchar_t> env_block = scrubbed_helper_env_block();
+    const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, env_block.data(), nullptr, si, &pi);
     if (!ok) {
         ::CloseHandle(job);
         ::CloseHandle(pipe);
@@ -267,7 +355,8 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     }
     ::ResumeThread(pi.hThread);
     ::CloseHandle(pi.hThread);
-    close_parent_sandbox();
+    // Keep AppContainer ACL grants until close_host. Revoking here (r1) dropped
+    // plugin_root / write_root from the running child.
 
     OVERLAPPED ov{};
     ov.hEvent      = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -282,6 +371,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
                 ::CloseHandle(pi.hProcess);
                 ::CloseHandle(job);
                 ::CloseHandle(pipe);
+                close_parent_sandbox();
                 error = "ConnectNamedPipe timed out";
                 return false;
             }
@@ -291,6 +381,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
             ::CloseHandle(pi.hProcess);
             ::CloseHandle(job);
             ::CloseHandle(pipe);
+            close_parent_sandbox();
             error = "ConnectNamedPipe failed";
             return false;
         }
@@ -304,6 +395,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         ::CloseHandle(pi.hProcess);
         ::CloseHandle(job);
         ::CloseHandle(pipe);
+        close_parent_sandbox();
         error = "named pipe client pid mismatch";
         return false;
     }
@@ -359,6 +451,7 @@ void close_host(SpawnedHost& host)
         host.job = nullptr;
     }
     host.pid = 0;
+    close_parent_sandbox();
 }
 
 #else
@@ -385,13 +478,23 @@ bool env_entry_allowed(const char* entry)
 {
     if (entry == nullptr || entry[0] == '\0')
         return false;
-    static const char* exact[] = {"PATH=",           "HOME=",
-                                  "USER=",           "LOGNAME=",
-                                  "LANG=",           "TZ=",
-                                  "TMPDIR=",         "TMP=",
-                                  "TEMP=",           "TERM=",
-                                  "CURL_CA_BUNDLE=", "REQUESTS_CA_BUNDLE=",
-                                  "FLATPAK_ID=",     "PYTHONNOUSERSITE="};
+    static const char* exact[] = {"PATH=",
+                                  "HOME=",
+                                  "USER=",
+                                  "LOGNAME=",
+                                  "LANG=",
+                                  "TZ=",
+                                  "TMPDIR=",
+                                  "TMP=",
+                                  "TEMP=",
+                                  "TERM=",
+                                  "CURL_CA_BUNDLE=",
+                                  "REQUESTS_CA_BUNDLE=",
+                                  "FLATPAK_ID=",
+                                  "PYTHONNOUSERSITE=",
+                                  "LD_LIBRARY_PATH=",
+                                  "APPDIR=",
+                                  "APPIMAGE="};
     for (const char* prefix : exact) {
         const size_t n = std::strlen(prefix);
         if (std::strncmp(entry, prefix, n) == 0)
@@ -705,6 +808,27 @@ std::string host_exit_summary(const SpawnedHost& host)
     if (WIFSIGNALED(host.last_wait_status))
         return "signal " + std::to_string(WTERMSIG(host.last_wait_status));
     return "wait-status " + std::to_string(host.last_wait_status);
+#endif
+}
+
+bool host_exceeded_job_memory_limit(const SpawnedHost& host)
+{
+#ifdef _WIN32
+    DWORD code = STILL_ACTIVE;
+    if (host.wait_reaped)
+        code = static_cast<DWORD>(host.last_wait_status);
+    else if (host.process != nullptr) {
+        if (!::GetExitCodeProcess(static_cast<HANDLE>(host.process), &code))
+            return false;
+    } else
+        return false;
+    if (code == STILL_ACTIVE)
+        return false;
+    return code == k_status_no_memory || code == k_status_quota_exceeded || code == k_status_commit_limit ||
+           code == k_error_not_enough_quota || code == k_error_commitment_limit;
+#else
+    (void) host;
+    return false;
 #endif
 }
 

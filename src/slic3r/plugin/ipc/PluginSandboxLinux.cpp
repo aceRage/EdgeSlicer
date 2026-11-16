@@ -375,6 +375,12 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
 #ifdef __NR_setsid
     deny_nr(__NR_setsid);
 #endif
+#ifdef __NR_setpgid
+    deny_nr(__NR_setpgid);
+#endif
+#ifdef __NR_setpgrp
+    deny_nr(__NR_setpgrp);
+#endif
 
     if (!allow_exec) {
 #ifdef __NR_execve
@@ -386,11 +392,15 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
     }
 
 #ifdef __NR_socketpair
-    // socketpair(AF_UNIX) stays: asyncio and the inherited IPC fd already use connected
-    // pairs. It cannot connect() to an existing socket (session bus, X11, Flatpak portal).
-    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, static_cast<uint32_t>(__NR_socketpair));
+    // socketpair(AF_UNIX, SOCK_STREAM) stays: asyncio and the inherited IPC fd. SOCK_DGRAM
+    // pairs can sendto() journald; restrict the type. AF_UNIX socket() is still denied.
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 8, static_cast<uint32_t>(__NR_socketpair));
     emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
     emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, static_cast<uint32_t>(AF_UNIX));
+    emit(BPF_RET | BPF_K, 0, 0, deny);
+    emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[1]));
+    emit(BPF_ALU | BPF_AND | BPF_K, 0, 0, 0xfu);
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, static_cast<uint32_t>(SOCK_STREAM));
     emit(BPF_RET | BPF_K, 0, 0, deny);
     emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
 #endif
@@ -513,6 +523,8 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
         add_opt(p, false);
     for (const char* p : {"/proc/self", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/filesystems", "/proc/version"})
         add_opt(p, false);
+    // systemd-resolved: /etc/resolv.conf is often a symlink into this directory.
+    add_opt("/run/systemd/resolve", false);
 
     auto add_req_if_exists = [&](const std::string& path, bool write) {
         if (path.empty() || ::access(path.c_str(), F_OK) != 0)
@@ -565,10 +577,12 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
     report.kind     = k_sandbox_kind_landlock_seccomp;
     report.network  = spec.allow_network;
     report.exec     = spec.allow_exec;
-    report.degraded = abi < 3;
+    report.degraded = abi < 6;
     report.detail   = "Landlock ABI " + std::to_string(abi) + (spec.allow_network ? " network=on" : " network=off");
-    if (report.degraded)
+    if (abi < 3)
         report.detail += "; truncated files unenforced (ABI<3)";
+    if (abi < 6)
+        report.detail += "; no abstract-unix/signal scopes (ABI<6)";
     return true;
 }
 

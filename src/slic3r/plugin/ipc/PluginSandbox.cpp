@@ -31,6 +31,7 @@ namespace {
 std::mutex               g_prompt_mutex;
 SandboxUnavailablePrompt g_prompt_for_testing;
 std::atomic<bool>        g_abort_sandbox_prompt{false};
+GUI::MessageDialog*      g_sandbox_dialog = nullptr;
 
 std::string unsandboxed_bind_hash(const std::string& plugin_key)
 {
@@ -355,7 +356,21 @@ void set_sandbox_unavailable_prompt_for_testing(SandboxUnavailablePrompt prompt)
     g_abort_sandbox_prompt.store(false, std::memory_order_release);
 }
 
-void abort_sandbox_unavailable_prompt() { g_abort_sandbox_prompt.store(true, std::memory_order_release); }
+void abort_sandbox_unavailable_prompt()
+{
+    g_abort_sandbox_prompt.store(true, std::memory_order_release);
+    auto dismiss = []() {
+        std::lock_guard<std::mutex> lock(g_prompt_mutex);
+        if (g_sandbox_dialog != nullptr)
+            g_sandbox_dialog->EndModal(wxID_NO);
+    };
+    if (wxTheApp == nullptr)
+        return;
+    if (wxIsMainThread())
+        dismiss();
+    else
+        GUI::wxGetApp().CallAfter(dismiss);
+}
 
 void clear_sandbox_unavailable_prompt_abort() { g_abort_sandbox_prompt.store(false, std::memory_order_release); }
 
@@ -399,7 +414,18 @@ bool allow_unsandboxed_run(const std::string& plugin_key, const std::string& rea
             GUI::MessageDialog dialog(nullptr, message, _L("Plugin sandbox unavailable"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
             dialog.SetButtonLabel(wxID_NO, _L("Don't run"), /*set_focus=*/true);
             dialog.SetButtonLabel(wxID_YES, _L("Run anyway"));
-            return dialog.ShowModal() == wxID_YES ? SandboxUnavailableChoice::RunUnsandboxed : SandboxUnavailableChoice::DontRun;
+            {
+                std::lock_guard<std::mutex> lock(g_prompt_mutex);
+                if (g_abort_sandbox_prompt.load(std::memory_order_acquire))
+                    return SandboxUnavailableChoice::DontRun;
+                g_sandbox_dialog = &dialog;
+            }
+            const int rc = dialog.ShowModal();
+            {
+                std::lock_guard<std::mutex> lock(g_prompt_mutex);
+                g_sandbox_dialog = nullptr;
+            }
+            return rc == wxID_YES ? SandboxUnavailableChoice::RunUnsandboxed : SandboxUnavailableChoice::DontRun;
         };
         if (wxTheApp == nullptr || GUI::wxGetApp().is_closing() || g_abort_sandbox_prompt.load(std::memory_order_acquire)) {
             choice = SandboxUnavailableChoice::DontRun;

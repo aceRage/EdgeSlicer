@@ -42,7 +42,7 @@ struct SandboxSpec
     std::string              plugin_key;
     std::string              python_home;
     std::string              plugin_root;
-    std::string              write_root; // exported G-code folder; empty for scripts
+    std::string              write_root; // extra writable path for tests; post-process G-code is inlined over IPC
     std::vector<SandboxPath> extra_paths;
     bool                     allow_network = false;
     bool                     allow_exec    = false;
@@ -60,7 +60,8 @@ struct SandboxReport
     bool        network      = false;
     bool        exec         = false;
     // True when the shipping sandbox is applied but weaker than the current policy
-    // (Linux Landlock ABI < 3 has no truncate). Fail-closed still requires applied.
+    // (Linux Landlock ABI < 3 has no truncate; ABI < 6 has no abstract-unix/signal scopes).
+    // Fail-closed still requires applied.
     bool degraded = false;
 };
 
@@ -100,7 +101,7 @@ std::string  expected_sandbox_kind();
 // True inside a Flatpak sandbox (/.flatpak-info or FLATPAK_ID). Nested bwrap is never used.
 bool running_inside_flatpak();
 
-// Build the spec for a plugin execute: python home, plugin dir, G-code folder, p4 grants.
+// Build the spec for a plugin execute: python home, plugin dir, extra writable test root, p4 grants.
 SandboxSpec make_sandbox_spec(const std::string& plugin_key, const std::string& write_root = {});
 SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPermissions& permissions, const std::string& write_root);
 
@@ -118,6 +119,8 @@ void  close_parent_sandbox();
 #ifdef _WIN32
 // Named-pipe SECURITY_ATTRIBUTES that lets the AppContainer SID connect. nullptr when unused.
 void* parent_sandbox_pipe_security_attributes();
+// Fixed-length FNV-1a profile name (no truncation collisions). Tests cover the hash.
+std::wstring win_appcontainer_profile_name(const std::string& plugin_key);
 #endif
 
 // Test-only: EDGE_PLUGIN_SANDBOX=0 / FORCE_UNAVAILABLE, same gate as EDGE_PLUGIN_HOST.

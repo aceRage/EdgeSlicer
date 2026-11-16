@@ -42,13 +42,13 @@ using sandbox_check_fn = int (*)(pid_t, const char*, int);
 bool containerized()
 {
     // APP_SANDBOX_CONTAINER_ID is inherited and spoofable (launchctl setenv). The kernel
-    // view is sandbox_check(getpid(), NULL, 0): non-zero means this process is sandboxed.
+    // view is sandbox_check(getpid(), NULL, 0): 1 means sandboxed, 0 means not, -1 is error.
     static sandbox_check_fn check = []() -> sandbox_check_fn {
         return reinterpret_cast<sandbox_check_fn>(::dlsym(RTLD_DEFAULT, "sandbox_check"));
     }();
     if (check == nullptr)
         return false;
-    return check(::getpid(), nullptr, 0) != 0;
+    return check(::getpid(), nullptr, 0) == 1;
 }
 
 // DEV/TEST PROBE ONLY. Not the shipping sandbox (that is a signed helper with
