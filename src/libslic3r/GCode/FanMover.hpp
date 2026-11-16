@@ -25,8 +25,9 @@ public:
     float x = 0, y = 0, z = 0, e = 0;
     float dx = 0, dy = 0, dz = 0, de = 0;
     BufferData(std::string line, float time = 0, int16_t fan_speed = 0, float is_kickstart = false) : raw(line), time(time), fan_speed(fan_speed), is_kickstart(is_kickstart){
-        //avoid double \n
-        if(!line.empty() && line.back() == '\n') line.pop_back();
+        // Avoid a double \n: the line is written with one added. (EDGE: this trimmed the argument, not the kept copy,
+        // so the kick-start command, which comes with its line end, was followed by an empty line.)
+        if (!raw.empty() && raw.back() == '\n') raw.pop_back();
     }
 };
 
