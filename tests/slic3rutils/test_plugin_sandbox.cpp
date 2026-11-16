@@ -79,7 +79,7 @@ bool spawn_and_handshake(plugin_ipc::SpawnedHost&       host,
                          nlohmann::json&                reply,
                          std::string&                   error)
 {
-    if (!plugin_ipc::spawn_host(host, error))
+    if (!plugin_ipc::spawn_host(host, spec, error))
         return false;
     nlohmann::json hello = {
         {"type", plugin_ipc::k_type_hello},
@@ -332,6 +332,7 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
     plugin_ipc::SandboxSpec spec;
     spec.python_home = PythonInterpreter::bundled_python_home();
     spec.plugin_root = data_dir_guard.plugins_dir().string();
+    fs::create_directories(data_dir_guard.plugins_dir());
 
     // macOS first-launch of a freshly linked helper (Gatekeeper / dyld, including libpython
     // pages faulted during hello) is charged on the first full spawn+handshake, not on a
@@ -1065,6 +1066,30 @@ class Pkg(orca.base):
 }
 #endif
 
+TEST_CASE("make_sandbox_spec creates the shared python packages dir", "[PluginSandbox]")
+{
+    ScopedDataDir  data("plugin-sandbox-create-packages");
+    const fs::path packages = fs::path(PythonInterpreter::shared_packages_dir());
+    {
+        boost::system::error_code ec;
+        const bool                present = fs::exists(packages, ec) && !ec;
+        REQUIRE_FALSE(present);
+    }
+
+    const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec("Create_Packages", {});
+    {
+        boost::system::error_code ec;
+        REQUIRE(fs::is_directory(packages, ec));
+        CHECK_FALSE(ec);
+    }
+    bool granted = false;
+    for (const auto& extra : spec.extra_paths) {
+        if (extra.path == packages.string() && !extra.write)
+            granted = true;
+    }
+    CHECK(granted);
+}
+
 #ifdef _WIN32
 TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSandbox][windows]")
 {
@@ -1091,5 +1116,45 @@ TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][
     spec.plugin_key  = "Win_Probe";
     spec.python_home = PythonInterpreter::bundled_python_home();
     REQUIRE(plugin_ipc::spawn_host(spawned.host, spec, error));
+}
+
+TEST_CASE("AppContainer spawn from a fresh data dir with no python/packages", "[PluginSandbox][windows]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedDataDir  data("plugin-sandbox-fresh-packages");
+    const fs::path packages = fs::path(PythonInterpreter::shared_packages_dir());
+    {
+        boost::system::error_code ec;
+        const bool                present = fs::exists(packages, ec) && !ec;
+        REQUIRE_FALSE(present);
+    }
+
+    fs::create_directories(data.plugins_dir());
+    plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec("Fresh_Packages", {});
+    spec.plugin_key              = "Fresh_Packages";
+    spec.python_home             = PythonInterpreter::bundled_python_home();
+    spec.plugin_root             = data.plugins_dir().string();
+    {
+        boost::system::error_code ec;
+        CHECK(fs::is_directory(packages, ec));
+    }
+
+    ScopedSpawnedHost spawned;
+    nlohmann::json    reply;
+    std::string       error;
+    const bool        ok = spawn_and_handshake(spawned.host, spec, reply, error);
+    INFO("spawn error: " << error);
+    REQUIRE(ok);
+    REQUIRE(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
+    REQUIRE(reply.contains("sandbox"));
+    const auto report = plugin_ipc::sandbox_report_from_json(reply["sandbox"]);
+    INFO("sandbox kind=" << report.kind << " applied=" << report.applied << " detail=" << report.detail);
+    CHECK(report.applied);
+    CHECK(report.kind == plugin_ipc::k_sandbox_kind_appcontainer);
 }
 #endif
