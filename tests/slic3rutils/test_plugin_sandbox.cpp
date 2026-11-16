@@ -1,10 +1,13 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/system/error_code.hpp>
 #include <catch2/catch.hpp>
 
 #include "plugin_test_utils.hpp"
 
+#include <libslic3r/Zipper.hpp>
 #include <slic3r/plugin/PluginDescriptor.hpp>
+#include <slic3r/plugin/PluginFsUtils.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
@@ -37,6 +40,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <netdb.h>
 #include <sys/syscall.h>
 #ifndef __NR_io_uring_setup
 #define __NR_io_uring_setup 425
@@ -66,6 +70,42 @@ fs::path write_plugin(const ScopedDataDir& data_dir_guard, const std::string& st
     std::ofstream out((plugin_dir / (stem + ".py")).string(), std::ios::binary);
     out << source;
     out.close();
+    return plugin_dir;
+}
+
+fs::path write_whl_entry_plugin(const ScopedDataDir& data_dir_guard, const std::string& stem)
+{
+    const fs::path plugin_dir = data_dir_guard.plugins_dir() / stem;
+    fs::create_directories(plugin_dir);
+    const std::string py = R"PY(import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        return orca.ExecutionResult.success("whl-ok")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY";
+    const std::string metadata = "Metadata-Version: 2.1\nName: sandbox_whl_echo\nVersion: 1.0.0\n"
+                                 "Summary: wheel entry test\nAuthor: test\nImport-Name: sandbox_whl_echo\n"
+                                 "Requires-Orca-Api: 1.0.0\n";
+    const std::string wheel    = "Wheel-Version: 1.0\nGenerator: edgeslicer-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n";
+    const std::string top      = "sandbox_whl_echo\n";
+    const std::string record   = "sandbox_whl_echo/__init__.py,,\n"
+                                 "sandbox_whl_echo-1.0.0.dist-info/METADATA,,\n"
+                                 "sandbox_whl_echo-1.0.0.dist-info/WHEEL,,\n"
+                                 "sandbox_whl_echo-1.0.0.dist-info/top_level.txt,,\n"
+                                 "sandbox_whl_echo-1.0.0.dist-info/RECORD,,\n";
+    const fs::path    whl      = plugin_dir / (stem + ".whl");
+    Zipper            zipper(whl.string(), Zipper::NO_COMPRESSION);
+    zipper.add_entry("sandbox_whl_echo/__init__.py", py.data(), py.size());
+    zipper.add_entry("sandbox_whl_echo-1.0.0.dist-info/METADATA", metadata.data(), metadata.size());
+    zipper.add_entry("sandbox_whl_echo-1.0.0.dist-info/WHEEL", wheel.data(), wheel.size());
+    zipper.add_entry("sandbox_whl_echo-1.0.0.dist-info/top_level.txt", top.data(), top.size());
+    zipper.add_entry("sandbox_whl_echo-1.0.0.dist-info/RECORD", record.data(), record.size());
+    zipper.finalize();
     return plugin_dir;
 }
 
@@ -269,8 +309,12 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
         SKIP("edge-plugin-host is not next to the test binary");
 
     ScopedDataDir     data_dir_guard("plugin-sandbox-hello");
-    ScopedSpawnedHost spawned;
     std::string       error;
+    {
+        ScopedSpawnedHost warm;
+        REQUIRE(plugin_ipc::spawn_host(warm.host, error));
+    }
+    ScopedSpawnedHost spawned;
     const auto        t0 = std::chrono::steady_clock::now();
     REQUIRE(plugin_ipc::spawn_host(spawned.host, error));
     plugin_ipc::SandboxSpec spec;
@@ -294,9 +338,11 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_landlock_seccomp);
         CHECK(plugin_ipc::sandbox_kind_is_shipping(report.kind));
         CHECK(report.landlock_abi == probe.landlock_abi);
-        CHECK(report.degraded == (probe.landlock_abi < 3));
-        if (report.degraded)
+        CHECK(report.degraded == (probe.landlock_abi < 6));
+        if (probe.landlock_abi < 3)
             CHECK(report.detail.find("ABI<3") != std::string::npos);
+        if (report.degraded)
+            CHECK(report.detail.find("ABI<6") != std::string::npos);
     } else {
         CHECK_FALSE(report.applied);
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
@@ -674,6 +720,15 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
 #else
             bits |= 4096u;
 #endif
+            if (::setpgid(0, 0) < 0)
+                bits |= 8192u;
+            int dgram[2] = {-1, -1};
+            if (::socketpair(AF_UNIX, SOCK_DGRAM, 0, dgram) < 0)
+                bits |= 16384u;
+            else {
+                ::close(dgram[0]);
+                ::close(dgram[1]);
+            }
         }
         (void) !::write(sv[1], &bits, sizeof(bits));
         ::_exit(0);
@@ -703,7 +758,9 @@ TEST_CASE("Landlock+seccomp fixture in a forked child", "[PluginSandbox][landloc
     CHECK((bits & 512u) != 0);  // abstract unix connect denied
     CHECK((bits & 1024u) != 0); // socketpair(AF_UNIX) still allowed
     CHECK((bits & 2048u) != 0); // plugin_root not writable
-    CHECK((bits & 4096u) != 0); // io_uring_setup denied
+    CHECK((bits & 4096u) != 0);  // io_uring_setup denied
+    CHECK((bits & 8192u) != 0);  // setpgid denied
+    CHECK((bits & 16384u) != 0); // SOCK_DGRAM socketpair denied
 }
 
 TEST_CASE("sandboxed child cannot connect to a dbus-daemon unix socket", "[PluginSandbox][landlock][dbus]")
@@ -717,9 +774,8 @@ TEST_CASE("sandboxed child cannot connect to a dbus-daemon unix socket", "[Plugi
     ScopedTemporaryDir bus_dir("plugin-sandbox-dbus");
     const fs::path     sock = bus_dir.path() / "bus";
     const std::string  addr = "unix:path=" + sock.string();
-    fs::create_directories("/opt/cursor/artifacts");
-    const fs::path log_path = "/opt/cursor/artifacts/p8-dbus-b1.log";
-    std::ofstream  log(log_path.string(), std::ios::app);
+    const fs::path     log_path = bus_dir.path() / "p8-dbus-b1.log";
+    std::ofstream      log(log_path.string(), std::ios::app);
     log << "addr=" << addr << "\n";
 
     const pid_t bus_pid = ::fork();
@@ -798,6 +854,11 @@ TEST_CASE("sandboxed child cannot connect to a dbus-daemon unix socket", "[Plugi
     while (::waitpid(bus_pid, &bus_st, 0) < 0 && errno == EINTR) {}
     log << "child_bits=" << static_cast<int>(bits) << " child_wait=" << wstatus << "\n";
     log.close();
+    {
+        boost::system::error_code ec;
+        fs::create_directories("/opt/cursor/artifacts", ec);
+        fs::copy_file(log_path, "/opt/cursor/artifacts/p8-dbus-b1.log", fs::copy_option::overwrite_if_exists, ec);
+    }
     REQUIRE(n == 1);
     CHECK((bits & 1u) != 0);
     CHECK((bits & 2u) != 0);
@@ -871,3 +932,125 @@ class Pkg(orca.base):
     plugin_ipc::set_sandbox_unavailable_prompt_for_testing({});
     PluginHostClient::set_allow_env_overrides_for_testing(false);
 }
+
+TEST_CASE("sandboxed .whl-entry plugin extracts under plugin_data", "[PluginSandbox][Python][whl]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    if (!test_os_sandbox_will_apply())
+        SKIP("OS sandbox is not applied in this environment: " + plugin_ipc::probe_os_sandbox().reason);
+
+    ScopedDataDir  data_dir_guard("plugin-sandbox-whl");
+    const fs::path plugin_dir = write_whl_entry_plugin(data_dir_guard, "Sandbox_Whl");
+    PluginManager& manager    = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    PluginDescriptor discovered;
+    INFO("discovered=" << manager.try_get_plugin_descriptor("Sandbox_Whl", discovered)
+                       << " meta_err=" << discovered.error << " entry=" << discovered.entry_path);
+    std::string error;
+    const bool  loaded = load_and_wait(manager, "Sandbox_Whl", error);
+    INFO("load error=" << error);
+    REQUIRE(loaded);
+
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_Whl", "Echo");
+    INFO("whl: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "whl-ok");
+    CHECK_FALSE(fs::exists(plugin_dir / "__whl_extracted__"));
+    CHECK(fs::exists(data_dir_guard.plugin_scratch_dir("Sandbox_Whl") / "__whl_extracted__" / "sandbox_whl_echo"));
+}
+
+#ifdef __linux__
+TEST_CASE("network-granted plugin can resolve DNS", "[PluginSandbox][Python][dns]")
+{
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    if (!test_os_sandbox_will_apply())
+        SKIP("OS sandbox is not applied in this environment: " + plugin_ipc::probe_os_sandbox().reason);
+
+    addrinfo hints{};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* resolved = nullptr;
+    if (::getaddrinfo("one.one.one.one", "80", &hints, &resolved) != 0)
+        SKIP("no network");
+    if (resolved != nullptr)
+        ::freeaddrinfo(resolved);
+
+    ScopedDataDir data_dir_guard("plugin-sandbox-dns");
+    write_plugin(data_dir_guard, "Sandbox_Dns", R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "DNS Probe"
+# type = "script"
+# ///
+import socket, orca
+class Probe(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Probe"
+    def execute(self):
+        try:
+            socket.getaddrinfo("one.one.one.one", 80)
+            return orca.ExecutionResult.success("dns-ok")
+        except Exception as e:
+            return orca.ExecutionResult.success("dns-fail:" + str(e))
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Probe)
+)PY");
+    PluginManager&     manager = PluginManager::instance();
+    PluginInstallState state;
+    state.installed_from             = "local";
+    state.plugin_name                = "DNS Probe";
+    state.enabled                    = true;
+    state.permissions.network_http   = {"https://one.one.one.one"};
+    REQUIRE(write_install_state(data_dir_guard.plugins_dir() / "Sandbox_Dns", state));
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Sandbox_Dns", error));
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_Dns", "Probe");
+    INFO("dns: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "dns-ok");
+}
+#endif
+
+#ifdef _WIN32
+TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSandbox][windows]")
+{
+    const auto a     = plugin_ipc::win_appcontainer_profile_name("alpha");
+    const auto b     = plugin_ipc::win_appcontainer_profile_name("beta");
+    const auto long1 = plugin_ipc::win_appcontainer_profile_name(std::string(400, 'x'));
+    const auto long2 = plugin_ipc::win_appcontainer_profile_name(std::string(400, 'y'));
+    CHECK(a != b);
+    CHECK(long1 != long2);
+    CHECK(a.size() == long1.size());
+    CHECK(a.find(L"EdgeSlicer.ph.") == 0);
+}
+
+TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+    ScopedSpawnedHost spawned;
+    std::string       error;
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key  = "Win_Probe";
+    spec.python_home = PythonInterpreter::bundled_python_home();
+    REQUIRE(plugin_ipc::spawn_host(spawned.host, spec, error));
+}
+#endif

@@ -143,9 +143,26 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   collisions). Directory ACLs are granted at the folder with inheritance (not a recursive
   walk), checked fail-closed, and revoked on `close_win_appcontainer`. The 1 GiB job process
   memory cap is a named constant, not plugin-configurable.
-- macOS / POSIX: process group kill (`kill(-pid)`). The helper exec env is an allow-list
-  (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` / `APP_SANDBOX_CONTAINER_ID` / `LD_*` /
-  `PYTHONPATH`).
+- macOS / POSIX: process group kill (`kill(-pid)`). `setsid` / `setpgid` / `setpgrp` are
+  denied after the Linux sandbox applies so grandchildren cannot leave the group. The helper
+  exec env is an allow-list (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` /
+  `APP_SANDBOX_CONTAINER_ID` / `PYTHONPATH`). `LD_LIBRARY_PATH`, `APPDIR`, and `APPIMAGE`
+  are passed through so an AppImage-started helper still finds bundled libs. Windows
+  `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`).
+- Post-process G-code is read by Edge and sent as JSON `gcode` on the existing
+  length-prefixed IPC (POSIX socketpair / Windows named pipe). The helper stages a scratch
+  copy under `plugin_data` / TMPDIR, Python still sees `ctx.gcode_path`, and Edge writes
+  the reply back. Security-scoped bookmarks are not used: Edge is not sandboxed and has a
+  different identity from the helper, so a bookmark would not resolve. File-descriptor
+  passing (`SCM_RIGHTS` / `DuplicateHandle`) is not on the Channel. Payloads over 16 MiB
+  fail with a clear error rather than a silent truncate.
+- Linux Landlock grants `/run/systemd/resolve` read-only so systemd-resolved DNS works
+  when the plugin has network; `/run` as a whole stays denied. `socketpair(AF_UNIX)` is
+  restricted to `SOCK_STREAM` so a `SOCK_DGRAM` pair cannot `sendto()` journald. `AF_UNIX`
+  `socket()` stays denied. Landlock ABI < 6 reports `degraded` (missing abstract-unix and
+  signal scopes).
+- `.whl` plugin entries extract under `plugin_data/<key>/__whl_extracted__`, not
+  read-only `plugin_root`.
 
 ## macOS entitlements
 
@@ -157,8 +174,7 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 - home-relative read/write of `Library/Application Support/EdgeSlicer/plugin_data/`
 
 The helper's own bundle (bundled Python at `@executable_path/python`) is readable without
-an extra exception. A user-chosen G-code folder needs a security-scoped bookmark from Edge
-at runtime; that cannot be baked into the entitlements plist. None of this is verified
+an extra exception. User G-code is not a helper filesystem grant. None of this is verified
 without a signed helper showing `kind=app-sandbox`.
 
 ## What can only be verified on a signed/notarised bundle
@@ -166,8 +182,10 @@ without a signed helper showing `kind=app-sandbox`.
 - macOS App Sandbox actually restricting the helper (`sandbox_check`, `kind=app-sandbox`).
   Ad-hoc `codesign --sign - --entitlements scripts/edge-plugin-host.entitlements` is hooked
   up but does not go through notarisation. `APP_SANDBOX_CONTAINER_ID` is not trusted.
-- Security-scoped G-code folder access on a sandboxed macOS helper (not known at sign time).
-- Windows AppContainer + named-pipe DACL + Job object on a real Windows box.
+- Windows AppContainer + named-pipe DACL + Job object on a real Windows box. ACL grants
+  live until host close (not revoked at `ResumeThread`). `python_home` under Program Files
+  is a best-effort grant: a standard user has no `WRITE_DAC`, and ALL APPLICATION PACKAGES
+  can already read it. Exceeding the 1 GiB job process-memory cap is a distinct error.
 - A Linux **desktop session** D-Bus / Flatpak portal / X11 abstract-socket escape (the unit
   test uses a forked fixture plus `dbus-daemon --session` when that binary exists).
 - The Don't-run / Run anyway GUI prompt (tests use the prompt seam).
