@@ -1070,9 +1070,9 @@ TEST_CASE("Curved tops: adding a part or a copy to a refused plate re-slices not
     Model model;
     Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2), make_capped_puck(15., 4., 1.2) }, print, model, config);
     // Two copies of the first object to start with, so the copy case goes from 2 to 3.
-    const Vec3d far = model.objects.front()->instances.front()->get_offset() + Vec3d(0., 45., 0.);
+    const Vec3d elsewhere = model.objects.front()->instances.front()->get_offset() + Vec3d(0., 45., 0.);
     if (!add_object) {
-        model.objects.front()->add_instance()->set_offset(far);
+        model.objects.front()->add_instance()->set_offset(elsewhere);
         print.apply(model, config);
     }
     Test::gcode(print);
@@ -1085,9 +1085,9 @@ TEST_CASE("Curved tops: adding a part or a copy to a refused plate re-slices not
 
     if (add_object) {
         ModelObject *third = model.add_object(*model.objects.back());
-        third->instances.front()->set_offset(far);
+        third->instances.front()->set_offset(elsewhere);
     } else
-        model.objects.front()->add_instance()->set_offset(far + Vec3d(45., 0., 0.));
+        model.objects.front()->add_instance()->set_offset(elsewhere + Vec3d(45., 0., 0.));
     print.apply(model, config);
     // The parts that were there keep their walls and fills.
     for (size_t i = 0; i < 2; ++i) {
