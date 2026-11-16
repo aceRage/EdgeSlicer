@@ -149,7 +149,7 @@ double extrusion_dip(const std::string &gcode)
 
 using ConfigItems = std::vector<std::pair<std::string, std::string>>;
 
-void slice_puck_items(Print &print, Model &model, bool curved_tops, const ConfigItems &extra, int filaments = 1)
+DynamicPrintConfig puck_config(bool curved_tops, const ConfigItems &extra, int filaments = 1)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     if (filaments > 1) {
@@ -169,7 +169,12 @@ void slice_puck_items(Print &print, Model &model, bool curved_tops, const Config
     });
     for (const auto &[key, value] : extra)
         config.set_deserialize_strict(key, value);
-    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, config);
+    return config;
+}
+
+void slice_puck_items(Print &print, Model &model, bool curved_tops, const ConfigItems &extra, int filaments = 1)
+{
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, puck_config(curved_tops, extra, filaments));
     print.process();
 }
 
@@ -435,8 +440,11 @@ TEST_CASE("Curved tops: every new guard refuses, warns and prints as with the fe
         { "supports",            { { "enable_support", "1" } }, 1, "supports" },
         { "two filaments",       { { "sparse_infill_filament", "2" }, { "solid_infill_filament", "2" } }, 2, "more than one filament" },
         { "raft",                { { "raft_layers", "2" } }, 1, "raft" },
+        { "stabilizers",         { { "stabilizer_supports", "auto" } }, 1, "side stabilizers" },
+        { "Z contouring",        { { "zaa_enabled", "1" } }, 1, "Z contouring is on for it as well" },
+        { "printable height",    { { "printable_height", "5.5" } }, 1, "above the printable height" },
     };
-    const size_t i = GENERATE(range(size_t(0), size_t(7)));
+    const size_t i = GENERATE(range(size_t(0), size_t(10)));
     REQUIRE(i < guards.size());
     const Guard &g = guards[i];
     INFO("guard: " << g.name);
@@ -894,24 +902,240 @@ TEST_CASE("Curved tops: head limits come from the head model only", "[CurvedTops
     CHECK_FALSE(generic.refusal.empty());
 
     // X1 Carbon: sock 2.5 mm above the tip (owner measured) less the 0.5 mm margin. The CC1 file's
-    // sock is set to the same 2.5 mm (a guess). Both flanks clear well over 35 degrees: the 30 degree
-    // ceiling binds.
+    // sock is set to the same 2.5 mm (a guess). Both flanks clear well over 25 degrees: the 20 degree
+    // ceiling #1021 shipped binds (the lead kept it for P1).
     CHECK_THAT(x1c.allowed_rise_mm, WithinAbs(2.0, 1e-9));
     CHECK_THAT(cc1.allowed_rise_mm, WithinAbs(2.0, 1e-9));
     CHECK_THAT(x1e.allowed_rise_mm, WithinAbs(2.0, 1e-9));
-    CHECK_THAT(x1c.max_slope_deg, WithinAbs(30.0, 1e-9));
-    CHECK_THAT(cc1.max_slope_deg, WithinAbs(30.0, 1e-9));
+    CHECK_THAT(x1c.max_slope_deg, WithinAbs(20.0, 1e-9));
+    CHECK_THAT(cc1.max_slope_deg, WithinAbs(20.0, 1e-9));
     CHECK_THAT(x1c.verified_rise_mm, WithinAbs(1.8, 1e-9));
     CHECK_THAT(x1c.verified_angle_deg, WithinAbs(10.3, 1e-9));
     CHECK_THAT(x1e.verified_rise_mm, WithinAbs(0.0, 1e-9));
 
-    // D8: the default 15 stays 15, nothing goes above 30.
+    // The default 15 stays 15, nothing goes above 20 (as #1021).
     CHECK_THAT(curved_tops_effective_max_angle(15., cc1), WithinAbs(15., 1e-9));
-    CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(30., 1e-9));
-    CHECK_THAT(curved_tops_effective_max_angle(40., x1c), WithinAbs(30., 1e-9));
+    CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(20., 1e-9));
+    CHECK_THAT(curved_tops_effective_max_angle(40., x1c), WithinAbs(20., 1e-9));
 
     CHECK_THAT(curved_tops_gap_flow(0.2, 0.2), WithinAbs(1.0, 1e-9));
     CHECK_THAT(curved_tops_gap_flow(0.3, 0.2), WithinAbs(1.5, 1e-9));
     CHECK_THAT(curved_tops_gap_flow(0.1, 0.2), WithinAbs(1.0, 1e-9));
     CHECK_THAT(curved_tops_gap_flow(0.9, 0.2), WithinAbs(2.0, 1e-9));
+}
+
+namespace Slic3r {
+// Test access (friend of PrintObject): leave posContouring unfinished over cut walls, as a cancel
+// during the step does.
+struct CurvedTopsTestAccess
+{
+    static void invalidate(PrintObject &object, PrintObjectStep step) { object.invalidate_step(step); }
+};
+} // namespace Slic3r
+
+namespace {
+
+ConfigItems joined(ConfigItems a, const ConfigItems &b)
+{
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+}
+
+bool top_block(const Print &print)
+{
+    return print.objects().front()->layers().back()->curved_tops_block;
+}
+
+} // namespace
+
+// Review finding a: most guard inputs do not invalidate posContouring by themselves. A guard input
+// changed after a curved slice must refuse on the re-slice (warning, output = feature-off output, no
+// cut-down top), and undoing it must curve again (output = the first slice).
+TEST_CASE("Curved tops: a guard input changed after a curved slice refuses on re-slice, and curves again when undone", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    struct Change { const char *name; ConfigItems base; ConfigItems blocker; int filaments; const char *reason; };
+    static const std::vector<Change> changes = {
+        { "draft shield",     {}, { { "skirt_loops", "1" }, { "draft_shield", "enabled" } }, 1, "draft shield" },
+        { "tall skirt",       { { "skirt_loops", "1" } }, { { "skirt_height", "3" } }, 1, "skirt taller than one layer" },
+        { "supports",         {}, { { "enable_support", "1" } }, 1, "supports" },
+        { "stabilizers",      {}, { { "stabilizer_supports", "auto" } }, 1, "side stabilizers" },
+        { "by object",        {}, { { "print_sequence", "by object" } }, 1, "prints by object" },
+        { "local-Z",          {}, { { "dithering_local_z_mode", "1" } }, 1, "local-Z dithering" },
+        { "second filament",  {}, { { "sparse_infill_filament", "2" }, { "solid_infill_filament", "2" } }, 2, "more than one filament" },
+        { "printable height", {}, { { "printable_height", "5.5" } }, 1, "above the printable height" },
+        { "Z contouring",     {}, { { "zaa_enabled", "1" } }, 1, "Z contouring is on for it as well" },
+        { "raft",             {}, { { "raft_layers", "2" } }, 1, "raft" },
+    };
+    const size_t i = GENERATE(range(size_t(0), size_t(10)));
+    REQUIRE(i < changes.size());
+    const Change &c = changes[i];
+    INFO("change: " << c.name);
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, puck_config(true, c.base, c.filaments));
+    const std::string gcode_curved = Test::gcode(print);
+    REQUIRE(top_block(print));
+
+    // Blocker on, curved tops still on.
+    const ConfigItems blocked = joined(c.base, c.blocker);
+    print.apply(model, puck_config(true, blocked, c.filaments));
+    const std::string gcode_blocked = Test::gcode(print);
+    CHECK_FALSE(top_block(print));
+    CHECK(count_all_curved_paths(*print.objects().front()) == 0);
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    INFO("warning: " << warning);
+    CHECK(warning.find(c.reason) != std::string::npos);
+    CHECK_THAT(extrusion_dip(gcode_blocked), WithinAbs(0., 1e-6));
+
+    // Blocker off again: curves again, exactly as the first slice.
+    print.apply(model, puck_config(true, c.base, c.filaments));
+    const std::string gcode_again = Test::gcode(print);
+    CHECK(top_block(print));
+    CHECK(curved_tops_unavailable_warning(*print.objects().front()).empty());
+    CHECK(gcode_without_curved_tops_key(gcode_again) == gcode_without_curved_tops_key(gcode_curved));
+
+    // The refused re-slice equals the feature-off slice of the same settings: nothing was left cut.
+    print.apply(model, puck_config(false, blocked, c.filaments));
+    const std::string gcode_off = Test::gcode(print);
+    CHECK(gcode_without_curved_tops_key(gcode_blocked) == gcode_without_curved_tops_key(gcode_off));
+}
+
+// Review finding a, the plate side: a second copy or a second object added after a curved slice.
+TEST_CASE("Curved tops: adding a copy or an object after a curved slice refuses, removing it curves again", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const bool add_object = GENERATE(false, true);
+    INFO((add_object ? "second object" : "second copy"));
+    const DynamicPrintConfig on  = puck_config(true, {});
+    const DynamicPrintConfig off = puck_config(false, {});
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, on);
+    const std::string gcode_curved = Test::gcode(print);
+    REQUIRE(top_block(print));
+
+    const Vec3d offset = model.objects.front()->instances.front()->get_offset() + Vec3d(45., 0., 0.);
+    if (add_object) {
+        ModelObject *other = model.add_object(*model.objects.front());
+        other->instances.front()->set_offset(offset);
+    } else
+        model.objects.front()->add_instance()->set_offset(offset);
+    print.apply(model, on);
+    const std::string gcode_blocked = Test::gcode(print);
+    for (const PrintObject *object : print.objects())
+        CHECK_FALSE(object->layers().back()->curved_tops_block);
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    INFO("warning: " << warning);
+    CHECK(warning.find("more than one object or copy") != std::string::npos);
+    CHECK_THAT(extrusion_dip(gcode_blocked), WithinAbs(0., 1e-6));
+    print.apply(model, off);
+    CHECK(gcode_without_curved_tops_key(gcode_blocked) == gcode_without_curved_tops_key(Test::gcode(print)));
+
+    if (add_object)
+        model.delete_object(size_t(1));
+    else
+        model.objects.front()->delete_instance(1);
+    print.apply(model, on);
+    const std::string gcode_again = Test::gcode(print);
+    CHECK(top_block(print));
+    CHECK(gcode_without_curved_tops_key(gcode_again) == gcode_without_curved_tops_key(gcode_curved));
+}
+
+// Review finding g: posContouring left unfinished over walls a curved run already cut (a cancel during
+// the step). The next apply regenerates the walls whatever changed, so the step never re-plans on cut
+// layers; with a blocker added at that moment the re-slice is the feature-off slice. And an apply
+// that changes nothing a guard reads does not regenerate anything.
+TEST_CASE("Curved tops: an unfinished curved step over cut walls is redone from fresh walls", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const bool add_blocker = GENERATE(false, true);
+    INFO((add_blocker ? "with a draft shield added" : "nothing changed"));
+    const ConfigItems blocker = { { "skirt_loops", "1" }, { "draft_shield", "enabled" } };
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, puck_config(true, {}));
+    const std::string gcode_curved = Test::gcode(print);
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object->layers().back()->curved_tops_block);
+    REQUIRE(object->curved_tops_clipped());
+
+    // An apply that changes nothing keeps every step.
+    print.apply(model, puck_config(true, {}));
+    CHECK(object->is_step_done(posPerimeters));
+    CHECK(object->is_step_done(posContouring));
+
+    CurvedTopsTestAccess::invalidate(*object, posContouring);
+    REQUIRE_FALSE(object->is_step_done(posContouring));
+    REQUIRE(object->is_step_done(posPerimeters));
+    print.apply(model, puck_config(true, add_blocker ? blocker : ConfigItems{}));
+    object = print.get_object(0);
+    CHECK_FALSE(object->is_step_done(posPerimeters));
+
+    const std::string gcode = Test::gcode(print);
+    if (add_blocker) {
+        CHECK_FALSE(top_block(print));
+        print.apply(model, puck_config(false, blocker));
+        CHECK(gcode_without_curved_tops_key(gcode) == gcode_without_curved_tops_key(Test::gcode(print)));
+    } else {
+        CHECK(top_block(print));
+        CHECK(gcode_without_curved_tops_key(gcode) == gcode_without_curved_tops_key(gcode_curved));
+    }
+}
+
+// Review finding e: R1 across surfaces. Two caps on one object, each rising 1 mm (under the 2.0 mm the
+// head allows) but 2 mm apart in height: the block spans 3 mm and is refused, with the numbers.
+TEST_CASE("Curved tops: surfaces at different heights are limited by the block's whole height span", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    TriangleMesh low  = make_capped_puck(8., 4., 1.0);
+    TriangleMesh high = make_capped_puck(8., 6., 1.0);
+    low.translate(-12.f, 0.f, 0.f);
+    high.translate(12.f, 0.f, 0.f);
+    low.merge(high);
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ low }, print, model, puck_config(true, {}));
+    print.process();
+    CHECK_FALSE(top_block(print));
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    INFO("warning: " << warning);
+    CHECK(warning.find("2 curved surfaces together span 3.00 mm") != std::string::npos);
+    CHECK(warning.find("more than the 2.00 mm the print head allows") != std::string::npos);
+}
+
+// Review finding d: a cap steeper than the 10.3 degrees the owner printed (about 11 at the rim). The
+// block is built, the summary says it is beyond what has been printed, and the head check - which
+// relaxes nothing for wipes and travels - lets it export on both heads.
+TEST_CASE("Curved tops: an 11 degree cap exports on both printers, with the beyond-printed note", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const std::string printer_model = GENERATE(std::string("Elegoo Centauri Carbon"), std::string("Bambu Lab X1 Carbon"));
+    INFO("printer_model = " << printer_model);
+    const ConfigItems extra = { { "printer_model", printer_model }, { "wipe", "1" }, { "wipe_distance", "2" },
+                                { "retraction_length", "0.8" }, { "enable_arc_fitting", "0" } };
+    Print print;
+    Model model;
+    // r = 15, cap 1.45 mm: sphere radius 78.3, rim slope asin(15 / 78.3) = 11.0 degrees.
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.45) }, print, model, puck_config(true, extra));
+    print.process();
+    REQUIRE(top_block(print));
+    const PrintObject *object = print.objects().front();
+    CHECK(object->layers().back()->curved_tops_slope_deg > 10.5f);
+    CHECK(object->layers().back()->curved_tops_slope_deg < 11.5f);
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("goes beyond what has been printed") != std::string::npos);
+    std::string error;
+    try {
+        Test::gcode(print);
+    } catch (const Slic3r::SlicingError &ex) {
+        error = ex.what();
+    }
+    INFO("error: " << error);
+    CHECK(error.empty());
 }

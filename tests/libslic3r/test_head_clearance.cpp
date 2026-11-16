@@ -320,3 +320,82 @@ TEST_CASE("Head collision check: ironing and start G-code are not reported", "[H
     moves.push_back(vertex(EMoveType::Extrude, 10.f, 5.f, 0.4f, 1, erIroning));
     CHECK(check_head_collisions(moves, test_head()).hit_moves == 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Curved tops: HeadCollisionParams::extrusion_surface_slope_deg (the tip land on a sloped neighbour)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// A neighbour bead 0.4 wide along y at x = nx, top nz (layer 0), then a move of `type` along x = 0 at
+// z 1.0 on `layer`, reached from above out of the bead's reach. MINIMAL_HEAD: tip land radius 0.5,
+// underside u(d) = d - 0.5 up to d = 1.5, so the land region (u <= 0.1 tolerance) ends at d = 0.6.
+std::vector<MV> neighbour_case(float nx, float nz, EMoveType type, unsigned layer = 1)
+{
+    std::vector<MV> moves;
+    moves.push_back(vertex(EMoveType::Travel, nx, 0.f, nz, 0));
+    moves.push_back(vertex(EMoveType::Extrude, nx, 10.f, nz, 0, erTopSolidInfill));
+    moves.push_back(vertex(EMoveType::Travel, nx, 10.f, nz + 6.f, layer));
+    moves.push_back(vertex(EMoveType::Travel, 0.f, -5.f, nz + 6.f, layer));
+    moves.push_back(vertex(EMoveType::Travel, 0.f, -5.f, 1.f, layer));
+    moves.push_back(vertex(type, 0.f, 10.f, 1.f, layer, erTopSolidInfill));
+    return moves;
+}
+
+HeadCollisionParams sloped(double deg, unsigned min_layer = 0)
+{
+    HeadCollisionParams p;
+    p.extrusion_surface_slope_deg       = deg;
+    p.extrusion_surface_slope_min_layer = min_layer;
+    return p;
+}
+
+} // namespace
+
+TEST_CASE("Head collision check: the curved-tops slope allowance covers only the tip land on extrusions", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+
+    // A neighbour 0.15 above the tip at 0.25-0.65 from the axis, inside the land: a hit with no slope
+    // (0.15 > 0.1), the surface being followed with a 20 degree slope (0.15 - 0.25 * tan 20 < 0.1).
+    const auto neighbour = neighbour_case(0.45f, 1.15f, EMoveType::Extrude);
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour, head);
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK_FALSE(r.hits.front().travel);
+    }
+    CHECK(check_head_collisions(neighbour, head, sloped(20.)).hit_moves == 0);
+    // Only on the block's layers: an extrusion on an earlier layer gets no allowance.
+    CHECK(check_head_collisions(neighbour, head, sloped(20., 2)).hit_moves == 1);
+
+    // Higher than d * tan(a) + tolerance inside the land: still a hit with the slope.
+    CHECK(check_head_collisions(neighbour_case(0.45f, 1.4f, EMoveType::Extrude), head, sloped(20.)).hit_moves == 1);
+
+    // The same neighbour met by a travel or a wipe: a hit, the allowance is for extrusions only.
+    for (const EMoveType type : { EMoveType::Travel, EMoveType::Wipe }) {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.15f, type), head, sloped(20.));
+        INFO("move type " << int(type));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().travel);
+    }
+
+    // Beyond the land, under the cone (d 0.75-1.05, u 0.25-0.55): 0.5 above the tip is a hit even
+    // with the steepest slope the check takes, which would cover it if it were applied to the cone.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.9f, 1.5f, EMoveType::Extrude), head, sloped(60.));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+    }
+
+    // Boxes are never relaxed: material reaching 0.5 into the duct (bottom 4 above the tip) 5 mm away.
+    // (The descent before it meets the duct too; the extrusion's own hit is the one checked.)
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(5.f, 5.5f, EMoveType::Extrude), head, sloped(60.));
+        bool extrusion_duct_hit = false;
+        for (const HeadCollisionHit &h : r.hits)
+            if (!h.travel && h.part == "duct" && h.depth > 0.45f && h.depth < 0.55f)
+                extrusion_duct_hit = true;
+        CHECK(extrusion_duct_hit);
+    }
+}

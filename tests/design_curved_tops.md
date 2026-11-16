@@ -41,12 +41,12 @@ tops check all use it. No head file = refused. From the head (`curved_tops_head_
 
 - allowed rise = lowest head box above the tip - 0.5 mm margin;
 - head angle cap = nozzle flank angle (profile points more than 0.1 mm above the tip, seen from the
-  tip land's edge) - 5 deg, at most 30 deg; the effective angle is min(`curved_tops_max_angle`, cap).
+  tip land's edge) - 5 deg, at most 20 deg (as #1021; the lead kept 20 for P1); the effective angle is min(`curved_tops_max_angle`, cap).
 
 | Printer model | Lowest part | Allowed rise | Angle cap | Usable in P1 |
 |---|---|---|---|---|
-| Bambu Lab X1 Carbon | sock 2.5 mm (owner measured) | 2.0 mm | 30 deg | yes: the file records the Dome40 print (1.8 mm, 10.3 deg) |
-| Elegoo Centauri Carbon | sock 2.5 mm (guess) | 2.0 mm | 30 deg | yes: the file records the Dome40 print |
+| Bambu Lab X1 Carbon | sock 2.5 mm (owner measured) | 2.0 mm | 20 deg | yes: the file records the Dome40 print (1.8 mm, 10.3 deg) |
+| Elegoo Centauri Carbon | sock 2.5 mm (guess) | 2.0 mm | 20 deg | yes: the file records the Dome40 print |
 | Bambu Lab X1, X1E; Snapmaker U1; Bambu Lab H2D | estimates | - | - | no: estimate nobody printed curved tops with (P2 acknowledgement) |
 | anything else | - | - | - | no: no head data |
 

@@ -252,8 +252,9 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
 
         // Ironing rubs the surface on purpose: only the boxes are checked for it.
         const bool check_nozzle = !(extrude && m.extrusion_role == erIroning);
-        const double surface_tan = extrude && params.extrusion_surface_slope_deg > 0. ?
-                                       std::tan(std::min(params.extrusion_surface_slope_deg, 60.) * M_PI / 180.) : 0.;
+        const bool   relaxed     = extrude && params.extrusion_surface_slope_deg > 0. &&
+                                   m.layer_id >= params.extrusion_surface_slope_min_layer;
+        const double surface_tan = relaxed ? std::tan(std::min(params.extrusion_surface_slope_deg, 60.) * M_PI / 180.) : 0.;
 
         Contact      worst;
         const double len_xy = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();

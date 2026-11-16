@@ -344,6 +344,9 @@ void PrintObject::make_perimeters()
 
     if (! this->set_started(posPerimeters))
         return;
+    // Curved tops: the walls are regenerated whole here (the fills follow in posInfill, which this
+    // step invalidates), so nothing an earlier curved-tops run cut is left.
+    m_curved_tops_clipped = false;
 
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
@@ -901,7 +904,19 @@ void PrintObject::contour_z()
 
     if (curved_tops) {
         // A refusal leaves the object planar; every refusal and every block is reported to the user.
-        const CurvedTopsResult ct = apply_curved_tops(*this, mesh, imesh);
+        // What the guards read is recorded, so Print::apply() regenerates the walls when it changes.
+        m_curved_tops_guard_inputs = curved_tops_guard_inputs(*this);
+        const bool             clipped_before = m_curved_tops_clipped;
+        const CurvedTopsResult ct             = apply_curved_tops(*this, mesh, imesh);
+        // Safety net (review finding g): this step running again over layers an earlier, unfinished run
+        // already cut (a cancel), with a guard now refusing, would print a cut-down top with nothing on
+        // it. Print::apply() regenerates the walls before that can happen; should it ever be reached
+        // anyway, stop rather than slice it.
+        if (!ct.applied && clipped_before)
+            throw Slic3r::SlicingError(Slic3r::format(_u8L("Curved tops: the top layers of %1% were cut for a curved top that is now "
+                                                           "refused. Slice again."),
+                                                      this->model_object()->name),
+                                       this->id().id);
         if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                           Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),

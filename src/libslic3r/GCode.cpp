@@ -3295,16 +3295,22 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
         return;
     }
 
-    // Curved tops: an extruding nozzle follows a surface up to the planner's angle, so its tip land
-    // meets the neighbouring bead of a sloped line (design 2.1: "the tip land ploughing the
-    // neighbouring bead" is a quality limit, not a crash). The check allows exactly that, within the
-    // land only; travels, wipes, the nozzle cone and the boxes are checked as for Z contouring.
+    // Curved tops: an extruding nozzle follows a sloped surface, so its tip land meets the neighbouring
+    // bead of the line it is laying next to (design 2.1: "the tip land ploughing the neighbouring bead"
+    // is a quality limit, not a crash). The check allows exactly that: up to the steepest slope the
+    // block really follows (not the configured maximum), within the land only, and only for extrusions
+    // on the block's layer - the last printed layer, as curved tops runs on one object, by layer, with
+    // no Z contouring on it. Travels, wipes, the nozzle cone and the boxes are checked as for Z contouring.
     HeadCollisionParams params;
     if (!curved_objects.empty()) {
-        const CurvedTopsHeadLimits limits = curved_tops_head_limits(print.config());
         for (const PrintObject *object : curved_objects)
             params.extrusion_surface_slope_deg = std::max(params.extrusion_surface_slope_deg,
-                curved_tops_effective_max_angle(object->config().curved_tops_max_angle.value, limits));
+                                                          double(object->layers().back()->curved_tops_slope_deg));
+        unsigned int last_layer = 0;
+        for (const GCodeProcessorResult::MoveVertex &m : result.moves)
+            if (m.type == EMoveType::Extrude && !m.prepare_stage)
+                last_layer = std::max(last_layer, m.layer_id);
+        params.extrusion_surface_slope_min_layer = last_layer;
     }
     const auto                t0     = std::chrono::steady_clock::now();
     const HeadCollisionReport report = check_head_collisions(result.moves, *head, params,

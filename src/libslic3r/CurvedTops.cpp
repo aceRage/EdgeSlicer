@@ -26,6 +26,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,35 @@ bool has_curved_tops_block(const PrintObject &object)
     return !object.layers().empty() && object.layers().back()->curved_tops_block;
 }
 
+std::string curved_tops_guard_inputs(const PrintObject &object)
+{
+    // Keep in step with the guards in apply_curved_tops(). Left out on purpose: what only slicing
+    // produces (layer count, the sub-layer plan) and the mesh, whose changes re-slice anyway.
+    const Print             &print = *object.print();
+    const PrintConfig       &pcfg  = print.config();
+    const PrintObjectConfig &ocfg  = object.config();
+    std::ostringstream       out;
+    const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg);
+    out << "head=" << (head.head ? head.head->id : std::string("-")) << ',' << head.usable << ';';
+    out << "model=" << pcfg.printer_model.value << ';';
+    out << "objects=" << print.objects().size() << ':';
+    for (const PrintObject *o : print.objects())
+        out << o->instances().size() << ',';
+    out << ";seq=" << int(pcfg.print_sequence.value) << ";spiral=" << pcfg.spiral_mode.value
+        << ";timelapse=" << int(pcfg.timelapse_type.value) << ";tower=" << print.has_wipe_tower() << ";extruders=";
+    for (unsigned int e : print.extruders(true))
+        out << e << ',';
+    out << ";localz=" << pcfg.dithering_local_z_mode.value << ";nozzles=" << print.uses_multiple_nozzle_diameters()
+        << ";skirt=" << pcfg.skirt_loops.value << ',' << pcfg.skirt_height.value << ',' << int(pcfg.draft_shield.value)
+        << ";height=" << pcfg.printable_height.value;
+    out << ";raft=" << ocfg.raft_layers.value
+        << ";vlh=" << (object.model_object() != nullptr && !object.model_object()->layer_height_profile.empty())
+        << ";support=" << object.has_support_material() << ";stab=" << object.has_stabilizers()
+        << ";zaa=" << object.need_z_contouring() << ";ct=" << ocfg.curved_tops_layers.value << ',' << ocfg.curved_tops_max_angle.value
+        << ',' << ocfg.layer_height.value;
+    return out.str();
+}
+
 CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla::IndexedMesh &imesh)
 {
     const PrintObjectConfig &ocfg  = object.config();
@@ -310,7 +340,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     if (object.layers().size() < 3)
         return refuse(_u8L("it has fewer than three layers."));
     Layer *top_layer = object.layers().back();
-    top_layer->curved_tops_block = false;
+    top_layer->curved_tops_block     = false;
+    top_layer->curved_tops_slope_deg = 0.f;
     for (LayerRegion *region : top_layer->regions())
         remove_previous_conformal(region->fills);
 
@@ -323,6 +354,10 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         return refuse(_u8L("there is more than one object or copy on the plate (curved tops handles one object for now)."));
     if (pcfg.print_sequence.value == PrintSequence::ByObject)
         return refuse(_u8L("the plate prints by object; curved tops needs the by-layer sequence."));
+    // Z contouring moves the same top layers up and down; the curved-tops head check is also more
+    // lenient on the block's extrusions than on Z contouring moves. One or the other per object.
+    if (object.need_z_contouring())
+        return refuse(_u8L("Z contouring is on for it as well; curved tops and Z contouring do not run on the same object."));
     if (pcfg.spiral_mode.value)
         return refuse(_u8L("spiral vase mode is on."));
     if (ocfg.raft_layers.value > 0)
@@ -436,14 +471,21 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
 
     ExPolygons footprint;
     double     z_lo = std::numeric_limits<double>::max(), z_hi = -std::numeric_limits<double>::max();
-    double     rise_used = 0., slope_used = 0.;
+    double     slope_used = 0.;
     for (const Surface3 &s : surfaces) {
         footprint.push_back(s.footprint);
         z_lo = std::min(z_lo, s.z_min);
         z_hi = std::max(z_hi, s.z_max);
-        rise_used  = std::max(rise_used, s.z_max - s.z_min);
         slope_used = std::max(slope_used, s.slope_max_deg);
     }
+    // R1 across surfaces (review finding e): the curved layers of every surface print in one block, so
+    // with the nozzle at the lowest point of one surface the highest point of any other may be under
+    // the head. The whole block's height span must fit, not each surface on its own.
+    const double rise_used = z_hi - z_lo;
+    if (surfaces.size() > 1 && rise_used > head.allowed_rise_mm + EPSILON)
+        return refuse(Slic3r::format(_u8L("its %1% curved surfaces together span %2% mm in height (Z %3% to %4% mm), more than the %5% mm "
+                                          "the print head allows."),
+                                     surfaces.size(), mm_str(rise_used), mm_str(z_lo), mm_str(z_hi), mm_str(head.allowed_rise_mm)));
     const double band_bottom = z_lo - n_layers * h;
 
     // 2. Clearance: nothing outside the surfaces may reach into the curved band.
@@ -568,6 +610,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     }
     const std::vector<ExPolygons> above = slice_mesh_ex(its, probe_z);
     const BoundingBox             footprint_bb = get_extents(footprint);
+    // From here on the planar walls and fills are cut; only the perimeter step restores them.
+    object.set_curved_tops_clipped(true);
     for (size_t j = 0; j < band_layers.size(); ++j) {
         const ExPolygons drop = diff_ex(footprint, above[j]);
         if (drop.empty())
@@ -581,7 +625,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     }
 
     top_region->fills.entities.push_back(conformal.release());
-    top_layer->curved_tops_block = true;
+    top_layer->curved_tops_block     = true;
+    top_layer->curved_tops_slope_deg = float(slope_used);
     BOOST_LOG_TRIVIAL(info) << "Curved tops: " << surfaces.size() << " surface(s), Z " << z_lo << ".." << z_hi << ", "
                             << n_layers << " layers, " << n_paths << " paths, max angle " << max_angle << " deg ("
                             << head.source << ")";
@@ -591,7 +636,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                          "%6% of %7% degrees allowed; curved moves at most %8% mm/s. Print head data: %9%."),
                                     object.model_object()->name, surfaces.size(), n_layers, mm_str(rise_used),
                                     mm_str(head.allowed_rise_mm), deg_str(slope_used), deg_str(max_angle),
-                                    deg_str(CURVED_TOPS_MAX_SPEED_MM_S), head.source);
+                                    float_to_string_decimal_point(CURVED_TOPS_MAX_SPEED_MM_S, 0), head.source);
     if (!too_high_note.empty())
         result.notes.push_back(too_high_note);
     // D8: beyond what has been printed on this printer is allowed, but said.

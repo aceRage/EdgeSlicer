@@ -35,8 +35,10 @@ namespace sla { class IndexedMesh; }
 static constexpr double CURVED_TOPS_CLEARANCE_MARGIN_MM = 0.5;
 // Taken off the nozzle flank's angle for the head's angle cap.
 static constexpr double CURVED_TOPS_FLANK_MARGIN_DEG    = 5.0;
-// Absolute ceiling for the surface angle, whatever the user or the head says (design D8, R3).
-static constexpr double CURVED_TOPS_MAX_ANGLE_CEILING   = 30.0;
+// Absolute ceiling for the surface angle, whatever the user or the head says. The design's D8
+// allows 30; the lead kept #1021's 20 for P1 (2026-11-16): a hardening phase must not loosen a
+// limit, and raising it waits for a steeper verified print.
+static constexpr double CURVED_TOPS_MAX_ANGLE_CEILING   = 20.0;
 // A nozzle profile point this close above the tip is part of the tip land (the collision check's
 // default tolerance, HeadCollisionParams::tolerance).
 static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
@@ -47,7 +49,7 @@ static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
 //  - allowed_rise_mm: a surface may rise at most this much (lowest head part above the tip minus
 //    the margin), otherwise the head body would meet the high part of the surface while the tip
 //    prints the low part;
-//  - max_slope_deg: the steepest slope the nozzle flank clears, minus a margin, at most 30.
+//  - max_slope_deg: the steepest slope the nozzle flank clears, minus a margin, at most CURVED_TOPS_MAX_ANGLE_CEILING (20).
 struct CurvedTopsHeadLimits
 {
     std::shared_ptr<const HeadClearance> head;
@@ -100,6 +102,12 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
 
 // True when the object's top layer carries a curved-tops block.
 bool has_curved_tops_block(const PrintObject &object);
+
+// Every value a guard of apply_curved_tops() reads (print, object, the other objects and copies),
+// as one string. PrintObject::contour_z() records it; Print::apply() compares it after each change
+// and regenerates the object's walls (and so re-plans the curved block) when it differs, because
+// most of these settings do not invalidate posContouring by themselves.
+std::string curved_tops_guard_inputs(const PrintObject &object);
 
 } // namespace Slic3r
 
