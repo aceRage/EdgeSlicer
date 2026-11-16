@@ -127,44 +127,49 @@ struct TowerExtrusion
     double z;
     double height;
     bool   purge;  // inside the purge of a tool change ("; CP TOOLCHANGE WIPE" .. "; CP TOOLCHANGE END")
-    bool   bridge; // after a mid-block switch to 0.2 mm: Bambu's bridge flow (need_thick_bridge_flow()) over a sparse band
+    bool   bridge; // a switch to 0.2 mm from a thinner block height: Bambu's bridge flow (need_thick_bridge_flow()) over a sparse band
 };
 
 void collect_extrusions(const std::string &gcode, int tool_before, int tool_after, double z, double height, std::vector<TowerExtrusion> &out)
 {
     static const std::regex height_re(R"(HEIGHT:\s*([0-9.]+))");
     static const std::regex e_re(R"(\bE([0-9.]+))");
-    std::istringstream      in(gcode);
-    std::string             line;
-    int                     tool     = tool_before;
-    bool                    purge    = false;
-    bool                    bridge   = false;
-    bool                    extruded = false; // since the writer's own height tag at the start of its block
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(gcode);
+        for (std::string l; std::getline(in, l);) {
+            if (!l.empty() && l.back() == '\r')
+                l.pop_back();
+            lines.push_back(l);
+        }
+    }
+    int    tool          = tool_before;
+    bool   purge         = false;
+    bool   bridge        = false;
+    double header_height = height; // the height a writer declares when it starts its block (its tag before the role tag)
+    for (size_t idx = 0; idx < lines.size(); ++idx) {
+        const std::string &line = lines[idx];
         std::smatch m;
         if (line.find("[change_filament_gcode]") != std::string::npos) {
             tool = tool_after;
             continue;
         }
-        if (line.find("WIPE_TOWER_START") != std::string::npos)
-            extruded = false;
         if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
             purge = true;
         else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
             purge = false;
         if (!line.empty() && line[0] == ';' && std::regex_search(line, m, height_re)) {
             height = std::stod(m[1].str());
-            bridge = extruded && std::abs(height - 0.2) < 1e-6;
+            const bool header = idx + 1 < lines.size() &&
+                                (lines[idx + 1].find("FEATURE:") != std::string::npos || lines[idx + 1].rfind(";TYPE:", 0) == 0);
+            if (header)
+                header_height = height;
+            bridge = !header && std::abs(height - 0.2) < 1e-6 && header_height < 0.2 - 1e-6;
             continue;
         }
         if (line.rfind("G1 ", 0) == 0 && (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
             std::regex_search(line, m, e_re) && std::stod(m[1].str()) > 0.)
-        {
             out.push_back({ tool, z, r3(height), purge, bridge });
-            extruded = true;
-        }
     }
 }
 
