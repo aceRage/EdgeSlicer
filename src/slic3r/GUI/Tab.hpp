@@ -591,6 +591,8 @@ public:
 	void		toggle_options() override;
 	void		update() override;
 	void		clear_pages() override;
+	void		msw_rescale() override;
+	void		sys_color_changed() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 	// Per-nozzle process P2: the Speed page header's note lists the filaments on each nozzle; refresh it after a
 	// filament's nozzle assignment changed.
@@ -680,6 +682,8 @@ private:
 	// Weak: switching pages destroys the page's controls without going through clear_pages().
 	wxWeakRef<wxWindow> m_tower_defaults_btn;
 	wxSizer*	tower_defaults_create_widget(wxWindow* parent);
+	// Style and size of the button: the label's width (DPI-scaled, translation-safe), at least the option fields' width.
+	void		tower_defaults_size_button();
 	Line*		tower_defaults_line();
 	// The Bambu system process the values come from: the edited preset's system parent, else the printer's
 	// default_print_profile. nullptr when neither is a system preset.

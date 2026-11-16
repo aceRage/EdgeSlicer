@@ -4840,15 +4840,46 @@ wxSizer* TabPrint::tower_defaults_create_widget(wxWindow* parent)
 {
     auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
     auto* button = new Button(parent, _L("Use Bambu defaults"));
-    button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+    m_tower_defaults_btn = button;
+    tower_defaults_size_button();
     button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         // After the click, as the Extruder page's "Extruder settings" button does: the dialog and the reload run outside
         // the button's own event.
         wxGetApp().CallAfter([this]() { on_tower_defaults(); });
     });
     sizer->Add(button, 0, wxALIGN_CENTER_VERTICAL);
-    m_tower_defaults_btn = button;
     return sizer;
+}
+
+void TabPrint::tower_defaults_size_button()
+{
+    auto* button = dynamic_cast<Button*>(m_tower_defaults_btn.get());
+    if (button == nullptr)
+        return;
+    // The house style for a button next to parameter boxes (as the Dependencies and ramming "Set..." buttons): Body_14,
+    // 26 DIP high, the theme's regular colours. Re-applied on DPI and theme changes, which is where it reads the theme.
+    button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+    // That style is a fixed 120 x 26 DIP box, which clipped "Use Bambu defaults" (owner hand test of #1080) and would clip
+    // longer translations. Size it to its label plus the Choice / Expanded buttons' 12 DIP side padding, never narrower
+    // than the option fields in the column below (Field::def_width_wider() em, the Width field), keeping the 26 DIP height.
+    button->SetPaddingSize(button->FromDIP(wxSize(12, 0)));
+    wxSize size = button->GetMinSize(); // label + padding, at least 120 x 26 DIP (Button::messureSize)
+    size.SetWidth(std::max(size.GetWidth(), Field::def_width_wider() * em_unit(button->GetParent())));
+    button->SetMinSize(size);
+    button->SetSize(button->GetMinSize());
+}
+
+void TabPrint::msw_rescale()
+{
+    // Before the option groups re-position their controls (Tab::msw_rescale -> Page::msw_rescale).
+    tower_defaults_size_button();
+    Tab::msw_rescale();
+}
+
+void TabPrint::sys_color_changed()
+{
+    tower_defaults_size_button(); // the style's colours depend on the theme
+    Tab::sys_color_changed();
 }
 
 Line* TabPrint::tower_defaults_line()
