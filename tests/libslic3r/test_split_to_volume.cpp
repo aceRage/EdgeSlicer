@@ -1520,7 +1520,9 @@ TEST_CASE("Split to Fit P3: a part with nothing flat to stand on is warned about
     }
     Model           model;
     ModelObject    *mo   = add_object(model, diamond, "Edge");
-    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), SplitOptions{});
+    // P4 (item 1): each half could stand on its 40 x 40 cut face, so it is only warned about when that
+    // pose does not fit either: here the usable height (60) is below the halves' length (150).
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 60.), SplitOptions{});
     REQUIRE(plan.part_count() == 2);
     size_t flagged = 0;
     for (const SplitWarning &w : plan.warnings)
@@ -1534,6 +1536,16 @@ TEST_CASE("Split to Fit P3: a part with nothing flat to stand on is warned about
     REQUIRE(res.parts.size() == 2);
     REQUIRE(std::count_if(res.warnings.begin(), res.warnings.end(),
                           [](const SplitWarning &w) { return w.kind == SplitWarning::Kind::NoFlatFace; }) == 2);
+
+    // With room to lay them on the cut face: no warning, before or after Apply.
+    const SplitPlan roomy = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), SplitOptions{});
+    REQUIRE_FALSE(has_warning(roomy.warnings, SplitWarning::Kind::NoFlatFace));
+    for (const SplitPiece &p : roomy.pieces) {
+        REQUIRE_THAT(p.contact_area, WithinAbs(0.6 * 150., 2.));
+        REQUIRE_THAT(p.best_contact_area, WithinRel(1600., 1e-3));
+    }
+    const SplitApplyResult roomy_res = split_apply(*mo, 0, roomy);
+    REQUIRE_FALSE(has_warning(roomy_res.warnings, SplitWarning::Kind::NoFlatFace));
 
     // The same bar lying flat stands on a whole face: no warning.
     const SplitPlan flat = split_plan_grid(box_at(300., 40., 40.), usable_box(200., 200., 200.), SplitOptions{});
@@ -1916,4 +1928,360 @@ TEST_CASE("Split to Fit P5: time of a plan on a big mesh", "[SplitToVolume][slow
     REQUIRE(plain.piece_count() == 8);
     REQUIRE(full.piece_count() == 8);
     REQUIRE(full.labels.size() == 2 * full.mates.size());
+}
+
+// ---- P4: polish ---------------------------------------------------------------------------------------
+
+namespace {
+
+// A square pyramid standing on its apex: base 40 x 40 at z = 40, apex at the origin.
+indexed_triangle_set p4_pyramid_apex_down()
+{
+    indexed_triangle_set its;
+    its.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(-20.f, -20.f, 40.f), Vec3f(20.f, -20.f, 40.f), Vec3f(20.f, 20.f, 40.f),
+                     Vec3f(-20.f, 20.f, 40.f) };
+    its.indices.emplace_back(1, 2, 3);   // base, facing up
+    its.indices.emplace_back(1, 3, 4);
+    its.indices.emplace_back(0, 2, 1);   // sides, facing out and down
+    its.indices.emplace_back(0, 3, 2);
+    its.indices.emplace_back(0, 4, 3);
+    its.indices.emplace_back(0, 1, 4);
+    return its;
+}
+
+BoundingBoxf3 p4_turned_bbox(const indexed_triangle_set &its, const Transform3d &t)
+{
+    BoundingBoxf3 bb;
+    for (const Vec3f &v : its.vertices)
+        bb.merge(t * v.cast<double>());
+    return bb;
+}
+
+// The P3 bar turned 45 degrees about X, standing on an edge.
+indexed_triangle_set p4_diamond_bar()
+{
+    indexed_triangle_set diamond = box_at(300., 40., 40., Vec3d(0., -20., -20.));
+    const double         c = std::cos(0.25 * PI), s = std::sin(0.25 * PI);
+    for (Vec3f &v : diamond.vertices) {
+        const double y = v.y(), z = v.z();
+        v.y()          = float(c * y - s * z);
+        v.z()          = float(s * y + c * z + 20. * std::sqrt(2.));
+    }
+    return diamond;
+}
+
+// The world box of an object's model parts (instance applied).
+BoundingBoxf3 p4_world_bbox(const ModelObject &o, size_t instance = 0)
+{
+    BoundingBoxf3 bb;
+    for (const ModelVolume *v : o.volumes)
+        if (v->is_model_part())
+            bb.merge(v->mesh().transformed_bounding_box(o.instances[instance]->get_matrix() * v->get_matrix()));
+    return bb;
+}
+
+// Where every dowel stands (world box centres of every instance), and where it is assembled, sorted.
+void p4_dowel_places(const std::vector<ModelObject *> &dowels, std::vector<Vec3d> &placed, std::vector<Vec3d> &assembled)
+{
+    for (const ModelObject *d : dowels)
+        for (const ModelInstance *inst : d->instances) {
+            const ModelVolume *v = d->volumes.front();
+            placed.push_back(v->mesh().transformed_bounding_box(inst->get_matrix() * v->get_matrix()).center());
+            assembled.push_back(v->mesh().transformed_bounding_box(inst->get_assemble_transformation().get_matrix() * v->get_matrix()).center());
+        }
+    auto less = [](const Vec3d &l, const Vec3d &r) {
+        for (int a = 0; a < 3; ++a)
+            if (std::abs(l[a] - r[a]) > 1e-3)
+                return l[a] < r[a];
+        return false;
+    };
+    std::sort(placed.begin(), placed.end(), less);
+    std::sort(assembled.begin(), assembled.end(), less);
+}
+
+} // namespace
+
+TEST_CASE("Split to Fit P4: overhang area", "[SplitToVolume]")
+{
+    double contact = -1.;
+    REQUIRE_THAT(split_overhang_area(box_at(20., 20., 20.), Transform3d::Identity(), 45., &contact), WithinAbs(0., 1e-9));
+    REQUIRE_THAT(contact, WithinRel(400., 1e-9));
+
+    // On its apex, all four sides overhang (their normals are 26.6 degrees off straight down).
+    const indexed_triangle_set pyramid = p4_pyramid_apex_down();
+    const double               sides   = 4. * 0.5 * 40. * std::sqrt(40. * 40. + 20. * 20.);
+    REQUIRE_THAT(split_overhang_area(pyramid, Transform3d::Identity(), 45., &contact), WithinRel(sides, 1e-6));
+    REQUIRE_THAT(contact, WithinAbs(0., 1e-9));
+    // Turned over onto its base: nothing overhangs, the base is on the bed.
+    const Transform3d over(Eigen::AngleAxisd(PI, Vec3d::UnitX()));
+    REQUIRE_THAT(split_overhang_area(pyramid, over, 45., &contact), WithinAbs(0., 1e-6));
+    REQUIRE_THAT(contact, WithinRel(1600., 1e-6));
+    // A steeper limit (70 degrees) lets the sides through.
+    REQUIRE_THAT(split_overhang_area(pyramid, Transform3d::Identity(), 70.), WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Split to Fit P4: the cut face to lay a part on", "[SplitToVolume]")
+{
+    // The pyramid on its apex lies on its base (the cut face): no overhang, the base on the bed.
+    const indexed_triangle_set pyramid = p4_pyramid_apex_down();
+    const SplitLayFlat         p       = split_choose_lay_flat(pyramid, { Vec3d::UnitZ() }, Vec3d::Zero());
+    REQUIRE(p.changed);
+    REQUIRE((p.normal - Vec3d::UnitZ()).norm() < 1e-9);
+    REQUIRE_THAT(p.overhang, WithinAbs(0., 1e-6));
+    REQUIRE_THAT(p.contact, WithinRel(1600., 1e-6));
+    REQUIRE((p.rotation.linear() * Vec3d::UnitZ() + Vec3d::UnitZ()).norm() < 1e-9);
+
+    // A cube standing on a face already: a tie everywhere, so it is left as it is.
+    REQUIRE_FALSE(split_choose_lay_flat(box_at(20., 20., 20.), { Vec3d::UnitX(), -Vec3d::UnitZ() }, Vec3d::Zero()).changed);
+
+    // A 10 x 20 x 30 block: no overhang either way, so the larger face wins (20 x 30 = 600 mm2).
+    const indexed_triangle_set block = box_at(10., 20., 30.);
+    const SplitLayFlat         b     = split_choose_lay_flat(block, { Vec3d::UnitX() }, Vec3d::Zero());
+    REQUIRE(b.changed);
+    REQUIRE((b.normal - Vec3d::UnitX()).norm() < 1e-9);
+    REQUIRE_THAT(b.contact, WithinRel(600., 1e-6));
+
+    // The pose must fit: on +X it is 30 x 20 (or 20 x 30), too wide for 32 x 15; on +Y it is 10 x 30,
+    // which fits with a quarter turn.
+    const Vec3d        usable(32., 15., 40.);
+    const SplitLayFlat f = split_choose_lay_flat(block, { Vec3d::UnitX(), Vec3d::UnitY() }, usable);
+    REQUIRE(f.changed);
+    REQUIRE(f.fits);
+    REQUIRE((f.normal - Vec3d::UnitY()).norm() < 1e-9);
+    REQUIRE_THAT(f.contact, WithinRel(300., 1e-6));
+    const Vec3d s = p4_turned_bbox(block, f.rotation).size();
+    REQUIRE(s.x() <= usable.x() + 1e-6);
+    REQUIRE(s.y() <= usable.y() + 1e-6);
+    REQUIRE(s.z() <= usable.z() + 1e-6);
+
+    // Nothing fits: kept as it is.
+    const SplitLayFlat none = split_choose_lay_flat(block, { Vec3d::UnitX() }, Vec3d(5., 5., 5.));
+    REQUIRE_FALSE(none.changed);
+    REQUIRE_FALSE(none.fits);
+}
+
+TEST_CASE("Split to Fit P4: Apply lays each part on its cut face", "[SplitToVolume]")
+{
+    Model        model;
+    ModelObject *mo = add_object(model, p4_diamond_bar(), "Edge");
+    SplitOptions opt;
+    opt.lay_flat       = true;
+    opt.labels.enabled = true;
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), opt);
+    REQUIRE(plan.part_count() == 2);
+    REQUIRE(plan.lay_flat);
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    REQUIRE(res.part_laid_flat == std::vector<bool>{ true, true });
+    for (size_t i = 0; i < res.parts.size(); ++i) {
+        const ModelObject *part = res.parts[i];
+        INFO("part " << part->name);
+        // Standing on the 40 x 40 diamond of the cut: 150 tall, the diamond's 56.6 across.
+        const Vec3d s = p4_world_bbox(*part).size();
+        REQUIRE_THAT(s.z(), WithinAbs(150., 0.2));
+        REQUIRE_THAT(s.x(), WithinAbs(40. * std::sqrt(2.), 0.2));
+        REQUIRE_THAT(s.y(), WithinAbs(40. * std::sqrt(2.), 0.2));
+        REQUIRE_THAT(world_volume(*part), WithinRel(plan.pieces[size_t(res.piece_index[i])].volume, 1e-3));
+        REQUIRE(open_edges(*part) == 0);
+    }
+    REQUIRE_FALSE(has_warning(res.warnings, SplitWarning::Kind::NoFlatFace));
+    // Each half's label is on the face it now stands on.
+    REQUIRE(res.labels == 2);
+    REQUIRE(res.labels_on_bed == 2);
+
+    // Off: the parts keep their pose.
+    SplitOptions          keep = opt;
+    keep.lay_flat              = false;
+    const SplitApplyResult as_is = split_apply(*mo, 0, split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), keep));
+    REQUIRE(as_is.part_laid_flat == std::vector<bool>{ false, false });
+    for (const ModelObject *part : as_is.parts)
+        REQUIRE_THAT(p4_world_bbox(*part).size().x(), WithinAbs(150., 0.2));
+    REQUIRE(as_is.labels_on_bed == 0);
+
+    // A pose on the cut face that does not fit (60 tall) is not taken.
+    const SplitApplyResult low = split_apply(*mo, 0, split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 60.), opt));
+    REQUIRE(low.part_laid_flat == std::vector<bool>{ false, false });
+    REQUIRE(p5_count(low.warnings, SplitWarning::Kind::NoFlatFace) == 2);
+}
+
+TEST_CASE("Split to Fit P4: identical dowels become instances of one object", "[SplitToVolume]")
+{
+    Model        model;
+    ModelObject *mo = add_object(model, box_at(100., 100., 40.), "Block");
+    SplitOptions opt;
+    opt.dowels.enabled           = true;
+    const SplitPlan        plain = split_plan_grid(split_object_mesh(*mo, 0), usable_box(60., 60., 60.), opt);
+    const SplitApplyResult sep   = split_apply(*mo, 0, plain);
+    REQUIRE(plain.sites.size() >= 4);
+    REQUIRE(sep.dowels.size() == plain.sites.size());
+    REQUIRE(sep.dowel_count == plain.sites.size());
+
+    opt.instance_dowels          = true;
+    const SplitPlan        plan  = split_plan_grid(split_object_mesh(*mo, 0), usable_box(60., 60., 60.), opt);
+    const SplitApplyResult res   = split_apply(*mo, 0, plan);
+    REQUIRE(plan.sites.size() == plain.sites.size());
+    REQUIRE(res.dowel_count == plan.sites.size());
+    // Every dowel here is the same 6 mm x 20 mm round dowel: one object.
+    REQUIRE(res.dowels.size() == 1);
+    REQUIRE(res.dowels.front()->instances.size() == plan.sites.size());
+    REQUIRE(res.dowels.front()->name.find("-Dowel ") != std::string::npos);
+    // The cut group counts objects: the parts and the one dowel object.
+    for (const ModelObject *o : res.parts)
+        REQUIRE(o->cut_id.check_sum() == res.parts.size() + res.dowels.size());
+    REQUIRE(res.dowels.front()->cut_id.check_sum() == res.parts.size() + res.dowels.size());
+    REQUIRE(res.dowels.front()->cut_id.connectors_cnt() == sep.dowels.front()->cut_id.connectors_cnt());
+
+    // Every dowel stands, and is assembled, exactly where it did as a separate object.
+    std::vector<Vec3d> placed_a, asm_a, placed_b, asm_b;
+    p4_dowel_places(sep.dowels, placed_a, asm_a);
+    p4_dowel_places(res.dowels, placed_b, asm_b);
+    REQUIRE(placed_a.size() == placed_b.size());
+    for (size_t i = 0; i < placed_a.size(); ++i) {
+        REQUIRE((placed_a[i] - placed_b[i]).norm() < 1e-4);
+        REQUIRE((asm_a[i] - asm_b[i]).norm() < 1e-4);
+    }
+}
+
+TEST_CASE("Split to Fit P4: dowel sites added and removed by hand", "[SplitToVolume]")
+{
+    // A 100 x 40 x 40 bar cut once across X at 50: one 40 x 40 face, one automatic dowel in its middle.
+    SplitOptions opt;
+    opt.dowels.enabled      = true;
+    opt.dowels.max_per_face = 1;
+    const indexed_triangle_set bar  = box_at(100., 40., 40.);
+    const SplitUsableVolume    vol  = usable_box(60., 60., 60.);
+    const SplitPlan            auto_plan = split_plan_grid(bar, vol, opt);
+    REQUIRE(auto_plan.planes.size() == 1);
+    REQUIRE(auto_plan.sites.size() == 1);
+    const double plane_pos = auto_plan.planes.front().pos;
+    const Vec3d  middle    = auto_plan.sites.front().pos;
+    REQUIRE_THAT(middle.y(), WithinAbs(20., 1.));
+    REQUIRE_THAT(middle.z(), WithinAbs(20., 1.));
+    auto edit = [&](const Vec3d &pos, bool add, double at = std::numeric_limits<double>::quiet_NaN()) {
+        SplitManualSite m;
+        m.axis      = 0;
+        m.index     = 0;
+        m.plane_pos = std::isnan(at) ? plane_pos : at;
+        m.pos       = pos;
+        m.add       = add;
+        return m;
+    };
+    auto refusal = [](const SplitPlan &plan) {
+        for (const SplitWarning &w : plan.warnings)
+            if (w.kind == SplitWarning::Kind::ManualSiteRefused)
+                return int(w.value);
+        return -1;
+    };
+
+    // Removed: no dowel, and no "face too small" warning for it.
+    SplitOptions removed = opt;
+    removed.manual_sites = { edit(middle, false) };
+    const SplitPlan r    = split_plan_grid(bar, vol, removed);
+    REQUIRE(r.sites.empty());
+    REQUIRE_FALSE(has_warning(r.warnings, SplitWarning::Kind::NoDowelOnFace));
+
+    // Removed and one added elsewhere: the added one is kept, marked as the user's.
+    SplitOptions moved = opt;
+    moved.manual_sites = { edit(middle, false), edit(Vec3d(plane_pos, 12., 12.), true) };
+    const SplitPlan m  = split_plan_grid(bar, vol, moved);
+    REQUIRE(m.sites.size() == 1);
+    REQUIRE(m.sites.front().manual);
+    REQUIRE_THAT(m.sites.front().pos.y(), WithinAbs(12., 1e-6));
+    REQUIRE_THAT(m.sites.front().pos.z(), WithinAbs(12., 1e-6));
+    REQUIRE(refusal(m) == -1);
+
+    // An added one beyond the cap is allowed when it keeps the spacing.
+    SplitOptions extra        = opt;
+    extra.dowels.min_spacing  = 10.;
+    extra.manual_sites        = { edit(Vec3d(plane_pos, 32., 32.), true) };
+    const SplitPlan e         = split_plan_grid(bar, vol, extra);
+    REQUIRE(e.sites.size() == 2);
+    REQUIRE(std::count_if(e.sites.begin(), e.sites.end(), [](const SplitSite &s) { return s.manual; }) == 1);
+
+    // Refused, with the reason.
+    SplitOptions near_dowel = opt;
+    near_dowel.manual_sites = { edit(Vec3d(plane_pos, middle.y(), middle.z() - 8.), true) };
+    const SplitPlan nd      = split_plan_grid(bar, vol, near_dowel);
+    REQUIRE(nd.sites.size() == 1);
+    REQUIRE(refusal(nd) == int(SplitManualRefusal::NearDowel));
+    const SplitWarning *w = p2_find(nd.warnings, SplitWarning::Kind::ManualSiteRefused);
+    REQUIRE(w != nullptr);
+    REQUIRE(w->detail == 0);
+    REQUIRE(w->plane == 0);
+
+    SplitOptions near_edge = opt;
+    near_edge.manual_sites = { edit(Vec3d(plane_pos, 3., 20.), true) };
+    REQUIRE(refusal(split_plan_grid(bar, vol, near_edge)) == int(SplitManualRefusal::NearEdge));
+
+    SplitOptions off_face = opt;
+    off_face.manual_sites = { edit(Vec3d(plane_pos, 60., 20.), true) };
+    REQUIRE(refusal(split_plan_grid(bar, vol, off_face)) == int(SplitManualRefusal::NotOnFace));
+
+    // Edits made for a plane that has moved since are ignored.
+    SplitOptions stale = opt;
+    stale.manual_sites = { edit(middle, false, plane_pos + 1.), edit(Vec3d(plane_pos + 1., 12., 12.), true, plane_pos + 1.) };
+    const SplitPlan st = split_plan_grid(bar, vol, stale);
+    REQUIRE(st.sites.size() == 1);
+    REQUIRE((st.sites.front().pos - middle).norm() < 1e-9);
+    REQUIRE(refusal(st) == -1);
+
+    // Close to another plane (the corner keep-out) on a 2 x 2 grid.
+    const SplitPlan grid = split_plan_grid(box_at(100., 100., 40.), vol, opt);
+    REQUIRE(grid.planes.size() == 2);
+    SplitOptions corner = opt;
+    SplitManualSite c   = edit(Vec3d(grid.planes[0].pos, 48., 20.), true, grid.planes[0].pos);
+    corner.manual_sites = { c };
+    REQUIRE(refusal(split_plan_grid(box_at(100., 100., 40.), vol, corner)) == int(SplitManualRefusal::NearOtherPlane));
+
+    // Apply bakes the user's dowel like any other: a hole on each side, one dowel.
+    Model        model;
+    ModelObject *mo           = add_object(model, bar, "Bar");
+    const SplitApplyResult res = split_apply(*mo, 0, m);
+    REQUIRE(res.parts.size() == 2);
+    REQUIRE(res.dowels.size() == 1);
+    for (const ModelObject *part : res.parts)
+        REQUIRE(p5_negative_names(*part).size() == 1);
+}
+
+TEST_CASE("Split to Fit P4: a click picks a dowel disc or a cut face", "[SplitToVolume]")
+{
+    SplitOptions opt;
+    opt.dowels.enabled      = true;
+    opt.dowels.max_per_face = 1;
+    const SplitPlan plan = split_plan_grid(box_at(100., 40., 40.), usable_box(60., 60., 60.), opt);
+    REQUIRE(plan.sites.size() == 1);
+    const Vec3d s = plan.sites.front().pos;
+
+    const SplitPickTarget site = split_pick(plan, Vec3d(-100., s.y(), s.z()), Vec3d::UnitX());
+    REQUIRE(site.kind == SplitPickTarget::Kind::Site);
+    REQUIRE(site.site == 0);
+    REQUIRE(site.plane == 0);
+
+    const SplitPickTarget face = split_pick(plan, Vec3d(-100., 5., 5.), Vec3d(1., 0., 0.));
+    REQUIRE(face.kind == SplitPickTarget::Kind::Face);
+    REQUIRE(face.plane == 0);
+    REQUIRE(face.mate == 0);
+    REQUIRE(face.pos.x() == plan.planes.front().pos);
+    REQUIRE_THAT(face.pos.y(), WithinAbs(5., 1e-9));
+
+    // Beside the model, or looking away from the plane: nothing.
+    REQUIRE(split_pick(plan, Vec3d(-100., 60., 20.), Vec3d::UnitX()).kind == SplitPickTarget::Kind::None);
+    REQUIRE(split_pick(plan, Vec3d(-100., 5., 5.), -Vec3d::UnitX()).kind == SplitPickTarget::Kind::None);
+}
+
+TEST_CASE("Split to Fit P4: loose pieces are marked for plates of their own", "[SplitToVolume]")
+{
+    Model           model;
+    ModelObject    *mo   = add_object(model, u_shape(), "U");
+    SplitOptions    opt;
+    opt.loose_own_plates = true;
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(400., 400., 205.), opt);
+    REQUIRE(plan.loose_own_plates);
+    REQUIRE(plan.pieces.size() == 3);
+    REQUIRE_FALSE(plan.is_loose_piece(0));
+    REQUIRE_FALSE(plan.is_loose_piece(1));
+    REQUIRE(plan.is_loose_piece(2));
+    REQUIRE_FALSE(plan.is_loose_piece(-1));
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.part_loose == std::vector<bool>{ false, false, true });
 }

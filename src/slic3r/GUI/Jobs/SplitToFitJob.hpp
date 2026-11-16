@@ -40,6 +40,30 @@ private:
     SplitApplyResult m_result;
 };
 
+// P4 (items 2, 3): arranges groups of objects one after the other, each later group on plates of its
+// own: the main parts first (into free space on the plates, then new ones, as before), then the loose
+// pieces (when asked), then the dowels. Each step is the "place loose objects" arrange; while it runs,
+// the groups still to come are set not to print (a loose object set not to print stays where it is)
+// and, for a later group, every plate that holds anything is locked (a locked plate takes nothing new).
+// Both are put back after each step and when an arrange is canceled. Kept alive by the jobs' callbacks.
+class SplitArrangeChain : public std::enable_shared_from_this<SplitArrangeChain>
+{
+public:
+    SplitArrangeChain(Plater *plater, std::vector<std::vector<ObjectID>> groups);
+    // UI thread: arranges the next group with anything in it, then queues the step after it.
+    void run_step();
+
+private:
+    ModelObject *find(const ObjectID &id) const;
+    void         release();
+
+    Plater                                  *m_plater{ nullptr };
+    std::vector<std::vector<ObjectID>>       m_groups;
+    size_t                                   m_step{ 0 };
+    std::vector<std::pair<ObjectID, size_t>> m_held;    // instances set not to print (object, instance)
+    std::vector<int>                         m_locked;  // plates locked by this chain
+};
+
 }} // namespace Slic3r::GUI
 
 #endif // slic3r_GUI_SplitToFitJob_hpp_
