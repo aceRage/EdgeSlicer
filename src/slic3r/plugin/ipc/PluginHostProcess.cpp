@@ -28,11 +28,23 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
 #include <cerrno>
 #include <poll.h>
+#endif
+
+#ifndef _WIN32
+#ifndef __APPLE__
+// POSIX: environ is not in the C++ standard library headers. Declare it at file
+// scope so it is not Slic3r::plugin_ipc::environ. macOS has no such symbol;
+// use *_NSGetEnviron() instead.
+extern char **environ;
+#endif
 #endif
 
 namespace Slic3r::plugin_ipc {
@@ -392,7 +404,12 @@ std::vector<std::string> scrubbed_helper_env()
 {
     std::vector<std::string> kept;
     bool                     have_nousersite = false;
-    for (char** e = ::environ; e && *e; ++e) {
+#ifdef __APPLE__
+    char** envp = *_NSGetEnviron();
+#else
+    char** envp = environ;
+#endif
+    for (char** e = envp; e && *e; ++e) {
         if (!env_entry_allowed(*e))
             continue;
         kept.emplace_back(*e);
