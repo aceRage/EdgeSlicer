@@ -42,8 +42,10 @@ void* win_pipe_security_attributes() { return nullptr; }
 #define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
 #endif
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <cstdint>
 #include <cstring>
@@ -109,10 +111,10 @@ bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mo
     // One SetNamedSecurityInfoW. An inheritable ACE does propagate to existing
     // children (that is the grant). Do not SET then immediately REVOKE — that was
     // the redundant second walk. Grants live until close_win_appcontainer.
-    ea.grfInheritance       = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
-    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName    = static_cast<LPWSTR>(sid);
+    ea.grfInheritance      = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName   = static_cast<LPWSTR>(sid);
 
     PACL                 prev = nullptr;
     PACL                 neu  = nullptr;
@@ -238,11 +240,43 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         else
             BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
     }
+    if (!spec.write_root.empty()) {
+        boost::system::error_code ec;
+        if (!boost::filesystem::exists(spec.write_root, ec) || ec) {
+            ec.clear();
+            boost::filesystem::create_directories(spec.write_root, ec);
+            if (ec) {
+                error = "AppContainer ACL grant failed for " + spec.write_root;
+                clear_win_state();
+                return false;
+            }
+        }
+    }
     if (!grant_or_fail(spec.plugin_root, false) || !grant_or_fail(spec.write_root, true)) {
         clear_win_state();
         return false;
     }
     for (const SandboxPath& extra : spec.extra_paths) {
+        if (extra.path.empty())
+            continue;
+        boost::system::error_code ec;
+        const bool                exists = boost::filesystem::exists(extra.path, ec) && !ec;
+        if (!exists) {
+            if (extra.write) {
+                ec.clear();
+                boost::filesystem::create_directories(extra.path, ec);
+                if (ec) {
+                    error = "AppContainer ACL grant failed for " + extra.path;
+                    clear_win_state();
+                    return false;
+                }
+            } else {
+                // Same skip-with-warning as python_home: a missing read-only grant (fresh
+                // python/packages, absent trust.json) must not abort the spawn.
+                BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for missing path: " << extra.path;
+                continue;
+            }
+        }
         if (!grant_or_fail(extra.path, extra.write)) {
             clear_win_state();
             return false;

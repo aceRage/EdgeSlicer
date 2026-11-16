@@ -15,7 +15,9 @@
 #include <slic3r/plugin/PythonInterpreter.hpp>
 
 #include <boost/filesystem/operations.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdlib.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -77,6 +79,32 @@ void add_unique_path(std::vector<SandboxPath>& paths, std::string path, bool wri
         }
     }
     paths.push_back(SandboxPath{std::move(path), write});
+}
+
+bool path_exists(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    return boost::filesystem::exists(path, ec) && !ec;
+}
+
+// Create an owned directory so a later ACL/Landlock grant has something to attach to.
+// Returns false (and logs) when the path cannot be created; the caller then skips the grant.
+bool ensure_grant_directory(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    if (boost::filesystem::is_directory(path, ec) && !ec)
+        return true;
+    ec.clear();
+    boost::filesystem::create_directories(path, ec);
+    if (ec) {
+        BOOST_LOG_TRIVIAL(warning) << "Failed to create sandbox grant directory " << path << ": " << ec.message();
+        return false;
+    }
+    return true;
 }
 
 bool env_truthy(const char* name)
@@ -237,23 +265,32 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     spec.allow_exec         = !permissions.process.empty();
     spec.dev_seatbelt_probe = sandbox_env_seatbelt_probe();
 
+    // write_root is an owned scratch folder (tests, post-process staging). Create it so
+    // Windows SetNamedSecurityInfoW has a real object; Linux add_req still needs the path.
+    if (!spec.write_root.empty())
+        ensure_grant_directory(spec.write_root);
+
     const boost::filesystem::path helper_dir = helper_path().parent_path();
-    if (!helper_dir.empty())
+    if (path_exists(helper_dir.string()))
         add_unique_path(spec.extra_paths, helper_dir.string(), false);
 
+    // {data_dir}/python/packages/{abi}. Interpreter init creates this under the data_dir
+    // that was current at initialize(); a later ScopedDataDir / first-run user tree does
+    // not have it. Create it here so pip installs inside the sandbox can still write, and
+    // so Windows AppContainer ACL grants do not abort the spawn on a missing path.
     const std::string packages = PythonInterpreter::shared_packages_dir();
-    if (!packages.empty())
+    if (ensure_grant_directory(packages))
         add_unique_path(spec.extra_paths, packages, false);
 
     const std::string resources = Slic3r::resources_dir();
-    if (!resources.empty())
+    if (path_exists(resources))
         add_unique_path(spec.extra_paths, resources, false);
 
     // Grant the trust sidecar file, not all of data_dir (presets, printer state).
-    // The plugin's own directory is granted read-only via plugin_root; writable scratch
-    // is get_storage_dir (plugin_data) plus the private TMPDIR.
+    // Skip when the file is not there yet (fresh data dir); Linux already uses
+    // add_req_if_exists. Creating an empty sidecar would change trust semantics.
     const boost::filesystem::path sidecar = plugin_trust::trust_sidecar_path();
-    if (!sidecar.empty())
+    if (path_exists(sidecar.string()))
         add_unique_path(spec.extra_paths, sidecar.string(), false);
 
     if (!descriptor.plugin_key.empty()) {
@@ -262,10 +299,16 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
         } catch (...) {}
     }
 
-    for (const std::string& path : permissions.fs_read)
-        add_unique_path(spec.extra_paths, path, false);
-    for (const std::string& path : permissions.fs_readwrite)
-        add_unique_path(spec.extra_paths, path, true);
+    for (const std::string& path : permissions.fs_read) {
+        const std::string stripped = strip_tree_wildcard(path);
+        if (path_exists(stripped))
+            add_unique_path(spec.extra_paths, stripped, false);
+    }
+    for (const std::string& path : permissions.fs_readwrite) {
+        const std::string stripped = strip_tree_wildcard(path);
+        if (ensure_grant_directory(stripped))
+            add_unique_path(spec.extra_paths, stripped, true);
+    }
     return spec;
 }
 
