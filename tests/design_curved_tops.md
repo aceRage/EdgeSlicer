@@ -63,7 +63,8 @@ not have, so no code was copied: this is a re-implementation on top of our ZAA p
   the stock X1C process keeps its layer bookkeeping; helper checks).
 - Hand test: the owner printed `C:/Dev/EdgeSlicerTest/test_files/CurvedTops_Dome40_X1C.gcode.3mf`
   (40 mm puck, 5 mm cylinder + 1.8 mm cap, X1C 0.20mm Standard, Bambu PLA Basic, 3 curved layers) on
-  the X1 Carbon: it came out good (2026-11-16). A CC1 file of the same dome exists; not reported printed.
+  the X1 Carbon: it came out good (2026-11-16). The same dome for the CC1
+  (`CurvedTops_Dome40_CC1.gcode.3mf`) printed well earlier, per the hand-test card.
 
 ## Limits
 
