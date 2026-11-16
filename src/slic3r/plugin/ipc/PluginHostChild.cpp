@@ -13,12 +13,15 @@
 #include <slic3r/plugin/pluginTypes/script/ScriptPluginCapability.hpp>
 #include <slic3r/plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapability.hpp>
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -132,7 +135,7 @@ ScriptCompletion run_script(const std::string& plugin_key, const std::string& ca
     return completion;
 }
 
-ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error)
+ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error, std::string* gcode_out)
 {
     const std::string plugin_key      = msg.value("plugin_key", std::string());
     const std::string capability_name = msg.value("capability_name", std::string());
@@ -158,11 +161,41 @@ ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error)
     SlicingPipelineContext ctx;
     ctx.orca_version = msg.value("orca_version", std::string());
     ctx.step         = SlicingPipelineStepPlugin::psGCodePostProcess;
-    ctx.gcode_path   = msg.value("gcode_path", std::string());
     ctx.host         = msg.value("host", std::string());
     ctx.output_name  = msg.value("output_name", std::string());
     ctx.full_config  = &config;
-    return pipeline->execute(ctx);
+
+    boost::filesystem::path work;
+    if (msg.contains("gcode") && msg["gcode"].is_string()) {
+        try {
+            work = boost::filesystem::path(PluginManager::instance().get_storage_dir(plugin_key)) / "post_process.gcode";
+        } catch (...) {
+            work = boost::filesystem::temp_directory_path() / "edge-plugin-post_process.gcode";
+        }
+        boost::system::error_code ec;
+        boost::filesystem::create_directories(work.parent_path(), ec);
+        const std::string         body = msg["gcode"].get<std::string>();
+        boost::nowide::ofstream   out(work.string(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            error = "failed to stage G-code in plugin host scratch";
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        out.write(body.data(), static_cast<std::streamsize>(body.size()));
+        out.close();
+        ctx.gcode_path = work.string();
+    }
+
+    ExecutionResult result = pipeline->execute(ctx);
+    if (!work.empty()) {
+        boost::nowide::ifstream in(work.string(), std::ios::binary);
+        if (in && gcode_out != nullptr) {
+            std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            *gcode_out = std::move(body);
+        }
+        boost::system::error_code ec;
+        boost::filesystem::remove(work, ec);
+    }
+    return result;
 }
 
 } // namespace
@@ -334,11 +367,15 @@ int run_child(Channel& channel)
             } else if (kind == k_kind_post_process) {
                 try {
                     std::string           exec_error;
-                    const ExecutionResult result = run_post_process(msg, exec_error);
+                    std::string           gcode_out;
+                    const ExecutionResult result = run_post_process(msg, exec_error, &gcode_out);
                     if (!exec_error.empty() && result.status == PluginResult::Success)
                         reply = {{"type", k_type_error}, {"message", exec_error}};
-                    else
+                    else {
                         reply = execution_result_json(result, false, msg);
+                        if (!gcode_out.empty() || msg.contains("gcode"))
+                            reply["gcode"] = std::move(gcode_out);
+                    }
                 } catch (const std::exception& ex) {
                     reply = {{"type", k_type_error}, {"message", ex.what()}};
                 }

@@ -104,7 +104,8 @@ public:
                                    const std::string& pkg_name,
                                    std::string&       error,
                                    std::vector<std::string>* plugin_paths = nullptr,
-                                   std::vector<std::string>* plugin_modules = nullptr);
+                                   std::vector<std::string>* plugin_modules = nullptr,
+                                   const std::string& extract_root = {});
     PyObject* load_module_from_directory(const std::string& dir_path,
                                          const std::string& pkg_name,
                                          std::string&       error,

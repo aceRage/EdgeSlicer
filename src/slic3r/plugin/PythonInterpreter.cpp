@@ -1358,7 +1358,8 @@ PyObject* PythonInterpreter::load_module_from_whl(const std::string& file_path,
                                                   const std::string& pkg_name,
                                                   std::string&       error,
                                                   std::vector<std::string>* plugin_paths,
-                                                  std::vector<std::string>* plugin_modules)
+                                                  std::vector<std::string>* plugin_modules,
+                                                  const std::string& extract_root)
 {
     if (!m_initialized.load(std::memory_order_acquire)) {
         error = "Python interpreter not initialized";
@@ -1374,7 +1375,10 @@ PyObject* PythonInterpreter::load_module_from_whl(const std::string& file_path,
         return nullptr;
     }
 
-    fs::path extract_dir = whl_path.parent_path() / "__whl_extracted__" / pkg_name;
+    // plugin_root is Landlock/AppContainer read-only. Extract under storage (writable
+    // plugin_data) the same way PluginLoader does for dependency wheels.
+    fs::path extract_dir = (extract_root.empty() ? whl_path.parent_path() : fs::path(extract_root)) /
+                           "__whl_extracted__" / pkg_name;
 
     boost::system::error_code ec;
     fs::remove_all(extract_dir, ec);

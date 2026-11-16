@@ -221,9 +221,14 @@ PyObject* import_plugin_module(const PluginDescriptor& descriptor,
     if (descriptor.entry_package.empty())
         return interpreter.load_module_from_file(descriptor.entry_path, error, &plugin_paths, &plugin_modules);
 
-    if (boost::filesystem::path(descriptor.entry_path).extension() == ".whl")
+    if (boost::filesystem::path(descriptor.entry_path).extension() == ".whl") {
+        std::string extract_root;
+        try {
+            extract_root = PluginManager::instance().get_storage_dir(descriptor.plugin_key);
+        } catch (...) {}
         return interpreter.load_module_from_whl(
-            descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules);
+            descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules, extract_root);
+    }
 
     return interpreter.load_module_from_directory(
         descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules);

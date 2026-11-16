@@ -5,9 +5,10 @@
     <!-- Shipping OS sandbox for edge-plugin-host. Applied only when this helper is signed
          (and, for distribution, notarised) with these entitlements. An unsigned helper is
          fail-closed: Edge refuses the workload unless the user stored a per-plugin override.
-         Path grants that are only known at runtime (the plugin dir, the G-code folder) cannot
-         be baked in here; they are documented in docs/plugins/phase8-os-sandbox.md and need a
-         signed bundle to verify. sandbox-exec / Seatbelt is a labelled dev/test probe only. -->
+         Path grants that are only known at runtime (the plugin dir) cannot be baked in here;
+         they are documented in docs/plugins/phase8-os-sandbox.md and need a signed bundle to
+         verify. Post-process G-code is inlined over IPC, so the helper does not need a G-code
+         folder grant. sandbox-exec / Seatbelt is a labelled dev/test probe only. -->
     <key>com.apple.security.app-sandbox</key>
     <true/>
     <!-- Bundled CPython is loaded from next to the helper; library validation would reject it. -->
@@ -25,9 +26,8 @@
         <string>/Library/Frameworks/</string>
         <string>/dev/</string>
     </array>
-    <!-- data_dir plugins live under Application Support. G-code is a user-chosen folder and
-         needs a security-scoped bookmark from Edge; that cannot be baked in here and is
-         unverifiable without a signed build that actually presents the bookmark. -->
+    <!-- data_dir plugins live under Application Support. User G-code stays in Edge and is
+         sent over the existing length-prefixed JSON channel; the helper never opens that folder. -->
     <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
     <array>
         <string>/Library/Application Support/EdgeSlicer/orca_plugins/</string>

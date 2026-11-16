@@ -18,8 +18,10 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdlib.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -80,6 +82,7 @@ struct Job
     std::string                                                            plugin_key;
     std::string                                                            capability_name;
     std::string                                                            write_root;
+    std::string                                                            gcode_path;
     nlohmann::json                                                         msg;
     int                                                                    timeout_ms{k_default_timeout_ms};
     std::uint64_t                                                          request_id{0};
@@ -276,6 +279,8 @@ struct PluginHostClient::Impl
             return false;
         }
         sandbox_report      = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
+        if (sandbox_report.degraded)
+            BOOST_LOG_TRIVIAL(warning) << "plugin host OS sandbox is degraded: " << sandbox_report.detail;
         const bool shipping = sandbox_report.applied && sandbox_kind_is_shipping(sandbox_report.kind);
         if (!shipping && !sandbox_env_disable_requested()) {
             const std::string reason = sandbox_report.detail.empty() ? std::string("plugin host reported no shipping OS sandbox") :
@@ -528,8 +533,14 @@ struct PluginHostClient::Impl
         }
 
         ScopedPluginAuditContext audit(job.plugin_key, job.capability_name);
-        if (!job.write_root.empty())
-            PluginAuditManager::instance().add_scoped_allowed_root(boost::filesystem::path(job.write_root));
+        // Post-process G-code is inlined over IPC. The helper stages a scratch copy under
+        // plugin_data; grant that folder to the parent audit (the RPC check runs here).
+        if (job.kind == Job::Kind::PostProcess) {
+            try {
+                PluginAuditManager::instance().add_scoped_allowed_root(
+                    boost::filesystem::path(PluginManager::instance().get_storage_dir(job.plugin_key)));
+            } catch (...) {}
+        }
 
         if (!host.channel.write_json(job.msg, job.timeout_ms, error)) {
             reset_child_locked();
@@ -546,6 +557,8 @@ struct PluginHostClient::Impl
             cancelled = is_cancelled_locked(job.request_id);
         }
         if (!ok) {
+            if (host_exceeded_job_memory_limit(host))
+                error = "plugin host exceeded the 1 GiB job memory limit";
             reset_child_locked();
             if (cancelled &&
                 (error == "closed pipe" || error.find("timed out") != std::string::npos || error.find("cancelled") != std::string::npos))
@@ -578,6 +591,16 @@ struct PluginHostClient::Impl
             result.status  = static_cast<PluginResult>(reply.value("status", 0));
             result.message = reply.value("message", std::string());
             result.data    = reply.value("data", std::string());
+            if (!job.gcode_path.empty() && reply.contains("gcode") && reply["gcode"].is_string()) {
+                boost::nowide::ofstream out(job.gcode_path, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    io.unlock();
+                    fail_job(job, "failed to write post-process G-code", false);
+                    return;
+                }
+                const std::string body = reply["gcode"].get<std::string>();
+                out.write(body.data(), static_cast<std::streamsize>(body.size()));
+            }
             io.unlock();
             if (job.post_promise)
                 job.post_promise->set_value({result, std::string()});
@@ -719,8 +742,7 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string&       
     job->plugin_key      = plugin_key;
     job->capability_name = capability_name;
     job->timeout_ms      = execute_timeout_ms(true, ctx.gcode_path);
-    if (!ctx.gcode_path.empty())
-        job->write_root = boost::filesystem::path(ctx.gcode_path).parent_path().string();
+    job->gcode_path      = ctx.gcode_path;
     job->post_promise = std::make_shared<std::promise<std::pair<ExecutionResult, std::string>>>();
     job->request_id   = i.next_id.fetch_add(1, std::memory_order_relaxed);
     job->msg          = {
@@ -729,13 +751,36 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string&       
         {"kind", k_kind_post_process},
         {"capability_name", capability_name},
         {"timeout_ms", job->timeout_ms},
-        {"gcode_path", ctx.gcode_path},
         {"host", ctx.host},
         {"output_name", ctx.output_name},
-        {"write_root", job->write_root},
         {"config", config_snapshot(ctx.full_config)},
         {"orca_version", ctx.orca_version},
     };
+    if (!ctx.gcode_path.empty()) {
+        boost::system::error_code ec;
+        const auto                sz = boost::filesystem::file_size(ctx.gcode_path, ec);
+        if (ec) {
+            error = "failed to read G-code for plugin host: " + ec.message();
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        constexpr uint32_t k_gcode_ipc_headroom = 1024u * 1024u;
+        if (sz > static_cast<uintmax_t>(k_max_payload_bytes - k_gcode_ipc_headroom)) {
+            error = "G-code file exceeds the 16 MiB plugin-host IPC payload";
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        boost::nowide::ifstream in(ctx.gcode_path, std::ios::binary);
+        if (!in) {
+            error = "failed to open G-code for plugin host";
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        std::string body;
+        body.resize(static_cast<size_t>(sz));
+        if (sz > 0 && !in.read(body.data(), static_cast<std::streamsize>(sz))) {
+            error = "failed to read G-code for plugin host";
+            return ExecutionResult::failure(PluginResult::FatalError, error);
+        }
+        job->msg["gcode"] = std::move(body);
+    }
     attach_plugin_identity(job->msg, plugin_key);
     auto future = job->post_promise->get_future();
     {
