@@ -257,7 +257,7 @@ add_executable(${_TEST_NAME}_tests
 	)
 
 if (TARGET OpenVDB::openvdb)
-    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp test_voxel_remesh.cpp)
 endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)
