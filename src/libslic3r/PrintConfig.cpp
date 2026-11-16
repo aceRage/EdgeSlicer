@@ -6084,8 +6084,9 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Quality");
     def->tooltip  = L("EXPERIMENTAL. Print the last top layers of gently curved top surfaces as non-planar layers "
                       "that follow the surface, instead of a staircase of flat layers.\n"
-                      "Only works on printers whose print head clearance is known: currently the Elegoo "
-                      "Centauri Carbon and the Bambu Lab X1 Carbon. On other printers this setting does nothing.\n"
+                      "For now only available on the Elegoo Centauri Carbon and the Bambu Lab X1 Carbon, the printers "
+                      "whose print head clearance is known. On any other printer the top layers stay flat and a "
+                      "slicing warning says so.\n"
                       "Only surfaces flatter than the maximum angle, and no taller than the print head's "
                       "nozzle clearance, are bent. One object, one nozzle only. Watch the first print.");
     def->mode     = comAdvanced;

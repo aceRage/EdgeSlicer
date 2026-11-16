@@ -3,8 +3,10 @@
 Status: **experimental, off by default** (`curved_tops_enabled`). Started as a spike on
 `feat/curved-tops-spike` (owner OK 2026-11-12, D2/D3 in `tests/ideas_pancakeslicer.md`), PR #1021.
 Works **only on printers whose print head clearance is known**: the Elegoo Centauri Carbon and the
-Bambu Lab X1 Carbon. On any other printer the setting is ignored (the object is left planar and a
-log line says why). With the setting off, the G-code is byte-identical to a build without the feature.
+Bambu Lab X1 Carbon. On any other printer the setting is refused: the G-code is the same as with the
+setting off, and a slicing warning (`SlicingCurvedTopsUnavailable`) says curved tops is experimental
+and only available on those two printers for now. With the setting off, the G-code is byte-identical
+to a build without the feature.
 
 ## What it does
 
@@ -38,7 +40,7 @@ Hard-coded in `curved_tops_head_clearance()` (CurvedTops.cpp):
 |---|---|---|---|
 | Elegoo Centauri Carbon (not CC2) | 2.0 mm | 20 deg | conservative guess, not measured |
 | Bambu Lab X1 Carbon (exact name) | 2.0 mm | 20 deg | owner measured 2.5 mm tip to sock (2026-11-15), 0.5 mm margin; slope not measured |
-| anything else | - | - | `known = false`: refused, left planar |
+| anything else | - | - | `known = false`: refused, left planar, slicing warning |
 
 Next step (designed separately): take these from the head-clearance model of #1004
 (`HeadClearance.hpp`, `head_clearance_for_printer_model()`, data in `resources/head_clearance/`,
@@ -56,7 +58,7 @@ not have, so no code was copied: this is a re-implementation on top of our ZAA p
 ## Results
 
 - Tests: `tests/fff_print/test_curved_tops.cpp` (off = no conformal path and extrusion Z never goes
-  back down; unknown printer = planar; on = conformal paths only on the top layer, extrusion Z dips back
+  back down; unknown printer = same G-code as off plus the warning; CC1 and X1C curve; on = conformal paths only on the top layer, extrusion Z dips back
   by the cap rise; travels in the curved block level and clear for every z-hop type with wipe on/off;
   the stock X1C process keeps its layer bookkeeping; helper checks).
 - Hand test: the owner printed `C:/Dev/EdgeSlicerTest/test_files/CurvedTops_Dome40_X1C.gcode.3mf`
@@ -66,7 +68,7 @@ not have, so no code was copied: this is a re-implementation on top of our ZAA p
 ## Limits
 
 - One object, one instance, one nozzle; no raft; no spiral vase; no variable layer height; refused
-  otherwise (log line only, no GUI warning).
+  otherwise (log line only; only the unknown-printer refusal has a slicing warning).
 - Surface rise capped by the nozzle clearance: a cap may rise at most 2.0 mm. A hemisphere dome is
   mostly too steep and too tall; only its gentle top would qualify.
 - The conformal layers are printed as one block at the end of the top layer: cooling sees one long
