@@ -4,6 +4,7 @@
 #include <iostream>
 #include <map>
 #include <vector>
+#include <array>
 #include <numeric>
 #include <limits>
 #include <unordered_map>
@@ -25,6 +26,7 @@
 #include "ClipperUtils.hpp"
 #include "LocalesUtils.hpp"
 #include "PrintConfig.hpp"
+#include "AdaptiveLayerMerge.hpp"
 #include "Triangulation.hpp"
 
 
@@ -1608,22 +1610,41 @@ float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &p
     const float extra_width = (extra_spacing - 1.f) * pw;
     const float gap         = pw + extra_width;
     const float nc_gap      = ncpw + extra_width;
+    // PR-C, a mixed-diameter plate: each purge at its nozzle's width, ramming width and slab (one block per category and
+    // nozzle, like the tower's block keys). Without these fields every purge is at the tower's, as before.
+    auto key_of       = [](const PurgeEstimate &p) { return p.nozzle_diameter > 0.f ? (p.category << 10) | int(p.nozzle_diameter / 0.05f + 0.5f) << 4 : p.category; };
+    auto pw_of        = [pw](const PurgeEstimate &p) { return p.line_width > 0.f ? p.line_width : pw; };
+    auto ncpw_of      = [ncpw](const PurgeEstimate &p) { return p.nozzle_diameter > 0.f ? nozzle_change_perimeter_width(p.nozzle_diameter) : ncpw; };
+    auto area_of      = [layer_height](const PurgeEstimate &p, float w) {
+        const float h = p.slab_height > 0.f ? p.slab_height : layer_height;
+        return h * (w - h * float(1. - M_PI_4));
+    };
+    const bool per_purge = std::any_of(purges.begin(), purges.end(), [](const PurgeEstimate &p) { return p.nozzle_diameter > 0.f; });
     // A layer purges into at most (filaments - 1) targets, so a category holding every filament
     // never sees its smallest purge (the layer's first filament) in its worst layer.
     struct Block { float depth = 0.f; float min_purge = 0.f; size_t filaments = 0; bool ramming = false; };
     // purge_gap / ramming_gap: the row pitch of a category's purge and ramming lines.
     auto stack = [&](const std::function<float(int)> &purge_gap, const std::function<float(int)> &ramming_gap, std::map<int, Block> &blocks) {
         for (const PurgeEstimate &purge : purges) {
-            Block      &block       = blocks[purge.category];
-            const float purge_depth = std::ceil(purge.prime_volume / line_area(pw) / line_width) * purge_gap(purge.category);
+            const int   key         = key_of(purge);
+            Block      &block       = blocks[key];
+            const float purge_depth = per_purge ?
+                                          std::ceil(purge.prime_volume / area_of(purge, pw_of(purge)) / line_width) * (purge_gap(key) + pw_of(purge) - pw) :
+                                          std::ceil(purge.prime_volume / line_area(pw) / line_width) * purge_gap(purge.category);
             block.min_purge         = block.filaments == 0 ? purge_depth : std::min(block.min_purge, purge_depth);
             block.depth += purge_depth;
             ++block.filaments;
             if (purge.filament_change_length > EPSILON) {
                 // The leaving filament is rammed over the nozzle-change flow, again in whole lines.
                 const float filament_area = float(M_PI) * purge.filament_diameter * purge.filament_diameter / 4.f;
-                const float nc_length     = purge.filament_change_length * filament_area / line_area(ncpw);
-                block.depth += std::ceil(nc_length / (width - ncpw - pw)) * ramming_gap(purge.category);
+                if (per_purge) {
+                    const float own_ncpw = ncpw_of(purge);
+                    const float nc_len   = purge.filament_change_length * filament_area / area_of(purge, own_ncpw);
+                    block.depth += std::ceil(nc_len / (width - own_ncpw - pw_of(purge))) * (ramming_gap(key) + own_ncpw - ncpw);
+                } else {
+                    const float nc_length = purge.filament_change_length * filament_area / line_area(ncpw);
+                    block.depth += std::ceil(nc_length / (width - ncpw - pw)) * ramming_gap(purge.category);
+                }
                 block.ramming = true;
             }
         }
@@ -1840,13 +1861,13 @@ void WipeTower::apply_tail_slowdown(ToolChangeResult &tcr) const
     wipe_tower_tail_slowdown(tcr.gcode, m_tail_slowdown_volume, m_tail_speed_factor, area, &tcr.start_pos, &tcr.tool_change_start_pos);
 }
 
-float WipeTower::calc_tower_feedrate(size_t tool, bool first_layer) const
+float WipeTower::calc_tower_feedrate(size_t tool, bool first_layer, float extrusion_flow) const
 {
-    // Bambu Studio 2.9.1 calc_tower_feedrate() (WipeTower.hpp:829). This tree computes every tower speed at the
-    // tower-wide flow (m_extrusion_flow), as it did before.
+    // Bambu Studio 2.9.1 calc_tower_feedrate() (WipeTower.hpp:829). This tree computes the tower speeds at the
+    // tower-wide flow (m_extrusion_flow), as it did before; a merged slab (PR-C) passes the flow it is laid with.
     if (first_layer)
         return std::min(m_first_layer_speed * 60.f, m_max_speed);
-    const float volumetric = 60.0f * m_filpar[tool].max_e_speed / m_extrusion_flow;
+    const float volumetric = 60.0f * m_filpar[tool].max_e_speed / extrusion_flow;
     if (m_handle_hotend_as_extruder)
         return std::min(volumetric * m_filpar[tool].feedrate_factor, m_machine_max_speed);
     return std::min(volumetric, m_max_speed);
@@ -2035,6 +2056,23 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
                                            std::vector<float>() :
                                            parse_speed_factor_curve(config.filament_prime_tower_speed_factor_curve.get_at(idx));
     m_filpar[idx].feedrate_factor    = std::max(0.01f, float(config.prime_tower_feedrate_factor.value));
+    // PR-C: on a mixed-diameter plate Bambu Studio 2.9.1 (multi-diameter mode, WipeTower.cpp:2054-2066) takes the tower line
+    // width and the feedrate factor from fixed per-diameter tables (PrintConfig.cpp:237-252: 0.4 mm lines for a 0.2 nozzle,
+    // 0.8 mm for 0.4 / 0.6 / 0.8, factor 1), the process values only for another diameter. The ramming width stays the
+    // built-in table (nozzle_change_width()), as Bambu's ramming table is all zeros. Edge: only where Bambu has that mode,
+    // the single-extruder rack (handle_hotend_as_extruder, H3C); an H2D / X2D with unequal nozzles keeps each tool's own
+    // width (per-nozzle P2), as Bambu Studio does there.
+    if (m_multi_diameter_print && m_handle_hotend_as_extruder) {
+        auto per_diameter = [nozzle_diameter](double preset, const std::array<double, 4> &values) {
+            static const std::array<double, 4> diameters{ 0.2, 0.4, 0.6, 0.8 };
+            for (size_t i = 0; i < diameters.size(); ++i)
+                if (std::abs(double(nozzle_diameter) - diameters[i]) < 1e-3)
+                    return values[i];
+            return preset;
+        };
+        m_filpar[idx].tower_line_width = float(std::max(0., per_diameter(config.prime_tower_line_width.value, { 0.4, 0.8, 0.8, 0.8 })));
+        m_filpar[idx].feedrate_factor  = std::max(0.01f, float(per_diameter(config.prime_tower_feedrate_factor.value, { 1., 1., 1., 1. })));
+    }
 
     m_filpar[idx].kind                  = TowerInterface::filament_kind(config, (unsigned int) idx);
     m_filpar[idx].interface_temperature = TowerInterface::interface_temperature(config.filament_tower_interface_print_temp.get_at(idx),
@@ -2113,7 +2151,9 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     // changes in, and the smallest width is safe for every tool). Each tool's purge uses
     // tool_line_width(). With uniform nozzles this is the value every set_extruder() call wrote before.
     {
-        const float tool_pw = m_tower_line_width > 0.f ? m_tower_line_width : nozzle_diameter * Width_To_Nozzle_Ratio;
+        const float tool_pw = m_filpar[idx].tower_line_width > 0.f ? m_filpar[idx].tower_line_width :
+                              m_tower_line_width > 0.f            ? m_tower_line_width :
+                                                                    nozzle_diameter * Width_To_Nozzle_Ratio;
         const bool  forced  = config.wipe_tower_filament > 0;
         const bool  is_wall = forced && idx == size_t(config.wipe_tower_filament - 1);
         if (idx == 0 || is_wall || (!forced && tool_pw < m_perimeter_width))
@@ -2222,7 +2262,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
             nozzle_change_result = ramming(old_tool, new_tool, *planned, solid_nozzlechange);
     }
 
-    WipeTowerBlock *block = get_block_by_category(get_filament_category(new_tool), false);
+    WipeTowerBlock *block = get_block_by_category(get_block_key(new_tool, int(m_cur_layer_id)), false);
     if (block == nullptr) {
         assert(false);
         return ToolChangeResult();
@@ -2230,7 +2270,15 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     m_cur_block = block;
     box_coordinates cleaning_box(Vec2f(m_perimeter_width, block->cur_depth), m_wipe_tower_width - 2 * m_perimeter_width, wipe_depth);
 
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:3601-3616): the purge sits on the merged slab of its band, which may span
+    // several base layers; a slab reaching the bed is a first layer. Without merged slabs: the layer height and the layer.
+    const float slab_height        = slab_height_for(new_tool, int(m_cur_layer_id), m_layer_height);
+    const bool  first_layer        = is_first_layer_for_slab(slab_height);
+    const float saved_extrusion_flow = m_extrusion_flow;
+    if (m_merged_slabs_active)
+        m_extrusion_flow = tool_extrusion_flow(new_tool, slab_height);
+
+    WipeTowerWriter writer(slab_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
@@ -2258,7 +2306,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
     toolchange_Unload(writer, cleaning_box, m_filpar[m_current_tool].material,
-                      is_first_layer() ? m_filpar[new_tool].nozzle_temperature_initial_layer : m_filpar[new_tool].nozzle_temperature);
+                      first_layer ? m_filpar[new_tool].nozzle_temperature_initial_layer : m_filpar[new_tool].nozzle_temperature);
     toolchange_Change(writer, new_tool, m_filpar[new_tool].material); // Change the tool, set a speed override for soluble and flex materials.
     toolchange_Load(writer, cleaning_box);
 
@@ -2267,7 +2315,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     bool        did_side_scrape    = false;
     Vec2f       scrape_start_local = Vec2f::Zero();
     SideScrapeZ scrape_z;
-    if (m_enable_side_scrape && !is_first_layer() &&
+    if (m_enable_side_scrape && !first_layer &&
         toolchange_side_scrape(writer, initial_position, &scrape_start_local, &scrape_z)) {
         writer.append("[wipe_tower_deretract_gcode]\n");
         did_side_scrape = true;
@@ -2278,7 +2326,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     // the purge heats back up. Not on the tower's first layer, an interface or a contact (solid) change: GCode
     // publishes no cooling for those (tcr.reheats_after_cooling).
     const bool at_interface          = planned != nullptr && planned->is_interface;
-    const bool reheats_after_cooling = !is_first_layer() && !at_interface && !solid_toolchange;
+    const bool reheats_after_cooling = !first_layer && !at_interface && !solid_toolchange;
     if (at_interface)
         interface_before_wipe(writer, *planned);
     toolchange_wipe_new(writer, cleaning_box, wipe_length, solid_toolchange, reheats_after_cooling,
@@ -2306,6 +2354,8 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     const Vec2f      writer_scrape_start = writer.point_rotated(scrape_start_local);
     ToolChangeResult result      = construct_tcr(writer, false, old_tool, false, true, purge_volume, solid_toolchange);
     result.reheats_after_cooling = reheats_after_cooling;
+    result.layer_height          = slab_height;
+    m_extrusion_flow             = saved_extrusion_flow;
     result.nozzle_change_result  = std::move(nozzle_change_result);
     if (did_side_scrape) {
         result.side_scrape                       = true;
@@ -2391,7 +2441,7 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
     const bool                extruder_change = plan.extruder_change;
     const FilamentParameters &fp              = m_filpar[old_tool];
 
-    WipeTowerBlock *block = get_block_by_category(get_filament_category(old_tool), false);
+    WipeTowerBlock *block = get_block_by_category(get_block_key(old_tool, int(m_cur_layer_id)), false);
     if (block == nullptr) {
         assert(false);
         return NozzleChangeResult();
@@ -2407,9 +2457,12 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
     const float nc_depth       = planned.nozzle_change_depth;
 
     auto flow_for = [this, nc_width](float height) { return height * (nc_width - height * (1.f - float(M_PI) / 4.f)) / filament_area(); };
-    const float nz_extrusion_flow = flow_for(m_layer_height);
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:3763-3772): the ramming lands in the outgoing filament's band, which carries
+    // its own merged slab height (the layer height without merged slabs).
+    const float ramming_height    = slab_height_for(old_tool, int(m_cur_layer_id), m_layer_height);
+    const float nz_extrusion_flow = flow_for(ramming_height);
 
-    WipeTowerWriter writer(m_layer_height, nc_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    WipeTowerWriter writer(ramming_height, nc_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(nz_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(old_tool)
@@ -2417,7 +2470,7 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
         .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift);
 
-    const bool first_layer = is_first_layer();
+    const bool first_layer = is_first_layer_for_slab(ramming_height);
     float      dy          = first_layer ? nc_width : m_layer_info->extra_spacing * get_block_gap_width(old_tool, true);
     // The block's next free row; rows start one perimeter width in, like the purge rows.
     box_coordinates cleaning_box(Vec2f(x_offset, block->cur_depth + (nc_width - old_tool_width) / 2.f), box_width, nc_depth);
@@ -2482,7 +2535,7 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
 
         writer.set_e_speed_limit(max_e_ramming_speed);
         for (int i = 0; true; ++i) {
-            if (need_thick_bridge_flow(writer.y())) {
+            if (need_thick_bridge_flow(writer.y(), ramming_height)) {
                 writer.set_extrusion_flow(flow_for(0.2f));
                 writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
                 need_change_flow = true;
@@ -2497,14 +2550,14 @@ WipeTower::NozzleChangeResult WipeTower::ramming(size_t old_tool, size_t new_too
                 break;
             if (need_change_flow) {
                 writer.set_extrusion_flow(nz_extrusion_flow);
-                writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
+                writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(ramming_height) + "\n");
                 need_change_flow = false;
             }
             writer.extrude(writer.x(), writer.y() + dy, nozzle_change_speed);
             m_left_to_right = !m_left_to_right;
         }
         if (need_change_flow)
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(ramming_height) + "\n");
         writer.set_extrusion_flow(nz_extrusion_flow);
         writer.set_e_speed_limit(0.f);
         block->cur_depth += nc_depth;
@@ -2627,7 +2680,7 @@ WipeTower::NozzleChangeResult WipeTower::idle_travel_cooling(size_t old_tool, si
     // Alternate the entry corner every layer, like the purge does.
     const bool  start_at_left   = (m_cur_layer_id % 4 == 0) || (m_cur_layer_id % 4 == 3);
     const bool  start_at_bottom = (m_cur_layer_id % 4 == 0) || (m_cur_layer_id % 4 == 2);
-    const WipeTowerBlock *block = get_block_by_category(get_filament_category(new_tool), false);
+    const WipeTowerBlock *block = get_block_by_category(get_block_key(new_tool, int(m_cur_layer_id)), false);
     const float cur_depth       = block != nullptr ? block->cur_depth : m_perimeter_width;
     const float depth_span      = (line_count - 1) * dy;
     const Vec2f start_pos(start_at_left ? xl : xr, start_at_bottom ? cur_depth : cur_depth + depth_span);
@@ -2884,9 +2937,12 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     // Mixed nozzle diameters (Edge, per-nozzle P2): the purge is laid by the tool just loaded (m_current_tool), at
     // its own width and flow. The box edges and the wall overlap stay on the structure width.
     const float tool_pw     = tool_line_width(m_current_tool);
-    const float tool_flow   = tool_extrusion_flow(m_current_tool);
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:5002-5012): the purge at its band's slab height (the layer height without
+    // merged slabs); a slab reaching the bed is a first layer.
+    const float slab_height = slab_height_for(m_current_tool, int(m_cur_layer_id), m_layer_height);
+    const float tool_flow   = tool_extrusion_flow(m_current_tool, slab_height);
     const bool  tool_width  = tool_pw != m_perimeter_width;
-    const bool  first_layer = is_first_layer();
+    const bool  first_layer = is_first_layer_for_slab(slab_height);
 
     writer.set_extrusion_flow(tool_flow * (first_layer ? m_first_layer_flow_ratio : 1.f))
           .append("; CP TOOLCHANGE WIPE\n");
@@ -2896,6 +2952,9 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_first_layer_flow_ratio * tool_pw) + "\n");
     else if (tool_width || after_nozzle_change)
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(tool_pw) + "\n");
+    // PR-C (WipeTower.cpp:5007-5012): the ramming spliced in before the purge left its own slab height behind.
+    if (after_nozzle_change && m_merged_slabs_active)
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(slab_height) + "\n");
 
     const float retract_length      = m_filpar[m_current_tool].retract_length;
     const float retract_speed       = m_filpar[m_current_tool].retract_speed * 60.f;
@@ -2943,7 +3002,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
             wipe_speed = wipe_speed_map[i];
 
         // BBS: check the bridging area and use the bridge flow
-        const bool need_change_flow = need_thick_bridge_flow(writer.y());
+        const bool need_change_flow = need_thick_bridge_flow(writer.y(), slab_height);
         if (need_change_flow) {
             writer.set_extrusion_flow(tool_extrusion_flow(m_current_tool, 0.2f));
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
@@ -2986,7 +3045,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
         // BBS: recover the flow in non-bridging area
         if (need_change_flow) {
             writer.set_extrusion_flow(tool_flow);
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(slab_height) + "\n");
         }
 
         if (!is_from_up && (writer.y() + dy - float(EPSILON) > cleaning_box.lu.y() - m_perimeter_width))
@@ -3123,9 +3182,14 @@ int WipeTower::brim_chamfer_loops_num(size_t layer) const
     // at most 3 mm, and none once the layer depth differs from the first layer's.
     if (layer >= m_plan.size())
         return 0;
-    const float spacing   = m_perimeter_width - m_plan[layer].height * float(1. - M_PI_4);
-    int         loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
+    // PR-C (Bambu Studio 2.9.1 finish_layer_new(), WipeTower.cpp:4330-4337): spaced for the wall's own slab, and a merged
+    // wall reaching down to the bed is the tower's anchor, which carries the full brim.
+    const float wall_height = wall_slab_height_at(layer);
+    const float spacing     = m_perimeter_width - wall_height * float(1. - M_PI_4);
+    int         loops_num   = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
     if (layer == m_first_layer_idx)
+        return loops_num;
+    if (m_merged_slabs_active && double(m_plan[layer].z - wall_height) <= tower_bed_z() + double(WT_EPSILON))
         return loops_num;
     if (m_plan[layer].depth != m_plan.front().depth)
         return 0;
@@ -3135,6 +3199,15 @@ int WipeTower::brim_chamfer_loops_num(size_t layer) const
     const int   dist_to_1st       = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, layer,
                                                                       [this](size_t idx) { return plan_layer_is_laid(idx); });
     return dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
+}
+
+float WipeTower::wall_slab_height_at(size_t layer) const
+{
+    if (layer >= m_plan.size())
+        return 0.f;
+    if (layer < m_wall_slab_height.size() && m_wall_slab_height[layer] > 0.f)
+        return m_wall_slab_height[layer];
+    return layer_slab_height(int(layer), m_plan[layer].height);
 }
 
 float WipeTower::side_scrape_z_floor(float *above_base) const
@@ -3156,10 +3229,14 @@ float WipeTower::side_scrape_z_floor(float *above_base) const
         // A layer folded into a later one, or not laid at all (no sparse layers), prints no loops of its own.
         if (m_plan[i].combined_away || ! plan_layer_is_laid(i))
             continue;
+        // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:4792-4795): a layer whose wall is merged upwards draws no loops; the group
+        // above carries them.
+        if (i < m_wall_reserved.size() && m_wall_reserved[i])
+            continue;
         if (brim_chamfer_loops_num(i) <= 0)
             break;
         if (i > first)
-            laid_above += m_plan[i].height;
+            laid_above += layer_slab_height(int(i), m_plan[i].height);
         flared_top = i;
     }
     if (above_base != nullptr)
@@ -3358,15 +3435,25 @@ WipeTower::box_coordinates WipeTower::align_perimeter(const WipeTower::box_coord
 // Orca #10780 / #15035 (Bambu Studio finish_layer_new()): the layer's outer wall and brim; on a layer without tool
 // changes also the sparse fill of every block (extrude_fill_wall / extrude_fill). The blocks a layer's tool changes
 // leave unfilled are finished by finish_block() / finish_block_solid().
-WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, bool extrude_fill, bool extrude_fill_wall)
+WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, bool extrude_fill, bool extrude_fill_wall, float wall_height,
+                                                        bool wall_reserved)
 {
     assert(!this->layer_finished());
     m_current_layer_finished = true;
 
     const size_t old_tool = m_current_tool;
 
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
-    writer.set_extrusion_flow(m_extrusion_flow)
+    // PR-C (Bambu Studio 2.9.1 finish_layer_new(), WipeTower.cpp:4077-4105): on a mixed-diameter plate the visit lays its
+    // fill and wall at the loaded nozzle's own line width; the outer wall at its own merged slab (wall_height). On a
+    // single-diameter plate pw is the structure width and fill_flow the layer's flow, as before.
+    if (wall_height <= 0.f)
+        wall_height = m_layer_height;
+    const bool  per_nozzle = m_multi_diameter_print;
+    const float pw         = per_nozzle ? tool_line_width(m_current_tool) : m_perimeter_width;
+    const float fill_flow  = per_nozzle ? flow_for(m_layer_height, pw) : m_extrusion_flow;
+
+    WipeTowerWriter writer(m_layer_height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    writer.set_extrusion_flow(fill_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
@@ -3379,7 +3466,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     // Slow down on the 1st layer.
     const bool  first_layer          = is_first_layer();
     // BBS: speed up perimeter speed to 90mm/s for non-first layer (prime_tower_max_speed, 90 mm/s by default)
-    const float feedrate             = wall_feedrate(m_current_tool);
+    float       feedrate             = per_nozzle ? calc_tower_feedrate(m_current_tool, first_layer, fill_flow) : wall_feedrate(m_current_tool);
     const bool  toolchanges_on_layer = m_layer_info->toolchanges_depth() > WT_EPSILON;
 
     std::vector<Vec2f> finish_rect_wipe_path;
@@ -3390,26 +3477,36 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     std::vector<float>           fill_box_origins;    // the block start: its purge rows lie on start + k * row pitch
     if (multi_block_fill) {
         for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
-            float block_fill_height = block.depth - 2 * m_perimeter_width;
+            // PR-C: a reserved band is the trench a merged slab above sinks into; leave it empty.
+            if (m_cur_layer_id < block.layer_reserved.size() && block.layer_reserved[m_cur_layer_id])
+                continue;
+            float block_fill_height = block.depth - 2 * pw;
             if (m_cur_layer_id < block.layer_depths.size())
-                block_fill_height = block.layer_depths[m_cur_layer_id] - 2 * m_perimeter_width;
+                block_fill_height = block.layer_depths[m_cur_layer_id] - 2 * pw;
             if (block_fill_height <= WT_EPSILON)
                 continue;
-            fill_boxes.emplace_back(Vec2f(m_perimeter_width, block.start_depth + m_perimeter_width), m_wipe_tower_width - 2 * m_perimeter_width,
-                                    block_fill_height);
-            fill_box_categories.push_back(block.filament_adhesiveness_category);
+            fill_boxes.emplace_back(Vec2f(pw, block.start_depth + pw), m_wipe_tower_width - 2 * pw, block_fill_height);
+            fill_box_categories.push_back(block.block_key);
             fill_box_origins.push_back(block.start_depth);
         }
     }
-    if (fill_boxes.empty()) {
-        float fill_box_depth = m_wipe_tower_depth - 2 * m_perimeter_width;
+    // PR-C (WipeTower.cpp:4124-4134): once the bands were enumerated and every one of them dropped out, or the only band is
+    // reserved, there is genuinely nothing to fill.
+    const bool only_band_reserved = m_merged_slabs_active && m_wipe_tower_blocks.size() == 1 &&
+                                    m_cur_layer_id < m_wipe_tower_blocks.front().layer_reserved.size() &&
+                                    m_wipe_tower_blocks.front().layer_reserved[m_cur_layer_id];
+    if (fill_boxes.empty() && !(m_merged_slabs_active && multi_block_fill) && !only_band_reserved) {
+        float fill_box_depth = m_wipe_tower_depth - 2 * pw;
         if (m_wipe_tower_blocks.size() == 1)
-            fill_box_depth = m_layer_info->depth - 2 * m_perimeter_width;
-        fill_boxes.emplace_back(Vec2f(m_perimeter_width, m_perimeter_width), m_wipe_tower_width - 2 * m_perimeter_width, fill_box_depth);
+            fill_box_depth = m_layer_info->depth - 2 * pw;
+        fill_boxes.emplace_back(Vec2f(pw, pw), m_wipe_tower_width - 2 * pw, fill_box_depth);
     }
 
-    writer.set_initial_position((m_left_to_right ? fill_boxes.front().ru : fill_boxes.front().lu), // so there is never a diagonal travel
-                                m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+    if (!fill_boxes.empty())
+        writer.set_initial_position((m_left_to_right ? fill_boxes.front().ru : fill_boxes.front().lu), // so there is never a diagonal travel
+                                    m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+    else
+        writer.set_initial_position(Vec2f(pw, pw), m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
     // Is there a soluble filament wiped/rammed at the next layer? If so, the infill should not be sparse.
     bool solid_infill = (m_layer_info + 1 == m_plan.end()) ?
@@ -3427,13 +3524,13 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
 
         // inner perimeter of the sparse section, if there is space for it:
         if (extrude_fill_wall && (fill_box.ru.y() - fill_box.rd.y() > WT_EPSILON))
-            writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, m_perimeter_width, feedrate);
+            writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, pw, feedrate);
         // Extrude infill to support the material to be printed above.
-        const float dy    = (fill_box.lu.y() - fill_box.ld.y() - m_perimeter_width);
-        float       left  = fill_box.lu.x() + 2 * m_perimeter_width;
-        float       right = fill_box.ru.x() - 2 * m_perimeter_width;
-        if (extrude_fill && dy > m_perimeter_width) {
-            writer.travel(fill_box.ld + Vec2f(m_perimeter_width * 2, 0.f))
+        const float dy    = (fill_box.lu.y() - fill_box.ld.y() - pw);
+        float       left  = fill_box.lu.x() + 2 * pw;
+        float       right = fill_box.ru.x() - 2 * pw;
+        if (extrude_fill && dy > pw) {
+            writer.travel(fill_box.ld + Vec2f(pw * 2, 0.f))
                   .append(";--------------------\n"
                           "; CP EMPTY GRID START\n")
                   .comment_with_value(" layer #", m_num_layer_changes + 1);
@@ -3442,13 +3539,13 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             } else if (solid_infill) {
                 float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
                 if (first_layer) {          // the infill should touch perimeters
-                    left -= m_perimeter_width;
-                    right += m_perimeter_width;
+                    left -= pw;
+                    right += pw;
                     sparse_factor = 1.f;
                 }
-                float y       = fill_box.ld.y() + m_perimeter_width;
-                int   n       = dy / (m_perimeter_width * sparse_factor);
-                float spacing = (dy - m_perimeter_width) / (n - 1);
+                float y       = fill_box.ld.y() + pw;
+                int   n       = dy / (pw * sparse_factor);
+                float spacing = (dy - pw) / (n - 1);
                 for (int i = 0; i < n; ++i) {
                     writer.extrude(writer.x(), y, feedrate).extrude(i % 2 ? left : right, y);
                     y = y + spacing;
@@ -3456,7 +3553,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                 writer.extrude(writer.x(), fill_box.lu.y());
             } else {
                 // Extrude an inverse U at the left of the region and the sparse infill.
-                writer.extrude(fill_box.lu + Vec2f(m_perimeter_width * 2, 0.f), feedrate);
+                writer.extrude(fill_box.lu + Vec2f(pw * 2, 0.f), feedrate);
                 const int   n  = 1 + int((right - left) / m_bridging);
                 const float dx = (right - left) / n;
                 for (int i = 1; i <= n; ++i) {
@@ -3480,6 +3577,17 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                                                                                                          m_wipe_tower_depth;
     box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, wipe_tower_depth);
     wt_box = align_perimeter(wt_box);
+    // PR-C (WipeTower.cpp:4224-4234): the outer wall has its own Z ladder, so only the perimeter switches to the wall slab;
+    // a merged wall reaching down to the bed is the tower's anchor and carries the brim and the first layer speed.
+    bool wall_first_layer = first_layer;
+    if (per_nozzle) {
+        const float perimeter_flow = flow_for(wall_height, pw);
+        writer.set_extrusion_flow(perimeter_flow);
+        if (extrude_perimeter && std::abs(wall_height - m_layer_height) > WT_EPSILON)
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(wall_height) + "\n");
+        wall_first_layer = is_first_layer_for_slab(wall_height);
+        feedrate         = calc_tower_feedrate(m_current_tool, wall_first_layer, perimeter_flow);
+    }
     // Bambu Studio finish_layer_new(): the rib wall is needed for the brim loops even when not printed here.
     Polygon outer_wall = print_outer_wall(writer, wt_box, feedrate, extrude_perimeter);
     if (extrude_perimeter)
@@ -3487,7 +3595,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
 
     // Bambu Studio 2.9.1: with the side scrape on, the first layer fills the inside of its wall where no purge lies, so
     // the tower base the scrape pushes against sticks to the bed everywhere.
-    if (extrude_perimeter && first_layer && m_enable_side_scrape) {
+    if (extrude_perimeter && wall_first_layer && m_enable_side_scrape) {
         std::vector<std::pair<float, float>> purge_bands;
         if (m_wipe_tower_blocks.size() > 1) {
             for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
@@ -3516,8 +3624,9 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     // brim chamfer: the full brim on the first layer, then at most 3 mm, one loop less per printed layer (Edge OD16
     // review: printed layers, so a combined tower steps one loop per printed layer), none on a layer below the tower's
     // first real layer and none once the depth changes. brim_chamfer_loops_num() is also the side scrape's floor.
-    const float spacing   = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
-    const int   loops_num = brim_chamfer_loops_num(layer_id);
+    // PR-C: at the wall's line width and slab; a layer whose wall a group above prints draws no loops.
+    const float spacing   = pw - (per_nozzle ? wall_height : m_layer_height) * float(1. - M_PI_4);
+    const int   loops_num = wall_reserved ? 0 : brim_chamfer_loops_num(layer_id);
 
     if (loops_num > 0 && m_use_rib_wall) {
         // Bambu Studio finish_layer_new(): the brim follows the rib wall.
@@ -3530,7 +3639,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             record_outer_wall(outer_wall);
             record_scrape_wall(outer_wall);
         }
-        if (first_layer)
+        if (wall_first_layer)
             m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;
     } else if (loops_num > 0) {
         box_coordinates box = wt_box;
@@ -3544,7 +3653,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             if (m_enable_side_scrape)
                 record_scrape_wall(generate_rectange_polygon(box.ld, box.ru));
         }
-        if (first_layer) {
+        if (wall_first_layer) {
             // Save actual brim width to be later passed to the Print object, which will use it
             // for skirt calculation and pass it to GLCanvas for precise preview box
             m_wipe_tower_brim_width_real = wt_box.ld.x() - box.ld.x() + spacing / 2.f;
@@ -3575,28 +3684,33 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         if (m_current_tool < m_used_filament_length.size())
             m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
-    return construct_tcr(writer, false, old_tool, true, false, 0.f, false);
+    ToolChangeResult result = construct_tcr(writer, false, old_tool, true, false, 0.f, false);
+    if (per_nozzle)
+        result.layer_height = wall_height;
+    return result;
 }
 
 // Edge (#1052 review S3): whether the next tower layer lays purge or ramming rows into the block of this category.
 // Always false on a single-block tower (unchanged from Orca there).
-bool WipeTower::next_layer_purges_into(int category) const
+bool WipeTower::next_layer_purges_into(int block_key) const
 {
     if (m_wipe_tower_blocks.size() < 2 || m_layer_info == m_plan.end() || m_layer_info + 1 == m_plan.end())
         return false;
+    const int next_layer = int(m_layer_info - m_plan.begin()) + 1;
     for (const WipeTowerInfo::ToolChange &tc : (m_layer_info + 1)->tool_changes) {
-        if (get_filament_category(tc.new_tool) == category)
+        if (get_block_key(tc.new_tool, next_layer) == block_key)
             return true;
-        if (tc.nozzle_change.need_ramming && tc.nozzle_change_depth > EPSILON && get_filament_category(tc.old_tool) == category)
+        if (tc.nozzle_change.need_ramming && tc.nozzle_change_depth > EPSILON && get_block_key(tc.old_tool, next_layer) == block_key)
             return true;
     }
     return false;
 }
 
 // Edge (#1052 review S3): the pitch of a block's purge rows on the current layer.
-float WipeTower::block_row_pitch(int category) const
+float WipeTower::block_row_pitch(int block_key) const
 {
-    const auto it = m_block_infill_gap_width.find(category);
+    // The gaps are kept per lane-independent group (PR-C); on a single-diameter plate that is the category.
+    const auto it = m_block_infill_gap_width.find(m_multi_diameter_print ? (block_key & ~0xF) : block_key);
     return m_layer_info->extra_spacing * (it == m_block_infill_gap_width.end() ? m_perimeter_width : it->second.first);
 }
 
@@ -3622,8 +3736,14 @@ void WipeTower::grid_fill(WipeTowerWriter &writer, const box_coordinates &fill_b
 // sparse fill printed with filament_id, a filament of the block's category where the layer has one.
 WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill)
 {
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
-    writer.set_extrusion_flow(m_extrusion_flow)
+    // PR-C (Bambu Studio 2.9.1 finish_block(), WipeTower.cpp:4398-4440): on a mixed-diameter plate the band is topped up at its
+    // own slab height and the filling filament's line width; a slab reaching the bed is a first layer.
+    const bool  per_nozzle = m_multi_diameter_print;
+    const float height     = per_nozzle && m_cur_layer_id < block.layer_heights.size() ? block.layer_heights[m_cur_layer_id] : m_layer_height;
+    const float pw         = per_nozzle ? tool_line_width(filament_id) : m_perimeter_width;
+    const float fill_flow  = per_nozzle ? flow_for(height, pw) : m_extrusion_flow;
+    WipeTowerWriter writer(height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    writer.set_extrusion_flow(fill_flow)
         .set_z(m_z_pos)
         .set_initial_tool(filament_id)
         .set_origin_offset(m_rib_offset)
@@ -3633,11 +3753,11 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
 
-    const bool  first_layer = is_first_layer();
-    const float feedrate    = wall_feedrate(filament_id);
+    const bool  first_layer = per_nozzle ? is_first_layer_for_slab(height) : is_first_layer();
+    const float feedrate    = per_nozzle ? calc_tower_feedrate(filament_id, first_layer, fill_flow) : wall_feedrate(filament_id);
 
-    box_coordinates fill_box(Vec2f(m_perimeter_width, block.cur_depth), m_wipe_tower_width - 2 * m_perimeter_width,
-                             block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - m_perimeter_width);
+    box_coordinates fill_box(Vec2f(pw, block.cur_depth), m_wipe_tower_width - 2 * pw,
+                             block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - pw);
 
     writer.set_initial_position((m_left_to_right ? fill_box.ru : fill_box.lu), m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
@@ -3646,14 +3766,14 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
     std::vector<Vec2f> finish_rect_wipe_path;
     // inner perimeter of the sparse section, if there is space for it:
     if (fill_box.ru.y() - fill_box.rd.y() > WT_EPSILON)
-        writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, m_perimeter_width, feedrate);
+        writer.rectangle_fill_box(this, fill_box, finish_rect_wipe_path, pw, feedrate);
 
     // Extrude infill to support the material to be printed above.
-    const float dy    = (fill_box.lu.y() - fill_box.ld.y() - m_perimeter_width);
-    float       left  = fill_box.lu.x() + 2 * m_perimeter_width;
-    float       right = fill_box.ru.x() - 2 * m_perimeter_width;
-    if (extrude_fill && dy > m_perimeter_width) {
-        writer.travel(fill_box.ld + Vec2f(m_perimeter_width * 2, 0.f))
+    const float dy    = (fill_box.lu.y() - fill_box.ld.y() - pw);
+    float       left  = fill_box.lu.x() + 2 * pw;
+    float       right = fill_box.ru.x() - 2 * pw;
+    if (extrude_fill && dy > pw) {
+        writer.travel(fill_box.ld + Vec2f(pw * 2, 0.f))
               .append(";--------------------\n"
                       "; CP EMPTY GRID START\n")
               .comment_with_value(" layer #", m_num_layer_changes + 1);
@@ -3669,20 +3789,20 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
         // purge rows of the layer below (a solid fill at its own pitch is not, on a stretched tower). The soluble
         // rule above, for one more trigger. Only on a tower with more than one block: a single block is purged into
         // on every layer and stays as upstream.
-        const bool grid = !solid_infill && next_layer_purges_into(block.filament_adhesiveness_category);
+        const bool grid = !solid_infill && next_layer_purges_into(block.block_key);
 
         if (grid) {
-            grid_fill(writer, fill_box, fill_box.ld.y(), block_row_pitch(block.filament_adhesiveness_category), feedrate);
+            grid_fill(writer, fill_box, fill_box.ld.y(), block_row_pitch(block.block_key), feedrate);
         } else if (solid_infill) {
             float sparse_factor = 1.5f; // 1=solid, 2=every other line, etc.
             if (first_layer) {          // the infill should touch perimeters
-                left -= m_perimeter_width;
-                right += m_perimeter_width;
+                left -= pw;
+                right += pw;
                 sparse_factor = 1.f;
             }
-            float y       = fill_box.ld.y() + m_perimeter_width;
-            int   n       = dy / (m_perimeter_width * sparse_factor);
-            float spacing = (dy - m_perimeter_width) / (n - 1);
+            float y       = fill_box.ld.y() + pw;
+            int   n       = dy / (pw * sparse_factor);
+            float spacing = (dy - pw) / (n - 1);
             for (int i = 0; i < n; ++i) {
                 writer.extrude(writer.x(), y, feedrate).extrude(i % 2 ? left : right, y);
                 y = y + spacing;
@@ -3690,7 +3810,7 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
             writer.extrude(writer.x(), fill_box.lu.y());
         } else {
             // Extrude an inverse U at the left of the region and the sparse infill.
-            writer.extrude(fill_box.lu + Vec2f(m_perimeter_width * 2, 0.f), feedrate);
+            writer.extrude(fill_box.lu + Vec2f(pw * 2, 0.f), feedrate);
             const int   n  = 1 + int((right - left) / m_bridging);
             const float dx = (right - left) / n;
             for (int i = 1; i <= n; ++i) {
@@ -3725,7 +3845,9 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
         if (filament_id < m_used_filament_length.size())
             m_used_filament_length[filament_id] += writer.get_and_reset_used_filament_length();
 
-    return construct_block_tcr(writer, filament_id, true);
+    ToolChangeResult result = construct_block_tcr(writer, filament_id, true);
+    result.layer_height     = height;
+    return result;
 }
 
 // Orca #10780 (Bambu Studio finish_block_solid()): the rest of a block on a contact / solid layer, as a solid grid
@@ -3733,14 +3855,26 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
 // layer at the bridge flow of a 0.2 mm layer.
 WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &block, size_t filament_id, WipeTowerLayerType layer_type)
 {
-    float layer_height = m_layer_height;
-    float e_flow       = m_extrusion_flow;
-    if (m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal && m_extrusion_flow < extrusion_flow(0.2f)) {
+    // PR-C (Bambu Studio 2.9.1 finish_block_solid(), WipeTower.cpp:4531-4560): on a mixed-diameter plate the band at its own
+    // slab and the filling filament's width; a merged slab has a fixed physical height and is never thickened to the 0.2 mm
+    // bridge flow. On a single-diameter plate as before.
+    const bool  per_nozzle  = m_multi_diameter_print;
+    const float slab_height = per_nozzle && m_cur_layer_id < block.layer_heights.size() ? block.layer_heights[m_cur_layer_id] : m_layer_height;
+    const float pw          = per_nozzle ? tool_line_width(filament_id) : m_perimeter_width;
+    float       layer_height = slab_height;
+    float       e_flow       = per_nozzle ? flow_for(slab_height, pw) : m_extrusion_flow;
+    if (per_nozzle) {
+        if (!m_merged_slabs_active && m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal &&
+            e_flow < flow_for(0.2f, pw)) {
+            layer_height = 0.2f;
+            e_flow       = flow_for(0.2f, pw);
+        }
+    } else if (m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal && m_extrusion_flow < extrusion_flow(0.2f)) {
         layer_height = 0.2f;
         e_flow       = extrusion_flow(0.2f);
     }
 
-    WipeTowerWriter writer(layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
+    WipeTowerWriter writer(layer_height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(e_flow)
         .set_z(m_z_pos)
         .set_initial_tool(filament_id)
@@ -3751,15 +3885,15 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
 
-    float feedrate = wall_feedrate(filament_id);
+    float feedrate = per_nozzle ? calc_tower_feedrate(filament_id, is_first_layer_for_slab(slab_height), e_flow) : wall_feedrate(filament_id);
     if (layer_type == WipeTowerLayerType::Contact || layer_type == WipeTowerLayerType::Contact_UP)
         feedrate = m_contact_speed;
-    box_coordinates fill_box(Vec2f(m_perimeter_width, block.cur_depth), m_wipe_tower_width - 2 * m_perimeter_width,
-                             block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - m_perimeter_width);
+    box_coordinates fill_box(Vec2f(pw, block.cur_depth), m_wipe_tower_width - 2 * pw,
+                             block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - pw);
     const bool  toolchanges_on_layer = m_layer_info->toolchanges_depth() > WT_EPSILON;
     const float dy                   = (fill_box.lu.y() - fill_box.ld.y());
-    const int   n                    = int((dy + 0.25f * m_perimeter_width) / m_perimeter_width + 1);
-    const float spacing              = m_perimeter_width;
+    const int   n                    = int((dy + 0.25f * pw) / pw + 1);
+    const float spacing              = pw;
     Vec2f       initial_pos(0.f, 0.f);
     bool        up_to_down = false;
     {
@@ -3834,7 +3968,10 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
         if (filament_id < m_used_filament_length.size())
             m_used_filament_length[filament_id] += writer.get_and_reset_used_filament_length();
 
-    return construct_block_tcr(writer, filament_id, true);
+    ToolChangeResult result = construct_block_tcr(writer, filament_id, true);
+    if (per_nozzle)
+        result.layer_height = layer_height;
+    return result;
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
@@ -3891,24 +4028,28 @@ void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned in
     // outgoing filament's ramming lines. generate() re-plans both at the block gaps (calc_block_infill_gap()).
     WipeTowerInfo::ToolChange tool_change(old_tool, new_tool, 0.f, 0.f, 0.f, wipe_volume, 0.f, purge_volume);
     tool_change.nozzle_change = nozzle_change;
-    replan_toolchange(tool_change, layer_height_par);
+    replan_toolchange(tool_change, layer_height_par, -1);
     m_plan.back().tool_changes.push_back(tool_change);
 }
 
 // Bambu Studio set_toolchange() (Orca #10780 / #14685): whole purge lines at the new filament's block gap, plus
 // whole ramming lines of the outgoing filament at its block's ramming gap. Edge (per-nozzle P2): each filament's
 // own line width; uniform nozzles give Orca's numbers.
-void WipeTower::replan_toolchange(WipeTowerInfo::ToolChange &tool_change, float layer_height) const
+void WipeTower::replan_toolchange(WipeTowerInfo::ToolChange &tool_change, float layer_height, int layer_id) const
 {
     const float width = m_wipe_tower_width - 2 * m_perimeter_width;
     if (width <= EPSILON)
         return;
-    tool_change.wipe_length = volume_to_length(tool_change.wipe_volume, tool_line_width(tool_change.new_tool), layer_height);
+    // PR-C (Bambu Studio set_toolchange(), WipeTower.cpp:3089-3091): the purge and the ramming live in different bands, and
+    // each may sit on a merged slab of its own. Without merged slabs both are layer_height.
+    const float wipe_height    = slab_height_for(tool_change.new_tool, layer_id, layer_height);
+    const float ramming_height = slab_height_for(tool_change.old_tool, layer_id, layer_height);
+    tool_change.wipe_length = volume_to_length(tool_change.wipe_volume, tool_line_width(tool_change.new_tool), wipe_height);
     float depth             = std::ceil(tool_change.wipe_length / width) * get_block_gap_width(tool_change.new_tool, false);
     tool_change.nozzle_change_length = 0.f;
     tool_change.nozzle_change_depth  = 0.f;
     if (tool_change.nozzle_change.need_ramming) {
-        tool_change.nozzle_change_length = nozzle_change_length(tool_change.old_tool, tool_change.nozzle_change.extruder_change, layer_height);
+        tool_change.nozzle_change_length = nozzle_change_length(tool_change.old_tool, tool_change.nozzle_change.extruder_change, ramming_height);
         // The ramming box spans the tower between the outgoing filament's purge lines on both sides.
         const float box_width = m_wipe_tower_width - (nozzle_change_width(tool_change.old_tool) + tool_line_width(tool_change.old_tool));
         if (tool_change.nozzle_change_length > 0.f && box_width > EPSILON)
@@ -3923,7 +4064,7 @@ float WipeTower::get_block_gap_width(size_t tool, bool nozzle_change) const
     // Orca: a block that does not exist (yet) has no gap of its own; its lines are laid at their own width.
     // Edge (per-nozzle P2): the gap is the category's, from the structure / widest ramming width, moved by the
     // tool's own width; with uniform nozzles that is Orca's gap.
-    const auto it = m_block_infill_gap_width.find(get_filament_category(tool));
+    const auto it = m_block_infill_gap_width.find(get_gap_key(tool));
     if (nozzle_change) {
         const float nc_width = nozzle_change_width(tool);
         return it == m_block_infill_gap_width.end() ? nc_width : it->second.second + (nc_width - m_nozzle_change_perimeter_width);
@@ -3932,16 +4073,18 @@ float WipeTower::get_block_gap_width(size_t tool, bool nozzle_change) const
     return it == m_block_infill_gap_width.end() ? pw : it->second.first + (pw - m_perimeter_width);
 }
 
-WipeTower::WipeTowerBlock *WipeTower::get_block_by_category(int category, bool create)
+// PR-C: looked up by the block key (get_block_key()), which is the category on a single-diameter plate.
+WipeTower::WipeTowerBlock *WipeTower::get_block_by_category(int block_key, bool create)
 {
     auto iter = std::find_if(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(),
-                             [category](const WipeTowerBlock &item) { return item.filament_adhesiveness_category == category; });
+                             [block_key](const WipeTowerBlock &item) { return item.block_key == block_key; });
     if (iter != m_wipe_tower_blocks.end())
         return &(*iter);
     if (create) {
         WipeTowerBlock new_block;
         new_block.block_id                       = int(m_wipe_tower_blocks.size());
-        new_block.filament_adhesiveness_category = category;
+        new_block.block_key                      = block_key;
+        new_block.filament_adhesiveness_category = block_key_category(block_key);
         m_wipe_tower_blocks.emplace_back(new_block);
         return &m_wipe_tower_blocks.back();
     }
@@ -4031,13 +4174,13 @@ void WipeTower::calc_block_infill_gap()
     for (int i = int(m_plan.size()) - 1; i >= 0; --i) {
         for (const WipeTowerInfo::ToolChange &tc : m_plan[i].tool_changes) {
             if (tc.nozzle_change.need_ramming) {
-                BlockInfo &old_info  = block_info[get_filament_category(tc.old_tool)];
+                BlockInfo &old_info  = block_info[get_gap_key(tc.old_tool)];
                 old_info.has_ramming = true;
                 if (reverse_travel(tc.old_tool, tc.nozzle_change.extruder_change))
                     old_info.has_reverse_travel = true;
                 old_info.depth += tc.nozzle_change_depth;
             }
-            block_info[get_filament_category(tc.new_tool)].depth += tc.required_depth - tc.nozzle_change_depth;
+            block_info[get_gap_key(tc.new_tool)].depth += tc.required_depth - tc.nozzle_change_depth;
         }
         for (auto &block : block_info) {
             auto high = high_block_info.find(block.first);
@@ -4086,9 +4229,9 @@ void WipeTower::calc_block_infill_gap()
         }
     }
 
-    for (WipeTowerInfo &info : m_plan)
-        for (WipeTowerInfo::ToolChange &tc : info.tool_changes)
-            replan_toolchange(tc, info.height);
+    for (size_t idx = 0; idx < m_plan.size(); ++idx)
+        for (WipeTowerInfo::ToolChange &tc : m_plan[idx].tool_changes)
+            replan_toolchange(tc, m_plan[idx].height, int(idx));
     m_extra_spacing = 1.f;
 }
 
@@ -4098,43 +4241,53 @@ void WipeTower::calc_block_infill_gap()
 // on the tower, Contact_UP on the layer above, Solid on the layers below a change.
 void WipeTower::generate_wipe_tower_blocks(bool add_solid_flag)
 {
-    // 1. every layer's depth per category
+    // 1. every layer's depth per block (PR-C: the block key, the category on a single-diameter plate)
     m_all_layers_depth.clear();
     m_all_layers_depth.resize(m_plan.size());
     m_cur_layer_id = 0;
     for (const WipeTowerInfo &info : m_plan) {
+        const int layer_id = int(m_cur_layer_id);
         for (const WipeTowerInfo::ToolChange &tool_change : info.tool_changes) {
             if (!tool_change.nozzle_change.need_ramming) {
-                add_depth_to_block(get_filament_category(tool_change.new_tool), tool_change.required_depth);
+                add_depth_to_block(get_block_key(tool_change.new_tool, layer_id), tool_change.required_depth);
             } else {
-                add_depth_to_block(get_filament_category(tool_change.old_tool), tool_change.nozzle_change_depth, true);
-                add_depth_to_block(get_filament_category(tool_change.new_tool), tool_change.required_depth - tool_change.nozzle_change_depth);
+                add_depth_to_block(get_block_key(tool_change.old_tool, layer_id), tool_change.nozzle_change_depth, true);
+                add_depth_to_block(get_block_key(tool_change.new_tool, layer_id), tool_change.required_depth - tool_change.nozzle_change_depth);
             }
         }
         ++m_cur_layer_id;
     }
-    auto depth_of = [this](size_t layer_id, int category) {
+    auto depth_of = [this](size_t layer_id, int block_key) {
         for (const BlockDepthInfo &info : m_all_layers_depth[layer_id])
-            if (info.category == category)
+            if (info.category == block_key)
                 return info.depth;
         return 0.f;
     };
 
     // 2. the blocks, in the order their categories first appear (Edge: Orca walks an unordered_map here,
-    // whose order differs between compilers).
+    // whose order differs between compilers). PR-C (Bambu Studio 2.9.1, WipeTower.cpp:5591-5597): on a mixed-diameter
+    // plate the keys of a layer are walked sorted, which keeps the lanes of one category and diameter adjacent.
     m_wipe_tower_blocks.clear();
     m_cur_block = nullptr;
-    for (size_t layer_id = 0; layer_id < m_all_layers_depth.size(); ++layer_id)
-        for (const BlockDepthInfo &info : m_all_layers_depth[layer_id]) {
+    for (size_t layer_id = 0; layer_id < m_all_layers_depth.size(); ++layer_id) {
+        std::vector<BlockDepthInfo> layer_blocks = m_all_layers_depth[layer_id];
+        if (m_multi_diameter_print)
+            std::stable_sort(layer_blocks.begin(), layer_blocks.end(),
+                             [](const BlockDepthInfo &l, const BlockDepthInfo &r) { return l.category < r.category; });
+        for (const BlockDepthInfo &info : layer_blocks) {
             WipeTowerBlock *block = get_block_by_category(info.category, true);
             if (block->layer_depths.empty()) {
                 block->layer_depths.resize(m_plan.size(), 0.f);
                 block->finish_depth.resize(m_plan.size(), 0.f);
                 block->layers_type.resize(m_plan.size(), WipeTowerLayerType::Normal);
+                block->layer_heights.resize(m_plan.size(), 0.f);
+                block->layer_reserved.resize(m_plan.size(), 0);
+                block->layer_fill_filament.resize(m_plan.size(), -1);
             }
             block->depth                   = std::max(block->depth, info.depth);
             block->layer_depths[layer_id]  = info.depth;
         }
+    }
 
     // 3. a block is as deep on a layer as on any layer above it
     for (int layer_id = int(m_plan.size()) - 1; layer_id >= 0; --layer_id) {
@@ -4157,51 +4310,92 @@ void WipeTower::generate_wipe_tower_blocks(bool add_solid_flag)
         }
     }
 
-    if (!add_solid_flag)
-        return;
-
-    // 4. layer types. The categories each layer purges on the tower: a layer without tool changes is printed by
-    // the filament loaded on it (Edge, #937: the one its Local-Z passes left loaded).
-    const int                            solid_infill_layer_low = 4;
-    std::vector<std::unordered_set<int>> layers_used_categories;
-    size_t                               loaded = m_current_tool;
-    for (const WipeTowerInfo &layer : m_plan)
-        if (!layer.tool_changes.empty() || layer.local_z_start_tool >= 0) {
-            loaded = layer.local_z_start_tool >= 0 ? size_t(layer.local_z_prev_tool) : layer.tool_changes.front().old_tool;
-            break;
-        }
-    for (const WipeTowerInfo &info : m_plan) {
-        std::unordered_set<int> used;
-        loaded = layer_start_tool(info, loaded);
-        if (info.tool_changes.empty())
-            used.insert(get_filament_category(loaded));
-        for (const WipeTowerInfo::ToolChange &tool_change : info.tool_changes) {
-            used.insert(get_filament_category(tool_change.old_tool));
-            used.insert(get_filament_category(tool_change.new_tool));
-        }
-        loaded = layer_end_tool(info, loaded);
-        layers_used_categories.push_back(std::move(used));
-    }
-
-    for (WipeTowerBlock &block : m_wipe_tower_blocks) {
-        const int category = block.filament_adhesiveness_category;
+    if (add_solid_flag) {
+        // 4. layer types. The categories each layer purges on the tower: a layer without tool changes is printed by
+        // the filament loaded on it (Edge, #937: the one its Local-Z passes left loaded).
+        // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:5631-5717): with merged fill, Contact and Solid follow the adhesiveness
+        // category, and a category stays on the tower as long as its column does, so a layer the merged ladder left
+        // without a tool change does not read as a material change. Without merged fill Solid keeps the block key,
+        // which is the category on a single-diameter plate (as before).
+        const bool                           merged_fill            = merged_fill_active();
+        const int                            solid_infill_layer_low = 4;
+        std::vector<std::unordered_set<int>> layers_used_keys;
+        std::vector<std::unordered_set<int>> layers_used_categories;
+        size_t                               loaded = m_current_tool;
+        for (const WipeTowerInfo &layer : m_plan)
+            if (!layer.tool_changes.empty() || layer.local_z_start_tool >= 0) {
+                loaded = layer.local_z_start_tool >= 0 ? size_t(layer.local_z_prev_tool) : layer.tool_changes.front().old_tool;
+                break;
+            }
         for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
-            const bool cur_has_category = layers_used_categories[layer_id].count(category) > 0;
-            // Solid: the block is not filled by purges here and the category changes within the next layers.
-            if (depth_of(layer_id, category) < block.layer_depths[layer_id] - m_perimeter_width) {
-                for (int layer_count = solid_infill_layer_low; layer_count > 0; --layer_count) {
-                    if (layer_id + layer_count < m_plan.size() &&
-                        cur_has_category != (layers_used_categories[layer_id + layer_count].count(category) > 0)) {
-                        block.layers_type[layer_id] = WipeTowerLayerType::Solid;
-                        break;
-                    }
+            const WipeTowerInfo    &info = m_plan[layer_id];
+            std::unordered_set<int> used;
+            loaded = layer_start_tool(info, loaded);
+            if (info.tool_changes.empty())
+                used.insert(get_block_key(loaded, int(layer_id)));
+            for (const WipeTowerInfo::ToolChange &tool_change : info.tool_changes) {
+                used.insert(get_block_key(tool_change.old_tool, int(layer_id)));
+                used.insert(get_block_key(tool_change.new_tool, int(layer_id)));
+            }
+            loaded = layer_end_tool(info, loaded);
+            std::unordered_set<int> used_categories;
+            if (merged_fill && layer_id > 0) {
+                used_categories = layers_used_categories[layer_id - 1];
+                if (!info.tool_changes.empty()) {
+                    std::unordered_set<int> kept;
+                    for (int category : used_categories)
+                        if (std::any_of(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(),
+                                        [this, category, layer_id](const WipeTowerBlock &block) {
+                                            return block_key_category(block.block_key) == category && layer_id < block.layer_depths.size() &&
+                                                   block.layer_depths[layer_id] > 2.f * m_perimeter_width;
+                                        }))
+                            kept.insert(category);
+                    used_categories.swap(kept);
                 }
             }
-            if (layer_id > 0) {
-                if (cur_has_category != (layers_used_categories[layer_id - 1].count(category) > 0))
-                    block.layers_type[layer_id] = WipeTowerLayerType::Contact;
-                if (block.layers_type[layer_id - 1] == WipeTowerLayerType::Contact && block.layers_type[layer_id] != WipeTowerLayerType::Contact)
-                    block.layers_type[layer_id] = WipeTowerLayerType::Contact_UP;
+            for (int key : used)
+                used_categories.insert(block_key_category(key));
+            layers_used_keys.push_back(std::move(used));
+            layers_used_categories.push_back(std::move(used_categories));
+        }
+
+        for (WipeTowerBlock &block : m_wipe_tower_blocks) {
+            const int category       = block_key_category(block.block_key);
+            auto      solid_has_band = [&](size_t layer_id) {
+                return merged_fill ? layers_used_categories[layer_id].count(category) > 0 : layers_used_keys[layer_id].count(block.block_key) > 0;
+            };
+            for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
+                // Solid: the block is not filled by purges here and the category changes within the next layers.
+                if (depth_of(layer_id, block.block_key) < block.layer_depths[layer_id] - m_perimeter_width) {
+                    const bool cur_has_category = solid_has_band(layer_id);
+                    for (int layer_count = solid_infill_layer_low; layer_count > 0; --layer_count) {
+                        if (layer_id + layer_count < m_plan.size() && cur_has_category != solid_has_band(layer_id + layer_count)) {
+                            block.layers_type[layer_id] = WipeTowerLayerType::Solid;
+                            break;
+                        }
+                    }
+                }
+                if (layer_id > 0) {
+                    if ((layers_used_categories[layer_id].count(category) > 0) != (layers_used_categories[layer_id - 1].count(category) > 0))
+                        block.layers_type[layer_id] = WipeTowerLayerType::Contact;
+                    if (block.layers_type[layer_id - 1] == WipeTowerLayerType::Contact && block.layers_type[layer_id] != WipeTowerLayerType::Contact)
+                        block.layers_type[layer_id] = WipeTowerLayerType::Contact_UP;
+                }
+            }
+        }
+    }
+
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:5720-5733): the slab plan onto the blocks. A band lays down whatever the
+    // whole tower lays on that layer unless it digs its own trench, and a layer the tower drops leaves every band empty.
+    for (WipeTowerBlock &block : m_wipe_tower_blocks) {
+        for (int layer_id = 0; layer_id < int(m_plan.size()); ++layer_id) {
+            block.layer_heights[layer_id]  = layer_slab_height(layer_id, m_plan[layer_id].height);
+            block.layer_reserved[layer_id] = (layer_is_skipped(layer_id) ||
+                                              (layer_id < int(m_reserved_blocks.size()) && m_reserved_blocks[layer_id].count(block.block_key))) ? 1 : 0;
+            if (layer_id < int(m_block_slab_height.size())) {
+                const auto iter = m_block_slab_height[layer_id].find(block.block_key);
+                if (iter != m_block_slab_height[layer_id].end() && iter->second > 0.f)
+                    block.layer_heights[layer_id] = iter->second;
             }
         }
     }
@@ -4238,6 +4432,1608 @@ void WipeTower::update_all_layer_depth(float idle_depth)
     }
 }
 
+// ---- PR-C: the tower side of AdaptiveLayerMerge (Bambu Studio 2.9.1 WipeTower.cpp 5222-5440, 5832-7600) -------------
+// On a plate whose filaments print through more than one nozzle diameter the tower is planned as a Z ladder per nozzle,
+// the way the objects are: a coarse nozzle lays one merged slab where the fine one lays several layers. Every function
+// below is a no-op, or returns what the tower used before, unless merged_fill_active().
+
+int WipeTower::get_block_key(size_t filament, int layer_id) const
+{
+    const int category = get_filament_category(filament);
+    if (!m_multi_diameter_print)
+        return category;
+    const float diameter = filament < m_filpar.size() ? m_filpar[filament].nozzle_diameter : 0.f;
+    int         lane     = 0;
+    if (layer_id >= 0 && size_t(layer_id) < m_lane_assignment.size()) {
+        const auto iter = m_lane_assignment[layer_id].find(int(filament));
+        if (iter != m_lane_assignment[layer_id].end())
+            lane = iter->second;
+    }
+    return encode_block_key(category, diameter, lane);
+}
+
+float WipeTower::slab_height_for(size_t filament, int layer_id, float fallback) const
+{
+    if (layer_id >= 0 && size_t(layer_id) < m_block_slab_height.size()) {
+        const auto iter = m_block_slab_height[layer_id].find(get_block_key(filament, layer_id));
+        if (iter != m_block_slab_height[layer_id].end() && iter->second > 0.f)
+            return iter->second;
+    }
+    return layer_slab_height(layer_id, fallback);
+}
+
+// Edge: the window of the ladder the objects of this filament are cut in (Print hands it over: the per-nozzle clamp of
+// adaptive_layer_height_range_for_nozzle(), widened by adaptive_ladder_height_range()), not Bambu's plain [0.2d, 0.7d].
+float WipeTower::min_layer_height_for_filament(int filament) const
+{
+    if (filament >= 0 && size_t(filament) < m_nozzle_ladders.size() && m_nozzle_ladders[filament].max_height > 0.f)
+        return m_nozzle_ladders[filament].min_height;
+    const float diameter = (filament >= 0 && size_t(filament) < m_filpar.size()) ? m_filpar[filament].nozzle_diameter : 0.f;
+    return diameter > 0.f ? float(adaptive_layer_height_range(diameter).min_height) : 0.f;
+}
+
+float WipeTower::max_layer_height_for_filament(int filament) const
+{
+    if (filament >= 0 && size_t(filament) < m_nozzle_ladders.size() && m_nozzle_ladders[filament].max_height > 0.f)
+        return m_nozzle_ladders[filament].max_height;
+    const float diameter = (filament >= 0 && size_t(filament) < m_filpar.size()) ? m_filpar[filament].nozzle_diameter : 0.f;
+    return diameter > 0.f ? float(adaptive_layer_height_range(diameter).max_height) : std::numeric_limits<float>::max();
+}
+
+bool WipeTower::filament_can_print_height(int filament, float height) const
+{
+    return height + WT_EPSILON >= min_layer_height_for_filament(filament) && height <= max_layer_height_for_filament(filament) + WT_EPSILON;
+}
+
+// Edge: the band size of the object ladder (adaptive_layer_band_size() in that window, or the slab of a process chosen
+// for the nozzle, nozzle_process_band_size()), so a purge slab and the object slab it sits beside agree.
+size_t WipeTower::preferred_band_size_for_filament(int filament) const
+{
+    if (filament >= 0 && size_t(filament) < m_nozzle_ladders.size() && m_nozzle_ladders[filament].max_height > 0.f)
+        return std::max<size_t>(1, m_nozzle_ladders[filament].band_size);
+    const float diameter = (filament >= 0 && size_t(filament) < m_filpar.size()) ? m_filpar[filament].nozzle_diameter : 0.f;
+    float       reference = 0.f;
+    for (const FilamentParameters &fp : m_filpar)
+        if (fp.nozzle_diameter > 0.f && (reference <= 0.f || fp.nozzle_diameter < reference))
+            reference = fp.nozzle_diameter;
+    return adaptive_layer_band_size(diameter, reference, m_tower_grid_layer_height);
+}
+
+float WipeTower::preferred_height_for_filament(int filament) const
+{
+    if (m_tower_grid_layer_height <= WT_EPSILON)
+        return min_layer_height_for_filament(filament);
+    return float(preferred_band_size_for_filament(filament)) * m_tower_grid_layer_height;
+}
+
+bool WipeTower::merged_fill_active() const
+{
+    // Bambu Studio 2.9.1 merged_fill_active() (6083): skipping sparse layers collapses the tower's Z after the fact and smooth
+    // timelapse needs the tower on every layer, so neither can take the ladder. (Edge has no wrapping detection.)
+    return !m_plan.empty() && m_multi_diameter_print && !m_sparse_layers_skipped && !m_enable_timelapse_print;
+}
+
+bool WipeTower::can_print_base_layers(int filament) const
+{
+    if (!m_merged_slabs_active)
+        return true;
+    for (int layer_id = 0; layer_id < int(m_plan.size()); ++layer_id)
+        if (!layer_is_skipped(layer_id) && !filament_can_print_height(filament, layer_slab_height(layer_id, m_plan[layer_id].height)))
+            return false;
+    return true;
+}
+
+int WipeTower::first_printed_layer_idx() const
+{
+    const int first   = m_first_layer_idx == size_t(-1) ? 0 : int(m_first_layer_idx);
+    int       printed = first;
+    while (printed < int(m_plan.size()) && layer_is_skipped(printed))
+        ++printed;
+    return printed < int(m_plan.size()) ? printed : first;
+}
+
+// The filament still loaded when the tower reaches this layer (Edge: after the layer's Local-Z passes), or -1.
+int WipeTower::loaded_filament(int layer_id) const
+{
+    if (layer_id >= 0 && layer_id < int(m_plan.size()) && m_plan[layer_id].local_z_start_tool >= 0)
+        return m_plan[layer_id].local_z_start_tool;
+    for (int l = std::min(layer_id, int(m_plan.size())) - 1; l >= 0; --l) {
+        if (!m_plan[l].tool_changes.empty())
+            return int(m_plan[l].tool_changes.back().new_tool);
+        if (m_plan[l].local_z_start_tool >= 0)
+            return m_plan[l].local_z_start_tool;
+    }
+    return -1;
+}
+
+double WipeTower::tower_bed_z() const
+{
+    if (m_plan.empty())
+        return 0.;
+    const int first = m_first_layer_idx == size_t(-1) ? 0 : int(m_first_layer_idx);
+    return double(m_plan[first].z - m_plan[first].height);
+}
+
+void WipeTower::collect_printed_steps(std::vector<int> &printed) const
+{
+    printed.clear();
+    const int first_layer = m_first_layer_idx == size_t(-1) ? 0 : int(m_first_layer_idx);
+    for (int layer_id = first_layer; layer_id < int(m_plan.size()); ++layer_id)
+        if (!layer_is_skipped(layer_id))
+            printed.push_back(layer_id);
+}
+
+// Bambu Studio 2.9.1 same_category_filler() (6091): lanes of one group share a nozzle and a material, so the band's own
+// group comes first; otherwise a band is stacked on, or under, a material it does not bond to.
+int WipeTower::same_category_filler(const WipeTowerInfo &layer, int block_key) const
+{
+    const int group_key       = block_key & ~0xF;
+    const int block_category  = block_key_category(block_key);
+    int       group_filler    = -1;
+    int       category_filler = -1;
+    // Every tool that touches the layer counts, including the one being switched away from.
+    auto consider = [&](int filament) {
+        if (filament < 0)
+            return;
+        if (get_gap_key(size_t(filament)) == group_key)
+            group_filler = filament;
+        else if (category_filler < 0 && get_filament_category(size_t(filament)) == block_category)
+            category_filler = filament;
+    };
+    for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes) {
+        consider(int(tool_change.old_tool));
+        consider(int(tool_change.new_tool));
+    }
+    return group_filler != -1 ? group_filler : category_filler;
+}
+
+float WipeTower::band_fill_depth(const WipeTowerBlock &block, int layer_id) const
+{
+    // Bambu Studio 2.9.1 band_fill_depth() (7437): layer_depths already is the depth this layer must fill.
+    if (layer_id >= 0 && size_t(layer_id) < block.layer_depths.size())
+        return block.layer_depths[layer_id];
+    return block.depth;
+}
+
+// Bambu Studio 2.9.1 get_wall_filament_for_layer() (7451): the wall filament, else one of its category, else the first
+// incoming filament; with merged fill only one that can print the layer's slab, and the wall ladder's choice first.
+int WipeTower::get_wall_filament_for_layer(const WipeTowerInfo &layer, int layer_id, int wall_filament) const
+{
+    if (layer.tool_changes.empty())
+        return -1;
+    if (layer_id >= 0 && size_t(layer_id) < m_wall_filament.size() && m_wall_filament[layer_id] >= 0)
+        return m_wall_filament[layer_id];
+    if (wall_filament < 0)
+        return int(layer.tool_changes.front().new_tool);
+
+    const bool enforce_height_window = merged_fill_active();
+    auto       fits_this_layer       = [this, &layer, layer_id, enforce_height_window](int filament) {
+        return !enforce_height_window || filament_can_print_height(filament, layer_slab_height(layer_id, layer.height));
+    };
+    const int wall_category = get_filament_category(size_t(wall_filament));
+    int       candidate_id  = -1;
+    for (size_t idx = 0; idx < layer.tool_changes.size(); ++idx) {
+        const WipeTowerInfo::ToolChange &tc = layer.tool_changes[idx];
+        if (idx == 0) {
+            if (int(tc.old_tool) == wall_filament && is_valid_last_layer(tc.old_tool, layer_id, layer.z))
+                return wall_filament;
+            if (get_filament_category(tc.old_tool) == wall_category && is_valid_last_layer(tc.old_tool, layer_id, layer.z) &&
+                fits_this_layer(int(tc.old_tool)))
+                candidate_id = int(tc.old_tool);
+        }
+        if (int(tc.new_tool) == wall_filament && fits_this_layer(wall_filament))
+            return wall_filament;
+        if (candidate_id == -1 && get_filament_category(tc.new_tool) == wall_category && fits_this_layer(int(tc.new_tool)))
+            candidate_id = int(tc.new_tool);
+    }
+    if (candidate_id != -1)
+        return candidate_id;
+
+    int fallback_id = int(layer.tool_changes.front().new_tool);
+    for (const WipeTowerInfo::ToolChange &tc : layer.tool_changes)
+        if (fits_this_layer(int(tc.new_tool)))
+            return int(tc.new_tool);
+    for (const WipeTowerInfo::ToolChange &tc : layer.tool_changes)
+        if (m_filpar[tc.new_tool].nozzle_diameter < m_filpar[fallback_id].nozzle_diameter)
+            fallback_id = int(tc.new_tool);
+    return fallback_id;
+}
+
+// Bambu Studio 2.9.1 block_fill_filament_base() (7501): which filament tops this band up on this layer, decided without
+// looking at the slab height: the one that last purged into it, the one that rammed out of it, the one loaded when the
+// layer started, or (merged fill) a filament of the band's own category; otherwise the wall filament.
+int WipeTower::block_fill_filament_base(const WipeTowerInfo &layer, int layer_id, const WipeTowerBlock &block, int wall_filament) const
+{
+    int last_filament_change = -1;
+    int last_nozzle_change   = -1;
+    for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes) {
+        if (get_block_key(tool_change.new_tool, layer_id) == block.block_key)
+            last_filament_change = int(tool_change.new_tool);
+        if (tool_change.nozzle_change_depth > EPSILON && tool_change.nozzle_change.need_ramming &&
+            is_valid_last_layer(tool_change.old_tool, layer_id, layer.z) && get_block_key(tool_change.old_tool, layer_id) == block.block_key)
+            last_nozzle_change = int(tool_change.old_tool);
+    }
+
+    int fill_filament = last_filament_change != -1 ? last_filament_change : last_nozzle_change;
+    if (fill_filament == -1 && !layer.tool_changes.empty() && get_block_key(layer.tool_changes.front().old_tool, layer_id) == block.block_key)
+        fill_filament = int(layer.tool_changes.front().old_tool);
+    if (fill_filament == -1 && merged_fill_active()) {
+        fill_filament = same_category_filler(layer, block.block_key);
+        // A layer without tool changes is laid down by whatever is still loaded.
+        if (fill_filament == -1 && layer.tool_changes.empty()) {
+            const int loaded = loaded_filament(layer_id);
+            if (loaded >= 0 && get_filament_category(size_t(loaded)) == block_key_category(block.block_key))
+                fill_filament = loaded;
+        }
+        return fill_filament;
+    }
+    if (fill_filament == -1)
+        fill_filament = wall_filament;
+    return fill_filament;
+}
+
+// Bambu Studio 2.9.1 get_block_fill_filament() (7535).
+int WipeTower::get_block_fill_filament(const WipeTowerInfo &layer, int layer_id, const WipeTowerBlock &block, int wall_filament) const
+{
+    // The support under an extra TPU lane already chose one filament for the whole slab. Keep that material.
+    if (layer_id >= 0 && layer_id < int(block.layer_fill_filament.size()) && block.layer_fill_filament[layer_id] >= 0) {
+        const int   planned = block.layer_fill_filament[layer_id];
+        const float height  = block.layer_heights[layer_id];
+        if (filament_can_print_height(planned, height))
+            return planned;
+        const int category = get_filament_category(size_t(planned));
+        for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes)
+            for (int filament : { int(tool_change.new_tool), int(tool_change.old_tool) })
+                if (get_filament_category(size_t(filament)) == category && filament_can_print_height(filament, height))
+                    return filament;
+        return planned;
+    }
+    const int fill_filament = block_fill_filament_base(layer, layer_id, block, wall_filament);
+    if (fill_filament < 0)
+        return -1;
+
+    const float height = layer_id >= 0 && layer_id < int(block.layer_heights.size()) ? block.layer_heights[layer_id] : m_layer_height;
+    if (!filament_can_print_height(fill_filament, height)) {
+        const bool same_category_only = merged_fill_active();
+        auto       can_take_over      = [&](int filament) {
+            return filament_can_print_height(filament, height) &&
+                   (!same_category_only || get_filament_category(size_t(filament)) == block_key_category(block.block_key));
+        };
+        for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes) {
+            if (can_take_over(int(tool_change.new_tool)))
+                return int(tool_change.new_tool);
+            if (can_take_over(int(tool_change.old_tool)))
+                return int(tool_change.old_tool);
+        }
+        BOOST_LOG_TRIVIAL(error) << "WipeTower: band " << block.block_key << " on layer " << layer_id << " is planned " << height
+                                 << " mm high, which no filament visiting that layer can extrude; filament " << fill_filament
+                                 << " lays it down outside its " << min_layer_height_for_filament(fill_filament) << ".."
+                                 << max_layer_height_for_filament(fill_filament) << " mm window";
+    }
+    return fill_filament;
+}
+
+// Bambu Studio 2.9.1 absorb_run_into_next_layer() (5843): hand a run of tool-change-free layers to the tool-change layer
+// right above it, which then extrudes the whole stack at once - only as far as every nozzle extruding there tolerates.
+bool WipeTower::absorb_run_into_next_layer(int run_begin, int run_end)
+{
+    const int above = run_end + 1;
+    if (above >= int(m_plan.size()) || m_plan[above].tool_changes.empty())
+        return false;
+
+    float grown = m_plan[above].height;
+    for (int layer_id = run_begin; layer_id <= run_end; ++layer_id)
+        grown += m_plan[layer_id].height;
+
+    // The incoming filament purges into its band on that layer, and the outgoing one rams there when a nozzle change is
+    // needed. Both would have to lay the grown slab down.
+    for (const WipeTowerInfo::ToolChange &tool_change : m_plan[above].tool_changes) {
+        if (!filament_can_print_height(int(tool_change.new_tool), grown))
+            return false;
+        if (tool_change.nozzle_change.need_ramming && !filament_can_print_height(int(tool_change.old_tool), grown))
+            return false;
+    }
+
+    for (int layer_id = run_begin; layer_id <= run_end; ++layer_id) {
+        m_layer_skipped[layer_id]     = 1;
+        m_layer_slab_height[layer_id] = 0.f;
+    }
+    m_layer_slab_height[above] = grown;
+    m_merged_slabs_active      = true;
+    return true;
+}
+
+// Bambu Studio 2.9.1 plan_tower_ladder() (5877): a no-tool-change layer holds one material and one full-tower patch, so it
+// follows the Z grouping of that material's nozzle. The raw foundation is kept only when real printing occurs at its Z.
+void WipeTower::plan_tower_ladder()
+{
+    const int layer_count = int(m_plan.size());
+    m_layer_slab_height.assign(layer_count, 0.f);
+    m_layer_skipped.assign(layer_count, 0);
+    m_merged_slabs_active = false;
+    for (int layer_id = 0; layer_id < layer_count; ++layer_id)
+        m_layer_slab_height[layer_id] = m_plan[layer_id].height;
+
+    if (!merged_fill_active())
+        return;
+
+    std::vector<int> loaded_filament(layer_count, -1);
+    size_t           loaded = m_current_tool;
+    for (int layer_id = 0; layer_id < layer_count; ++layer_id) {
+        loaded                    = layer_end_tool(m_plan[layer_id], loaded);
+        loaded_filament[layer_id] = int(loaded);
+    }
+
+    const int           first_layer = m_first_layer_idx == size_t(-1) ? 0 : int(m_first_layer_idx);
+    std::vector<double> heights;
+    heights.reserve(m_plan.size());
+    for (const WipeTowerInfo &info : m_plan)
+        heights.push_back(info.height);
+
+    int run_begin = m_foundation_required ? first_layer + 1 : first_layer;
+    while (run_begin < layer_count) {
+        while (run_begin < layer_count && !m_plan[run_begin].tool_changes.empty())
+            ++run_begin;
+        if (run_begin >= layer_count)
+            break;
+
+        int run_end = run_begin;
+        while (run_end + 1 < layer_count && m_plan[run_end + 1].tool_changes.empty() &&
+               loaded_filament[run_end + 1] == loaded_filament[run_begin])
+            ++run_end;
+
+        // Before any real first-layer extrusion exists, hand the complete prefix to the first required tool change.
+        if (!m_foundation_required && run_begin == first_layer && absorb_run_into_next_layer(run_begin, run_end)) {
+            run_begin = run_end + 1;
+            continue;
+        }
+
+        const int filament_id = loaded_filament[run_begin];
+        if (filament_id >= 0) {
+            // A sparse run is one material: plan it on that nozzle's own band, inside its printable window.
+            std::vector<std::pair<size_t, size_t>> groups;
+            const size_t                           band_size = preferred_band_size_for_filament(filament_id);
+            const AdaptiveLayerHeightRange         range{ min_layer_height_for_filament(filament_id), max_layer_height_for_filament(filament_id) };
+            auto apply_group = [&](const std::pair<size_t, size_t> &group) {
+                float merged_height = 0.f;
+                for (size_t layer_id = group.first; layer_id <= group.second; ++layer_id)
+                    merged_height += m_plan[layer_id].height;
+                for (size_t layer_id = group.first; layer_id < group.second; ++layer_id) {
+                    m_layer_skipped[layer_id]     = 1;
+                    m_layer_slab_height[layer_id] = 0.f;
+                }
+                m_layer_slab_height[group.second] = merged_height;
+                if (group.first != group.second)
+                    m_merged_slabs_active = true;
+                BOOST_LOG_TRIVIAL(debug) << "[wt_ladder] layers " << group.first << ".." << group.second << " -> print at layer "
+                                         << group.second << " z=" << m_plan[group.second].z << " h=" << merged_height
+                                         << " filament=" << filament_id;
+            };
+            auto span_height = [&](size_t bottom, size_t top) {
+                float height = 0.f;
+                for (size_t layer_id = bottom; layer_id <= top; ++layer_id)
+                    height += m_plan[layer_id].height;
+                return height;
+            };
+            const float preferred = preferred_height_for_filament(filament_id);
+            const float ceiling   = max_layer_height_for_filament(filament_id);
+            auto        fold_short_groups = [&]() {
+                bool folded = true;
+                while (folded) {
+                    folded = false;
+                    for (size_t i = 0; i < groups.size(); ++i) {
+                        if (span_height(groups[i].first, groups[i].second) + WT_EPSILON >= preferred)
+                            continue;
+                        if (i + 1 < groups.size() && span_height(groups[i].first, groups[i + 1].second) <= ceiling + WT_EPSILON) {
+                            groups[i + 1].first = groups[i].first;
+                            groups.erase(groups.begin() + int(i));
+                            folded = true;
+                            break;
+                        }
+                        if (i > 0 && span_height(groups[i - 1].first, groups[i].second) <= ceiling + WT_EPSILON) {
+                            groups[i].first = groups[i - 1].first;
+                            groups.erase(groups.begin() + int(i - 1));
+                            folded = true;
+                            break;
+                        }
+                    }
+                }
+            };
+            // The tool-change layer above this run is pinned to its own Z. Reserve a suffix of the run for it before the
+            // split, so the split cannot spend that suffix on a finished band and leave the purge on the grid step.
+            int       suffix       = run_end + 1;
+            float     suffix_limit = ceiling;
+            const int above        = run_end + 1;
+            if (above < layer_count && !m_plan[above].tool_changes.empty()) {
+                float target = 0.f;
+                suffix_limit = std::numeric_limits<float>::max();
+                for (const WipeTowerInfo::ToolChange &tool_change : m_plan[above].tool_changes) {
+                    const int new_tool = int(tool_change.new_tool);
+                    target             = std::max(target, preferred_height_for_filament(new_tool));
+                    suffix_limit       = std::min(suffix_limit, max_layer_height_for_filament(new_tool));
+                    if (tool_change.nozzle_change.need_ramming) {
+                        const int old_tool = int(tool_change.old_tool);
+                        target             = std::max(target, preferred_height_for_filament(old_tool));
+                        suffix_limit       = std::min(suffix_limit, max_layer_height_for_filament(old_tool));
+                    }
+                }
+                target      = std::min(target, suffix_limit);
+                float grown = m_plan[above].height;
+                if (grown + WT_EPSILON < target) {
+                    for (int layer_id = run_end; layer_id >= run_begin; --layer_id) {
+                        const float next = grown + m_plan[layer_id].height;
+                        if (next > suffix_limit + WT_EPSILON)
+                            break;
+                        grown  = next;
+                        suffix = layer_id;
+                        if (grown + WT_EPSILON >= target)
+                            break;
+                    }
+                    if (!(suffix <= run_end && grown + WT_EPSILON > m_plan[above].height))
+                        suffix = run_end + 1;
+                }
+            }
+            const int  plan_end = suffix - 1;
+            const bool split_ok = plan_end >= run_begin &&
+                                  split_adaptive_layer_span(heights, size_t(run_begin), size_t(plan_end), band_size, range, groups);
+            if (plan_end < run_begin) {
+                if (!absorb_run_into_next_layer(run_begin, run_end))
+                    BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot hand layers " << run_begin << ".." << run_end
+                                               << " to the tool change above them; keeping their base layer heights";
+            } else if (split_ok) {
+                fold_short_groups();
+                std::pair<size_t, size_t> pulled_tail;
+                bool                      pulled = false;
+                if (!groups.empty() && suffix <= run_end) {
+                    const float tail       = span_height(groups.back().first, groups.back().second);
+                    const float grown_tail = span_height(size_t(suffix), size_t(run_end)) + m_plan[above].height;
+                    if (tail + WT_EPSILON < preferred && grown_tail + tail <= suffix_limit + WT_EPSILON) {
+                        pulled_tail = groups.back();
+                        pulled      = true;
+                        suffix      = int(groups.back().first);
+                        groups.pop_back();
+                    }
+                }
+                for (const auto &group : groups)
+                    apply_group(group);
+                if (suffix <= run_end && !absorb_run_into_next_layer(suffix, run_end)) {
+                    if (pulled)
+                        apply_group(pulled_tail);
+                    BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot thicken the tool change at layer " << above << " with layers "
+                                               << suffix << ".." << run_end << "; keeping their base layer heights";
+                }
+            } else if (!absorb_run_into_next_layer(run_begin, run_end)) {
+                BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot apply the model Z merge plan to layers " << run_begin << ".." << run_end
+                                           << " with filament " << filament_id << "; keeping their base layer heights";
+            }
+        }
+        run_begin = run_end + 1;
+    }
+}
+
+// Bambu Studio 2.9.1 plan_merged_slabs() (6128): on top of the tower-wide ladder a single band still has to dig its own
+// trench when a large nozzle purges on a step the ladder kept thin. The band stays empty on the steps the slab reaches
+// into and the purge is printed at the merged height. Bands of one category and diameter are split into parallel lanes
+// so that purges on consecutive steps can each own their reservation.
+void WipeTower::plan_merged_slabs()
+{
+    m_lane_assignment.assign(m_plan.size(), {});
+    m_block_slab_height.assign(m_plan.size(), {});
+    m_reserved_blocks.assign(m_plan.size(), {});
+
+    if (!merged_fill_active())
+        return;
+
+    std::vector<int> printed;
+    collect_printed_steps(printed);
+    if (printed.empty())
+        return;
+    const double bed_z = tower_bed_z();
+
+    enum : unsigned char { CellFree = 0, CellPurge, CellReserved };
+    constexpr int max_lanes           = 4;  // more lanes means a deeper tower, so keep the budget tight
+    constexpr int max_encodable_lanes = 16; // the lane field of the block key is 4 bits wide
+    constexpr int max_merge_layers    = 8;
+    constexpr int unfillable          = std::numeric_limits<int>::max() / 2;
+    const int     step_count          = int(printed.size());
+
+    auto top_z = [&](int step) { return step < 0 ? float(bed_z) : m_plan[printed[step]].z; };
+    // A lane can host the event if the purge step is not reserved by a slab above and every step the slab reaches into
+    // is still completely untouched.
+    auto lane_fits = [](const std::vector<unsigned char> &lane, int step, int merge_layers) {
+        if (lane[step] == CellReserved)
+            return false;
+        for (int l = step - merge_layers + 1; l < step; ++l)
+            if (lane[l] != CellFree)
+                return false;
+        return true;
+    };
+
+    // Every filament extruding into a band on a layer: the incoming one wipes there, and the outgoing one rams there when
+    // a nozzle change lays ramming lines (one with no ramming footprint lays nothing and must not pin the band's Z).
+    struct GroupEvent
+    {
+        int              step = 0;
+        std::vector<int> filaments;
+        float            base_depth = 0.f;
+    };
+    std::map<int, std::vector<GroupEvent>> group_events;
+    std::map<int, std::set<int>>           category_groups;
+    for (int step = 0; step < step_count; ++step) {
+        const int                 layer_id = printed[step];
+        std::map<int, GroupEvent> on_layer;
+        for (const WipeTowerInfo::ToolChange &tool_change : m_plan[layer_id].tool_changes) {
+            const size_t new_tool = tool_change.new_tool;
+            const size_t old_tool = tool_change.old_tool;
+            GroupEvent  &wipe     = on_layer[get_gap_key(new_tool)];
+            wipe.filaments.push_back(int(new_tool));
+            wipe.base_depth += std::max(0.f, tool_change.required_depth - tool_change.nozzle_change_depth);
+            category_groups[get_filament_category(new_tool)].insert(get_gap_key(new_tool));
+            category_groups[get_filament_category(old_tool)].insert(get_gap_key(old_tool));
+            if (tool_change.nozzle_change_depth > EPSILON && tool_change.nozzle_change.need_ramming) {
+                GroupEvent &ramming = on_layer[get_gap_key(old_tool)];
+                ramming.filaments.push_back(int(old_tool));
+                ramming.base_depth += tool_change.nozzle_change_depth;
+            }
+        }
+        for (auto &entry : on_layer) {
+            entry.second.step = step;
+            group_events[entry.first].push_back(std::move(entry.second));
+        }
+    }
+
+    struct PlannedPurge
+    {
+        int  lane   = 0;
+        int  merge  = 1;
+        bool fitted = true;
+    };
+    struct GroupPlan
+    {
+        std::vector<PlannedPurge> purges;            // one per event
+        int                       thin_layers = 0;   // slabs of the band's nozzle thinner than its band size
+        float                     depth       = 0.f; // sum over lanes of the deepest footprint each one holds
+        int                       lanes       = 0;
+    };
+
+    auto plan_group = [&](int group_key, const std::vector<GroupEvent> &events, bool lanes_for_thinness) {
+        const int   filament         = events.front().filaments.front();
+        const float min_height       = min_layer_height_for_filament(filament);
+        const float max_height       = max_layer_height_for_filament(filament);
+        const float preferred_height = preferred_height_for_filament(filament);
+        // With a second diameter of the same material around, a smaller nozzle can lay a thin fill down; a category with
+        // this nozzle alone has to top its bands up with it.
+        const bool own_nozzle_fill = category_groups[block_key_category(group_key)].size() <= 1;
+        auto       is_thin         = [&](float height) { return height + WT_EPSILON < preferred_height; };
+
+        // A layer without tool changes fills its bands straight from the layer routine at the base height, so the band
+        // fill may stop there but never merge down from there.
+        enum : char { NoFill = 0, SingleFill, MergedFill };
+        std::vector<char> can_fill(step_count, NoFill);
+        for (int step = 0; step < step_count; ++step) {
+            const WipeTowerInfo &layer = m_plan[printed[step]];
+            if (same_category_filler(layer, group_key) >= 0)
+                can_fill[step] = MergedFill;
+            else if (layer.tool_changes.empty()) {
+                const int loaded = loaded_filament(printed[step]);
+                if (loaded >= 0 && get_filament_category(size_t(loaded)) == block_key_category(group_key))
+                    can_fill[step] = SingleFill;
+            }
+        }
+
+        // The fewest thin slabs the band fill needs to bring a lane from its surface at step `from` (-1 is the bed) up to
+        // step `to`.
+        auto fill_thin_layers = [&](int from, int to) {
+            if (to <= from)
+                return 0;
+            bool any_own = false;
+            for (int t = std::max(0, from + 1); t <= to && t < step_count; ++t)
+                if (can_fill[t])
+                    any_own = true;
+            // Layers under the first purge of this category are printed by whoever else is on the tower.
+            if (!any_own)
+                return 0;
+            if (!can_fill[to])
+                return unfillable;
+            // The stretch is laid down by the band fill ladder over several slabs, not as one slab of this nozzle.
+            if (!own_nozzle_fill)
+                return 0;
+            std::vector<int> best(size_t(to - from + 1), unfillable);
+            best[0] = 0;
+            for (int t = from + 1; t <= to; ++t) {
+                if (!can_fill[t])
+                    continue;
+                const int lowest = can_fill[t] == SingleFill ? t - 1 : from;
+                for (int u = t - 1; u >= lowest; --u) {
+                    const float height = top_z(t) - top_z(u);
+                    if (height > max_height + WT_EPSILON)
+                        break;
+                    if (height + WT_EPSILON < min_height || best[u - from] >= unfillable)
+                        continue;
+                    best[t - from] = std::min(best[t - from], best[u - from] + (is_thin(height) ? 1 : 0));
+                }
+            }
+            return best[to - from];
+        };
+        auto surface_step = [](const std::vector<unsigned char> &lane, int below_step) {
+            for (int l = below_step; l >= 0; --l)
+                if (lane[l] == CellPurge)
+                    return l;
+            return -1;
+        };
+
+        // Thinness ranks first, then the lane (a lower lane in use beats a higher one, any lane in use beats a new one),
+        // then the deviation from the band size, and on equal deviation the deeper slab.
+        struct SlabChoice
+        {
+            int   merge = 1;
+            int   lane  = -1;
+            int   thin  = std::numeric_limits<int>::max();
+            float delta = std::numeric_limits<float>::max();
+            bool  valid() const { return thin != std::numeric_limits<int>::max(); }
+        };
+        auto better = [](const SlabChoice &choice, const SlabChoice &best) {
+            if (choice.thin != best.thin)
+                return choice.thin < best.thin;
+            if (choice.lane != best.lane)
+                return choice.lane < best.lane;
+            return choice.delta <= best.delta + 1e-3f;
+        };
+
+        GroupPlan                               plan;
+        std::vector<std::vector<unsigned char>> lanes(1, std::vector<unsigned char>(step_count, CellFree));
+        std::vector<float>                      lane_depth(1, 0.f);
+        for (const GroupEvent &event : events) {
+            const int  step          = event.step;
+            const int  max_available = std::min(step + 1, max_merge_layers);
+            SlabChoice in_use, fresh;
+            int        unreachable_merge = 1;
+            float      unreachable_delta = std::numeric_limits<float>::max();
+            for (int candidate = 1; candidate <= max_available; ++candidate) {
+                const float height = top_z(step) - top_z(step - candidate);
+                // Nothing on the tower is extruded outside this nozzle's window.
+                if (height > max_height + WT_EPSILON)
+                    break;
+                if (height + WT_EPSILON < min_height)
+                    continue;
+                const float delta = std::abs(height - preferred_height);
+                if (delta <= unreachable_delta + WT_EPSILON) {
+                    unreachable_merge = candidate;
+                    unreachable_delta = delta;
+                }
+                const int below     = step - candidate;
+                const int slab_thin = is_thin(height) ? 1 : 0;
+                // A fresh lane starts at the bed, so its fill covers everything below the slab.
+                const int fresh_fill = fill_thin_layers(-1, below);
+                if (fresh_fill < unfillable) {
+                    const SlabChoice choice{ candidate, -1, slab_thin + fresh_fill, delta };
+                    if (better(choice, fresh))
+                        fresh = choice;
+                }
+                for (int idx = 0; idx < int(lanes.size()); ++idx) {
+                    if (!lane_fits(lanes[idx], step, candidate))
+                        continue;
+                    const int fill = fill_thin_layers(surface_step(lanes[idx], below), below);
+                    if (fill >= unfillable)
+                        continue;
+                    const SlabChoice choice{ candidate, idx, slab_thin + fill, delta };
+                    if (better(choice, in_use))
+                        in_use = choice;
+                }
+            }
+
+            const bool   lanes_left = int(lanes.size()) < max_lanes;
+            const bool   open_lane  = lanes_for_thinness && in_use.valid() && fresh.valid() && lanes_left && fresh.thin < in_use.thin;
+            PlannedPurge purge;
+            int          lane = -1;
+            if (in_use.valid() && !open_lane) {
+                purge.merge = in_use.merge;
+                lane        = in_use.lane;
+            }
+            if (lane < 0) {
+                // A fresh lane is opened only when every lane in use has this step reserved.
+                if (!fresh.valid())
+                    BOOST_LOG_TRIVIAL(warning) << "WipeTower: no slab of group " << group_key << " on layer " << printed[step]
+                                               << " can be topped up with its own material";
+                purge.merge = fresh.valid() ? fresh.merge : unreachable_merge;
+                if (!(open_lane && fresh.valid())) {
+                    for (int candidate = 0; candidate < int(lanes.size()); ++candidate)
+                        if (lane_fits(lanes[candidate], step, purge.merge)) {
+                            lane = candidate;
+                            break;
+                        }
+                    // The preferred merge does not fit, but the purge cell itself may still be free: stay on that lane at
+                    // the thickest height it can actually host.
+                    if (lane < 0) {
+                        for (int candidate = 0; candidate < int(lanes.size()); ++candidate) {
+                            if (lanes[candidate][step] == CellReserved)
+                                continue;
+                            int fit_merge = 0;
+                            for (int m = 1; m <= max_available; ++m) {
+                                if (!lane_fits(lanes[candidate], step, m))
+                                    break;
+                                const float height = top_z(step) - top_z(step - m);
+                                if (height > max_height + WT_EPSILON)
+                                    break;
+                                if (height + WT_EPSILON < min_height)
+                                    continue;
+                                fit_merge = m;
+                            }
+                            // A free cell is not a licence to print below the nozzle minimum.
+                            if (fit_merge == 0)
+                                continue;
+                            purge.merge = fit_merge;
+                            lane        = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (lane < 0 && lanes_left && (open_lane || fresh.valid())) {
+                    lanes.emplace_back(step_count, CellFree);
+                    lane_depth.push_back(0.f);
+                    lane = int(lanes.size()) - 1;
+                }
+            }
+            if (lane < 0) {
+                purge.fitted = false;
+                // The last resort still has to be a height this nozzle can extrude, and it has to fit the lane.
+                const float single    = top_z(step) - top_z(step - 1);
+                const bool  single_ok = single + WT_EPSILON >= min_height && single <= max_height + WT_EPSILON;
+                if (unreachable_delta < std::numeric_limits<float>::max()) {
+                    for (int candidate = 0; candidate < int(lanes.size()); ++candidate)
+                        if (lane_fits(lanes[candidate], step, unreachable_merge)) {
+                            purge.merge = unreachable_merge;
+                            lane        = candidate;
+                            break;
+                        }
+                }
+                if (lane < 0 && single_ok) {
+                    purge.merge = 1;
+                    for (int candidate = 0; candidate < int(lanes.size()); ++candidate)
+                        if (lanes[candidate][step] != CellReserved) {
+                            lane = candidate;
+                            break;
+                        }
+                }
+                if (lane < 0 && unreachable_delta < std::numeric_limits<float>::max())
+                    purge.merge = unreachable_merge;
+                else if (lane < 0 && !single_ok)
+                    BOOST_LOG_TRIVIAL(error) << "WipeTower: group " << group_key << " on layer " << printed[step] << " has no slab inside "
+                                             << min_height << ".." << max_height << " mm";
+                if (lane < 0 && int(lanes.size()) < max_encodable_lanes) {
+                    lanes.emplace_back(step_count, CellFree);
+                    lane_depth.push_back(0.f);
+                    lane = int(lanes.size()) - 1;
+                }
+                if (lane < 0)
+                    lane = 0; // The lane bits of the block key are exhausted; share the first one.
+            }
+            purge.lane = lane;
+
+            std::vector<unsigned char> &lane_state  = lanes[lane];
+            const int                   below       = step - purge.merge;
+            const float                 slab_height = top_z(step) - top_z(below);
+            const int                   fill        = fill_thin_layers(surface_step(lane_state, below), below);
+            plan.thin_layers += (is_thin(slab_height) ? 1 : 0) + (fill < unfillable ? fill : 0);
+            for (int l = below + 1; l < step; ++l)
+                lane_state[l] = CellReserved;
+            lane_state[step]        = CellPurge;
+            const float base_height = m_plan[printed[step]].height;
+            lane_depth[lane]        = std::max(lane_depth[lane], slab_height > EPSILON ? event.base_depth * base_height / slab_height : event.base_depth);
+            plan.purges.push_back(purge);
+        }
+        plan.lanes = int(lanes.size());
+        for (float depth : lane_depth)
+            plan.depth += depth;
+        return plan;
+    };
+
+    for (const auto &entry : group_events) {
+        const int                      group_key = entry.first;
+        const std::vector<GroupEvent> &events    = entry.second;
+        // One block per material and diameter; a second lane only when every lane in use has the purge step reserved.
+        const GroupPlan chosen = plan_group(group_key, events, false);
+        BOOST_LOG_TRIVIAL(debug) << "[wt_lanes] group=" << group_key << " lanes=" << chosen.lanes << " thin=" << chosen.thin_layers
+                                 << " depth=" << chosen.depth;
+
+        for (size_t idx = 0; idx < events.size(); ++idx) {
+            const GroupEvent   &event       = events[idx];
+            const PlannedPurge &purge       = chosen.purges[idx];
+            const int           step        = event.step;
+            const int           layer_id    = printed[step];
+            const int           block_key   = (group_key & ~0xF) | purge.lane;
+            const float         slab_height = top_z(step) - top_z(step - purge.merge);
+            for (int filament : event.filaments)
+                m_lane_assignment[layer_id][filament] = purge.lane;
+            m_block_slab_height[layer_id][block_key] = slab_height;
+            for (int l = step - purge.merge + 1; l < step; ++l)
+                m_reserved_blocks[printed[l]].insert(block_key);
+            if (purge.merge > 1)
+                m_merged_slabs_active = true;
+            if (!purge.fitted)
+                BOOST_LOG_TRIVIAL(warning) << "WipeTower: no lane left for a merged purge on layer " << layer_id
+                                           << ", falling back to the tower layer height";
+            BOOST_LOG_TRIVIAL(debug) << "[wt_purge] layer " << layer_id << " z=" << m_plan[layer_id].z << " group=" << group_key
+                                     << " lane=" << purge.lane << " merge=" << purge.merge << " slab_h=" << slab_height << " block=" << block_key;
+        }
+    }
+}
+
+// Bambu Studio 2.9.1 plan_band_merge_ladder() (5256): partition the printed steps [first_step, last_step] into slabs a
+// visiting nozzle can lay down, each as close to that nozzle's band as possible (preferred_height overrides it), or with
+// prefer_max_height as few and as thick as the nozzle's maximum allows. height_ceiling, when positive, caps every slab.
+bool WipeTower::plan_band_merge_ladder(const std::vector<int> &printed, int first_step, int last_step, double bottom_z,
+                                       const std::vector<std::vector<int>> &visitors, const std::vector<char> &reservable,
+                                       const std::vector<char> &can_merge_top, std::vector<MergeLadderGroup> &groups,
+                                       float preferred_height, bool prefer_max_height, float height_ceiling) const
+{
+    groups.clear();
+    if (first_step > last_step)
+        return true;
+    const int span = last_step - first_step + 1;
+
+    double widest = 0.;
+    for (int filament_id = 0; filament_id < int(m_filpar.size()); ++filament_id)
+        widest = std::max(widest, double(max_layer_height_for_filament(filament_id)));
+
+    auto step_z = [this, &printed, first_step, bottom_z](int step) { return step < first_step ? bottom_z : double(m_plan[printed[step]].z); };
+
+    const double        unreachable = std::numeric_limits<double>::max();
+    std::vector<double> best(span + 1, unreachable);
+    std::vector<int>    prev(span + 1, -1);
+    std::vector<int>    chosen(span + 1, -1);
+    best[0] = 0.;
+    for (int end = 1; end <= span; ++end) {
+        const int top_step = first_step + end - 1;
+        for (int begin = end - 1; begin >= 0; --begin) {
+            const bool merged = begin < end - 1;
+            if (merged && !can_merge_top[top_step])
+                break;
+            if (merged && !reservable[first_step + begin])
+                break;
+            const double height     = step_z(top_step) - step_z(first_step + begin - 1);
+            const double span_limit = height_ceiling > WT_EPSILON ? std::min(widest, double(height_ceiling)) : widest;
+            if (merged && height > span_limit + WT_EPSILON)
+                break;
+            if (best[begin] == unreachable)
+                continue;
+
+            int    filament_id = -1;
+            double penalty     = unreachable;
+            for (int candidate : visitors[top_step]) {
+                if (!filament_can_print_height(candidate, float(height)))
+                    continue;
+                double candidate_penalty;
+                if (prefer_max_height) {
+                    candidate_penalty = 1. + std::max(0., double(max_layer_height_for_filament(candidate)) - height);
+                } else {
+                    const double target_height = preferred_height > WT_EPSILON ? double(preferred_height) :
+                                                                                 double(preferred_band_size_for_filament(candidate)) *
+                                                                                     double(m_tower_grid_layer_height);
+                    candidate_penalty = std::abs(height - target_height);
+                }
+                if (candidate_penalty + WT_EPSILON < penalty) {
+                    filament_id = candidate;
+                    penalty     = candidate_penalty;
+                }
+            }
+            // A height no visiting nozzle can extrude is not a slab.
+            if (filament_id < 0)
+                continue;
+            const double cost = best[begin] + penalty;
+            if (cost <= best[end] + WT_EPSILON) {
+                best[end]   = cost;
+                prev[end]   = begin;
+                chosen[end] = filament_id;
+            }
+        }
+    }
+
+    if (prev[span] < 0)
+        return false;
+
+    for (int end = span; end > 0; end = prev[end]) {
+        const int begin = prev[end];
+        groups.push_back({ first_step + begin, first_step + end - 1, chosen[end],
+                           float(step_z(first_step + end - 1) - step_z(first_step + begin - 1)) });
+    }
+    std::reverse(groups.begin(), groups.end());
+    // Short groups join a neighbour only while the extruding nozzle can still print the result.
+    fold_thin_ladder_groups(visitors, reservable, can_merge_top, groups, height_ceiling);
+    return true;
+}
+
+// Bambu Studio 2.9.1 fold_thin_ladder_groups() (5355).
+void WipeTower::fold_thin_ladder_groups(const std::vector<std::vector<int>> &visitors, const std::vector<char> &reservable,
+                                        const std::vector<char> &can_merge_top, std::vector<MergeLadderGroup> &groups,
+                                        float height_ceiling) const
+{
+    auto span_is_reservable = [&reservable](int begin, int end) {
+        for (int step = begin; step <= end; ++step)
+            if (step < 0 || step >= int(reservable.size()) || !reservable[step])
+                return false;
+        return true;
+    };
+    auto pick_filament = [&](int top_step, float height) {
+        int   best       = -1;
+        float best_delta = std::numeric_limits<float>::max();
+        if (top_step < 0 || top_step >= int(visitors.size()))
+            return best;
+        for (int candidate : visitors[top_step]) {
+            if (!filament_can_print_height(candidate, height))
+                continue;
+            const float delta = std::abs(height - preferred_height_for_filament(candidate));
+            if (delta + WT_EPSILON < best_delta) {
+                best       = candidate;
+                best_delta = delta;
+            }
+        }
+        return best;
+    };
+
+    bool folded = true;
+    while (folded) {
+        folded = false;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            const float preferred = preferred_height_for_filament(groups[i].filament_id);
+            if (preferred <= WT_EPSILON || groups[i].height + WT_EPSILON >= preferred)
+                continue;
+            // A slab prints at its top and extends downward, so a short group can only join the group above it, or grow
+            // downward over the group below.
+            if (i + 1 < groups.size() && groups[i + 1].top_step >= 0 && groups[i + 1].top_step < int(can_merge_top.size()) &&
+                can_merge_top[groups[i + 1].top_step] && span_is_reservable(groups[i].begin_step, groups[i].top_step) &&
+                !(height_ceiling > WT_EPSILON && groups[i].height + groups[i + 1].height > height_ceiling + WT_EPSILON)) {
+                const float height   = groups[i].height + groups[i + 1].height;
+                const int   filament = pick_filament(groups[i + 1].top_step, height);
+                if (filament >= 0) {
+                    groups[i + 1].begin_step  = groups[i].begin_step;
+                    groups[i + 1].height      = height;
+                    groups[i + 1].filament_id = filament;
+                    groups.erase(groups.begin() + int(i));
+                    folded = true;
+                    break;
+                }
+            }
+            if (i > 0 && groups[i].top_step >= 0 && groups[i].top_step < int(can_merge_top.size()) && can_merge_top[groups[i].top_step] &&
+                span_is_reservable(groups[i - 1].begin_step, groups[i - 1].top_step) &&
+                !(height_ceiling > WT_EPSILON && groups[i - 1].height + groups[i].height > height_ceiling + WT_EPSILON)) {
+                const float height   = groups[i - 1].height + groups[i].height;
+                const int   filament = pick_filament(groups[i].top_step, height);
+                if (filament >= 0) {
+                    groups[i].begin_step  = groups[i - 1].begin_step;
+                    groups[i].height      = height;
+                    groups[i].filament_id = filament;
+                    groups.erase(groups.begin() + int(i - 1));
+                    folded = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// The rest of the merged ladder, ported verbatim from Bambu Studio 2.9.1 (WipeTower.cpp 6637-7255) apart from the band
+// height (Edge: the nozzle's object ladder) and the helpers' Edge spellings.
+// A band's purge is pinned to the layer it belongs to and already owns the trench it dug for itself, but the
+// fill that tops the band up to its full depth is not pinned to anything. On the layers in between - typically
+// a tool change of some other band - that fill would otherwise run at the tower's base layer height, which is
+// exactly where a large nozzle ends up laying down 0.1 mm. So the fill of every band gets its own Z ladder
+// over the layers between its purges, planned the same way as the outer wall. Runs on the finished blocks
+// because a merged group has to carry the material interfaces and the band depth of the layers it swallows.
+void WipeTower::plan_merged_block_fill()
+{
+    if (!merged_fill_active())
+        return;
+
+    std::vector<int> printed;
+    collect_printed_steps(printed);
+    if (printed.empty())
+        return;
+
+    const int               n = int(printed.size());
+    const std::vector<char> reservable(n, 1); // a band left empty is fine, the wall planner keeps the layer alive
+    const int               wall_filament = get_wall_filament_for_all_layer();
+
+    // Only a layer that lays its bands down through the block bookkeeping reads the merged height back; one
+    // that carries neither a tool change nor a solid interface fills its bands straight from the layer
+    // routine at the whole-tower height. Such a layer already prints at a height its loaded nozzle covers, so
+    // it can be swallowed by a group above it, but it can never top one.
+    std::vector<char> can_merge_top(n, 0);
+    for (int step = 0; step < n; ++step) {
+        const int layer_id = printed[step];
+        can_merge_top[step] = !m_plan[layer_id].tool_changes.empty() ||
+                              std::any_of(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(),
+                                          [layer_id](const WipeTowerBlock &block) {
+                                              return block.layers_type[layer_id] != WipeTowerLayerType::Normal;
+                                          });
+    }
+
+    // Contact beats Contact_UP beats Solid: a merged group has to be laid down with the strongest fill any of
+    // the layers it swallows asked for, otherwise a material interface is silently turned into sparse grid.
+    auto type_rank = [](WipeTowerLayerType type) {
+        switch (type) {
+        case WipeTowerLayerType::Contact: return 3;
+        case WipeTowerLayerType::Contact_UP: return 2;
+        case WipeTowerLayerType::Solid: return 1;
+        default: return 0;
+        }
+    };
+
+    for (WipeTowerBlock &block : m_wipe_tower_blocks) {
+        // A block key contains one nozzle diameter even if a different visiting filament occasionally tops
+        // the block up. Keep this band's grid tied to its own nozzle instead of changing the target height
+        // whenever another nozzle happens to visit the tower.
+        const float block_nozzle_diameter   = block_key_nozzle(block.block_key);
+        const int   block_category          = block_key_category(block.block_key);
+        // Edge: the band of this nozzle's object ladder (preferred_height_for_filament() of a filament of the band's
+        // category and diameter), where Bambu re-derives it from the diameter ratio.
+        float preferred_block_height = 0.f;
+        for (int id = 0; id < int(m_filpar.size()); ++id)
+            if (get_filament_category(size_t(id)) == block_category && std::abs(m_filpar[id].nozzle_diameter - block_nozzle_diameter) <= 0.026f)
+                preferred_block_height = std::max(preferred_block_height, preferred_height_for_filament(id));
+        // The slot under this band is filled by whatever visits the layer, but the slab still has to be a
+        // height this band's own nozzle can lay down. A 0.6 mm PLA filling under 0.4 mm TPU must not
+        // leave the column empty and then extrude one 0.4 mm+ first layer.
+        float block_height_ceiling = 0.f;
+        for (int id = 0; id < int(m_filpar.size()); ++id) {
+            if (get_filament_category(size_t(id)) != block_category)
+                continue;
+            if (std::abs(m_filpar[id].nozzle_diameter - block_nozzle_diameter) > 0.026f)
+                continue;
+            block_height_ceiling = std::max(block_height_ceiling, max_layer_height_for_filament(id));
+        }
+        if (block_height_ceiling <= WT_EPSILON)
+            block_height_ceiling = 0.7f * block_nozzle_diameter;
+        bool       category_is_tpu = false;
+        for (int id = 0; id < int(m_filpar.size()); ++id)
+            if (get_filament_category(size_t(id)) == block_category && (m_filpar[id].material == "TPU")) {
+                category_is_tpu = true;
+                break;
+            }
+        // Ramming is extruded by the outgoing filament into its own band. The slot under that strip is
+        // still filled, and switching material on every grid step turns each one into a solid interface.
+        bool band_has_tpu_ramming = false;
+        if (category_is_tpu) {
+            for (int layer_id = 0; layer_id < int(m_plan.size()) && !band_has_tpu_ramming; ++layer_id) {
+                for (const WipeTowerInfo::ToolChange &tool_change : m_plan[layer_id].tool_changes) {
+                    const int old_tool = int(tool_change.old_tool);
+                    if (tool_change.nozzle_change_depth > EPSILON &&
+                        tool_change.nozzle_change.need_ramming &&
+                        (m_filpar[old_tool].material == "TPU") && get_block_key(size_t(old_tool), layer_id) == block.block_key) {
+                        band_has_tpu_ramming = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // An extra lane is the band opened because the first one could not host the next purge. Its slot
+        // below that purge was empty. A TPU ramming band has the same hole under the ramming strip. Both
+        // are covered with the thickest slab the filament actually on each layer can extrude.
+        const bool prefer_max_fill  = category_is_tpu && ((block.block_key & 0xF) > 0 || band_has_tpu_ramming);
+        // Under a TPU ramming strip, stay on that category for as far as its nozzle can reach. A foreign
+        // category only fills the stretch TPU itself cannot extrude.
+        const bool prefer_own_fill  = band_has_tpu_ramming;
+
+        // The ladder must only accept heights the filament that will actually top this band up can extrude,
+        // so plan it against that one filament rather than against everything visiting the tower: the
+        // generic list contains the other bands' nozzles too, and the largest of them would wave through a
+        // slab the band's own nozzle cannot lay down.
+        // A band only takes material of its own category, so it simply has no visitor on a layer none of that
+        // category visits, and that layer gets swallowed by the next visit above it.
+        std::vector<std::vector<int>> block_visitors(n);
+        for (int step = 0; step < n; ++step) {
+            const int layer_id = printed[step];
+            const int filler    = block_fill_filament_base(m_plan[layer_id], layer_id, block, wall_filament);
+            if (filler >= 0)
+                block_visitors[step].assign(1, filler);
+        }
+
+        // Steps the purge plan already decided on: the band lays down its purge there, or it is the trench
+        // such a purge sinks into. A trench always runs right up to its purge, so a free step never follows
+        // one. A band that has nothing to fill on a layer is not a step of its ladder either.
+        std::vector<char> fixed(n, 0);
+        for (int step = 0; step < n; ++step) {
+            const int layer_id = printed[step];
+            if (block.layer_reserved[layer_id] || m_block_slab_height[layer_id].count(block.block_key) ||
+                block.layer_depths[layer_id] <= 2.f * m_perimeter_width)
+                fixed[step] = 1;
+        }
+
+        // This is the top surface of this band, not the previous layer visited by the whole tower. Other
+        // nozzle bands may print between two visits of this one without advancing its supporting surface.
+        double band_top_z = tower_bed_z();
+        for (int run_begin = 0; run_begin < n;) {
+            if (fixed[run_begin]) {
+                const int layer_id = printed[run_begin];
+                // A purge is real extrusion in this band and brings its surface to this Z. A reserved step
+                // is only the empty trench below a later purge, so it must not advance the surface.
+                if (m_block_slab_height[layer_id].count(block.block_key))
+                    band_top_z = double(m_plan[layer_id].z);
+                ++run_begin;
+                continue;
+            }
+            // The band widens towards the bed, so a group may only span layers of one depth: a slab printed
+            // at the top of the group cannot cover a wider part of the band below it.
+            const float run_depth = block.layer_depths[printed[run_begin]];
+            int         run_end   = run_begin;
+            while (run_end + 1 < n && !fixed[run_end + 1] &&
+                   std::abs(block.layer_depths[printed[run_end + 1]] - run_depth) <= WT_EPSILON)
+                ++run_end;
+            const int next_run = run_end + 1;
+            // Layers this category does not visit are still filled: the slot under a TPU column is printed
+            // by whatever other material is on the tower. Leaving them out of the ladder kept that support
+            // fill on the raw grid height, so a 0.4 or 0.6 nozzle laid it down at 0.1 mm.
+            auto filaments_on_step = [&](int step, bool other_category_only) {
+                std::vector<int> visitors;
+                auto             add = [&](int filament) {
+                    if (filament < 0)
+                        return;
+                    if (other_category_only &&
+                        get_filament_category(size_t(filament)) == block_key_category(block.block_key))
+                        return;
+                    if (std::find(visitors.begin(), visitors.end(), filament) == visitors.end())
+                        visitors.push_back(filament);
+                };
+                const int            layer_id = printed[step];
+                const WipeTowerInfo &layer    = m_plan[layer_id];
+                if (layer.tool_changes.empty())
+                    add(loaded_filament(layer_id));
+                else {
+                    add(int(layer.tool_changes.front().old_tool));
+                    for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes)
+                        add(int(tool_change.new_tool));
+                }
+                return visitors;
+            };
+            auto apply_fill_groups = [&](const std::vector<MergeLadderGroup> &groups, bool foreign_support, bool keep_sparse = false) {
+                double surface = band_top_z;
+                for (const MergeLadderGroup &group : groups) {
+                    const int top_layer = printed[group.top_step];
+                    float     height    = group.height;
+                    // The support nozzle may already be extruding a thicker slab of its own on this layer.
+                    // Use that height when it still sits on this band's surface, so the fill under TPU
+                    // matches the 0.4/0.6 band instead of the grid step.
+                    if (foreign_support && group.filament_id >= 0 &&
+                        height + WT_EPSILON < preferred_height_for_filament(group.filament_id)) {
+                        const float carrier = slab_height_for(size_t(group.filament_id), top_layer, height);
+                        const float bottom  = m_plan[top_layer].z - carrier;
+                        if (carrier > height + WT_EPSILON && double(bottom) + WT_EPSILON >= surface &&
+                            (block_height_ceiling <= WT_EPSILON || carrier <= block_height_ceiling + WT_EPSILON))
+                            height = carrier;
+                    }
+                    const float bottom_z = m_plan[top_layer].z - height;
+                    for (int step = 0; step < n; ++step) {
+                        const int   layer_id = printed[step];
+                        const float z        = m_plan[layer_id].z;
+                        if (z <= bottom_z + WT_EPSILON)
+                            continue;
+                        if (z > m_plan[top_layer].z + WT_EPSILON)
+                            break;
+                        if (layer_id == top_layer)
+                            continue;
+                        if (layer_id < int(m_block_slab_height.size()) &&
+                            m_block_slab_height[layer_id].count(block.block_key))
+                            continue;
+                        block.layer_reserved[layer_id] = 1;
+                        // A same-material support run stays sparse. Promoting Solid from a swallowed
+                        // layer would turn the whole slab solid just because the TPU category flickered.
+                        if (!keep_sparse &&
+                            type_rank(block.layers_type[layer_id]) > type_rank(block.layers_type[top_layer]))
+                            block.layers_type[top_layer] = block.layers_type[layer_id];
+                    }
+                    if (keep_sparse)
+                        block.layers_type[top_layer] = WipeTowerLayerType::Normal;
+                    // Remember which filament this slab actually extrudes. A later category check
+                    // compares these, and generation has to lay down the same one.
+                    if (top_layer < (int) block.layer_fill_filament.size() && group.filament_id >= 0)
+                        block.layer_fill_filament[top_layer] = group.filament_id;
+                    block.layer_heights[top_layer] = height;
+                    if (height > m_plan[top_layer].height + WT_EPSILON)
+                        m_merged_slabs_active = true;
+                    BOOST_LOG_TRIVIAL(debug)
+                        << "[wt_fill]   block=" << block.block_key << " layers z=(" << bottom_z << ".."
+                        << m_plan[top_layer].z << "] -> print at " << top_layer << " h=" << height
+                        << " filament=" << group.filament_id
+                        << (foreign_support ? " (support under other category)" : "");
+                    surface = double(m_plan[top_layer].z);
+                }
+                if (!groups.empty())
+                    band_top_z = surface;
+            };
+            auto plan_fill_span = [&](int begin, int end, const std::vector<std::vector<int>> &visitors,
+                                      float preferred, bool foreign_support) {
+                while (end >= begin && (end >= n || visitors[end].empty()))
+                    --end;
+                if (begin > end)
+                    return;
+                BOOST_LOG_TRIVIAL(debug)
+                    << "[wt_fill] block=" << block.block_key << " lane=" << (block.block_key & 0xF)
+                    << " run=layers " << printed[begin] << ".." << printed[end] << " depth=" << run_depth
+                    << " bottom_z=" << band_top_z << (foreign_support ? " support-fill" : " own-fill")
+                    << (prefer_max_fill ? " max-height" : "");
+                std::vector<MergeLadderGroup> groups;
+                const float capped_preferred = block_height_ceiling > WT_EPSILON ?
+                                                   std::min(preferred, block_height_ceiling) : preferred;
+                if (plan_band_merge_ladder(printed, begin, end, band_top_z, visitors, reservable, can_merge_top, groups,
+                                      capped_preferred, prefer_max_fill, block_height_ceiling))
+                    apply_fill_groups(groups, foreign_support);
+                else {
+                    BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot merge the fill of band " << block.block_key
+                                               << " over printed layers " << printed[begin] << ".." << printed[end]
+                                               << "; keeping their base layer heights";
+                    band_top_z = double(m_plan[printed[end]].z);
+                }
+            };
+            // Own-category stretches keep this band's nozzle grid. Stretches nobody of this category visits
+            // are the support fill under that column, planned on the nozzle that actually prints them.
+            // An extra TPU lane, and the band a TPU ramming strip lands in, are the exception: chopping
+            // them wherever the category flickers fills every grid step with a different material, and each
+            // change is a solid interface. Lock one material for as far as its nozzle can reach, and lay
+            // that stretch down at the nozzle's maximum height. Under the ramming strip the locked material
+            // is TPU itself whenever that nozzle can still print the slab.
+            auto filaments_of = [&](int step, int category) {
+                std::vector<int> out;
+                for (int filament : filaments_on_step(step, false))
+                    if (get_filament_category(size_t(filament)) == category)
+                        out.push_back(filament);
+                return out;
+            };
+            auto mark_fill_interface = [&](const std::vector<MergeLadderGroup> &groups, int category, int prev_category, bool meets_band) {
+                if (groups.empty())
+                    return;
+                const int first_layer = printed[groups.front().top_step];
+                const int last_layer  = printed[groups.back().top_step];
+                if (prev_category >= 0 && prev_category != category)
+                    block.layers_type[first_layer] = WipeTowerLayerType::Contact;
+                if (meets_band && category != block_category)
+                    block.layers_type[last_layer] = WipeTowerLayerType::Contact;
+            };
+            if (prefer_max_fill) {
+                int prev_category = -1;
+                if (run_begin > 0) {
+                    for (int step = run_begin - 1; step >= 0 && fixed[step]; --step) {
+                        if (m_block_slab_height[printed[step]].count(block.block_key)) {
+                            prev_category = block_category;
+                            break;
+                        }
+                    }
+                }
+                const bool meets_band = next_run < n && fixed[next_run] &&
+                                        (block.layer_reserved[printed[next_run]] ||
+                                         m_block_slab_height[printed[next_run]].count(block.block_key));
+                for (int cursor = run_begin; cursor <= run_end;) {
+                    std::vector<int> categories;
+                    for (int step = cursor; step <= run_end; ++step)
+                        for (int filament : filaments_on_step(step, false)) {
+                            const int category = get_filament_category(size_t(filament));
+                            if (std::find(categories.begin(), categories.end(), category) == categories.end())
+                                categories.push_back(category);
+                        }
+                    int   best_cat   = -1;
+                    int   best_end   = cursor - 1;
+                    float best_max_h = -1.f;
+                    int   own_end    = cursor - 1;
+                    for (int category : categories) {
+                        float cat_max_h = 0.f;
+                        for (int step = cursor; step <= run_end; ++step)
+                            for (int filament : filaments_of(step, category))
+                                cat_max_h = std::max(cat_max_h, max_layer_height_for_filament(filament));
+                        if (block_height_ceiling > WT_EPSILON)
+                            cat_max_h = std::min(cat_max_h, block_height_ceiling);
+                        double surface = band_top_z;
+                        int    next    = cursor;
+                        int    end     = cursor - 1;
+                        while (next <= run_end) {
+                            int farthest = -1;
+                            for (int step = next; step <= run_end; ++step) {
+                                const std::vector<int> fils = filaments_of(step, category);
+                                if (fils.empty())
+                                    continue;
+                                const double height = double(m_plan[printed[step]].z) - surface;
+                                if (height > double(cat_max_h) + WT_EPSILON)
+                                    break;
+                                bool swallows = false;
+                                for (int below = next; below < step; ++below)
+                                    if (double(m_plan[printed[below]].z) > surface + WT_EPSILON)
+                                        swallows = true;
+                                if (swallows && !can_merge_top[step])
+                                    continue;
+                                const bool can_print = std::any_of(fils.begin(), fils.end(), [&](int filament) {
+                                    return filament_can_print_height(filament, float(height));
+                                });
+                                if (!can_print)
+                                    continue;
+                                farthest = step;
+                            }
+                            if (farthest < 0)
+                                break;
+                            end     = farthest;
+                            surface = double(m_plan[printed[farthest]].z);
+                            next    = farthest + 1;
+                        }
+                        if (category == block_category && end >= cursor)
+                            own_end = end;
+                        if (end > best_end || (end == best_end && cat_max_h > best_max_h + WT_EPSILON)) {
+                            best_end   = end;
+                            best_cat   = category;
+                            best_max_h = cat_max_h;
+                        }
+                    }
+                    // The ramming strip is TPU. Take that category for the whole reach of its nozzle before
+                    // a longer foreign stretch is allowed to replace it.
+                    if (prefer_own_fill && own_end >= cursor) {
+                        best_cat = block_category;
+                        best_end = own_end;
+                    }
+                    if (best_cat < 0 || best_end < cursor) {
+                        std::vector<std::vector<int>> foreign(n);
+                        foreign[cursor] = filaments_on_step(cursor, false);
+                        plan_fill_span(cursor, cursor, foreign, 0.f, true);
+                        ++cursor;
+                        prev_category = -1;
+                        continue;
+                    }
+                    std::vector<std::vector<int>> visitors(n);
+                    for (int step = cursor; step <= best_end; ++step)
+                        visitors[step] = filaments_of(step, best_cat);
+                    std::vector<MergeLadderGroup> groups;
+                    if (plan_band_merge_ladder(printed, cursor, best_end, band_top_z, visitors, reservable, can_merge_top, groups,
+                                          0.f, true, block_height_ceiling)) {
+                        apply_fill_groups(groups, true, true);
+                        mark_fill_interface(groups, best_cat, prev_category, best_end == run_end && meets_band);
+                    } else {
+                        BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot merge the fill of band " << block.block_key
+                                                   << " over printed layers " << printed[cursor] << ".." << printed[best_end]
+                                                   << "; keeping their base layer heights";
+                        band_top_z = double(m_plan[printed[best_end]].z);
+                    }
+                    prev_category = best_cat;
+                    cursor        = best_end + 1;
+                }
+            } else {
+                for (int cursor = run_begin; cursor <= run_end;) {
+                    const bool own     = !block_visitors[cursor].empty();
+                    int        seg_end = cursor;
+                    while (seg_end + 1 <= run_end && block_visitors[seg_end + 1].empty() == !own)
+                        ++seg_end;
+                    if (own)
+                        plan_fill_span(cursor, seg_end, block_visitors, preferred_block_height, false);
+                    else {
+                        std::vector<std::vector<int>> foreign(n);
+                        for (int step = cursor; step <= seg_end; ++step)
+                            foreign[step] = filaments_on_step(step, true);
+                        plan_fill_span(cursor, seg_end, foreign, 0.f, true);
+                    }
+                    cursor = seg_end + 1;
+                }
+            }
+            run_begin = next_run;
+        }
+    }
+
+    // Each block is one adhesiveness category, but the slot under it is often printed by a
+    // filament from another block. Those two meet on a plane, and both slabs are the interface.
+    // PLA in a TPU block is only a fill, so it was already marked. TPU's own layers are the
+    // purge: skipping those left the TPU side of the same joint sparse. A run of one category
+    // stays sparse except at the joint. Layers 1-5 PLA, 6-7 TPU, 8-10 PLA, then TPU again
+    // mark 5, 6, 7, 8 and 10.
+    for (WipeTowerBlock &block : m_wipe_tower_blocks) {
+        struct PrintedSlab {
+            int   layer_id;
+            int   filament;
+            float top_z;
+            float bottom_z;
+        };
+        std::vector<PrintedSlab> slabs;
+        for (int layer_id = 0; layer_id < int(m_plan.size()); ++layer_id) {
+            if (layer_is_skipped(layer_id))
+                continue;
+            if (layer_id < int(block.layer_reserved.size()) && block.layer_reserved[layer_id])
+                continue;
+            if (band_fill_depth(block, layer_id) <= 2.f * m_perimeter_width)
+                continue;
+            int filament = -1;
+            if (layer_id < int(block.layer_fill_filament.size()) && block.layer_fill_filament[layer_id] >= 0)
+                filament = block.layer_fill_filament[layer_id];
+            else
+                filament = block_fill_filament_base(m_plan[layer_id], layer_id, block, wall_filament);
+            if (filament < 0)
+                continue;
+            const float height = layer_id < int(block.layer_heights.size()) && block.layer_heights[layer_id] > WT_EPSILON ?
+                                     block.layer_heights[layer_id] :
+                                     m_plan[layer_id].height;
+            if (height <= WT_EPSILON)
+                continue;
+            const float top_z = m_plan[layer_id].z;
+            slabs.push_back({layer_id, filament, top_z, top_z - height});
+        }
+        for (const PrintedSlab &upper : slabs) {
+            const PrintedSlab *support = nullptr;
+            for (const PrintedSlab &lower : slabs) {
+                if (lower.layer_id >= upper.layer_id || lower.top_z > upper.bottom_z + WT_EPSILON)
+                    continue;
+                if (support == nullptr || lower.top_z > support->top_z)
+                    support = &lower;
+            }
+            if (support == nullptr || support->top_z + WT_EPSILON < upper.bottom_z)
+                continue;
+            if (get_filament_category(size_t(support->filament)) == get_filament_category(size_t(upper.filament)))
+                continue;
+            block.layers_type[support->layer_id] = WipeTowerLayerType::Contact;
+            block.layers_type[upper.layer_id]    = WipeTowerLayerType::Contact;
+        }
+    }
+}
+
+// Only a purge is pinned to the layer it belongs to; the outer wall is not. So the wall gets its own Z ladder
+// spanning every layer the tower prints, no matter where the tool changes fall: a group draws one wall at its
+// top layer covering the whole span, and the layers below it merely omit their wall. Planning globally is what
+// lets an isolated tool-change layer - too thin for any large nozzle on its own - hand its wall to the next
+// printed layer instead of falling back to the base layer height.
+void WipeTower::plan_merged_outer_wall()
+{
+    const int layer_count = int(m_plan.size());
+    m_wall_filament.assign(layer_count, -1);
+    m_wall_slab_height.assign(layer_count, 0.f);
+    m_wall_reserved.assign(layer_count, 0);
+
+    if (!merged_fill_active())
+        return;
+
+    // The foundation participates in the wall ladder so the first printed wall may span down to the bed.
+    // The tower's adhesion anchor is the group covering the foundation, not the foundation layer itself:
+    // a nozzle that first reaches the tower a few layers up may lay that wall down from the bed in one go.
+    std::vector<int> printed;
+    collect_printed_steps(printed);
+    if (printed.empty())
+        return;
+    const int n = int(printed.size());
+
+    // Like on a single-diameter tower, the wall keeps to the material of the tower's wall filament: a layer
+    // any filament of that category visits hands its wall only to one of those, the wall filament itself
+    // first and the others in the order they come to the tower. Another material takes the wall over only
+    // on a layer none of that category visits. A layer without tool changes is visited by whatever is still
+    // loaded.
+    const int wall_filament = get_wall_filament_for_all_layer();
+    const int wall_category = wall_filament >= 0 ? get_filament_category(wall_filament) : -1;
+    int       initial       = -1;
+    for (const WipeTowerInfo &info : m_plan)
+        if (!info.tool_changes.empty()) {
+            initial = int(info.tool_changes.front().old_tool);
+            break;
+        }
+    std::vector<std::vector<int>> visitors(n);
+    for (int step = 0; step < n; ++step) {
+        const WipeTowerInfo &layer = m_plan[printed[step]];
+        std::vector<int>     arrivals;
+        auto                 arrive = [&arrivals](int filament) {
+            if (filament >= 0 && std::find(arrivals.begin(), arrivals.end(), filament) == arrivals.end())
+                arrivals.push_back(filament);
+        };
+        if (layer.tool_changes.empty()) {
+            const int loaded = loaded_filament(printed[step]);
+            arrive(loaded >= 0 ? loaded : initial);
+        } else {
+            arrive(int(layer.tool_changes.front().old_tool));
+            for (const WipeTowerInfo::ToolChange &tool_change : layer.tool_changes)
+                arrive(int(tool_change.new_tool));
+        }
+        std::vector<int> own_material;
+        if (std::find(arrivals.begin(), arrivals.end(), wall_filament) != arrivals.end())
+            own_material.push_back(wall_filament);
+        for (int filament : arrivals)
+            if (filament != wall_filament && get_filament_category(size_t(filament)) == wall_category)
+                own_material.push_back(filament);
+        visitors[step] = own_material.empty() ? std::move(arrivals) : std::move(own_material);
+    }
+
+    // Every printed layer may hand its wall to the group above. Holding a wall back so that the layer keeps a
+    // visit would defeat the ladder: a tool-change layer sitting one thin step above another one has no other
+    // way out than merging its wall upwards. A layer left with neither a wall nor an unreserved band lays down
+    // nothing at all, and generate_new() drops that visit rather than travelling to the tower for nothing.
+    // The foundation is no exception; finish_layer_new() gives the brim to whichever wall reaches the bed.
+    const std::vector<char> reservable(n, 1);
+
+    // The layer routine draws the wall from the planned height on every layer, so any of them can top a group.
+    const std::vector<char>       can_merge_top(n, 1);
+    const double                  bottom_z = tower_bed_z();
+    std::vector<MergeLadderGroup> groups;
+    if (!plan_band_merge_ladder(printed, 0, n - 1, bottom_z, visitors, reservable, can_merge_top, groups, 0.f, false, 0.f)) {
+        BOOST_LOG_TRIVIAL(warning) << "WipeTower: cannot lay out a wall ladder over the printed tower layers "
+                                   << printed.front() << ".." << printed.back()
+                                   << "; keeping the existing per-layer wall plan";
+        return;
+    }
+
+    for (const MergeLadderGroup &group : groups) {
+        for (int step = group.begin_step; step < group.top_step; ++step)
+            m_wall_reserved[printed[step]] = 1;
+        m_wall_filament[printed[group.top_step]]    = group.filament_id;
+        m_wall_slab_height[printed[group.top_step]] = group.height;
+        if (group.begin_step < group.top_step) {
+            m_merged_slabs_active = true;
+            const int top_layer = printed[group.top_step];
+            BOOST_LOG_TRIVIAL(debug)
+                << "[wt_wall] layers " << printed[group.begin_step] << ".." << top_layer << " -> print at "
+                << top_layer << " z=" << m_plan[top_layer].z << " h=" << group.height
+                << " span=(" << (m_plan[top_layer].z - group.height) << ".." << m_plan[top_layer].z
+                << "] filament=" << group.filament_id;
+        }
+    }
+}
+
+// The tower's Z is decided by four ladders that never see each other's result: the tower-wide one, the trench
+// each purge digs, the fill of every band and the outer wall. Walk the finished plan and report every place
+// where a band, or the wall, claims Z that a lower layer already filled - such a slab is extruded straight
+// into the previous one instead of on top of it.
+void WipeTower::audit_merged_slabs() const
+{
+    if (m_plan.empty() || !m_merged_slabs_active)
+        return;
+
+    // Mirrors the fill condition of finish_layer_new(): a reserved band is the trench of a slab above, and a
+    // band with no depth left lays nothing down. A purge is pinned to its layer and drawn either way.
+    auto band_prints = [this](const WipeTowerBlock &block, int layer_id) {
+        if (layer_is_skipped(layer_id))
+            return false;
+        if (layer_id < int(m_block_slab_height.size()) && m_block_slab_height[layer_id].count(block.block_key))
+            return true;
+        return layer_id < int(block.layer_reserved.size()) && !block.layer_reserved[layer_id] &&
+               band_fill_depth(block, layer_id) > 2.f * m_perimeter_width;
+    };
+
+    int overlaps = 0;
+    for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
+        float prev_top   = 0.f;
+        int   prev_layer = -1;
+        for (int layer_id = 0; layer_id < int(m_plan.size()); ++layer_id) {
+            if (! band_prints(block, layer_id))
+                continue;
+            const float top    = m_plan[layer_id].z;
+            const float height = (layer_id < int(block.layer_heights.size()) && block.layer_heights[layer_id] > 0.f) ?
+                                     block.layer_heights[layer_id] : m_plan[layer_id].height;
+            if (prev_layer >= 0 && top - height + WT_EPSILON < prev_top) {
+                ++overlaps;
+                BOOST_LOG_TRIVIAL(error)
+                    << "[wt_audit] band " << block.block_key << " (cat=" << block_key_category(block.block_key)
+                    << " lane=" << (block.block_key & 0xF) << " y=" << block.start_depth << ") fills ("
+                    << (top - height) << ".." << top << "] at layer " << layer_id << " h=" << height
+                    << ", but layer " << prev_layer << " already reached " << prev_top << "; overlap "
+                    << (prev_top - (top - height)) << " mm";
+            }
+            prev_top   = top;
+            prev_layer = layer_id;
+        }
+    }
+
+    float prev_wall_top   = 0.f;
+    int   prev_wall_layer = -1;
+    for (int layer_id = 0; layer_id < int(m_plan.size()); ++layer_id) {
+        if (layer_is_skipped(layer_id) || (layer_id < int(m_wall_reserved.size()) && m_wall_reserved[layer_id]))
+            continue;
+        const float top    = m_plan[layer_id].z;
+        const float height = (layer_id < int(m_wall_slab_height.size()) && m_wall_slab_height[layer_id] > 0.f) ?
+                                 m_wall_slab_height[layer_id] : layer_slab_height(layer_id, m_plan[layer_id].height);
+        if (prev_wall_layer >= 0 && top - height + WT_EPSILON < prev_wall_top) {
+            ++overlaps;
+            BOOST_LOG_TRIVIAL(error)
+                << "[wt_audit] outer wall draws (" << (top - height) << ".." << top << "] at layer " << layer_id
+                << " h=" << height << ", but layer " << prev_wall_layer << " already reached " << prev_wall_top
+                << "; overlap " << (prev_wall_top - (top - height)) << " mm";
+        }
+        prev_wall_top   = top;
+        prev_wall_layer = layer_id;
+    }
+
+    if (overlaps)
+        BOOST_LOG_TRIVIAL(error) << "[wt_audit] wipe tower slab plan has " << overlaps
+                                 << " overlapping slab(s) over " << m_wipe_tower_blocks.size() << " band(s)";
+    else
+        BOOST_LOG_TRIVIAL(info) << "[wt_audit] wipe tower slab plan is free of overlapping slabs over "
+                                << m_wipe_tower_blocks.size() << " band(s)";
+}
+
+
 // Orca #10780 / #15035 (Bambu Studio plan_tower_new()): the block gaps, a rib tower squared, the blocks, the stretch to
 // the stability minimum (a rib tower lengthens its ribs instead), the first layer printed solid, the wall gaps.
 void WipeTower::plan_tower_new()
@@ -4245,6 +6041,15 @@ void WipeTower::plan_tower_new()
     // Bambu Studio's "auto" brim (prime_tower_brim_width -1), from the tower's real height.
     if (m_wipe_tower_brim_width < 0.f)
         m_wipe_tower_brim_width = get_auto_brim_by_height(m_wipe_tower_height);
+
+    // PR-C (Bambu Studio 2.9.1 plan_tower_new(), WipeTower.cpp:7259-7261): on a mixed-diameter plate the whole-tower
+    // ladder and the purge trenches first, so the gaps and the block depths below are sized at the slab heights. Both are
+    // no-ops otherwise.
+    plan_tower_ladder();
+    plan_merged_slabs();
+    for (size_t idx = 0; idx < m_plan.size(); ++idx)
+        if (layer_is_skipped(int(idx)))
+            m_plan[idx].combined_away = true; // nothing is printed there: the emitter leaves the layer out (Orca #15841's flag)
 
     calc_block_infill_gap();
     if (m_use_rib_wall) {
@@ -4256,9 +6061,9 @@ void WipeTower::plan_tower_new()
         const float square_width = align_ceil(std::sqrt(max_depth * m_wipe_tower_width * m_extra_spacing), m_perimeter_width);
         if (! m_wipe_tower_blocks.empty() && square_width - 2 * m_perimeter_width > EPSILON) {
             m_wipe_tower_width = square_width;
-            for (WipeTowerInfo &info : m_plan)
-                for (WipeTowerInfo::ToolChange &tc : info.tool_changes)
-                    replan_toolchange(tc, info.height);
+            for (size_t idx = 0; idx < m_plan.size(); ++idx)
+                for (WipeTowerInfo::ToolChange &tc : m_plan[idx].tool_changes)
+                    replan_toolchange(tc, m_plan[idx].height, int(idx));
         }
     }
 
@@ -4285,7 +6090,8 @@ void WipeTower::plan_tower_new()
 
     // Edge: the tower's first layer is the print's first, or with sparse layers skipped its first tool change,
     // the layer it lays on the bed (the print's first is not laid then). 0 when nothing is skipped.
-    const size_t first_tower_layer = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
+    // PR-C: with merged slabs, the first layer the tower prints (Bambu Studio first_printed_layer_idx()).
+    const size_t first_tower_layer = size_t(first_printed_layer_idx());
     for (size_t idx = 0; idx < m_plan.size(); ++idx) {
         WipeTowerInfo &info = m_plan[idx];
         if (idx == first_tower_layer) {
@@ -4310,13 +6116,18 @@ void WipeTower::plan_tower_new()
             for (WipeTowerInfo::ToolChange &tc : info.tool_changes) {
                 tc.required_depth *= m_extra_spacing;
                 tc.nozzle_change_depth *= m_extra_spacing;
-                tc.wipe_length = volume_to_length(tc.wipe_volume, tool_line_width(tc.new_tool), info.height);
+                tc.wipe_length = volume_to_length(tc.wipe_volume, tool_line_width(tc.new_tool), slab_height_for(tc.new_tool, int(idx), info.height));
             }
         }
     }
 
     update_all_layer_depth(max_depth);
     set_nozzle_last_layer_id();
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:7344-7349): the band fill and the outer wall are the parts free to merge
+    // across Z, and both need the finished blocks. Then the wall gaps, which skip what those ladders left empty.
+    plan_merged_block_fill();
+    plan_merged_outer_wall();
+    audit_merged_slabs();
     get_all_wall_skip_points();
 
     if (m_use_rib_wall) {
@@ -4352,8 +6163,13 @@ void WipeTower::get_all_wall_skip_points()
     if (!m_use_gap_wall)
         return;
     const std::vector<float> y_shifts = layer_y_shifts();
-    for (size_t i = 0; i < m_plan.size(); ++i)
+    for (size_t i = 0; i < m_plan.size(); ++i) {
+        // PR-C (Bambu Studio 2.9.1 get_all_wall_skip_points(), WipeTower.cpp:3435-3437): a layer the tower drops, and a layer
+        // whose wall a merged group above prints, cut no gaps.
+        if (layer_is_skipped(int(i)) || (i < m_wall_reserved.size() && m_wall_reserved[i]))
+            continue;
         get_wall_skip_points(m_plan[i], int(i), y_shifts);
+    }
 }
 
 void WipeTower::get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const std::vector<float> &y_shifts)
@@ -4377,8 +6193,9 @@ void WipeTower::get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const s
         const float  wipe_depth          = tc.required_depth - nozzle_change_depth;
         if (!is_valid_last_layer(old_filament, layer_id, layer.z))
             nozzle_change_depth = 0.f;
-        const int       new_category = get_filament_category(new_filament);
-        const int       old_category = get_filament_category(old_filament);
+        // PR-C: keyed by the block (the category on a single-diameter plate).
+        const int       new_category = get_block_key(new_filament, layer_id);
+        const int       old_category = get_block_key(old_filament, layer_id);
         WipeTowerBlock *block        = get_block_by_category(new_category, false);
         if (block == nullptr)
             continue;
@@ -4429,16 +6246,27 @@ void WipeTower::get_wall_skip_points(WipeTowerInfo &layer, int layer_id, const s
     // finish_block_solid(), which starts outside the tower as well: a gap where its first row crosses the wall.
     if (m_enable_tower_interface_features) {
         for (const WipeTowerBlock &block : m_wipe_tower_blocks) {
-            const auto  it          = cur_block_depth.find(block.filament_adhesiveness_category);
+            // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:3507-3508): a band reserved for a merged slab above prints nothing here.
+            if (size_t(layer_id) < block.layer_reserved.size() && block.layer_reserved[layer_id])
+                continue;
+            const auto  it          = cur_block_depth.find(block.block_key);
             const float block_depth = it != cur_block_depth.end() ? it->second : block.start_depth;
             if (block_depth + EPSILON >= block.start_depth + block.layer_depths[layer_id] - m_perimeter_width)
                 continue;
             if (block.layers_type[layer_id] != WipeTowerLayerType::Contact || std::abs(block_depth - block.start_depth) >= EPSILON)
                 continue;
-            // In step with finish_block_solid(): its rows one line width apart, the top one at grid_depth.
-            const float dy_skip    = block.layer_depths[layer_id] - m_perimeter_width;
-            const int   n_skip     = int((dy_skip + 0.25f * m_perimeter_width) / m_perimeter_width + 1);
-            const float grid_depth = m_perimeter_width * float(n_skip - 1);
+            // In step with finish_block_solid(): its rows one line width apart, the top one at grid_depth. PR-C (Bambu Studio
+            // 2.9.1, WipeTower.cpp:3517-3523): with merged fill the rows are the filling filament's own line width.
+            float fill_width = m_perimeter_width;
+            if (merged_fill_active()) {
+                const int fill_filament = get_block_fill_filament(layer, layer_id, block, get_wall_filament_for_all_layer());
+                if (fill_filament < 0)
+                    continue;
+                fill_width = tool_line_width(size_t(fill_filament));
+            }
+            const float dy_skip    = block.layer_depths[layer_id] - fill_width;
+            const int   n_skip     = int((dy_skip + 0.25f * fill_width) / fill_width + 1);
+            const float grid_depth = fill_width * float(n_skip - 1);
             Vec2f       res;
             switch (layer_id % 4) {
             case 0: res = Vec2f(0.f, block_depth); break;
@@ -4564,6 +6392,18 @@ int WipeTower::get_wall_filament_for_all_layer() const
         current_tool = layer.tool_changes.back().new_tool;
     }
 
+    // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:7400-7408): the wall spans every layer, including the ones a merged slab leaves
+    // empty, so it has to come from a nozzle that can print the whole-tower slabs. Drop the others unless that would leave
+    // no candidate. Without merged slabs every filament qualifies.
+    if (m_merged_slabs_active &&
+        std::any_of(filament_counts.begin(), filament_counts.end(), [this](const std::pair<const int, int> &e) { return can_print_base_layers(e.first); })) {
+        for (auto iter = filament_counts.begin(); iter != filament_counts.end();)
+            iter = can_print_base_layers(iter->first) ? std::next(iter) : filament_counts.erase(iter);
+        category_counts.clear();
+        for (const auto &entry : filament_counts)
+            category_counts[get_filament_category(size_t(entry.first))] += entry.second;
+    }
+
     int selected_category = -1;
     int selected_count    = 0;
     for (const auto &[category, count] : category_counts)
@@ -4581,6 +6421,122 @@ int WipeTower::get_wall_filament_for_all_layer() const
     return filament_id;
 }
 
+// PR-C (Bambu Studio 2.9.1 generate_new(), WipeTower.cpp:7900-8040): one band's fill on a layer of a merged tower. A band
+// reserved as the trench of a slab above stays empty; the fill is laid by a filament of the band's own category that visits
+// the tower on this layer, at the band's slab height; a sparse grid keeps the purge front so the next layer can bridge it.
+void WipeTower::merged_finish_block(const WipeTowerInfo &layer, WipeTowerBlock &block, int wall_idx, std::vector<ToolChangeResult> &layer_result,
+                                    ToolChangeResult &finish_layer_tcr)
+{
+    const int cur = int(m_cur_layer_id);
+    if (block.layer_reserved[cur]) {
+        block.finish_depth[cur] = block.start_depth;
+        return;
+    }
+    const float planned_depth = block.start_depth + band_fill_depth(block, cur);
+    block.finish_depth[cur]   = m_merged_slabs_active ? std::min(block.cur_depth, planned_depth) : block.start_depth + block.depth;
+    if (block.cur_depth + EPSILON >= planned_depth - m_perimeter_width)
+        return;
+    const WipeTowerLayerType layer_type  = block.layers_type[cur];
+    bool                     block_solid = layer_type != WipeTowerLayerType::Normal;
+    const float              band_height = block.layer_heights[cur];
+    int                      fill        = get_block_fill_filament(layer, cur, block, wall_idx);
+    // No filament of this band's category visits the layer. The slot is still there - the next band sits on top of it - so
+    // a filament that does visit has to fill it.
+    if (fill < 0) {
+        for (const ToolChangeResult &tcr : layer_result)
+            if (filament_can_print_height(tcr.new_tool, band_height)) {
+                fill = tcr.new_tool;
+                break;
+            }
+        if (fill < 0 && wall_idx >= 0)
+            fill = wall_idx;
+    }
+    if (fill < 0)
+        return;
+    // The band G-code is appended to one of this layer's tower visits, so only a filament that visit has loaded can lay it.
+    auto can_carry_band = [this, &layer_result, &finish_layer_tcr, &block](int filament) {
+        if (filament < 0)
+            return false;
+        if (std::any_of(layer_result.begin(), layer_result.end(), [filament](const ToolChangeResult &tcr) { return tcr.new_tool == filament; }))
+            return true;
+        // The outgoing tool is still loaded at the start of its visit, so it can lay this band down before the change.
+        const bool own_category = get_filament_category(size_t(filament)) == block_key_category(block.block_key);
+        if ((block.last_filament_change_id == -1 || own_category) &&
+            std::any_of(layer_result.begin(), layer_result.end(), [filament](const ToolChangeResult &tcr) { return tcr.initial_tool == filament; }))
+            return true;
+        // A layer without tool changes has nothing but the finish-layer visit to hang the band on.
+        return this->layer_finished() && finish_layer_tcr.new_tool == filament;
+    };
+    if (!can_carry_band(fill)) {
+        // A band stacked on, or under, another material does not bond to it.
+        auto may_fill = [this, &block](int filament) { return get_filament_category(size_t(filament)) == block_key_category(block.block_key); };
+        int  fallback = -1;
+        for (const ToolChangeResult &tcr : layer_result)
+            if (filament_can_print_height(tcr.new_tool, band_height) && may_fill(tcr.new_tool)) {
+                fallback = tcr.new_tool;
+                break;
+            }
+        if (fallback < 0 && can_carry_band(wall_idx) && may_fill(wall_idx))
+            fallback = wall_idx;
+        if (fallback < 0 && !layer_result.empty() && may_fill(layer_result.back().new_tool))
+            fallback = layer_result.back().new_tool;
+        // Still nothing of this category: fill with whoever is on the layer, dense, so the band above still has a surface.
+        if (fallback < 0) {
+            for (const ToolChangeResult &tcr : layer_result)
+                if (filament_can_print_height(tcr.new_tool, band_height)) {
+                    fallback = tcr.new_tool;
+                    break;
+                }
+            if (fallback < 0 && can_carry_band(wall_idx))
+                fallback = wall_idx;
+            if (fallback < 0 && !layer_result.empty())
+                fallback = layer_result.back().new_tool;
+            if (fallback >= 0)
+                block_solid = true;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "WipeTower: filament " << fill << " does not visit the tower on layer " << cur << ", band "
+                                   << block.block_key << " falls back to filament " << fallback;
+        if (fallback < 0)
+            return;
+        fill = fallback;
+    }
+    if (!filament_can_print_height(fill, band_height))
+        BOOST_LOG_TRIVIAL(warning) << "WipeTower: filament " << fill << " fills band " << block.block_key << " on layer " << cur << " at "
+                                   << band_height << " mm, outside its nozzle window";
+    // Cancel the block on an extruder's last layer above its printable height.
+    if (!is_valid_last_layer(size_t(fill), cur, layer.z))
+        return;
+    ToolChangeResult finish_block_tcr = block_solid ? finish_block_solid(block, size_t(fill), layer_type) :
+                                                      finish_block(block, size_t(fill), layer.extruder_fill);
+    if (m_merged_slabs_active) {
+        const bool dense_fill   = block_solid || (m_adhesion && is_first_layer_for_slab(band_height));
+        block.finish_depth[cur] = dense_fill ? planned_depth : std::min(block.cur_depth, planned_depth);
+    } else
+        block.finish_depth[cur] = block_solid ? block.start_depth + block.depth : block.cur_depth;
+
+    bool has_inserted = false;
+    auto fc_iter      = std::find_if(layer_result.begin(), layer_result.end(), [fill](const ToolChangeResult &item) { return item.new_tool == fill; });
+    if (fc_iter != layer_result.end()) {
+        *fc_iter     = merge_tcr(*fc_iter, finish_block_tcr);
+        has_inserted = true;
+    }
+    const bool own_category_fill = get_filament_category(size_t(fill)) == block_key_category(block.block_key);
+    if ((block.last_filament_change_id == -1 || own_category_fill) && !has_inserted) {
+        auto nc_iter = std::find_if(layer_result.begin(), layer_result.end(), [fill](const ToolChangeResult &item) { return item.initial_tool == fill; });
+        if (nc_iter != layer_result.end()) {
+            *nc_iter     = merge_tcr(finish_block_tcr, *nc_iter);
+            has_inserted = true;
+        }
+    }
+    if (!has_inserted && is_valid_gcode(finish_block_tcr.gcode)) {
+        if (this->layer_finished() && finish_layer_tcr.new_tool == fill)
+            finish_layer_tcr = merge_tcr(finish_layer_tcr, finish_block_tcr);
+        else
+            BOOST_LOG_TRIVIAL(error) << "WipeTower: no visit on layer " << cur << " can carry band " << block.block_key << " of filament " << fill
+                                     << ", dropping its fill";
+    }
+}
+
 // Orca #10780 / #15035 (Bambu Studio generate_new()): the block planner.
 // Processes vector m_plan and calls respective functions to generate G-code for the wipe tower
 // Resulting ToolChangeResults are appended into vector "result"
@@ -4591,7 +6547,8 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 
     // Orca #15841: before planning, since the layer heights this rewrites feed the extrusion flow of
     // every later pass. A layer with no toolchange prints with the filament the layer below left loaded.
-    if (m_sparse_layers_combined) {
+    // PR-C: not on a mixed-diameter plate, whose merged ladder (plan_tower_ladder()) folds the same sparse layers, per nozzle.
+    if (m_sparse_layers_combined && ! merged_fill_active()) {
         size_t start_tool = m_current_tool;
         for (const WipeTowerInfo &layer : m_plan) {
             if (layer.local_z_start_tool >= 0) {
@@ -4645,6 +6602,8 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     const int                wall_filament      = get_wall_filament_for_all_layer();
     const std::vector<float> y_shifts           = layer_y_shifts();
     const bool               only_generate_wall = m_enable_timelapse_print;
+    // PR-C: the tower side of AdaptiveLayerMerge (Bambu Studio 2.9.1 generate_new(), WipeTower.cpp 7760-8110).
+    const bool               merged             = merged_fill_active();
 
     int index = 0;
 	for (auto layer : m_plan)
@@ -4656,7 +6615,30 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
         // first change starts from that one (initial_tool, unload and material of the old filament).
         if (layer.local_z_start_tool >= 0)
             m_current_tool = size_t(layer.local_z_start_tool);
-        set_layer(layer.z, layer.height, 0, false/*layer.z == m_plan.front().z*/, layer.z == m_plan.back().z);
+        // PR-C: the whole-tower slab of the layer (its own height without merged slabs).
+        set_layer(layer.z, layer_slab_height(int(m_cur_layer_id), layer.height), 0, false/*layer.z == m_plan.front().z*/, layer.z == m_plan.back().z);
+
+        if (layer_is_skipped(int(m_cur_layer_id))) {
+            // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:7786-7795): the nozzle that would fill this layer cannot lay down what is
+            // left of it, so the tower waits: no tool change happens here and the height rolls into the next layer the tower
+            // prints. The fill front each block reached carries over for get_floating_area(). The layer keeps one empty
+            // result flagged combined_away, which the emitter leaves out (it needs one entry per tower layer).
+            for (WipeTowerBlock &block : m_wipe_tower_blocks)
+                block.finish_depth[m_cur_layer_id] = m_cur_layer_id > 0 ? block.finish_depth[m_cur_layer_id - 1] : block.start_depth + block.depth;
+            ToolChangeResult skipped;
+            skipped.priming       = false;
+            skipped.initial_tool  = int(m_current_tool);
+            skipped.new_tool      = int(m_current_tool);
+            skipped.print_z       = layer.z;
+            skipped.layer_height  = layer.height;
+            skipped.elapsed_time  = 0.f;
+            skipped.start_pos     = Vec2f::Zero();
+            skipped.end_pos       = Vec2f::Zero();
+            skipped.combined_away = true;
+            layer_result.emplace_back(std::move(skipped));
+            result.emplace_back(std::move(layer_result));
+            continue;
+        }
 
         if (m_layer_info->depth < m_perimeter_width)
             continue;
@@ -4686,7 +6668,18 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
             }
             return candidate_id == -1 ? int(layer.tool_changes[0].new_tool) : candidate_id;
         };
-        int wall_idx = get_wall_filament_for_this_layer();
+        // PR-C (Bambu Studio 2.9.1 get_wall_filament_for_layer()): with merged fill the wall ladder's filament, else one
+        // that can print the layer's slab.
+        int wall_idx = merged ? get_wall_filament_for_layer(layer, int(m_cur_layer_id), wall_filament) : get_wall_filament_for_this_layer();
+        // PR-C (WipeTower.cpp:7820-7828): the outer wall follows its own ladder; a layer whose wall a group above draws
+        // prints none.
+        const bool  wall_reserved      = merged && m_cur_layer_id < m_wall_reserved.size() && m_wall_reserved[m_cur_layer_id] != 0;
+        const bool  extrude_outer_wall = !only_generate_wall && !wall_reserved;
+        const float wall_height        = merged && m_cur_layer_id < m_wall_slab_height.size() && m_wall_slab_height[m_cur_layer_id] > 0.f ?
+                                             m_wall_slab_height[m_cur_layer_id] : m_layer_height;
+        if (wall_idx != -1 && m_merged_slabs_active && !filament_can_print_height(wall_idx, wall_height))
+            BOOST_LOG_TRIVIAL(warning) << "WipeTower: no nozzle on layer " << m_cur_layer_id
+                                       << " covers the wall layer height, drawing the wall with filament " << wall_idx;
 
         ToolChangeResult finish_layer_tcr;
         ToolChangeResult timelapse_wall;
@@ -4699,9 +6692,17 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
             } else {
                 if (only_generate_wall)
                     timelapse_wall = only_generate_out_wall();
-                finish_layer_tcr = finish_layer_new(!only_generate_wall, layer.extruder_fill);
-                for (WipeTowerBlock &block : m_wipe_tower_blocks)
-                    block.finish_depth[m_cur_layer_id] = block.start_depth;
+                finish_layer_tcr = finish_layer_new(extrude_outer_wall, layer.extruder_fill, true, wall_height, wall_reserved);
+                if (merged) {
+                    // Only a dense fill supports the layer above; a sparse grid has to be bridged (WipeTower.cpp:7840-7845).
+                    const bool dense_fill = m_merged_slabs_active && layer.extruder_fill && m_adhesion && is_first_layer();
+                    for (WipeTowerBlock &block : m_wipe_tower_blocks)
+                        block.finish_depth[m_cur_layer_id] = (!dense_fill || block.layer_reserved[m_cur_layer_id]) ?
+                                                                 block.start_depth :
+                                                                 block.start_depth + band_fill_depth(block, int(m_cur_layer_id));
+                } else
+                    for (WipeTowerBlock &block : m_wipe_tower_blocks)
+                        block.finish_depth[m_cur_layer_id] = block.start_depth;
             }
         }
 
@@ -4713,15 +6714,15 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
             const WipeTowerInfo::ToolChange &tc            = layer.tool_changes[i];
             const bool                       wall_by_first = i == 0 && int(tc.old_tool) == wall_idx;
             if (wall_by_first)
-                finish_layer_tcr = finish_layer_new(!only_generate_wall, false, false);
+                finish_layer_tcr = finish_layer_new(extrude_outer_wall, false, false, wall_height, wall_reserved);
             bool solid_toolchange = false, solid_nozzlechange = false;
-            if (const WipeTowerBlock *block = get_block_by_category(get_filament_category(tc.new_tool), false))
+            if (const WipeTowerBlock *block = get_block_by_category(get_block_key(tc.new_tool, int(m_cur_layer_id)), false))
                 solid_toolchange = block->layers_type[m_cur_layer_id] == WipeTowerLayerType::Contact;
-            if (const WipeTowerBlock *block = get_block_by_category(get_filament_category(tc.old_tool), false))
+            if (const WipeTowerBlock *block = get_block_by_category(get_block_key(tc.old_tool, int(m_cur_layer_id)), false))
                 solid_nozzlechange = block->layers_type[m_cur_layer_id] == WipeTowerLayerType::Contact;
             layer_result.emplace_back(tool_change_new(tc.new_tool, solid_toolchange, solid_nozzlechange));
             if (!wall_by_first && int(tc.new_tool) == wall_idx) {
-                finish_layer_tcr        = finish_layer_new(!only_generate_wall, false, false);
+                finish_layer_tcr        = finish_layer_new(extrude_outer_wall, false, false, wall_height, wall_reserved);
                 insert_finish_layer_idx = i;
             }
         }
@@ -4730,8 +6731,12 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
         // one: printed right after that filament's purge, or before its nozzle change.
         if (wall_idx != -1) {
             if (layer.tool_changes.empty())
-                finish_layer_tcr = finish_layer_new(!only_generate_wall, false, false);
+                finish_layer_tcr = finish_layer_new(extrude_outer_wall, false, false, wall_height, wall_reserved);
             for (WipeTowerBlock &block : m_wipe_tower_blocks) {
+                if (merged) {
+                    merged_finish_block(layer, block, wall_idx, layer_result, finish_layer_tcr);
+                    continue;
+                }
                 block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
                 if (block.cur_depth + EPSILON >= block.start_depth + block.layer_depths[m_cur_layer_id] - m_perimeter_width)
                     continue;
@@ -4743,7 +6748,7 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
                 else if (block.last_nozzle_change_id != -1)
                     finish_layer_filament = block.last_nozzle_change_id;
                 if (!layer.tool_changes.empty()) {
-                    const WipeTowerBlock *start_block = get_block_by_category(get_filament_category(layer.tool_changes.front().old_tool), false);
+                    const WipeTowerBlock *start_block = get_block_by_category(get_block_key(layer.tool_changes.front().old_tool, int(m_cur_layer_id)), false);
                     if (start_block != nullptr && start_block->block_id == block.block_id && finish_layer_filament == -1)
                         finish_layer_filament = int(layer.tool_changes.front().old_tool);
                 }
@@ -4783,6 +6788,10 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 
         if (layer_result.empty()) {
             // there is nothing to merge finish_layer with
+            // PR-C (Bambu Studio 2.9.1, WipeTower.cpp:8044-8053): a visit whose wall went to a group above and whose bands are
+            // all reserved lays nothing down; the emitter leaves it out (combined_away) instead of travelling to the tower.
+            if (merged && !only_generate_wall && finish_layer_tcr.extrusions.empty())
+                finish_layer_tcr.combined_away = true;
             layer_result.emplace_back(std::move(finish_layer_tcr));
         } else if (is_valid_gcode(finish_layer_tcr.gcode)) {
             if (insert_finish_layer_idx == -1)
@@ -4795,11 +6804,21 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
             layer_result.insert(layer_result.begin(), std::move(timelapse_wall));
 
         // Bambu Studio 2.9.1 (generate_new(), WipeTower.cpp:8075-8100): slow the end of every tower visit down on
-        // hotend_as_extruder printers, whatever comes last (wall, purge or fill). Single nozzle diameter rule; the
-        // mixed-diameter tower (per-nozzle slab heights) is not ported.
-        if (tail_slowdown_applies())
-            for (ToolChangeResult &tcr : layer_result)
+        // hotend_as_extruder printers, whatever comes last (wall, purge or fill), never on an extrusion that sits on the
+        // bed. PR-C: on a mixed-diameter plate that is the visit's own nozzle slab (a merged slab can reach the bed while
+        // the layer does not).
+        if (! has_multiple_nozzle_diameters()) {
+            if (tail_slowdown_applies())
+                for (ToolChangeResult &tcr : layer_result)
+                    apply_tail_slowdown(tcr);
+        } else if (m_handle_hotend_as_extruder && m_tail_speed_factor < 1.f) {
+            for (ToolChangeResult &tcr : layer_result) {
+                const size_t tail_tool = tcr.new_tool >= 0 && size_t(tcr.new_tool) < m_filpar.size() ? size_t(tcr.new_tool) : m_current_tool;
+                if (tcr.combined_away || is_first_layer_for_slab(filament_extrusion_height(tail_tool)))
+                    continue;
                 apply_tail_slowdown(tcr);
+            }
+        }
 
         if (layer.combined_away)
             for (WipeTower::ToolChangeResult &tcr : layer_result)
@@ -5058,6 +7077,30 @@ void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInf
 // Orca #10780 (Bambu Studio get_floating_area()): the part of the current block the previous layer left sparse, which
 // this layer bridges.
 bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {
+    // PR-C (Bambu Studio 2.9.1 get_floating_area(), WipeTower.cpp:8483-8509): with merged slabs the support comes from the last
+    // layer on which this band itself deposited material; a trench below a later purge, or a layer the tower skipped, does
+    // not move its supporting surface.
+    if (m_merged_slabs_active) {
+        if (m_cur_block == nullptr)
+            return false;
+        int below = -1;
+        for (int layer_id = int(m_cur_layer_id) - 1; layer_id >= 0; --layer_id) {
+            if (layer_is_skipped(layer_id))
+                continue;
+            const bool purge = layer_id < int(m_block_slab_height.size()) && m_block_slab_height[layer_id].count(m_cur_block->block_key) != 0;
+            const bool fill  = layer_id < int(m_cur_block->layer_reserved.size()) && !m_cur_block->layer_reserved[layer_id] &&
+                              band_fill_depth(*m_cur_block, layer_id) > 2.f * m_perimeter_width;
+            if (purge || fill) {
+                below = layer_id;
+                break;
+            }
+        }
+        if (below < 0)
+            return false;
+        end_pos_y   = m_cur_block->start_depth + band_fill_depth(*m_cur_block, int(m_cur_layer_id)) - m_perimeter_width;
+        start_pos_y = m_cur_block->finish_depth[below];
+        return true;
+    }
     if (m_layer_info == m_plan.begin() || (m_layer_info - 1) == m_plan.begin())
         return false;
     if (m_cur_block == nullptr || m_cur_layer_id < 1 || m_cur_layer_id - 1 >= m_cur_block->finish_depth.size())
@@ -5076,8 +7119,10 @@ bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {
     return true;
 }
 
-bool WipeTower::need_thick_bridge_flow(float pos_y) const {
-    if (m_layer_height >= 0.2f)
+// PR-C (Bambu Studio 2.9.1 need_thick_bridge_flow(pos_y, slab_height), WipeTower.cpp:8526): the 0.2 mm bridge flow is for an
+// extrusion thinner than that; a merged slab of 0.2 mm or more bridges at its own height.
+bool WipeTower::need_thick_bridge_flow(float pos_y, float slab_height) const {
+    if (slab_height >= 0.2f)
         return false;
 
     float y_min = 0., y_max = 0.;

@@ -335,7 +335,13 @@ All of the above, on our planner (`generate()`, not `generate_new()`), with thes
 - `plan_merge_ladder()`/`collect_tower_visitors()` (6530-6640) are not ported: nothing calls them at the tag.
 - **Gate:** `Print::uses_multiple_nozzle_diameters()` (owner decision, no mode key). That also covers H2D/X2D with
   unequal nozzles, where Bambu has no multi-diameter mode; our objects already merge there, so the tower follows.
-- **Per-nozzle tower parameters** on the same gate.
+- **Per-nozzle tower parameters** (0.4/0.8 mm lines, factor 1) only where Bambu has its multi-diameter mode: the
+  single-extruder rack (`handle_hotend_as_extruder`, H3C). An H2D/X2D with unequal nozzles keeps each tool's own width
+  (per-nozzle P2) and the process feedrate factor, as Bambu Studio does there (it has no multi-diameter mode on them).
+- **Gaps** stay Edge's (structure-width gap moved by the tool's width, `get_block_gap_width()`), keyed per
+  (category, diameter) group like Bambu's; Bambu derives the extra spacing from each band's own width (a small difference
+  only with `prime_tower_infill_gap` above 100 %).
+- **Wall gaps / brim spacing** keep the tower structure width for the loop count (Edge OD16 counting in laid layers).
 - `WipeTowerEstimate` estimates mixed plates per (category, diameter) band at the band slab height and per-nozzle width.
 
 ### Not ported, and why
