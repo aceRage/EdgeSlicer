@@ -155,7 +155,7 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::OBJECT_C
                     }},
     { L("Support"), {{"brim_type", "",1},{"brim_width", "",2},{"brim_object_gap", "",3},{"brim_flow_ratio", "",3},{"brim_use_efc_outline", "",3},
                     {"enable_support", "",4},{"support_type", "",5},{"support_threshold_angle", "",6}, {"support_threshold_overlap", "",6}, {"support_on_build_plate_only", "",7},
-                    {"support_filament", "",8},{"support_interface_filament", "",9},{"support_expansion", "",24},{"support_style", "",25},
+                    {"support_filament", "",8},{"support_interface_filament", "",9},{"support_interface_nozzle_temperature", "",9},{"support_expansion", "",24},{"support_style", "",25},
                     {"tree_support_brim_width", "",26}, {"tree_support_branch_angle", "",10},{"tree_support_branch_angle_organic","",10}, {"tree_support_wall_count", "",11},{"tree_support_branch_diameter_angle", "",11},//tree support
                     {"support_top_z_distance", "",13},{"support_bottom_z_distance", "",12},{"support_base_pattern", "",14},{"support_base_pattern_spacing", "",15},
                     {"support_interface_top_layers", "",16},{"support_interface_bottom_layers", "",17},{"support_interface_spacing", "",18},{"support_bottom_interface_spacing", "",19},
@@ -2573,8 +2573,9 @@ void MenuFactory::create_bbl_part_menu()
         [](wxCommandEvent&) { plater()->split_by_color(); }, "menu_split_parts", menu,
         []() { return plater()->can_split_by_color(); }, m_parent);
 
+    // A part is never split to objects (can_split(true) is false for a part), so "To parts" must enable the sub-menu too.
     append_submenu(menu, split_menu, wxID_ANY, _L("Split"), _L("Split the selected object"), "",
-        []() { return plater()->can_split(true) || plater()->can_split_by_color(); }, m_parent);
+        []() { return plater()->can_split(true) || plater()->can_split(false) || plater()->can_split_by_color(); }, m_parent);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);
@@ -3408,6 +3409,8 @@ void MenuFactory::append_menu_item_locked(wxMenu* menu)
 
     auto item = append_menu_item(menu, wxID_ANY, lock_text, "",
         [plate](wxCommandEvent&) {
+            // As the plate's lock icon does: one undo step, which also marks the project modified.
+            plater()->take_snapshot("lock partplate");
             bool lock = plate->is_locked();
             plate->lock(!lock);
         }, "", nullptr, []() { return true; }, m_parent);

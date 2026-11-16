@@ -486,6 +486,12 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_G3;
         if (line.type) {
             // G0, G1 or G92
+            // With relative E every line's E is a distance of its own: a line without an E word moves the
+            // extruder by nothing. Reset the extruder accumulator before the new position is copied from the
+            // old one, or a line with no E (the "G1 F.." that opens a path or a wipe) inherits the E of the
+            // line before it and is counted as an extruder move of that length.
+            if (m_config.use_relative_e_distances.value)
+                current_pos[3] = 0.f;
             // Parse the G-code line.
             std::vector<float> new_pos(current_pos);
             const char *c = sline.data() + 3;
@@ -544,9 +550,6 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             }
             if ((line.type & CoolingLine::TYPE_G92) == 0) {
                 //BBS: G0, G1, G2, G3. Calculate the duration.
-                if (m_config.use_relative_e_distances.value)
-                    // Reset extruder accumulator.
-                    current_pos[3] = 0.f;
                 float dif[4];
                 for (size_t i = 0; i < 4; ++ i)
                     dif[i] = new_pos[i] - current_pos[i];
@@ -1110,8 +1113,20 @@ std::string CoolingBuffer::apply_layer_cooldown(
             assert(fpos != nullptr);
             new_feedrate = line->slowdown ? int(floor(60. * line->feedrate + 0.5)) : atoi(fpos);
             if (new_feedrate == current_feedrate) {
+                // A line with an axis word is never dropped, even when it seems not to move the head: the position
+                // this pass tracks runs straight through firmware branches (the H2D tool change repeats its moves to
+                // the tower's avoid position in a power-loss-resume branch), where a move that repeats the one before
+                // it is the only one the printer runs. Only its F word is removed.
+                auto has_axis_word = [line_start, end]() {
+                    for (const char *c = line_start + 2; c < end; ++ c)
+                        if ((c[-1] == ' ' || c[-1] == '\t') &&
+                            (*c == 'X' || *c == 'Y' || *c == 'Z' || *c == 'E' || *c == 'I' || *c == 'J'))
+                            return true;
+                    return false;
+                };
                 // No need to change the F value.
-                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) || line->length == 0.)
+                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) ||
+                    (line->length == 0. && ! has_axis_word()))
                     // Feedrate does not change and this line does not move the print head. Skip the complete G-code line including the G-code comment.
                     end = line_end;
                 else

@@ -17,6 +17,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -87,8 +88,51 @@ TEST_CASE("Rib footprint extends the ribs, not the body, below the stability min
     CHECK_THAT(WipeTower::rib_footprint_side(0.f, 30.f, 8.f, 0.f, 5.f), WithinAbs(0.f, 1e-6f));
 }
 
+// calc_block_infill_gap(): on a short rectangle tower a block with ramming lays its purge rows at the ramming pitch once
+// that pitch, stretched to the stability minimum, reaches twice the ramming width (an H2D with two PLAs, 60 mm wide,
+// 40 mm tall: the generator prints 13 mm). The footprint estimate follows it.
+TEST_CASE("Footprint estimate: purge rows at the ramming pitch on a short tower with ramming", "[WipeTower][TowerDepthTable]") {
+    const float ncpw   = WipeTower::nozzle_change_perimeter_width(0.4f);
+    const float pw     = 0.5f;
+    const float nc_gap = ncpw + 0.5f * pw; // 150 % infill gap
+    const std::vector<WipeTower::PurgeEstimate> purges{ { 45.f, 100, 4.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    const float area      = 0.2f * (pw - 0.2f * float(1. - PI / 4.));
+    const float rows      = std::ceil(45.f / area / (60.f - 2.f * pw));
+    const float nc_length = 4.f * float(PI) * 1.75f * 1.75f / 4.f / (0.2f * (ncpw - 0.2f * float(1. - PI / 4.)));
+    const float rams      = std::ceil(nc_length / (60.f - ncpw - pw));
+    REQUIRE(rows == 9.f);
+    // Without a height (a rib tower): purge rows at the purge gap.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f),
+               WithinAbs(pw + rows * 0.75f + rams * nc_gap, 1e-4f));
+    // A 40 mm rectangle tower: the purge rows move to the ramming pitch.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(pw + rows * nc_gap + rams * nc_gap, 1e-4f));
+    // Without ramming nothing aligns.
+    const std::vector<WipeTower::PurgeEstimate> plain{ { 45.f, 100, 0.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f), 1e-6f));
+}
+
+// Bambu Studio 2.9.1 / Orca stability table for the Type 1 tower (D4); WipeTower2 keeps its own.
+TEST_CASE("The Type 1 tower uses Bambu Studio's stability depth table", "[WipeTower][TowerDepthTable]") {
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(2.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(52.5f), WithinAbs(12.5f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(100.f), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(300.f), WithinAbs(50.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(350.f), WithinAbs(60.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-5f));
+    // WipeTower2 (Type 2): unchanged, 20 mm up to 100 mm, 40 mm from 250 mm.
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f, true), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f, true), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f, true), WithinAbs(40.f, 1e-5f));
+    // The rib footprint follows the table of its generator.
+    CHECK(WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f, true) > WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f) + 5.f);
+}
+
 TEST_CASE("Brim width estimate matches each generator's loop quantization", "[WipeTower]") {
-    const float spacing = 0.5f - 0.2f * float(1. - M_PI_4);
+    const float spacing = 0.5f - 0.2f * float(1. - PI / 4.);
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, true), WithinAbs(7.f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, false), WithinAbs(7.5f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(0.f, 0.4f, 0.2f, true), WithinAbs(0.f, 1e-6f));
@@ -187,20 +231,81 @@ TEST_CASE("The tower keep-out zone grows by the spiral z-hop envelope", "[WipeTo
     CHECK_THAT(unscaled(compacted_wipe_tower_zone(cfg, footprint).hull.bounding_box().max.x()), WithinAbs(10., 1e-6));
 
     // A spiral lift leaves the outline at low z, so it counts as tower. The circle reaches
-    // 2 * lift / (2*pi*atan(slope)) past the outline, matching GCodeWriter: 2*2/(2*pi*atan(3)) = 0.51 mm.
+    // 2 * lift / (2*pi*atan(slope)) past the outline, matching GCodeWriter, which takes the slope in
+    // radians: 2*2/(2*pi*atan(3 degrees)) = 12.17 mm.
     cfg.z_hop.values = {2.};
     const CompactedTowerZone lifted = compacted_wipe_tower_zone(cfg, footprint);
-    CHECK_THAT(unscaled(lifted.hull.bounding_box().max.x()), WithinAbs(10.51, 0.02));
-    CHECK_THAT(unscaled(lifted.hull.bounding_box().min.y()), WithinAbs(-10.51, 0.02));
+    const double reach = 2. * 2. / (2. * M_PI * std::atan(3. * M_PI / 180.));
+    CHECK_THAT(unscaled(lifted.hull.bounding_box().max.x()), WithinAbs(10. + reach, 0.05));
+    CHECK_THAT(unscaled(lifted.hull.bounding_box().min.y()), WithinAbs(-10. - reach, 0.05));
     CHECK(diff(Polygons{footprint}, Polygons{lifted.hull}).empty());
 
     // z_hop is capped at 5 mm by the option, so a taller lift cannot widen the zone further.
     cfg.z_hop.values = {10.};
     const double capped = unscaled(compacted_wipe_tower_zone(cfg, footprint).hull.bounding_box().max.x());
-    CHECK_THAT(capped, WithinAbs(10. + 2. * 5. / (2. * M_PI * std::atan(3.)), 0.02));
+    CHECK_THAT(capped, WithinAbs(10. + 2. * 5. / (2. * M_PI * std::atan(3. * M_PI / 180.)), 0.1));
 
     // The rod sweeps the whole X axis, so its band is the tower's y span plus half the rod offset.
-    CHECK_THAT(unscaled(lifted.bbox_rod.max.y()), WithinAbs(10.51 + 10., 0.02));
+    CHECK_THAT(unscaled(lifted.bbox_rod.max.y()), WithinAbs(10. + reach + 10., 0.05));
+}
+
+// travel_slope is set in degrees; GCodeWriter takes it in radians (Extruder::travel_slope()). The
+// keep-out zone read the degrees as radians, so for the 3 degree default its spiral reach came out
+// 0.10 mm for a 0.4 mm lift instead of the 2.43 mm circle the writer draws.
+TEST_CASE("The tower keep-out zone reaches as far as the writer's spiral lift", "[WipeTower][NoSparseLayers]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(false));
+    config.set_key_value("z_hop", new ConfigOptionFloats{0.4});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0.});
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0., 0.), Vec2d(300., 0.), Vec2d(300., 300.), Vec2d(0., 300.)}));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    // The spiral the writer lifts with at (150, 150): how far from its start it reaches.
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    writer.set_position(Vec3d(150., 150., 0.2));
+    writer.set_current_position_clear(true);
+    // The lift is emitted with the next travel (here 0.05 mm, so the travel itself adds nothing).
+    std::string spiral = writer.lift(LiftType::SpiralLift);
+    spiral += writer.travel_to_xyz(Vec3d(150.05, 150., 0.2));
+    double             reach = 0.;
+    std::istringstream in(spiral);
+    std::string        line;
+    const std::regex   word("([XY])(-?[0-9]*\\.?[0-9]+)");
+    double             x = 150., y = 150.;
+    while (std::getline(in, line)) {
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it)
+            ((*it)[1].str()[0] == 'X' ? x : y) = std::atof((*it)[2].str().c_str());
+        reach = std::max(reach, std::hypot(x - 150., y - 150.));
+    }
+    // 2 * 0.4 / (2 * pi * atan(3 degrees)) = 2.434 mm across the circle.
+    INFO(spiral);
+    REQUIRE(reach > 2.);
+
+    const CompactedTowerZone zone = compacted_wipe_tower_zone(print_config, centered_square(0., 0., 20.));
+    const double zone_reach = unscaled(zone.hull.bounding_box().max.x()) - 10.;
+    INFO("writer's spiral reaches " << reach << " mm, the keep-out zone " << zone_reach << " mm");
+    CHECK(zone_reach >= reach - 0.02);
+    CHECK_THAT(zone_reach, WithinAbs(2. * 0.4 / (2. * M_PI * std::atan(3. * M_PI / 180.)), 0.02));
+
+    // Where that puts an object that stays below the nozzle cone (rise 3 < nozzle_height 5): within
+    // 3.8 mm of the grown outline (the bare nozzle tier) it may not rise above the tower at all. A
+    // gap of 5 mm to the tower wall is closer than 3.8 + 2.43 and is refused; 6.5 mm is accepted.
+    PrintConfig clearance = clearance_config();
+    clearance.z_hop.values        = {0.4};
+    clearance.travel_slope.values = {3.};
+    const CompactedTowerZone u1   = compacted_wipe_tower_zone(clearance, centered_square(0., 0., 20.));
+    // A 10 mm object centred at x leaves a gap of x - 15 to the tower.
+    CHECK_THAT(compacted_wipe_tower_clearance(clearance, u1, centered_square(20., 0., 10.), 3.).allowed_rise, WithinAbs(0., 1e-9));
+    CHECK(compacted_wipe_tower_clearance(clearance, u1, centered_square(21.5, 0., 10.), 3.).allowed_rise > 0.);
 }
 
 TEST_CASE("An object beside a compacted tower is limited by the nearest part of the toolhead", "[WipeTower][NoSparseLayers]") {
@@ -1197,8 +1302,8 @@ TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower po
     const double brim = wtd.brim_width;
     // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
     // to it, so the footprint is at least that deep.
-    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
-    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
 
     const Vec2d              anchor(140., 140.);
     const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));

@@ -3651,6 +3651,11 @@ int CLI::run(int argc, char **argv)
     //set the filament settings into print config
     if ((load_filament_count > 0) || (up_config_to_date))
     {
+        // The project's lists one value per filament, the one each filament reads, so that a preset's value written
+        // below at the filament's index is the one read for it (a project saved by the application keeps a
+        // filament's flow variants side by side).
+        if (!load_filaments_config.empty())
+            cli_flatten_filament_flow_variants(m_print_config, size_t(filament_count));
         for (int index = 0; index < load_filaments_config.size(); index++) {
             DynamicPrintConfig&  config = load_filaments_config[index];
             int filament_index = load_filaments_index[index];
@@ -3754,9 +3759,10 @@ int CLI::run(int argc, char **argv)
                         record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
                         flush_and_exit(CLI_CONFIG_FILE_ERROR);
                     }
-                    ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt);
-                    const ConfigOptionVectorBase* opt_vec_src = static_cast<const ConfigOptionVectorBase*>(source_opt);
-                    opt_vec_dst->set_at(opt_vec_src, filament_index-1, 0);
+                    // The preset's value for the filament's flow type (filament_volume_type), the list cut to the
+                    // filament count. Taking entry 0 printed a high-flow filament at its standard values, and a
+                    // project's longer list kept its old values past the filaments.
+                    cli_set_filament_preset_value(m_print_config, opt_key, config, size_t(filament_index - 1), size_t(filament_count));
                 }
             }
 
@@ -7671,18 +7677,14 @@ int CLI::run(int argc, char **argv)
             }
             // add wipe tower bounding box
             if (print->has_wipe_tower()) {
-                BBoxData data;
                 auto   wt_corners = print->first_layer_wipe_tower_corners();
                 // when loading gcode.3mf, wipe tower info may not be correct
                 if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
-                    bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    // Numbered by the plate being exported (the current plate is not it here), its
+                    // area and layer height set rather than left as the stack held them.
+                    BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, part_plate->get_index(),
+                                                                     float(print->config().initial_layer_print_height.value));
+                    bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
                     id_bboxes.emplace_back(std::move(data));
                 }
             }

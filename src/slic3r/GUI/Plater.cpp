@@ -5615,6 +5615,12 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
     } else if (!preset.empty() && NozzleInfo::diameter_known(obj->m_extder_data.extders.front().current_nozzle_diameter)) {
         reported.assign(preset.size(), obj->m_extder_data.extders.front().current_nozzle_diameter);
+    } else if (!preset.empty() && obj->has_nozzle_rack()) {
+        // Owner bug 2026-11-13: the H3C mounts no nozzle between prints (its extruder's hnow names none of the reported
+        // nozzles, which all sit in the rack), so the extruder's size comes from the rack's first usable position.
+        const std::vector<double> sizes = reported_sync_nozzle_sizes(DualNozzle::nozzle_report_state(obj), 1);
+        if (!sizes.empty() && sizes.front() > 0.)
+            reported.assign(preset.size(), sizes.front());
     }
     if (std::none_of(reported.begin(), reported.end(), [](double d) { return d > 0.; })) {
         MessageDialog dlg(wxGetApp().mainframe, _L("The printer did not report its nozzle sizes."), _L("Sync nozzle sizes"), wxOK);
@@ -5632,7 +5638,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
     // (printer_state() reports no nozzles on a single-extruder one), so an H3C sync left its nine slots as they were.
     wxString rack_note;
     if (obj->has_nozzle_rack()) {
-        const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(DualNozzle::nozzle_report_state(obj), preset.size());
+        const DualNozzleSync::PrinterState          rack_state = DualNozzle::nozzle_report_state(obj);
+        const std::vector<std::vector<RackNozzle>> layout     = reported_rack_nozzles(rack_state, preset.size());
+        const std::vector<double>                  mounted    = reported_extruder_nozzle_sizes(rack_state, preset.size());
         std::vector<std::string>                   current(preset.size());
         for (size_t e = 0; e < preset.size(); ++e)
             current[e] = bundle->rack_nozzle_override(e);
@@ -5647,7 +5655,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
         for (size_t e = 0; e < texts.size(); ++e)
             if (!texts[e].empty())
-                rack_note += "\n" + wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e]));
+                rack_note += "\n" + (e < mounted.size() && mounted[e] > 0. ?
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e])) :
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slots in rack order)."), int(e + 1), from_u8(texts[e])));
     }
     if (changed) {
         on_nozzle_sizes_changed();
@@ -20245,9 +20255,9 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     auto orig = this->partplate_list.get_curr_plate()->get_origin();
     Vec2d orig2d = { orig[0], orig[1] };
 
-    BBoxData data;
     for (auto obj : objects)
     {
+        BBoxData data;
         // Ultra (H2C nozzle rack): PrintObject::get_first_layer_bbox already returns plate-relative
         // coordinates, so subtracting the plate origin here shifted every object bbox in
         // Metadata/plate_N.json by exactly one plate origin (measured on the user's plate 5:
@@ -20269,15 +20279,11 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
         auto   wt_corners = print->first_layer_wipe_tower_corners();
         // when loading gcode.3mf, wipe tower info may not be correct
         if (!wt_corners.empty()) {
-            BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-            auto        bb        = unscaled(bb_scaled);
-            bb.min -= orig2d;
-            bb.max -= orig2d;
-            bbox_all.merge(bb);
-            data.name = "wipe_tower";
-            data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-            data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
-            id_bboxes.emplace_back(data);
+            // Its own entry: it used to reuse the last object's, area and layer height included.
+            BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, partplate_list.get_curr_plate()->get_index(),
+                                                             float(print->config().initial_layer_print_height.value));
+            bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
+            id_bboxes.emplace_back(std::move(data));
         }
     }
 
@@ -28391,21 +28397,8 @@ void Plater::on_filaments_delete(size_t num_filaments, size_t filament_id, int r
     }
 
     // update customize gcode
-    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item) {
-        auto iter = std::remove_if(item->second.gcodes.begin(), item->second.gcodes.end(), [filament_id](const CustomGCode::Item& gcode_item) {
-            return (gcode_item.type == CustomGCode::Type::ToolChange && gcode_item.extruder == filament_id + 1);
-        });
-        if (replace_filament_id == -1)
-            item->second.gcodes.erase(iter, item->second.gcodes.end());
-        else if (iter != item->second.gcodes.end()) {
-            iter->extruder = replace_filament_id + 1;
-        }
-
-        for (auto& item : item->second.gcodes) {
-            if (item.type == CustomGCode::Type::ToolChange && item.extruder > filament_id)
-                item.extruder--;
-        }
-    }
+    for (auto item = p->model.plates_custom_gcodes.begin(); item != p->model.plates_custom_gcodes.end(); ++item)
+        CustomGCode::update_tool_changes_when_delete_filament(item->second, filament_id, replace_filament_id);
 }
 
 
@@ -30635,6 +30628,7 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     dlg.sync_spiral_mode(curr_plate->get_spiral_vase_mode(), !curr_plate->has_spiral_mode_config());
 
     dlg.Bind(EVT_SET_BED_TYPE_CONFIRM, [this, plate_index, &dlg](wxCommandEvent& e) {
+        take_snapshot(_u8L("Plate Settings"));
         PartPlate* curr_plate = p->partplate_list.get_curr_plate();
         BedType old_bed_type = curr_plate->get_bed_type(true);
         auto bt_sel = BedType(dlg.get_bed_type_choice());
@@ -30682,6 +30676,8 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
         });
     dlg.set_plate_name(from_u8(curr_plate->get_plate_name()));
 
+    // One undo step for the dialog: the settings snapshot taken on OK covers a rename too.
+    Plater::SingleSnapshot single(this);
     dlg.ShowModal();
     rename_plate(p->partplate_list.get_curr_plate_index(), dlg.get_plate_name().ToUTF8().data());
 }
@@ -30909,6 +30905,9 @@ int Plater::duplicate_plate(int plate_index)
     if (plate_index == -1)
         index = p->partplate_list.get_curr_plate_index();
 
+    if (!p->can_add_plate())
+        return -1;
+    take_snapshot(_u8L("Duplicate Current Plate"));
     ret = p->partplate_list.duplicate_plate(index);
 
     //need to call update

@@ -10,6 +10,9 @@
     "eng_plate_temp": [
         "90"
     ],
+    "filament_adhesiveness_category": [
+        "798"
+    ],
     "hot_plate_temp": [
         "90"
     ],

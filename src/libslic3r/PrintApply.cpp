@@ -1649,6 +1649,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Per-nozzle process P6: every line width for the nozzle that prints it (explicit per-nozzle widths, mm widths
     // scaled to the nozzle's size on a printer with mixed sizes). No-op with one nozzle size.
     resolve_nozzle_line_widths(new_full_config);
+    // Mixed color sublayer: a mixed filament reads its components' nozzle entries. No-op without mixed filaments.
+    extend_nozzle_filament_values_to_mixed(new_full_config);
     // Only WipeTower2 rotates; the Bambu Lab (Type1) tower is always printed unrotated, as the
     // greyed-out Process field and the inert Rotate tool show. The CLI sets is_BBL_printer() after
     // apply(), so printer_model decides too (resolve_wipe_tower_type).
@@ -1816,6 +1818,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // The following call may stop the background processing.
     if (! print_diff.empty())
         update_apply_status(this->invalidate_state_by_config_options(new_full_config, print_diff));
+    // Bambu Studio 2.9.1: the Type 1 tower's first layer purges at initial_layer_flow_ratio (here the region option
+    // bottom_solid_infill_flow_ratio, otherwise read at G-code export only), so the tower is generated again.
+    if (std::find(region_diff.begin(), region_diff.end(), "bottom_solid_infill_flow_ratio") != region_diff.end())
+        update_apply_status(this->invalidate_step(psWipeTower));
 
     // Apply variables to placeholder parser. The placeholder parser is used by G-code export,
     // which should be stopped if print_diff is not empty.
@@ -2552,6 +2558,19 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             m_default_object_config.apply_only(after, keys, true);
             m_default_region_config.apply_only(after, keys, true);
             m_full_print_config.apply_only(after, keys, true);
+        }
+    }
+
+    // EdgeSlicer: support interface temperatures (support_interface_nozzle_temperature). They depend on the
+    // objects' support settings and on which filaments print model parts, all final here. The tower and the
+    // G-code read them; a change re-runs both (the object option alone only invalidates psGCodeExport).
+    {
+        SupportInterfaceTemperatures resolved = this->resolve_support_interface_temperatures();
+        if (resolved != m_support_interface_temperatures) {
+            // Only the ignored list (warnings, read by validate()) changing needs no step re-run.
+            if (resolved.temperatures != m_support_interface_temperatures.temperatures)
+                update_apply_status(this->invalidate_steps({psWipeTower, psGCodeExport}));
+            m_support_interface_temperatures = std::move(resolved);
         }
     }
 

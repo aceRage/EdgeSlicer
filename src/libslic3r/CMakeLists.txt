@@ -111,6 +111,8 @@ set(lisbslic3r_sources
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
     Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseSurfaceColours.cpp
+    Showcase/ShowcaseSurfaceColours.hpp
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
@@ -404,6 +406,8 @@ set(lisbslic3r_sources
     GCode/PrintExtents.cpp
     GCode/PrintExtents.hpp
     GCodeReader.cpp
+    GCodeTemplateLint.cpp
+    GCodeTemplateLint.hpp
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
@@ -425,6 +429,8 @@ set(lisbslic3r_sources
     GCode/WipePathHelpers.hpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
+    GCode/StartupSound.cpp
+    GCode/StartupSound.hpp
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/ToolOrdering.cpp

@@ -1943,3 +1943,13 @@ TEST_CASE("An empty list applied by index replaces the target list", "[Config][R
     edited.apply_only(saved, {"filament_ids#0"});
     CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
 }
+
+TEST_CASE("The chamber temperature key the settings page checks exists", "[Config][Regression]")
+{
+    // ConfigManipulation::check_chamber_temperature and TabFilament asked for "chamber_temperatures" (Bambu
+    // Studio's name), which this config does not have, so the safe-temperature warning never ran.
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.has("chamber_temperature"));
+    CHECK_FALSE(config.has("chamber_temperatures"));
+    REQUIRE(config.option<ConfigOptionInts>("chamber_temperature") != nullptr);
+}

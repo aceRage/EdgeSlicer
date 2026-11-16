@@ -34,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
 	test_custom_gcode_placeholders.cpp
 	test_exclude_object_tolerance.cpp
 	test_gcode_file_header.cpp
+	test_tower_labels_and_order.cpp
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
@@ -49,6 +50,9 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_rack_slots_gcode.cpp
 	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
+	test_bbs_tower_ramming.cpp
+	test_bbs_tower_h3c_parity.cpp
+	test_bbs_tower_leftovers.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_polyholes.cpp
@@ -59,8 +63,10 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
+	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
+	test_support_interface_temperature.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp
@@ -86,6 +92,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_v2.cpp
 	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
+	test_empty_first_layer_warning.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
 	test_ironing_overrides.cpp

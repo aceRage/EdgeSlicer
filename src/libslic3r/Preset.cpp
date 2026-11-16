@@ -1264,7 +1264,7 @@ static std::vector<std::string> s_Preset_print_options {
     "support_top_z_distance", "support_on_build_plate_only","support_critical_regions_only", "bridge_no_support", "thick_bridges", "thick_internal_bridges","dont_filter_internal_bridges","enable_extra_bridge_layer", "max_bridge_length", "print_sequence", "print_order", "support_remove_small_overhang",
     "filename_format", "wall_filament", "outer_wall_filament", "support_bottom_z_distance",
     "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament", "support_filament_matching","support_interface_not_for_body",
-    "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines",
+    "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines", "support_interface_nozzle_temperature",
     "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
@@ -1298,6 +1298,11 @@ static std::vector<std::string> s_Preset_print_options {
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "prime_tower_acceleration", "prime_tower_line_width", "prime_tower_wipe_speed", "prime_tower_wipe_distance",
+     "prime_tower_infill_gap", "prime_tower_enable_framework", "prime_tower_flat_ironing",
+     "prime_tower_feedrate_factor", "prime_tower_tail_speed_factor", "prime_tower_tail_slowdown_volume", "prime_tower_line_ironing",
+     "prime_tower_ironing_speed", "prime_tower_side_scrape", "prime_tower_side_scrape_face", "prime_tower_side_scrape_length",
+     "prime_tower_side_scrape_height", "prime_tower_side_scrape_speed", "prime_tower_side_scrape_wall_gap",
+     "prime_tower_side_scrape_point_spacing", "prime_tower_side_scrape_along_length",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      "toolchange_ordering",
@@ -1305,7 +1310,7 @@ static std::vector<std::string> s_Preset_print_options {
      "toolchange_cyclic_first_layer",
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "wipe_tower_stagger_toolchange_start",
      "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger",
-     "enable_tower_interface_features",
+     "enable_tower_interface_features", "enable_tower_interface_cooldown_during_tower",
      "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "paint_depth_mode", "paint_depth_walls", "paint_depth_mm", "paint_infill_override", "paint_depth_solid_interfaces",
@@ -1334,7 +1339,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "fins_extrude_safe_temp", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_prime_volume", "filament_prime_volume_nc", "filament_prime_tower_speed_factor_curve", "filament_adhesiveness_category", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
@@ -1363,6 +1368,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "long_retractions_when_ec", "retraction_distances_when_ec",
     "filament_tower_ironing_area",
     "filament_tower_interface_print_temp", "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length",
+    "filament_tower_interface_purge_volume",
     // Bambu Studio 2.9.1: auto circle compensation coefficients.
     "circle_compensation_speed", "counter_coef_1", "counter_coef_2", "counter_coef_3", "hole_coef_1", "hole_coef_2", "hole_coef_3",
     "counter_limit_min", "counter_limit_max", "hole_limit_min", "hole_limit_max", "diameter_limit",
@@ -1372,7 +1378,10 @@ static std::vector<std::string> s_Preset_filament_options {
     // BBS (H2C rack): hotend-change retraction (M620.11 O1 T<len>); same reason as above.
     "filament_retract_length_nc",
     // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
-    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
+    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta", "filament_pre_heating_enabled",
+    // BBS 2.9.1: the tower's nozzle-change ramming (length, reverse travel, speed) and idle travel cooling.
+    "filament_change_length", "filament_change_length_nc", "filament_ramming_travel_time", "filament_ramming_travel_time_nc",
+    "filament_ramming_volumetric_speed", "filament_ramming_volumetric_speed_nc", "filament_idle_travel_cooling_enabled",
     // BBS: flush temperature / speed and the pre-tower cooling of the BBL change_filament templates
     // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
     // without them here the loader dropped them and the G-code always ran on the defaults.
@@ -1399,8 +1408,9 @@ static std::vector<std::string> s_Preset_printer_options {
     "extruder_ams_count", "extruder_nozzle_count", "extruder_max_nozzle_count", "printer_extruder_id",
     "extruder_nozzle_stats", "machine_switch_extruder_time", "group_algo_with_time", // Ultra (dual-nozzle) grouping inputs
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
-    "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
+    "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "hotend_cooling_rate_on_rack", "nozzle_flush_dataset",
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
+    "handle_hotend_as_extruder", // BBS 2.9.1 H3C: rack hotends keep their filament (estimate, flush)
     "tool_slot_model", "support_filament_nozzle_mapping", "extruder_rack_nozzle_diameter", // per-nozzle process P4
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
