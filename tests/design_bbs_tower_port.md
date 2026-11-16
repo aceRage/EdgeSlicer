@@ -278,3 +278,74 @@ BBS 2.9.1 code stays the source either way.
   towers whose band is purged on the next layer change (sparse grid -> solid grid: the fill of those blocks
   takes several times its sparse filament, up to about 10 x for a deep block); single-category towers and Type 2 are untouched. A denser `m_bridging` instead would
   change every Bambu tower's sparse fill. Not done in #1052 (upstream behaviour; owner decision after the prints).
+
+## 12. PR-C: the tower side of AdaptiveLayerMerge (mixed nozzle diameters)
+
+Branch `port/bbs-tower-alm`, worktree `C:/Dev/wt_toweralm` (from origin/main 1caf304431). Reference: Bambu Studio
+`v02.09.01.70`, `src/libslic3r/GCode/WipeTower.cpp` (file:line below is at that tag). Survey finding F1.
+
+### What Bambu Studio 2.9.1 does
+- Gate: `merged_fill_active()` (6083) = more than one nozzle diameter on the plate (`Print::uses_multiple_nozzle_diameters`,
+  Print.cpp:4222), no sparse-layer skipping, no smooth timelapse, no wrapping detection. Everything below is a no-op
+  otherwise, so single-diameter towers are unchanged.
+- `plan_tower_ladder()` (5877) + `absorb_run_into_next_layer()` (5843): a run of tool-change-free layers is one material;
+  it is cut into slabs of the loaded nozzle's band (`split_adaptive_layer_span`), short groups folded inside the window,
+  a suffix reserved so the tool-change layer above grows to its nozzles' band. Layers merged out print nothing at all
+  (`m_layer_skipped`); the slab prints at the group's top Z. The foundation (first tower layer) is kept when it carries
+  object or support (`set_foundation_required`).
+- `plan_merged_slabs()` (6128): per (category, diameter) group, every purge (and ramming, when it lays lines) picks a
+  merge depth inside its nozzle's [min, max] window and a lane (up to 4 parallel bands per group): the band stays empty
+  on the steps the slab reaches into (`m_reserved_blocks`), the purge prints at the merged height (`m_block_slab_height`).
+- Block key = (category, nozzle diameter, lane) (`encode_block_key`, WipeTower.hpp:445; `get_block_key` 5427). Gaps
+  are per lane-independent key (`calc_block_infill_gap` 5736) at that nozzle's line widths; `set_toolchange` (3085)
+  sizes purge and ramming depth at the band's slab height.
+- `plan_merged_block_fill()` (6643): the fill that tops every band up gets its own ladder between that band's purges
+  (`plan_band_merge_ladder` 5256, `fold_thin_ladder_groups` 5355), filled only with a filament of the band's category
+  (`block_fill_filament_base` 7501, `same_category_filler` 6091, `get_block_fill_filament` 7535); swallowed layers
+  carry their strongest Contact/Solid type up; category joints are re-marked Contact.
+- `plan_merged_outer_wall()` (7093): the outer wall has its own ladder over all printed layers, wall filament of the
+  wall category first; layers below a merged wall omit only the wall (`m_wall_reserved`), brim/chamfer follow the wall
+  slab. `get_wall_filament_for_all_layer()` (7370) prefers a filament that can print every whole-tower slab.
+- Generation (`generate_new` 7760, `tool_change_new` 3542, `ramming` 3727, `toolchange_wipe_new` 4999, `finish_layer_new`
+  4077, `finish_block`/`_solid` 4398/4531): each extrusion uses its band's slab height for flow, analyzer HEIGHT tag and
+  `is_first_layer_for_slab` (WipeTower.hpp:813: a slab reaching the bed is a first layer); reserved bands and skipped
+  layers print nothing; a visit that lays nothing is dropped. Tail slowdown is skipped per visit when that nozzle's slab
+  reaches the bed (8086-8100). Side scrape floor walks wall slabs (`side_scrape_z_floor` 4769). Wall gaps skip reserved
+  bands and wall-reserved layers (`get_wall_skip_points` 3450; contact gaps go on the plan layer and the 3 plan layers
+  below, as before). `audit_merged_slabs()` (7189) logs overlapping slabs.
+- Per-nozzle tower parameters in multi-diameter mode (WipeTower.cpp:2054-2075, PrintConfig.cpp:237-252): tower line width
+  0.4 for a 0.2 nozzle and 0.8 for 0.4/0.6/0.8, built-in ramming widths, feedrate factor 1; the structure width follows
+  the finest nozzle.
+
+### What we already have
+#887/#902/#907/#910/#912 run the object and support ladders (`build_adaptive_layer_ladder`, per-nozzle clamp
+`adaptive_layer_height_range_for_nozzle`, `adaptive_ladder_height_range`, `nozzle_process_band_size` for a chosen
+per-nozzle process); ToolOrdering already lists a coarse filament only on its band tops, so the tower's tool changes
+already sit on the slab tops. The tower itself is the #1052/#1056/#1062 block planner at the base layer height.
+
+### What this PR ports
+All of the above, on our planner (`generate()`, not `generate_new()`), with these adaptations:
+- **Nozzle windows from our ALM, not Bambu's plain [0.2d, 0.7d].** Print hands the tower, per filament, the window and
+  band size its object ladder is cut with (the same calls `PrintObject::compute_adaptive_merge_groups()` makes:
+  per-nozzle clamp, `adaptive_ladder_height_range`, `adaptive_layer_band_size`, `nozzle_process_band_size` for a
+  chosen per-nozzle process), so the tower's slabs follow each nozzle's object ladder.
+- **Skipped layers** reuse `combined_away` (Orca #15841), which the emitter already drops; the Orca sparse-layer
+  combination does not run when the merged ladder is active (the ladder supersedes it, nozzle aware).
+- **Block key** is the plain category on single-diameter plates (bit-identical bookkeeping), the packed key otherwise.
+- `plan_merge_ladder()`/`collect_tower_visitors()` (6530-6640) are not ported: nothing calls them at the tag.
+- **Gate:** `Print::uses_multiple_nozzle_diameters()` (owner decision, no mode key). That also covers H2D/X2D with
+  unequal nozzles, where Bambu has no multi-diameter mode; our objects already merge there, so the tower follows.
+- **Per-nozzle tower parameters** on the same gate.
+- `WipeTowerEstimate` estimates mixed plates per (category, diameter) band at the band slab height and per-nozzle width.
+
+### Not ported, and why
+- Bambu's H3C single-diameter "layering nozzle" path (`set_single_diameter_parameters`, `m_single_diameter_layering_nozzle`):
+  Edge has no grid nozzle (see `Print::uses_multiple_nozzle_diameters()` comment).
+- `seed_emitted_tower_foundation` / `ToolOrdering::seed_first_tower_layer`: Edge never merges layer 0, so the first tower
+  layer always has object extrusions (`foundation_required` stays true); kept as the BBS flag for the planner only.
+- Filament-switcher and wrapping-detection branches: not in Edge (survey features 8, 11).
+
+### D2 warning
+The #1056 warning ("every filament at the plate's layer height") is removed for plates the ladder plans. It stays,
+narrowed, where the ladder is off: sparse layers skipped (`wipe_tower_no_sparse_layers`) or smooth timelapse on a
+mixed-diameter plate, which Bambu also prints at the base height.
