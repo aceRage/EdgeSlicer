@@ -3865,13 +3865,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
     m_layer_count = 0;
+    // EdgeSlicer SPIKE, curved tops: the planar layers a curved block emptied on purpose are not
+    // printed (no layer change), so they are not counted either; the printer's layer x / total and
+    // the progress then end at the real count. Always false with curved tops off.
+    auto curved_tops_emptied = [](const Layer *layer) {
+        const Layer *top = layer->object()->layers().empty() ? nullptr : layer->object()->layers().back();
+        return top != nullptr && top != layer && top->curved_tops_block && !layer->has_extrusions();
+    };
     if (print.config().print_sequence == PrintSequence::ByObject) {
         // Add each of the object's layers separately.
         for (auto object : print.objects()) {
             std::vector<coordf_t> zs;
             zs.reserve(object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
             std::sort(zs.begin(), zs.end());
@@ -3890,7 +3898,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         for (auto object : print.objects()) {
             zs.reserve(zs.size() + object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
         }

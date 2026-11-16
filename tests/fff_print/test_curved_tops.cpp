@@ -416,17 +416,24 @@ TEST_CASE("Curved tops: the stock X1C process keeps its travels clear and its G-
     CHECK(t.min_clearance >= 0.5);
     CHECK(t.max_travel_z < cfg.opt_float("printable_height"));
 
-    // One layer change and one Z_HEIGHT per layer; progress lines still there.
-    const size_t layers = print.objects().front()->layers().size();
-    size_t change_layer = 0, z_height = 0, m73 = 0;
+    // One layer change and one Z_HEIGHT per printed layer (the planar layers the curved block
+    // emptied are not printed), the header's total says the same, progress lines still there.
+    size_t layers = 0;
+    for (const Layer *layer : print.objects().front()->layers())
+        layers += layer->has_extrusions() ? 1 : 0;
+    REQUIRE(layers < print.objects().front()->layers().size()); // the block emptied some planar layers
+    size_t change_layer = 0, z_height = 0, m73 = 0, header_total = 0;
     std::istringstream in(gcode);
     for (std::string line; std::getline(in, line);) {
         change_layer += line.rfind("; CHANGE_LAYER", 0) == 0 || line.rfind(";LAYER_CHANGE", 0) == 0;
         z_height     += line.rfind("; Z_HEIGHT:", 0) == 0;
         m73          += line.rfind("M73 ", 0) == 0;
+        if (line.rfind("; total layer number: ", 0) == 0)
+            header_total = size_t(std::atoi(line.c_str() + 22));
     }
     CHECK(change_layer == layers);
     CHECK(z_height == layers);
+    CHECK(header_total == layers);
     CHECK(m73 > 0);
 }
 
