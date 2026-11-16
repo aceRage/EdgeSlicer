@@ -425,6 +425,8 @@ DynamicPrintConfig h2d_config(const std::string &sequence, const std::string &mo
             { "wipe_tower_x", tower_x },
             { "wipe_tower_y", 250. },
             { "wipe_tower_rotation_angle", 0 },
+            // These cases size a rectangle tower by prime_tower_width; the BBL presets default to rib.
+            { "wipe_tower_wall_type", "rectangle" },
         });
     return cfg;
 }
