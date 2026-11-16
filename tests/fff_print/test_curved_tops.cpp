@@ -974,8 +974,10 @@ TEST_CASE("Curved tops: a guard input changed after a curved slice refuses on re
         { "printable height", {}, { { "printable_height", "5.5" } }, 1, "above the printable height" },
         { "Z contouring",     {}, { { "zaa_enabled", "1" } }, 1, "Z contouring is on for it as well" },
         // raft_layers is left out: it re-slices the object by itself (posSlice), and the fresh-slice guard
-        // test covers its refusal. (Re-sliced from a curved slice, the raft's first loop differed from the
-        // re-sliced feature-off raft by one 0.00001 E split segment - slicing history, not curved tops.)
+        // test covers its refusal. Turning a raft on in an already sliced Print leaves one 0.00001 E split
+        // segment in the raft's first loop that a fresh slice does not have - with curved tops off as well
+        // (see "raft re-slice control" below: off-reslice vs fresh differs at the same line, and a full
+        // invalidation makes both identical again). Pre-existing re-slice history in the raft code.
     };
     const size_t i = GENERATE(range(size_t(0), size_t(9)));
     REQUIRE(i < changes.size());
