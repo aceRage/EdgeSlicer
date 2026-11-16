@@ -18,9 +18,11 @@ struct SlicingPipelineContext {
     SlicingPipelineStepPlugin  step { SlicingPipelineStepPlugin::posSlice };
     Print*               print  { nullptr };   // present for in-pipeline steps; null at psGCodePostProcess
     const PrintObject*   object { nullptr };   // null for print-wide steps and psGCodePostProcess
-    // Populated ONLY at Step.psGCodePostProcess. gcode_path is the working G-code file on disk
-    // that the plugin edits in place; host is the target ("File", "OctoPrint", ...); output_name
-    // mirrors SLIC3R_PP_OUTPUT_NAME. Empty at every other step.
+    // Populated ONLY at Step.psGCodePostProcess. gcode_path is the working G-code file the plugin
+    // edits in place. In the OOP host this is a scratch copy under plugin_data; Edge writes the
+    // result back to the export file, so the helper has no G-code-folder grant. In-process
+    // fallback still points at the export file. host is the target ("File", "OctoPrint", ...);
+    // output_name mirrors SLIC3R_PP_OUTPUT_NAME. Empty at every other step.
     std::string          gcode_path;
     std::string          host;
     std::string          output_name;

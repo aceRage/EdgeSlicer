@@ -21,6 +21,7 @@
 #include "slic3r/plugin/PluginTrust.hpp"
 #include "slic3r/plugin/PythonInterpreter.hpp"
 #include "slic3r/plugin/PythonPluginInterface.hpp"
+#include "slic3r/plugin/ipc/PluginHostClient.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -110,6 +111,9 @@ import os
 
 import orca
 
+ULTRANET = r'''__ULTRANET__'''
+OUTSIDE = r'''__OUTSIDE__'''
+
 class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
     def get_name(self):
         return "WriteProbe"
@@ -117,11 +121,17 @@ class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
     def execute(self, ctx):
         if ctx.step != orca.slicing.Step.psGCodePostProcess:
             return orca.ExecutionResult.success()
-        targets_path = os.path.join(os.path.dirname(ctx.gcode_path), "probe_targets.json")
-        with open(targets_path, "r", encoding="utf-8") as f:
-            targets = json.load(f)
+        # Hosted post-process stages G-code under plugin_data; in-process keeps the export path.
+        work_dir = os.path.dirname(ctx.gcode_path)
+        sidecar = os.path.join(work_dir, "sidecar.txt")
         results = {}
-        for name, path in targets.items():
+        try:
+            with open(sidecar, "w", encoding="utf-8") as out:
+                out.write("wrote:work_dir")
+            results["work_dir"] = "ok"
+        except Exception as e:
+            results["work_dir"] = type(e).__name__ + ":" + str(e)
+        for name, path in (("ultranet", ULTRANET), ("outside", OUTSIDE)):
             try:
                 with open(path, "w", encoding="utf-8") as out:
                     out.write("wrote:" + name)
@@ -130,7 +140,7 @@ class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
                 results[name] = type(e).__name__ + ":" + str(e)
         results_json = json.dumps(results, sort_keys=True)
         orca._write_probe = results_json
-        with open(os.path.join(os.path.dirname(ctx.gcode_path), "probe_results.json"), "w", encoding="utf-8") as out:
+        with open(os.path.join(work_dir, "probe_results.json"), "w", encoding="utf-8") as out:
             out.write(results_json)
         return orca.ExecutionResult.success("probed")
 
@@ -237,6 +247,13 @@ void write_file(const fs::path& path, const std::string& contents)
     fs::create_directories(path.parent_path());
     std::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
     out << contents;
+}
+
+std::string replace_all(std::string text, const std::string& from, const std::string& to)
+{
+    for (size_t pos = 0; (pos = text.find(from, pos)) != std::string::npos; pos += to.size())
+        text.replace(pos, from.size(), to);
+    return text;
 }
 
 DynamicPrintConfig pipeline_config(const std::string& cap, const std::string& plugin_key)
@@ -426,7 +443,7 @@ TEST_CASE("An early-step RecoverableError fails the slice", "[slicing_pipeline][
     manager.unload_plugin("Recoverable");
 }
 
-TEST_CASE("psGCodePostProcess write root is the G-code folder and not UltraNet plugins",
+TEST_CASE("psGCodePostProcess write root is the working-copy folder and not UltraNet plugins",
           "[slicing_pipeline][Python][audit]")
 {
     ScopedPluginManager plugin_system;
@@ -435,37 +452,46 @@ TEST_CASE("psGCodePostProcess write root is the G-code folder and not UltraNet p
 
     ScopedDataDir  data_dir_guard("pipeline-write-root");
     PluginManager& manager = PluginManager::instance();
-    discover_and_load(manager, data_dir_guard, "WriteProbe", WRITE_PROBE_SOURCE, {"WriteProbe"});
 
     ScopedTemporaryDir gcode_dir("pipeline-write-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, "G1 X0 Y0\n");
 
-    const fs::path sidecar = gcode_dir.path() / "sidecar.txt";
-    const fs::path ultra   = fs::path(data_dir()) / "plugins" / "escape.txt";
+    const fs::path ultra = fs::path(data_dir()) / "plugins" / "escape.txt";
     fs::create_directories(ultra.parent_path());
-    const fs::path outside = fs::temp_directory_path() / "edge-pipeline-outside.txt";
+    const fs::path            outside = fs::temp_directory_path() / "edge-pipeline-outside.txt";
     boost::system::error_code ec;
     fs::remove(outside, ec);
 
-    json targets = {{"gcode_folder", sidecar.string()}, {"ultranet", ultra.string()}, {"outside", outside.string()}};
-    write_file(gcode_dir.path() / "probe_targets.json", targets.dump());
+    // Embed deny-targets in the plugin. After M5 the helper stages G-code under plugin_data
+    // and has no grant on the export folder, so a sibling probe_targets.json next to the
+    // original file is invisible to the child (Linux Landlock and unsigned macOS both host).
+    std::string source = replace_all(WRITE_PROBE_SOURCE, "__ULTRANET__", ultra.string());
+    source             = replace_all(std::move(source), "__OUTSIDE__", outside.string());
+    discover_and_load(manager, data_dir_guard, "WriteProbe", source, {"WriteProbe"});
+
+    const bool     hosted      = plugin_ipc::PluginHostClient::should_use_host();
+    const fs::path work_dir    = hosted ? data_dir_guard.plugin_scratch_dir("WriteProbe") : gcode_dir.path();
+    const fs::path sidecar     = work_dir / "sidecar.txt";
+    const fs::path export_side = gcode_dir.path() / "sidecar.txt";
 
     // Production deny-first: a worker thread must not pop a Yes/No dialog. The test seam would
     // short-circuit that path, so leave it unset and run the plugin off the main thread.
     DynamicPrintConfig config = pipeline_config("WriteProbe", "WriteProbe");
     std::exception_ptr ex;
-    std::thread worker([&] { run_post_process(gcode, config, ex); });
+    std::thread        worker([&] { run_post_process(gcode, config, ex); });
     worker.join();
 
     REQUIRE_FALSE(ex);
     CHECK(fs::exists(sidecar));
-    CHECK(read_file(sidecar) == "wrote:gcode_folder");
+    CHECK(read_file(sidecar) == "wrote:work_dir");
+    if (hosted)
+        CHECK_FALSE(fs::exists(export_side));
     CHECK_FALSE(fs::exists(ultra));
     CHECK_FALSE(fs::exists(outside));
 
-    std::string observed;
-    const fs::path results_file = gcode_dir.path() / "probe_results.json";
+    std::string    observed;
+    const fs::path results_file = work_dir / "probe_results.json";
     if (fs::exists(results_file))
         observed = read_file(results_file);
     else {
@@ -475,8 +501,8 @@ TEST_CASE("psGCodePostProcess write root is the G-code folder and not UltraNet p
         if (pybind11::hasattr(orca, "_write_probe"))
             observed = orca.attr("_write_probe").cast<std::string>();
     }
-    INFO("write probe: " << observed);
-    CHECK(observed.find("\"gcode_folder\": \"ok\"") != std::string::npos);
+    INFO("write probe hosted=" << hosted << " " << observed);
+    CHECK(observed.find("\"work_dir\": \"ok\"") != std::string::npos);
     CHECK(observed.find("ultranet") != std::string::npos);
     CHECK(observed.find("\"ultranet\": \"ok\"") == std::string::npos);
     CHECK(observed.find("\"outside\": \"ok\"") == std::string::npos);

@@ -152,7 +152,9 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 - Post-process G-code is read by Edge and sent as JSON `gcode` on the existing
   length-prefixed IPC (POSIX socketpair / Windows named pipe). The helper stages a scratch
   copy under `plugin_data` / TMPDIR, Python still sees `ctx.gcode_path`, and Edge writes
-  the reply back. Security-scoped bookmarks are not used: Edge is not sandboxed and has a
+  the reply back. The hosted write root is that working-copy folder, not the export
+  directory — sibling files next to the original G-code are not visible to the child.
+  Security-scoped bookmarks are not used: Edge is not sandboxed and has a
   different identity from the helper, so a bookmark would not resolve. File-descriptor
   passing (`SCM_RIGHTS` / `DuplicateHandle`) is not on the Channel. Payloads over 16 MiB
   fail with a clear error rather than a silent truncate.
