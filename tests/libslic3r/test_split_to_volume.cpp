@@ -1,13 +1,25 @@
-// Split to Fit, phase 1: the planner and the apply (tests/design_split_to_build_volume.md).
+// Split to Fit, phases 1 and 2: the planner, the apply and the automatic dowels
+// (tests/design_split_to_build_volume.md).
 #include <catch2/catch.hpp>
 
+#include <libslic3r/CutUtils.hpp>
+#include <libslic3r/Format/bbs_3mf.hpp>
+#include <libslic3r/Geometry.hpp>
 #include <libslic3r/Model.hpp>
+#include <libslic3r/Preset.hpp>
+#include <libslic3r/PrintConfig.hpp>
+#include <libslic3r/Semver.hpp>
 #include <libslic3r/SplitToVolume.hpp>
 #include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/Utils.hpp>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 #include <set>
 
 using namespace Slic3r;
@@ -563,4 +575,558 @@ TEST_CASE("Split to Fit: cancel stops the apply and leaves the source alone", "[
     REQUIRE(res.parts.empty());
     REQUIRE(mo->volumes.size() == 1);
     REQUIRE_THAT(world_volume(*mo), WithinRel(total, 1e-9));
+}
+
+// =====================================================================================================
+// Phase 2: automatic dowels
+// =====================================================================================================
+
+namespace {
+
+// GLGizmoCut3D::apply_cut_connectors() and the Plug / Dowel / Snap branch of get_connector_mesh() as
+// they were before P2 moved them to libslic3r (copied from main at 2999085364, gizmo snap defaults).
+void p2_old_gizmo_bake(ModelObject *mo, const std::string &connector_name)
+{
+    using namespace Geometry;
+    const float snap_space = 0.3f, snap_bulge = 0.15f;
+    size_t      connector_id = mo->cut_id.connectors_cnt();
+    for (const CutConnector &connector : mo->cut_connectors) {
+        int sectorCount{ 1 };
+        switch (CutConnectorShape(connector.attribs.shape)) {
+        case CutConnectorShape::Triangle: sectorCount = 3; break;
+        case CutConnectorShape::Square: sectorCount = 4; break;
+        case CutConnectorShape::Circle: sectorCount = 360; break;
+        case CutConnectorShape::Hexagon: sectorCount = 6; break;
+        default: break;
+        }
+        indexed_triangle_set connector_mesh;
+        if (connector.attribs.type == CutConnectorType::Snap)
+            connector_mesh = its_make_snap(1.0, 1.0, snap_space, snap_bulge);
+        else if (connector.attribs.style == CutConnectorStyle::Prism)
+            connector_mesh = its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
+        else if (connector.attribs.type == CutConnectorType::Plug)
+            connector_mesh = its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
+        else
+            connector_mesh = its_make_frustum_dowel(1.0, 1.0, sectorCount);
+        TriangleMesh mesh       = TriangleMesh(connector_mesh);
+        ModelVolume *new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
+        new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                                       rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
+                                       scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
+        new_volume->name     = connector_name + "-" + std::to_string(++connector_id);
+    }
+    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
+    mo->cut_connectors.clear();
+}
+
+ModelObject *p2_cube(Model &model)
+{
+    TriangleMesh mesh = make_cube(40.0, 40.0, 40.0);
+    mesh.translate(Vec3f(-20.f, -20.f, -20.f));
+    ModelObject *obj = model.add_object();
+    obj->name        = "cube";
+    obj->add_volume(mesh);
+    obj->add_instance();
+    return obj;
+}
+
+bool p2_same_mesh(const indexed_triangle_set &a, const indexed_triangle_set &b)
+{
+    return a.vertices == b.vertices && a.indices == b.indices;
+}
+
+BoundingBoxf3 p2_world_bbox(const ModelObject &o, const ModelVolume &v)
+{
+    return v.mesh().transformed_bounding_box(o.instances.front()->get_transformation().get_matrix() * v.get_matrix());
+}
+
+SplitOptions p2_dowels_on()
+{
+    SplitOptions opt;
+    opt.dowels.enabled = true;
+    return opt;
+}
+
+const SplitWarning *p2_find(const std::vector<SplitWarning> &w, SplitWarning::Kind kind)
+{
+    const auto it = std::find_if(w.begin(), w.end(), [kind](const SplitWarning &x) { return x.kind == kind; });
+    return it == w.end() ? nullptr : &*it;
+}
+
+// Every check of a split with dowels (design P2 tests 5 and 6).
+void p2_check_dowel_apply(const indexed_triangle_set &its, const SplitUsableVolume &usable, size_t expected_parts)
+{
+    Model        model;
+    ModelObject *mo   = add_object(model, its, "Block");
+    const SplitOptions opt  = p2_dowels_on();
+    const SplitPlan    plan = split_plan_grid(split_object_mesh(*mo, 0), usable, opt);
+    REQUIRE(plan.part_count() == expected_parts);
+    REQUIRE_FALSE(plan.sites.empty());
+
+    // Every face of a solid box gets dowels; the total is the sum over the faces.
+    size_t sum = 0;
+    for (const SplitFace &f : plan.faces) {
+        INFO("face " << f.key);
+        REQUIRE_FALSE(f.sites.empty());
+        REQUIRE(int(f.sites.size()) <= opt.dowels.max_per_face);
+        sum += f.sites.size();
+    }
+    REQUIRE(sum == plan.dowel_count());
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE_FALSE(res.canceled);
+    REQUIRE(res.parts.size() == expected_parts);
+    REQUIRE(res.dowels.size() == plan.sites.size());
+    REQUIRE(res.warnings.empty());
+
+    // One linked cut group (D10): every part and every dowel, the check sum counting them all.
+    const CutObjectBase &group = res.parts.front()->cut_id;
+    REQUIRE_FALSE(group.id().invalid());
+    REQUIRE(group.check_sum() == res.parts.size() + res.dowels.size());
+    // (CutObjectBase::is_equal() is not const.)
+    auto same_group = [&group](const ModelObject *o) {
+        return o->cut_id.id() == group.id() && o->cut_id.check_sum() == group.check_sum() &&
+               o->cut_id.connectors_cnt() == group.connectors_cnt();
+    };
+    for (const ModelObject *o : res.parts)
+        REQUIRE(same_group(o));
+    for (const ModelObject *o : res.dowels)
+        REQUIRE(same_group(o));
+
+    // Parts closed, connector names unique within each part.
+    std::map<std::string, std::pair<int, const ModelVolume *>> holes; // hole name -> (plan part, volume)
+    std::map<std::string, const ModelObject *>                 hole_owner;
+    for (size_t i = 0; i < res.parts.size(); ++i) {
+        const ModelObject *part = res.parts[i];
+        INFO("part " << part->name);
+        REQUIRE(open_edges(*part) == 0);
+        std::set<std::string> names;
+        size_t                connectors = 0;
+        for (const ModelVolume *v : part->volumes)
+            if (v->cut_info.is_connector) {
+                ++connectors;
+                names.insert(v->name);
+                REQUIRE(v->type() == ModelVolumeType::NEGATIVE_VOLUME);
+                REQUIRE(holes.count(v->name) == 0);  // each hole in exactly one part
+                holes[v->name]      = { res.part_index[i], v };
+                hole_owner[v->name] = part;
+            }
+        REQUIRE(names.size() == connectors);
+        // A hole on every one of its cut faces.
+        for (int fid : plan.parts[size_t(res.part_index[i])].faces) {
+            const SplitFace &f   = plan.faces[size_t(fid)];
+            bool             any = false;
+            for (int si : f.sites)
+                any = any || std::any_of(part->volumes.begin(), part->volumes.end(), [&](const ModelVolume *v) {
+                          return v->name.rfind(plan.sites[size_t(si)].name + "_", 0) == 0;
+                      });
+            REQUIRE(any);
+        }
+    }
+    REQUIRE(holes.size() == 2 * plan.sites.size());
+
+    for (size_t k = 0; k < plan.sites.size(); ++k) {
+        const SplitSite  &s  = plan.sites[k];
+        const SplitFace  &f  = plan.faces[size_t(s.face)];
+        const SplitPlane &pl = plan.planes[size_t(s.plane)];
+        const int a = pl.axis, ua = (a + 1) % 3, va = (a + 2) % 3;
+        INFO("site " << s.name);
+        REQUIRE(holes.count(s.name + "_A") == 1);
+        REQUIRE(holes.count(s.name + "_B") == 1);
+        // _A in the part above the plane, _B in the part below: the two mating parts.
+        REQUIRE(holes[s.name + "_A"].first == f.part_above);
+        REQUIRE(holes[s.name + "_B"].first == f.part_below);
+        const BoundingBoxf3 up   = p2_world_bbox(*hole_owner[s.name + "_A"], *holes[s.name + "_A"].second);
+        const BoundingBoxf3 down = p2_world_bbox(*hole_owner[s.name + "_B"], *holes[s.name + "_B"].second);
+        // Both at the site, on either side of the plane (apply may move a plane by up to ~0.07 mm).
+        for (const BoundingBoxf3 *bb : { &up, &down }) {
+            REQUIRE_THAT(bb->center()[ua], WithinAbs(s.pos[ua], 1e-3));
+            REQUIRE_THAT(bb->center()[va], WithinAbs(s.pos[va], 1e-3));
+            // The hole is the dowel plus the tolerance all round.
+            REQUIRE_THAT(0.5 * bb->size()[ua], WithinAbs(0.5 * s.diameter + opt.dowels.tolerance, 1e-3));
+        }
+        const double depth = s.half_length + 0.5 * opt.dowels.depth_tolerance;
+        REQUIRE_THAT(up.max[a], WithinAbs(pl.pos + depth, 0.1));
+        REQUIRE_THAT(up.min[a], WithinAbs(pl.pos - CONNECTOR_HOLE_OVERLAP, 0.1));
+        REQUIRE_THAT(down.min[a], WithinAbs(pl.pos - depth, 0.1));
+        REQUIRE_THAT(down.max[a], WithinAbs(pl.pos + CONNECTOR_HOLE_OVERLAP, 0.1));
+        // No hole reaches another cut plane.
+        for (const BoundingBoxf3 *bb : { &up, &down })
+            for (const SplitPlane &other : plan.planes) {
+                if (&other == &pl)
+                    continue;
+                const int b = other.axis;
+                REQUIRE_FALSE((bb->min[b] < other.pos + 0.1 && bb->max[b] > other.pos - 0.1));
+            }
+
+        // The dowel: its own object, named after the site, the nominal size: it fits its holes with
+        // the tolerance.
+        const ModelObject *dowel = res.dowels[k];
+        REQUIRE(dowel->name == "Block-Dowel-" + s.name);
+        REQUIRE(dowel->volumes.size() == 1);
+        REQUIRE(dowel->volumes.front()->is_model_part());
+        const BoundingBoxf3 db = dowel->volumes.front()->mesh().transformed_bounding_box(dowel->volumes.front()->get_matrix());
+        REQUIRE_THAT(db.size().x(), WithinAbs(s.diameter, 1e-3));
+        REQUIRE_THAT(db.size().z(), WithinAbs(2. * s.half_length, 1e-3));
+        REQUIRE_THAT(0.5 * up.size()[ua] - 0.5 * db.size().x(), WithinAbs(opt.dowels.tolerance, 1e-3));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Split to Fit P2: the connector bake moved out of the Cut gizmo is unchanged", "[SplitToVolume][CutConnectors]")
+{
+    struct Kind { CutConnectorType type; CutConnectorStyle style; CutConnectorShape shape; };
+    const std::vector<Kind> kinds = {
+        { CutConnectorType::Dowel, CutConnectorStyle::Prism, CutConnectorShape::Circle },
+        { CutConnectorType::Dowel, CutConnectorStyle::Prism, CutConnectorShape::Square },
+        { CutConnectorType::Plug, CutConnectorStyle::Prism, CutConnectorShape::Hexagon },
+        { CutConnectorType::Plug, CutConnectorStyle::Frustum, CutConnectorShape::Circle },
+        { CutConnectorType::Snap, CutConnectorStyle::Prism, CutConnectorShape::Circle },
+    };
+    for (const Kind &kind : kinds) {
+        INFO("type " << int(kind.type) << " style " << int(kind.style) << " shape " << int(kind.shape));
+        // A turned connector off the middle, as the gizmo leaves it once it has doubled a Dowel's height.
+        const Transform3d rot = Geometry::rotation_transform(Vec3d(0.1, -0.2, 0.3));
+        CutConnector      c(Vec3d(4., -3., 0.5), rot, 3.f, 12.f, 0.1f, 0.2f, 0.4f,
+                            CutConnectorAttributes(kind.type, kind.style, kind.shape));
+        Model old_model, new_model;
+        ModelObject *old_obj = p2_cube(old_model);
+        ModelObject *new_obj = p2_cube(new_model);
+        old_obj->cut_connectors.push_back(c);
+        new_obj->cut_connectors.push_back(c);
+        p2_old_gizmo_bake(old_obj, "Connector");
+        bake_cut_connectors(new_obj, "Connector");
+
+        REQUIRE(new_obj->cut_connectors.empty());
+        REQUIRE(new_obj->cut_id.connectors_cnt() == old_obj->cut_id.connectors_cnt());
+        REQUIRE(new_obj->volumes.size() == old_obj->volumes.size());
+        for (size_t i = 0; i < old_obj->volumes.size(); ++i) {
+            const ModelVolume *o = old_obj->volumes[i];
+            const ModelVolume *n = new_obj->volumes[i];
+            REQUIRE(n->name == o->name);
+            REQUIRE(n->type() == o->type());
+            REQUIRE(p2_same_mesh(n->mesh().its, o->mesh().its));
+            REQUIRE(n->get_matrix().isApprox(o->get_matrix(), 1e-12));
+            REQUIRE(n->cut_info.is_connector == o->cut_info.is_connector);
+            REQUIRE(n->cut_info.is_processed == o->cut_info.is_processed);
+            REQUIRE(n->cut_info.connector_type == o->cut_info.connector_type);
+            REQUIRE(n->cut_info.radius_tolerance == o->cut_info.radius_tolerance);
+            REQUIRE(n->cut_info.height_tolerance == o->cut_info.height_tolerance);
+        }
+
+        // And the cut a single manual connector gives is the same.
+        const bool                     dowel = kind.type == CutConnectorType::Dowel;
+        const ModelObjectCutAttributes attrs = dowel ? (ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                                        ModelObjectCutAttribute::CreateDowels) :
+                                                       (ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+        Cut                    old_cut(old_obj, 0, Transform3d::Identity(), attrs);
+        Cut                    new_cut(new_obj, 0, Transform3d::Identity(), attrs);
+        const ModelObjectPtrs &old_res = old_cut.perform_with_plane();
+        const ModelObjectPtrs &new_res = new_cut.perform_with_plane();
+        REQUIRE(new_res.size() == old_res.size());
+        REQUIRE(new_res.size() == (dowel ? 3u : 2u));
+        for (size_t k = 0; k < old_res.size(); ++k) {
+            REQUIRE(new_res[k]->name == old_res[k]->name);
+            REQUIRE(new_res[k]->volumes.size() == old_res[k]->volumes.size());
+            for (size_t i = 0; i < old_res[k]->volumes.size(); ++i) {
+                const ModelVolume *o = old_res[k]->volumes[i];
+                const ModelVolume *n = new_res[k]->volumes[i];
+                REQUIRE(n->name == o->name);
+                REQUIRE(n->type() == o->type());
+                REQUIRE(p2_same_mesh(n->mesh().its, o->mesh().its));
+                REQUIRE(n->get_matrix().isApprox(o->get_matrix(), 1e-12));
+            }
+        }
+    }
+}
+
+TEST_CASE("Split to Fit P2: sites on a 60 x 40 face", "[SplitToVolume]")
+{
+    ExPolygon face;
+    face.contour.points = { Point::new_scale(0., 0.), Point::new_scale(60., 0.), Point::new_scale(60., 40.), Point::new_scale(0., 40.) };
+    const BoundingBoxf all(Vec2d(-1., -1.), Vec2d(61., 41.));
+    const double       inset = 3. + 3.1;   // wall margin + a 6 mm dowel's hole radius
+
+    const std::vector<Vec2d> three = split_pick_sites(face, all, inset, 3, 20.);
+    REQUIRE(three.size() == 3);
+    for (size_t i = 0; i < three.size(); ++i) {
+        const Vec2d &p = three[i];
+        REQUIRE(p.x() >= inset - 1e-6);
+        REQUIRE(p.x() <= 60. - inset + 1e-6);
+        REQUIRE(p.y() >= inset - 1e-6);
+        REQUIRE(p.y() <= 40. - inset + 1e-6);
+        for (size_t j = 0; j < i; ++j)
+            REQUIRE((p - three[j]).norm() >= 20. - 1e-6);
+    }
+    // The first is the point farthest from the outline: the middle.
+    REQUIRE_THAT(three.front().x(), WithinAbs(30., 1.));
+    REQUIRE_THAT(three.front().y(), WithinAbs(20., 1.));
+
+    // The cap holds; a bigger cap still keeps the spacing.
+    REQUIRE(split_pick_sites(face, all, inset, 1, 20.).size() == 1);
+    const std::vector<Vec2d> many = split_pick_sites(face, all, inset, 10, 20.);
+    REQUIRE(many.size() >= 3);
+    for (size_t i = 0; i < many.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            REQUIRE((many[i] - many[j]).norm() >= 20. - 1e-6);
+
+    // A keep-out band takes the right side off: nothing beyond it.
+    const BoundingBoxf left(Vec2d(-1., -1.), Vec2d(25., 41.));
+    for (const Vec2d &p : split_pick_sites(face, left, inset, 3, 10.))
+        REQUIRE(p.x() <= 25. + 1e-6);
+
+    // A refused site is replaced by the next best one.
+    int refused = 0;
+    const std::vector<Vec2d> after_refusal =
+        split_pick_sites(face, all, inset, 1, 20., [&refused](const Vec2d &) { return refused++ > 0; });
+    REQUIRE(after_refusal.size() == 1);
+    REQUIRE(refused == 2);
+    // A face too small for the inset gets none.
+    ExPolygon small;
+    small.contour.points = { Point::new_scale(0., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.), Point::new_scale(0., 10.) };
+    REQUIRE(split_pick_sites(small, all, inset, 3, 20.).empty());
+}
+
+TEST_CASE("Split to Fit P2: dowels off leaves the plan as in P1", "[SplitToVolume]")
+{
+    const SplitPlan plan = split_plan_grid(box_at(100., 100., 100.), usable_box(60., 60., 60.), SplitOptions{});
+    REQUIRE(plan.sites.empty());
+    for (const SplitFace &f : plan.faces)
+        REQUIRE(f.sites.empty());
+    REQUIRE_FALSE(plan.dowel_options.enabled);
+}
+
+TEST_CASE("Split to Fit P2: a small face gets one smaller dowel, or none", "[SplitToVolume]")
+{
+    // A 10 x 10 bar, cut once across.
+    const indexed_triangle_set bar = box_at(300., 10., 10.);
+    SplitOptions               opt = p2_dowels_on();
+    const SplitPlan            plan = split_plan_grid(bar, usable_box(200., 200., 200.), opt);
+    REQUIRE(plan.faces.size() == 1);
+    REQUIRE(plan.sites.size() == 1);
+    const SplitSite &s = plan.sites.front();
+    REQUIRE(s.scaled_down);
+    REQUIRE_THAT(s.diameter, WithinAbs(3., 1e-9));
+    REQUIRE_THAT(s.pos.y(), WithinAbs(5., 0.6));
+    REQUIRE_THAT(s.pos.z(), WithinAbs(5., 0.6));
+    REQUIRE(has_warning(plan.warnings, SplitWarning::Kind::DowelScaledDown));
+    // One round dowel: the parts can turn on it.
+    REQUIRE(has_warning(plan.warnings, SplitWarning::Kind::DowelCanTurn));
+    REQUIRE_FALSE(has_warning(plan.warnings, SplitWarning::Kind::NoDowelOnFace));
+
+    // A square dowel is keyed: no turning warning.
+    opt.dowels.shape = SplitDowelShape::Square;
+    const SplitPlan square = split_plan_grid(bar, usable_box(200., 200., 200.), opt);
+    REQUIRE(square.sites.size() == 1);
+    REQUIRE_FALSE(has_warning(square.warnings, SplitWarning::Kind::DowelCanTurn));
+
+    // Without scaling down: no dowel, and the face is reported as too small.
+    opt.dowels.shape      = SplitDowelShape::Round;
+    opt.dowels.scale_down = false;
+    const SplitPlan none  = split_plan_grid(bar, usable_box(200., 200., 200.), opt);
+    REQUIRE(none.sites.empty());
+    const SplitWarning *w = p2_find(none.warnings, SplitWarning::Kind::NoDowelOnFace);
+    REQUIRE(w != nullptr);
+    REQUIRE(w->face == 0);
+    REQUIRE(w->value == SPLIT_NO_DOWEL_TOO_SMALL);
+}
+
+TEST_CASE("Split to Fit P2: the depth check shortens or drops a dowel in thin material", "[SplitToVolume]")
+{
+    const indexed_triangle_set slab = box_at(300., 60., 60.);
+    SplitOptions               opt  = p2_dowels_on();
+    // The plane pinned 11.5 mm from the end: 10 mm half-length + 0.05 depth tolerance + 1.5 mm of
+    // material does not fit, so the dowels get 11.5 - 1.5 - 0.05 = 9.95 mm on that side.
+    opt.pinned.push_back({ 0, 0, 300. - 11.5 });
+    const SplitPlan near_end = split_plan_grid(slab, usable_box(200., 200., 200.), opt);
+    REQUIRE_FALSE(near_end.sites.empty());
+    for (const SplitSite &s : near_end.sites) {
+        REQUIRE(s.shortened);
+        REQUIRE_THAT(s.half_length, WithinAbs(9.95, 1e-3));
+    }
+    const SplitWarning *shortened = p2_find(near_end.warnings, SplitWarning::Kind::DowelShortened);
+    REQUIRE(shortened != nullptr);
+    REQUIRE_THAT(shortened->value, WithinAbs(19.9, 1e-3));
+
+    // 3 mm from the end: nothing holds there, at any size.
+    opt.pinned.front().pos   = 300. - 3.;
+    const SplitPlan thin     = split_plan_grid(slab, usable_box(200., 200., 200.), opt);
+    REQUIRE(thin.sites.empty());
+    const SplitWarning *w = p2_find(thin.warnings, SplitWarning::Kind::NoDowelOnFace);
+    REQUIRE(w != nullptr);
+    REQUIRE(w->value == SPLIT_NO_DOWEL_TOO_THIN);
+
+    // A part 12 mm thick between two planes: the dowel stops 2 mm short of the next plane.
+    SplitOptions between = p2_dowels_on();
+    between.pinned.push_back({ 0, 0, 100. });
+    between.pinned.push_back({ 0, 1, 112. });
+    const SplitPlan three = split_plan_grid(slab, usable_box(110., 200., 200.), between);
+    REQUIRE(three.planes.size() == 2);
+    for (const SplitSite &s : three.sites)
+        REQUIRE(s.half_length + 0.5 * between.dowels.depth_tolerance <= 12. - between.dowels.corner_keepout + 1e-6);
+}
+
+TEST_CASE("Split to Fit P2: dowels keep out of the other planes on a 2 x 2 x 2 grid", "[SplitToVolume]")
+{
+    const SplitOptions opt  = p2_dowels_on();
+    const SplitPlan    plan = split_plan_grid(box_at(100., 100., 100.), usable_box(60., 60., 60.), opt);
+    REQUIRE(plan.faces.size() == 12);
+    REQUIRE_FALSE(plan.sites.empty());
+    std::set<std::string> names;
+    for (const SplitSite &s : plan.sites) {
+        INFO("site " << s.name);
+        names.insert(s.name);
+        const SplitPlane &own = plan.planes[size_t(s.plane)];
+        REQUIRE_THAT(s.pos[own.axis], WithinAbs(own.pos, 1e-9));
+        for (const SplitPlane &other : plan.planes) {
+            if (other.axis == own.axis)
+                continue;
+            // The hole's footprint plus the keep-out band stays off every crossing plane.
+            REQUIRE(std::abs(s.pos[other.axis] - other.pos) >= s.footprint_radius + opt.dowels.corner_keepout - 1e-6);
+        }
+        // Inside the wall margin of the model's outside.
+        for (int b = 0; b < 3; ++b)
+            if (b != own.axis) {
+                REQUIRE(s.pos[b] >= opt.dowels.wall_margin + s.footprint_radius - 1e-6);
+                REQUIRE(s.pos[b] <= 100. - opt.dowels.wall_margin - s.footprint_radius + 1e-6);
+            }
+        REQUIRE_THAT(s.half_length, WithinAbs(10., 1e-9));
+    }
+    REQUIRE(names.size() == plan.sites.size());
+}
+
+TEST_CASE("Split to Fit P2: apply a 2 x 2 x 1 split of a block with dowels", "[SplitToVolume]")
+{
+    p2_check_dowel_apply(box_at(100., 100., 100.), usable_box(60., 60., 200.), 4);
+}
+
+TEST_CASE("Split to Fit P2: apply a 2 x 2 x 2 split of a block with dowels", "[SplitToVolume]")
+{
+    p2_check_dowel_apply(box_at(100., 100., 100.), usable_box(60., 60., 60.), 8);
+}
+
+TEST_CASE("Split to Fit P2: a hollow box warns and still splits", "[SplitToVolume]")
+{
+    // D6: warn and still split, with whatever dowels fit (none in 2 mm walls).
+    indexed_triangle_set shell = box_at(200., 200., 200.);
+    indexed_triangle_set inner = box_at(196., 196., 196., Vec3d(2., 2., 2.));
+    for (auto &f : inner.indices)
+        std::swap(f[1], f[2]);
+    its_merge(shell, inner);
+
+    Model           model;
+    ModelObject    *mo   = add_object(model, shell, "Shell");
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(150., 150., 250.), p2_dowels_on());
+    REQUIRE(plan.part_count() == 4);
+    REQUIRE(plan.sites.empty());
+    REQUIRE(has_warning(plan.warnings, SplitWarning::Kind::HollowModel));
+    const size_t no_dowel = size_t(std::count_if(plan.warnings.begin(), plan.warnings.end(),
+                                                 [](const SplitWarning &w) { return w.kind == SplitWarning::Kind::NoDowelOnFace; }));
+    REQUIRE(no_dowel == plan.faces.size());
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 4);
+    REQUIRE(res.dowels.empty());
+    // No dowels: not a linked group (D10).
+    for (const ModelObject *p : res.parts) {
+        REQUIRE(p->cut_id.id().invalid());
+        REQUIRE(open_edges(*p) == 0);
+    }
+}
+
+TEST_CASE("Split to Fit P2: pins instead of dowels", "[SplitToVolume]")
+{
+    Model        model;
+    ModelObject *mo  = add_object(model, box_at(300., 60., 60.), "Bar");
+    SplitOptions opt = p2_dowels_on();
+    opt.dowels.type  = SplitConnectorType::Pin;
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), opt);
+    REQUIRE(plan.part_count() == 2);
+    REQUIRE_FALSE(plan.sites.empty());
+
+    const SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    REQUIRE(res.dowels.size() == plan.sites.size());
+    for (size_t k = 0; k < res.dowels.size(); ++k) {
+        REQUIRE(res.dowels[k]->name == "Bar-Pin-" + plan.sites[k].name);
+        REQUIRE(res.dowels[k]->volumes.front()->cut_info.is_pushfit());
+    }
+    for (const SplitSite &s : plan.sites) {
+        size_t a = 0, b = 0;
+        for (const ModelObject *p : res.parts)
+            for (const ModelVolume *v : p->volumes) {
+                if (v->name == s.name + "_A" && v->is_negative_volume())
+                    ++a;
+                if (v->name == s.name + "_B" && v->is_negative_volume())
+                    ++b;
+            }
+        REQUIRE(a == 1);
+        REQUIRE(b == 1);
+    }
+    for (const ModelObject *p : res.parts)
+        REQUIRE(open_edges(*p) == 0);
+}
+
+TEST_CASE("Split to Fit P2: a split with dowels survives a project round trip", "[SplitToVolume][3mf]")
+{
+    Model           model;
+    ModelObject    *mo   = add_object(model, box_at(300., 60., 60.), "Bar");
+    const SplitPlan plan = split_plan_grid(split_object_mesh(*mo, 0), usable_box(200., 200., 200.), p2_dowels_on());
+    SplitApplyResult res = split_apply(*mo, 0, plan);
+    REQUIRE(res.parts.size() == 2);
+    REQUIRE_FALSE(res.dowels.empty());
+    size_t holes = 0;
+    for (const ModelObject *o : res.model->objects)
+        for (const ModelVolume *v : o->volumes)
+            if (v->is_negative_volume())
+                ++holes;
+    REQUIRE(holes == 2 * res.dowels.size());
+    for (ModelObject *o : res.model->objects)
+        o->ensure_on_bed();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string  test_file    = (tmp_root / "split_to_fit_dowels.3mf").string();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    StoreParams        store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = res.model.get();
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored     = store_bbs_3mf(store_params);
+
+    Model                     dst;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst, &plate_data, &project_presets, &is_bbl_3mf,
+                                               &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                                   LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+    REQUIRE(stored);
+    REQUIRE(loaded);
+
+    REQUIRE(dst.objects.size() == res.model->objects.size());
+    size_t loaded_holes = 0;
+    for (const ModelObject *o : dst.objects) {
+        INFO("object " << o->name);
+        // Still one linked group with the same check sum.
+        REQUIRE(o->is_cut());
+        REQUIRE(o->cut_id.check_sum() == res.parts.size() + res.dowels.size());
+        REQUIRE(o->cut_id.id() == dst.objects.front()->cut_id.id());
+        for (const ModelVolume *v : o->volumes)
+            if (v->is_negative_volume()) {
+                ++loaded_holes;
+                REQUIRE(v->cut_info.is_connector);
+            }
+    }
+    REQUIRE(loaded_holes == holes);
 }

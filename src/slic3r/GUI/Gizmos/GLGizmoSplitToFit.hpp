@@ -10,6 +10,10 @@
 // background job (SplitToFitJob), names the parts by grid cell (D7), arranges them over plates (D12)
 // and is one undo step.
 //
+// Phase 2 adds automatic dowels (design 3.6): a "Dowels" group in the panel, the sites as discs on
+// the planes, the dowel count per part, and the dowel warnings. The planner places them; the job's
+// split_apply() bakes them as Cut-tool Dowels (or Pins) and adds the loose dowels as objects.
+//
 // Entry points (D1): its own toolbar icon, a "Split to fit..." button in the Cut panel and
 // "Split to fit the printer..." in the object's right-click menu.
 //
@@ -76,6 +80,9 @@ private:
     GLModel               m_pinned_fill;
     GLModel               m_planes_outline;
     GLModel               m_bad_parts;
+    // P2: the dowel sites, drawn on top of the model (discs on the planes, their axes as lines).
+    GLModel               m_sites_fill;
+    GLModel               m_sites_axes;
     bool                  m_preview_dirty{ true };
 };
 
