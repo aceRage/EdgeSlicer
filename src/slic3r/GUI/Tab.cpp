@@ -71,6 +71,10 @@
 // #include "BonjourDialog.hpp"
 // Ultra (support sets): the Support-set row on the Support page.
 #include "libslic3r/SupportSet.hpp"
+// "Use Bambu defaults" on the Prime tower group.
+#include "libslic3r/PrimeTowerDefaults.hpp"
+// The row's label, also its handle: a widget-only row has no option key for get_line() (TabPrint::tower_defaults_line).
+static const char* const TOWER_DEFAULTS_ROW_LABEL = L("Bambu defaults");
 #include "GUI_Factories.hpp"
 #include "SupportGroupsDialog.hpp"
 #include "SupportSetEditDialog.hpp"
@@ -3530,6 +3534,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("zaa_dont_alternate_fill_direction", "quality_settings_z_contouring#dont-alternate-fill-direction");
         optgroup->append_single_option_line("zaa_speed_scaling", "quality_settings_z_contouring#constant-flow-speed-scaling");
         optgroup->append_single_option_line("zaa_max_segment_rate", "quality_settings_z_contouring");
+        // EdgeSlicer: curved tops (experimental, off by default).
+        optgroup->append_single_option_line("curved_tops_enabled");
+        optgroup->append_single_option_line("curved_tops_layers");
+        optgroup->append_single_option_line("curved_tops_max_angle");
 
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
@@ -3911,6 +3919,16 @@ void TabPrint::build()
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Prime tower"), L"param_tower");
         optgroup->append_single_option_line("enable_prime_tower", "multimaterial_settings_prime_tower");
+        // "Use Bambu defaults" (tests/design_prime_tower_menu_rework.md 5): a labelled widget-only row, shown by
+        // TabPrint::tower_defaults_update_row() on a Bambu printer with the tower on. Process tab only: the object / part
+        // tabs derive from TabPrint, and their build() drops option-less rows anyway.
+        if (m_type == Preset::TYPE_PRINT) {
+            Line tower_defaults_line = Line{ TOWER_DEFAULTS_ROW_LABEL,
+                                             L("Sets the prime tower settings of this process to Bambu Studio's defaults for the "
+                                               "selected printer. Lists every change before applying it. Filament settings are not changed.") };
+            tower_defaults_line.widget = [this](wxWindow* parent) { return tower_defaults_create_widget(parent); };
+            optgroup->append_line(tower_defaults_line);
+        }
         optgroup->append_single_option_line("prime_tower_width", "multimaterial_settings_prime_tower#width");
         optgroup->append_single_option_line("prime_volume", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_brim_width", "multimaterial_settings_prime_tower#brim-width");
@@ -4813,6 +4831,177 @@ wxSizer* TabPrint::support_set_create_widget(wxWindow* parent)
     return vsizer;
 }
 
+// ---------------------------------------------------------------------------------------------
+// "Use Bambu defaults": the button row in the Prime tower group of the Multimaterial page.
+// tests/design_prime_tower_menu_rework.md section 5 (owner, 2026-11-16: the button only).
+// ---------------------------------------------------------------------------------------------
+
+wxSizer* TabPrint::tower_defaults_create_widget(wxWindow* parent)
+{
+    auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
+    auto* button = new Button(parent, _L("Use Bambu defaults"));
+    m_tower_defaults_btn = button;
+    tower_defaults_size_button();
+    button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        // After the click, as the Extruder page's "Extruder settings" button does: the dialog and the reload run outside
+        // the button's own event.
+        wxGetApp().CallAfter([this]() { on_tower_defaults(); });
+    });
+    sizer->Add(button, 0, wxALIGN_CENTER_VERTICAL);
+    return sizer;
+}
+
+void TabPrint::tower_defaults_size_button()
+{
+    auto* button = dynamic_cast<Button*>(m_tower_defaults_btn.get());
+    if (button == nullptr)
+        return;
+    // The house style for a button next to parameter boxes (as the Dependencies and ramming "Set..." buttons): Body_14,
+    // 26 DIP high, the theme's regular colours. Re-applied on DPI and theme changes, which is where it reads the theme.
+    button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+    // That style is a fixed 120 x 26 DIP box, which clipped "Use Bambu defaults" (owner hand test of #1080) and would clip
+    // longer translations. Size it to its label plus the Choice / Expanded buttons' 12 DIP side padding, never narrower
+    // than the option fields in the column below (Field::def_width_wider() em, the Width field), keeping the 26 DIP height.
+    button->SetPaddingSize(button->FromDIP(wxSize(12, 0)));
+    wxSize size = button->GetMinSize(); // label + padding, at least 120 x 26 DIP (Button::messureSize)
+    size.SetWidth(std::max(size.GetWidth(), Field::def_width_wider() * em_unit(button->GetParent())));
+    button->SetMinSize(size);
+    button->SetSize(button->GetMinSize());
+}
+
+void TabPrint::msw_rescale()
+{
+    // Before the option groups re-position their controls (Tab::msw_rescale -> Page::msw_rescale).
+    tower_defaults_size_button();
+    Tab::msw_rescale();
+}
+
+void TabPrint::sys_color_changed()
+{
+    tower_defaults_size_button(); // the style's colours depend on the theme
+    Tab::sys_color_changed();
+}
+
+Line* TabPrint::tower_defaults_line()
+{
+    if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr)
+        return nullptr;
+    const wxString label = _(TOWER_DEFAULTS_ROW_LABEL);
+    for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
+        for (const Line& line : group->get_lines())
+            // Only a widget-only row: an option row with the same label (none today) is never taken for it.
+            if (!line.is_separator() && line.get_options().empty() && line.widget != nullptr && line.label == label)
+                return const_cast<Line*>(&line);
+    return nullptr;
+}
+
+const Preset* TabPrint::tower_defaults_source() const
+{
+    if (m_presets == nullptr || m_preset_bundle == nullptr)
+        return nullptr;
+    if (const Preset* parent = m_presets->get_selected_preset_parent(); parent != nullptr && parent->is_system)
+        return parent;
+    // A detached user process (no system parent): the printer's own default process, if it is a system preset.
+    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    if (const ConfigOptionString* name = printer.option<ConfigOptionString>("default_print_profile"); name != nullptr && !name->value.empty())
+        if (const Preset* preset = m_presets->find_preset(name->value, false); preset != nullptr && preset->is_system)
+            return preset;
+    return nullptr;
+}
+
+void TabPrint::tower_defaults_update_row()
+{
+    Line* line = tower_defaults_line();
+    if (line == nullptr) // not this tab, or not the Multimaterial page
+        return;
+    const bool is_bbl    = m_preset_bundle != nullptr && m_preset_bundle->is_bbl_vendor();
+    const bool tower_on  = m_config != nullptr && m_config->has("enable_prime_tower") && m_config->opt_bool("enable_prime_tower");
+    line->toggle_visible = PrimeTowerDefaults::offered(is_bbl, tower_on);
+
+    wxWindow* btn = m_tower_defaults_btn; // null once the page's controls are gone
+    if (btn == nullptr)
+        return;
+    // A nozzle's own process (the per-nozzle selector or a nozzle chip) is not what the system preset describes.
+    const bool nozzle_view = !selected_nozzle_process().empty() || (m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0);
+    const Preset* source   = nozzle_view ? nullptr : tower_defaults_source();
+    btn->Enable(source != nullptr);
+    if (nozzle_view)
+        btn->SetToolTip(_L("Not available while a nozzle's own process is shown. Show the plate's process first."));
+    else if (source == nullptr)
+        btn->SetToolTip(_L("No Bambu system process was found for this preset or printer, so there are no defaults to apply."));
+    else
+        btn->SetToolTip(format_wxstr(_L("Set the prime tower settings to Bambu Studio's defaults, taken from \"%1%\". "
+                                                         "Filament settings are not changed."), from_u8(source->name)));
+}
+
+// One value as the confirm dialog shows it: an enum by its label, a bool as On / Off, a number with its unit.
+static wxString tower_default_value_text(const ConfigOptionDef* def, const ConfigOption* opt)
+{
+    if (opt == nullptr)
+        return wxEmptyString;
+    if (opt->type() == coBool)
+        return opt->getBool() ? _L("On") : _L("Off");
+    const std::string value = opt->serialize();
+    if (opt->type() == coEnum && def != nullptr) {
+        for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i)
+            if (def->enum_values[i] == value)
+                return _(def->enum_labels[i]);
+        return from_u8(value);
+    }
+    wxString text = from_u8(value);
+    const bool plain_number = opt->type() == coFloat || opt->type() == coInt || opt->type() == coFloats || opt->type() == coInts;
+    if (plain_number && def != nullptr && !def->sidetext.empty())
+        text += " " + _(def->sidetext);
+    return text;
+}
+
+void TabPrint::on_tower_defaults()
+{
+    if (m_type != Preset::TYPE_PRINT || m_config == nullptr)
+        return;
+    const Preset* source = tower_defaults_source();
+    if (source == nullptr || !selected_nozzle_process().empty() || (m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0))
+        return; // the button is disabled then; the click was queued before the state changed
+
+    const DynamicPrintConfig         defaults = PrimeTowerDefaults::bambu_tower_defaults(source->config);
+    const std::vector<std::string>   changed  = PrimeTowerDefaults::changed_keys(*m_config, defaults);
+    const wxString                   title    = _L("Use Bambu defaults");
+    if (changed.empty()) {
+        MessageDialog(this, _L("The prime tower already uses Bambu's defaults."), title, wxOK | wxICON_INFORMATION).ShowModal();
+        return;
+    }
+
+    wxString msg = format_wxstr(_L("Set the prime tower to Bambu Studio's defaults for this printer, taken from \"%1%\"?"),
+                                from_u8(source->name));
+    msg += "\n\n" + _L("These process settings will change:") + "\n";
+    bool wall_type_changes = false;
+    for (const std::string& key : changed) {
+        const ConfigOptionDef* def   = print_config_def.get(key);
+        const wxString         label = def != nullptr && !def->label.empty() ? _(def->label) : from_u8(key);
+        msg += "- " + label + ": " + tower_default_value_text(def, m_config->option(key)) + " -> " +
+               tower_default_value_text(def, defaults.option(key)) + "\n";
+        wall_type_changes |= key == "wipe_tower_wall_type";
+    }
+    if (wall_type_changes)
+        msg += "\n" + _L("Wall type becomes Rib, Bambu Studio's default: the tower gets four ribs and a nearly square "
+                         "cross-section, so its shape and its footprint on the plate change.");
+    msg += "\n\n" + _L("Filament settings (for example the tower interface temperature and the prime volume) are not changed.");
+    msg += "\n" + _L("There is no undo: each changed setting gets a revert arrow, and discarding the process changes "
+                     "goes back too.");
+
+    MessageDialog dlg(this, msg, title, wxOK | wxCANCEL | wxICON_QUESTION);
+    dlg.SetButtonLabel(wxID_OK, _L("Apply"), true);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    // Only the changed keys, in one load_config() call: it marks the preset and each changed row as modified (revert
+    // arrows) and runs update() once, as the support sets and the 3D view's tower move do.
+    this->load_config(PrimeTowerDefaults::changes_to_apply(*m_config, defaults));
+    // Rows the new values show or hide (the rib rows after Wall type = Rib), as on_value_change() does.
+    if (m_active_page)
+        m_active_page->update_visibility(m_mode, true);
+}
+
 void TabPrint::update_description_lines()
 {
     Tab::update_description_lines();
@@ -4949,6 +5138,9 @@ void TabPrint::toggle_options()
     disable_fields_of_nozzle_process();
     // Per-nozzle process P8: Plate / tool field states.
     apply_tool_field_states();
+    // "Use Bambu defaults": shown on a Bambu printer with the tower on. Its callers refresh the row visibility afterwards
+    // (Page::update_visibility), as for ConfigManipulation's toggle_line.
+    tower_defaults_update_row();
 }
 
 void TabPrint::update()
@@ -5018,6 +5210,8 @@ void TabPrint::clear_pages()
     m_support_set_note   = nullptr;
     m_support_set_names.clear();
     m_support_set_page_was_active = false;
+    // "Use Bambu defaults": the page owns the button.
+    m_tower_defaults_btn.Release();
 }
 
 

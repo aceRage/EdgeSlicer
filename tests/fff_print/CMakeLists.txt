@@ -53,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bbs_tower_ramming.cpp
 	test_bbs_tower_h3c_parity.cpp
 	test_bbs_tower_leftovers.cpp
+	test_alm_tower.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_polyholes.cpp
@@ -71,6 +72,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
+	test_curved_tops.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
 	test_counterbore_bridging.cpp

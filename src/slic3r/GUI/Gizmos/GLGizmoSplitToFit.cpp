@@ -92,17 +92,68 @@ static Severity severity(SplitWarning::Kind k)
     case SplitWarning::Kind::OpenEdges:
     case SplitWarning::Kind::NoDowelOnFace:
     case SplitWarning::Kind::IslandsWithoutDowel:
-    case SplitWarning::Kind::DowelCanTurn: return Severity::Warning;
+    case SplitWarning::Kind::DowelCanTurn:
+    case SplitWarning::Kind::AdjustRefused:
+    case SplitWarning::Kind::PlaneInDetail:
+    case SplitWarning::Kind::AdjustImpossible:
+    case SplitWarning::Kind::SmallPart:
+    case SplitWarning::Kind::NoFlatFace:
+    case SplitWarning::Kind::NoLabel: return Severity::Warning;
     default: return Severity::Info;
     }
+}
+
+// Box of a plane (thin, across the model), of a cut face (its plane clipped to the face's cell),
+// or of a part: what a click on a warning shows.
+static BoundingBoxf3 plane_box(const SplitPlan &plan, int plane, const SplitCell *cell)
+{
+    BoundingBoxf3 out;
+    if (plane < 0 || size_t(plane) >= plan.planes.size())
+        return out;
+    const SplitPlane &pl = plan.planes[size_t(plane)];
+    Vec3d             lo = plan.model_bbox.min, hi = plan.model_bbox.max;
+    if (cell != nullptr) {
+        // The face's cell along the other axes.
+        std::array<std::vector<double>, 3> pos;
+        for (int a = 0; a < 3; ++a)
+            pos[a] = plan.plane_positions(a);
+        for (int a = 0; a < 3; ++a) {
+            if (a == pl.axis)
+                continue;
+            const int c = (*cell)[a];
+            if (c > 0 && size_t(c) - 1 < pos[a].size())
+                lo[a] = pos[a][size_t(c) - 1];
+            if (size_t(c) < pos[a].size())
+                hi[a] = pos[a][size_t(c)];
+        }
+    }
+    lo[pl.axis] = pl.pos - 0.5;
+    hi[pl.axis] = pl.pos + 0.5;
+    out.merge(lo);
+    out.merge(hi);
+    return out;
 }
 
 } // namespace split_fit_gizmo_detail
 
 wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
 {
-    const std::string part  = w.part >= 0 && size_t(w.part) < plan.parts.size() ? plan.parts[size_t(w.part)].name : std::string();
+    // P5: a warning about a piece names the piece ("X1-Y2_b"), else the section.
+    const std::string part  = w.piece >= 0 && size_t(w.piece) < plan.pieces.size() ? plan.pieces[size_t(w.piece)].name :
+                              w.part >= 0 && size_t(w.part) < plan.parts.size()   ? plan.parts[size_t(w.part)].name :
+                                                                                     std::string();
     const std::string plane = w.plane >= 0 && size_t(w.plane) < plan.planes.size() ? plan.planes[size_t(w.plane)].name() : std::string();
+    // A face by the two pieces it joins ("X1-Y1 | X2-Y1_b"), else by its code or plane.
+    std::string face = plane;
+    if (w.mate >= 0 && size_t(w.mate) < plan.mates.size()) {
+        const SplitMate &m = plan.mates[size_t(w.mate)];
+        const std::string below = m.piece_below >= 0 ? plan.pieces[size_t(m.piece_below)].name : std::string();
+        const std::string above = m.piece_above >= 0 ? plan.pieces[size_t(m.piece_above)].name : std::string();
+        face = m.code + " (" + below + " | " + above + ")";
+    } else if (w.face >= 0 && size_t(w.face) < plan.faces.size()) {
+        const SplitFace &f = plan.faces[size_t(w.face)];
+        face               = f.mate_label.empty() || f.mate_label == " | " ? f.mate_code : f.mate_label;
+    }
     switch (w.kind) {
     case SplitWarning::Kind::NoUsableVolume:
         return _L("The margins leave no room on this printer. Make them smaller.");
@@ -110,7 +161,9 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
         return format_wxstr(_L("This would make %1% parts, more than the %2% Split to Fit makes. Check the margins, or scale the model down first."),
                             int(w.value), SPLIT_MAX_CELLS);
     case SplitWarning::Kind::PartDoesNotFit: {
-        const Vec3d s = w.part >= 0 && size_t(w.part) < plan.parts.size() ? plan.parts[size_t(w.part)].size() : Vec3d::Zero();
+        const Vec3d s = w.piece >= 0 && size_t(w.piece) < plan.pieces.size() ? plan.pieces[size_t(w.piece)].size() :
+                        w.part >= 0 && size_t(w.part) < plan.parts.size()     ? plan.parts[size_t(w.part)].size() :
+                                                                                 Vec3d::Zero();
         return format_wxstr(_L("Part %1% (%2%) does not fit the printer."), part.empty() ? std::string("1") : part,
                             split_fit_gizmo_detail::mm_size(s));
     }
@@ -135,12 +188,6 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
     case SplitWarning::Kind::DowelCanTurn:
     case SplitWarning::Kind::DowelShortened:
     case SplitWarning::Kind::DowelScaledDown: {
-        // The face by the two parts it joins ("X1-Y1 | X2-Y1"), or by its plane.
-        std::string face = plane;
-        if (w.face >= 0 && size_t(w.face) < plan.faces.size()) {
-            const SplitFace &f = plan.faces[size_t(w.face)];
-            face               = f.mate_label.empty() || f.mate_label == " | " ? f.mate_code : f.mate_label;
-        }
         switch (w.kind) {
         case SplitWarning::Kind::NoDowelOnFace:
             return w.value == SPLIT_NO_DOWEL_TOO_THIN ?
@@ -160,6 +207,52 @@ wxString split_warning_text(const SplitWarning &w, const SplitPlan &plan)
         }
         break;
     }
+    case SplitWarning::Kind::PlaneMoved: {
+        const std::string by = format("%+.1f", w.value);
+        switch (SplitAdjustReason(w.detail)) {
+        case SplitAdjustReason::ThinPieces:
+            return format_wxstr(_L("Plane %1% moved %2% mm to avoid thin pieces on the cut face."), plane, by);
+        case SplitAdjustReason::DowelRoom:
+            return format_wxstr(_L("Plane %1% moved %2% mm to leave more room for dowels."), plane, by);
+        case SplitAdjustReason::FineDetail:
+            return format_wxstr(_L("Plane %1% moved %2% mm to avoid fine detail."), plane, by);
+        case SplitAdjustReason::RaggedOutline:
+            return format_wxstr(_L("Plane %1% moved %2% mm to get a simpler cut face."), plane, by);
+        case SplitAdjustReason::FlatFace:
+            return format_wxstr(_L("Plane %1% moved %2% mm away from a flat face, so no paper-thin layer is left."), plane, by);
+        case SplitAdjustReason::KeepFit:
+            return format_wxstr(_L("Plane %1% moved %2% mm so the part next to it still fits the printer."), plane, by);
+        default: return format_wxstr(_L("Plane %1% moved %2% mm to a better place to cut."), plane, by);
+        }
+    }
+    case SplitWarning::Kind::AdjustRefused:
+        return format_wxstr(_L("Plane %1% would cut better %2% mm away, but the part next to it would then not fit the printer."), plane,
+                            format("%+.1f", w.value));
+    case SplitWarning::Kind::PlaneInDetail:
+        return format_wxstr(_L("Plane %1% cuts through fine detail or thin pieces, and there is no better place within %2% mm. "
+                               "Drag it if that matters."),
+                            plane, format("%.0f", w.value));
+    case SplitWarning::Kind::AdjustImpossible: {
+        static const char *axes[3] = { "X", "Y", "Z" };
+        return format_wxstr(_L("The %1% planes were left as laid out: moving them would break the size rules."),
+                            axes[std::clamp(int(w.value), 0, 2)]);
+    }
+    case SplitWarning::Kind::SmallPart:
+        return format_wxstr(_L("Part %1% is very small (%2% cm3). Drag a plane to make it bigger, or take care when gluing it."), part,
+                            format("%.2f", w.value / 1000.));
+    case SplitWarning::Kind::NoFlatFace:
+        return format_wxstr(_L("Part %1% has no flat face to stand on (%2% cm2 touches the bed): it needs supports, or turn it by hand."),
+                            part, format("%.2f", w.value / 100.));
+    case SplitWarning::Kind::DiscardedPieces:
+        return format_wxstr(_L_PLURAL("%1% small piece (%2% cm3 in all) is left out: \"Discard pieces smaller than\" is on.",
+                                      "%1% small pieces (%2% cm3 in all) are left out: \"Discard pieces smaller than\" is on.", int(w.value)),
+                            int(w.value), format("%.2f", w.value2 / 1000.));
+    case SplitWarning::Kind::LabelSmaller:
+        return format_wxstr(_L("Face %1%: the label is smaller (%2% mm tall) to fit the face."), face, format("%.1f", w.value));
+    case SplitWarning::Kind::LabelPattern:
+        return format_wxstr(_L("Face %1%: no room for the text, so it gets the dot pattern instead."), face);
+    case SplitWarning::Kind::NoLabel:
+        return format_wxstr(_L("Face %1% gets no label: there is no room clear of the edges and the dowels. Mark it by hand."), face);
     }
     return wxString();
 }
@@ -207,8 +300,14 @@ void GLGizmoSplitToFit::on_set_state()
         m_options.pinned.clear();
         m_mesh_object = ObjectID();
         m_plan_dirty  = true;
+        m_drag_plane  = -1;
+        m_highlight   = BoundingBoxf3();
     } else if (m_state == Off) {
         save_settings();
+        drop_grabbers();
+        m_drag_plane = -1;
+        m_highlight  = BoundingBoxf3();
+        m_highlight_model.reset();
         m_mesh = indexed_triangle_set();
         m_plan = SplitPlan();
         m_planes_fill.reset();
@@ -217,6 +316,10 @@ void GLGizmoSplitToFit::on_set_state()
         m_bad_parts.reset();
         m_sites_fill.reset();
         m_sites_axes.reset();
+        for (GLModel &m : m_piece_boxes)
+            m.reset();
+        m_labels.reset();
+        m_mesh_neighbors.clear();
     }
 }
 
@@ -229,7 +332,22 @@ void GLGizmoSplitToFit::data_changed(bool /*is_serializing*/)
 void GLGizmoSplitToFit::load_settings()
 {
     using namespace split_fit_gizmo_detail;
+    // P3: the adjustment's settings live for the session only (no app config key for them yet).
+    const bool              adjust       = m_options.adjust_planes;
+    const double            adjust_limit = m_options.adjust_limit;
+    // P5: the labels and the discard option, for the session too.
+    const SplitLabelOptions labels       = m_options.labels;
+    const bool              discard      = m_options.discard_small;
+    const double            tiny_volume  = m_options.small_piece_volume;
     reset_options();
+    if (m_adjust_seen) {
+        m_options.adjust_planes      = adjust;
+        m_options.adjust_limit       = adjust_limit;
+        m_options.labels             = labels;
+        m_options.discard_small      = discard;
+        m_options.small_piece_volume = tiny_volume;
+    }
+    m_adjust_seen                = true;
     m_options.margin_xy          = read_double(CFG_MARGIN_XY, 5., 0., 100.);
     m_options.margin_z           = read_double(CFG_MARGIN_Z, 5., 0., 100.);
     m_options.min_part_thickness = read_double(CFG_MIN_T, 10., 1., 100.);
@@ -277,9 +395,13 @@ void GLGizmoSplitToFit::save_settings() const
 void GLGizmoSplitToFit::reset_options()
 {
     // The defaults the owner accepted: D2 margins, D5 even parts, D9 every axis, D14 reach off,
-    // D3 dowels on (loose round Dowel, 6 x 20 mm, up to 3 per face).
+    // D3 dowels on (loose round Dowel, 6 x 20 mm, up to 3 per face), D4 plane adjustment on, 10 mm.
     m_options                = SplitOptions();
     m_options.dowels.enabled = true;
+    m_options.adjust_planes  = true;
+    m_options.adjust_limit   = 10.;
+    // P5: labels on (code, up to 6 mm tall, 0.6 mm deep); small pieces kept (discard off, 1 cm3).
+    m_options.labels.enabled = true;
 }
 
 void GLGizmoSplitToFit::refresh_inputs()
@@ -299,6 +421,8 @@ void GLGizmoSplitToFit::refresh_inputs()
         if (mo->id() != m_mesh_object)
             m_options.pinned.clear();
         m_mesh         = split_object_mesh(*mo, instance);
+        // P5: once per mesh, not per plan.
+        m_mesh_neighbors = its_face_neighbors_par(m_mesh);
         m_mesh_object  = mo->id();
         m_mesh_trafo   = trafo;
         m_mesh_volumes = mo->volumes.size();
@@ -319,11 +443,230 @@ void GLGizmoSplitToFit::update_plan()
     m_preview_dirty = true;
     try {
         const SplitUsableVolume usable = split_usable_volume(m_printer, m_options);
-        m_plan                         = split_plan_grid(m_mesh, usable, m_options);
+        m_plan                         = split_plan_grid(m_mesh, usable, m_options, nullptr, &m_mesh_neighbors);
     } catch (const std::exception &e) {
         BOOST_LOG_TRIVIAL(error) << "Split to Fit: planning failed: " << e.what();
         m_plan = SplitPlan();
     }
+    // The old plan's planes and parts are gone: so is a drag in the panel, and the highlight.
+    if (!m_dragging)
+        m_drag_plane = -1;
+    m_highlight = BoundingBoxf3();
+    m_highlight_model.reset();
+    sync_grabbers();
+}
+
+// ---- P3: plane handles -----------------------------------------------------------------------------
+
+void GLGizmoSplitToFit::drop_grabbers()
+{
+    for (Grabber &g : m_grabbers)
+        if (g.picking_id >= 0)
+            g.unregister_raycasters_for_picking();
+    m_grabbers.clear();
+    if (m_hover_id >= 0)
+        m_hover_id = -1;
+}
+
+void GLGizmoSplitToFit::sync_grabbers()
+{
+    // Never under a running drag: the grabber being dragged must stay.
+    if (m_dragging)
+        return;
+    drop_grabbers();
+    if (m_state != On)
+        return;
+    m_grabbers.resize(m_plan.planes.size());
+    for (size_t i = 0; i < m_plan.planes.size(); ++i) {
+        const int a           = m_plan.planes[i].axis;
+        Grabber  &g           = m_grabbers[i];
+        g.color               = AXES_COLOR[size_t(a)];
+        g.hover_color         = AXES_HOVER_COLOR[size_t(a)];
+        // The arrows show the one direction the handle moves in.
+        static const EGrabberExtension ext[3] = { EGrabberExtension(int(EGrabberExtension::PosX) | int(EGrabberExtension::NegX)),
+                                                  EGrabberExtension(int(EGrabberExtension::PosY) | int(EGrabberExtension::NegY)),
+                                                  EGrabberExtension(int(EGrabberExtension::PosZ) | int(EGrabberExtension::NegZ)) };
+        g.extensions = ext[a];
+    }
+    register_grabbers_for_picking();
+    update_grabbers();
+}
+
+double GLGizmoSplitToFit::shown_pos(size_t i) const
+{
+    return m_drag_plane >= 0 && size_t(m_drag_plane) == i ? m_drag_pos : m_plan.planes[i].pos;
+}
+
+void GLGizmoSplitToFit::update_grabbers()
+{
+    if (m_grabbers.size() != m_plan.planes.size())
+        return;
+    // Each handle sits on its plane's edge, just outside the model: on top for X and Y planes
+    // (centred across), behind the model for Z planes.
+    const BoundingBoxf3 &bb  = m_plan.model_bbox;
+    const double         pad = std::max(5., 0.04 * bb.size().maxCoeff());
+    for (size_t i = 0; i < m_plan.planes.size(); ++i) {
+        const int a = m_plan.planes[i].axis;
+        Vec3d     c = bb.center();
+        c[a]        = shown_pos(i);
+        if (a == 2)
+            c.y() = bb.max.y() + pad;
+        else
+            c.z() = bb.max.z() + pad;
+        m_grabbers[i].center = c;
+        m_grabbers[i].matrix = Transform3d::Identity();
+    }
+}
+
+void GLGizmoSplitToFit::on_register_raycasters_for_picking()
+{
+    // The handles are drawn on top of the scene; picking has to agree.
+    m_parent.set_raycaster_gizmos_on_top(true);
+}
+
+void GLGizmoSplitToFit::on_unregister_raycasters_for_picking()
+{
+    m_parent.set_raycaster_gizmos_on_top(false);
+}
+
+bool GLGizmoSplitToFit::on_mouse(const wxMouseEvent &mouse_event)
+{
+    if (m_grabbers.empty())
+        return false;
+    return use_grabbers(mouse_event);
+}
+
+void GLGizmoSplitToFit::on_start_dragging()
+{
+    if (m_hover_id < 0 || size_t(m_hover_id) >= m_plan.planes.size()) {
+        m_drag_plane = -1;
+        return;
+    }
+    m_drag_plane     = m_hover_id;
+    m_drag_pos       = m_plan.planes[size_t(m_hover_id)].pos;
+    m_drag_start_pos = m_drag_pos;
+    m_drag_have_t    = false;
+    m_preview_dirty  = true;
+}
+
+void GLGizmoSplitToFit::on_dragging(const UpdateData &data)
+{
+    if (m_drag_plane < 0 || size_t(m_drag_plane) >= m_plan.planes.size())
+        return;
+    const int   a = m_plan.planes[size_t(m_drag_plane)].axis;
+    Vec3d       e = Vec3d::Zero();
+    e[a]          = 1.;
+    // The point of the plane's axis (through the handle) nearest the mouse ray.
+    const Vec3d anchor = m_grabbers[size_t(m_drag_plane)].center;
+    const Vec3d d      = data.mouse_ray.unit_vector();
+    const Vec3d w0     = anchor - data.mouse_ray.a;
+    const double b     = e.dot(d);
+    const double denom = 1. - b * b;
+    if (denom < 1e-6)
+        return;   // looking straight down the axis: no sensible move
+    // Measured from the handle's own place, which follows the drag: add back where it already is.
+    const double t = (b * d.dot(w0) - e.dot(w0)) / denom + (anchor[a] - m_drag_start_pos);
+    if (!m_drag_have_t) {
+        m_drag_start_t = t;
+        m_drag_have_t  = true;
+    }
+    double pos = m_drag_start_pos + (t - m_drag_start_t);
+    // Snap to 0.1 mm (Shift: 1 mm), inside the model.
+    const double snap = wxGetKeyState(WXK_SHIFT) ? 1. : 0.1;
+    pos               = snap * std::round(pos / snap);
+    const double lo   = m_plan.model_bbox.min[a] + 0.1;
+    const double hi   = m_plan.model_bbox.max[a] - 0.1;
+    if (hi > lo)
+        pos = std::clamp(pos, lo, hi);
+    if (pos != m_drag_pos) {
+        m_drag_pos      = pos;
+        m_preview_dirty = true;
+        update_grabbers();
+    }
+}
+
+void GLGizmoSplitToFit::on_stop_dragging()
+{
+    commit_drag();
+}
+
+void GLGizmoSplitToFit::commit_drag()
+{
+    if (m_drag_plane < 0 || size_t(m_drag_plane) >= m_plan.planes.size()) {
+        m_drag_plane = -1;
+        return;
+    }
+    const SplitPlane &pl    = m_plan.planes[size_t(m_drag_plane)];
+    const double      pos   = m_drag_pos;
+    const bool        moved = std::abs(pos - pl.pos) > 1e-6;
+    if (moved) {
+        auto it = std::find_if(m_options.pinned.begin(), m_options.pinned.end(),
+                               [&pl](const SplitPinnedPlane &p) { return p.axis == pl.axis && p.index == pl.index; });
+        if (it == m_options.pinned.end())
+            m_options.pinned.push_back({ pl.axis, pl.index, pos });
+        else
+            it->pos = pos;
+        // The full plan (adjustment of the other planes, dowel sites) is made once, now.
+        m_plan_dirty = true;
+    }
+    m_drag_plane    = -1;
+    m_preview_dirty = true;
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+}
+
+std::string GLGizmoSplitToFit::drag_lengths(size_t i, double pos, bool *too_long) const
+{
+    const SplitPlane   &pl  = m_plan.planes[i];
+    const int           a   = pl.axis;
+    std::vector<double> xs  = m_plan.plane_positions(a);
+    const double        prev = pl.index > 0 && size_t(pl.index) - 1 < xs.size() ? xs[size_t(pl.index) - 1] : m_plan.model_bbox.min[a];
+    const double        next = size_t(pl.index) + 1 < xs.size() ? xs[size_t(pl.index) + 1] : m_plan.model_bbox.max[a];
+    const double        l0 = pos - prev, l1 = next - pos;
+    if (too_long != nullptr)
+        *too_long = l0 > m_plan.usable.size[a] + 1e-6 || l1 > m_plan.usable.size[a] + 1e-6;
+    return Slic3r::format("%.1f | %.1f mm", l0, l1);
+}
+
+std::string GLGizmoSplitToFit::get_tooltip() const
+{
+    const int i = m_drag_plane >= 0 ? m_drag_plane : m_hover_id;
+    if (i < 0 || size_t(i) >= m_plan.planes.size())
+        return std::string();
+    const double pos      = shown_pos(size_t(i));
+    bool         too_long = false;
+    std::string  out      = m_plan.planes[size_t(i)].name() + ": " + Slic3r::format("%.1f mm", pos) + "\n" +
+                      _u8L("Parts either side") + ": " + drag_lengths(size_t(i), pos, &too_long);
+    if (too_long)
+        out += "\n" + _u8L("A part would be too long for the printer.");
+    if (m_drag_plane < 0)
+        out += "\n" + _u8L("Drag to move this plane. A moved plane stays where you put it.");
+    return out;
+}
+
+void GLGizmoSplitToFit::show_warning(const SplitWarning &w)
+{
+    BoundingBoxf3 box;
+    if (w.piece >= 0 && size_t(w.piece) < m_plan.pieces.size())
+        box = m_plan.pieces[size_t(w.piece)].bbox;
+    else if (w.part >= 0 && size_t(w.part) < m_plan.parts.size() && !m_plan.parts[size_t(w.part)].empty)
+        box = m_plan.parts[size_t(w.part)].bbox;
+    else if (w.face >= 0 && size_t(w.face) < m_plan.faces.size())
+        box = split_fit_gizmo_detail::plane_box(m_plan, m_plan.faces[size_t(w.face)].plane, &m_plan.faces[size_t(w.face)].cell_below);
+    else if (w.plane >= 0)
+        box = split_fit_gizmo_detail::plane_box(m_plan, w.plane, nullptr);
+    if (!box.defined)
+        return;
+    m_highlight = box;
+    m_highlight_model.reset();
+    // Zoom to it with some of the model round it.
+    BoundingBoxf3 view = box;
+    const Vec3d   grow = Vec3d::Constant(std::max(10., 0.25 * box.size().maxCoeff()));
+    view.min -= grow;
+    view.max += grow;
+    wxGetApp().plater()->get_camera().zoom_to_box(view);
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
 }
 
 void GLGizmoSplitToFit::rebuild_preview()
@@ -335,7 +678,10 @@ void GLGizmoSplitToFit::rebuild_preview()
     m_bad_parts.reset();
     m_sites_fill.reset();
     m_sites_axes.reset();
-    if (m_plan.planes.empty() && m_plan.parts_not_fitting() == 0)
+    for (GLModel &m : m_piece_boxes)
+        m.reset();
+    m_labels.reset();
+    if (m_plan.planes.empty() && m_plan.pieces_not_fitting() == 0)
         return;
 
     const BoundingBoxf3 &bb  = m_plan.model_bbox;
@@ -350,15 +696,17 @@ void GLGizmoSplitToFit::rebuild_preview()
     outline.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
     bad.format     = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
 
-    for (const SplitPlane &pl : m_plan.planes) {
+    for (size_t pi = 0; pi < m_plan.planes.size(); ++pi) {
+        const SplitPlane &pl = m_plan.planes[pi];
         const int a = pl.axis, u = (a + 1) % 3, v = (a + 2) % 3;
         Vec3d     c[4];
         for (int k = 0; k < 4; ++k) {
-            c[k][a] = pl.pos;
+            // P3: a plane being dragged is drawn under the mouse (orange: it will be pinned).
+            c[k][a] = shown_pos(pi);
             c[k][u] = (k == 1 || k == 2) ? hi[u] : lo[u];
             c[k][v] = (k >= 2) ? hi[v] : lo[v];
         }
-        Geo         &g    = pl.pinned ? pinned : fill;
+        Geo         &g    = pl.pinned || int(pi) == m_drag_plane ? pinned : fill;
         const unsigned base = unsigned(g.vertices_count());
         for (const Vec3d &p : c)
             g.add_vertex(Vec3f(p.cast<float>()));
@@ -371,18 +719,83 @@ void GLGizmoSplitToFit::rebuild_preview()
             outline.add_line(ob + k, ob + (k + 1) % 4);
     }
 
-    // The boxes of the parts that would not fit.
-    for (const SplitPart &part : m_plan.parts) {
-        if (part.empty || part.fits)
-            continue;
-        const Vec3d   &mn = part.bbox.min, &mx = part.bbox.max;
-        const unsigned b  = unsigned(bad.vertices_count());
-        for (int k = 0; k < 8; ++k)
-            bad.add_vertex(Vec3f(float((k & 1) ? mx.x() : mn.x()), float((k & 2) ? mx.y() : mn.y()), float((k & 4) ? mx.z() : mn.z())));
-        static const int edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 },
+    static const int box_edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 },
                                           { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
-        for (const auto &e : edges)
-            bad.add_line(b + unsigned(e[0]), b + unsigned(e[1]));
+    auto add_box = [](Geo &g, const BoundingBoxf3 &box) {
+        const Vec3d   &mn = box.min, &mx = box.max;
+        const unsigned b  = unsigned(g.vertices_count());
+        for (int k = 0; k < 8; ++k)
+            g.add_vertex(Vec3f(float((k & 1) ? mx.x() : mn.x()), float((k & 2) ? mx.y() : mn.y()), float((k & 4) ? mx.z() : mn.z())));
+        for (const auto &e : box_edges)
+            g.add_line(b + unsigned(e[0]), b + unsigned(e[1]));
+    };
+
+    // The boxes of the parts (P5: pieces) that would not fit.
+    for (const SplitPiece &piece : m_plan.pieces)
+        if (!piece.discarded && !piece.fits && piece.bbox.defined)
+            add_box(bad, piece.bbox);
+
+    // P5: the pieces of a section that falls apart, each in its own colour (discarded ones grey), so the
+    // loose bits Apply will make into parts of their own show before Apply.
+    {
+        static const ColorRGBA palette[6] = { ColorRGBA(0.16f, 0.62f, 0.95f, 1.f), ColorRGBA(0.85f, 0.33f, 0.85f, 1.f),
+                                              ColorRGBA(0.20f, 0.78f, 0.35f, 1.f), ColorRGBA(0.95f, 0.55f, 0.10f, 1.f),
+                                              ColorRGBA(0.55f, 0.45f, 0.95f, 1.f), ColorRGBA(0.10f, 0.75f, 0.75f, 1.f) };
+        std::vector<Geo> per_colour(7);
+        for (Geo &g : per_colour)
+            g.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
+        for (size_t s = 0; s < m_plan.parts.size(); ++s) {
+            const std::vector<int> list = m_plan.pieces_of(int(s));
+            if (list.size() < 2)
+                continue;
+            for (int i : list) {
+                const SplitPiece &p = m_plan.pieces[size_t(i)];
+                if (p.bbox.defined)
+                    add_box(per_colour[p.discarded ? 6 : size_t(p.index) % 6], p.bbox);
+            }
+        }
+        for (size_t c = 0; c < per_colour.size() && c < m_piece_boxes.size(); ++c)
+            if (per_colour[c].vertices_count() > 0) {
+                m_piece_boxes[c].init_from(std::move(per_colour[c]));
+                m_piece_boxes[c].set_color(c < 6 ? palette[c] : ColorRGBA(0.55f, 0.55f, 0.55f, 1.f));
+            }
+    }
+
+    // P5: the labels, as the outlines of their glyphs on the plane (one of each pair: both sit on the
+    // same spot), drawn as they read from the piece below the plane.
+    {
+        Geo lbl;
+        lbl.format = { Geo::EPrimitiveType::Lines, Geo::EVertexLayout::P3 };
+        for (const SplitLabel &l : m_plan.labels) {
+            if (!l.below)
+                continue;
+            if (l.mate >= 0 && size_t(l.mate) < m_plan.mates.size()) {
+                const int face = m_plan.mates[size_t(l.mate)].face;
+                if (face >= 0 && size_t(face) < m_plan.faces.size() && m_plan.faces[size_t(face)].plane == m_drag_plane)
+                    continue;   // placed again when the plane is let go
+            }
+            const ExPolygons shapes = l.pattern ? split_label_pattern_shapes(l.number, l.stroke) :
+                                                  split_label_text_shapes(l.text, l.height, l.stroke);
+            auto add_poly = [&](const Polygon &poly) {
+                const unsigned b = unsigned(lbl.vertices_count());
+                for (const Point &pt : poly.points) {
+                    const Vec2d q = unscale(pt);
+                    lbl.add_vertex(Vec3f((l.center + q.x() * l.right + q.y() * l.up).cast<float>()));
+                }
+                const unsigned n = unsigned(poly.points.size());
+                for (unsigned k = 0; k < n; ++k)
+                    lbl.add_line(b + k, b + (k + 1) % n);
+            };
+            for (const ExPolygon &ex : shapes) {
+                add_poly(ex.contour);
+                for (const Polygon &h : ex.holes)
+                    add_poly(h);
+            }
+        }
+        if (lbl.vertices_count() > 0) {
+            m_labels.init_from(std::move(lbl));
+            m_labels.set_color(ColorRGBA(0.98f, 0.76f, 0.12f, 0.95f));
+        }
     }
 
     // P2: each dowel site as a disc of its hole's size on its plane, and its length as a line
@@ -393,6 +806,9 @@ void GLGizmoSplitToFit::rebuild_preview()
     static constexpr int DISC_SEGMENTS = 24;
     for (const SplitSite &s : m_plan.sites) {
         if (s.plane < 0 || size_t(s.plane) >= m_plan.planes.size())
+            continue;
+        // The dowels of a plane being dragged are placed again when it is let go.
+        if (s.plane == m_drag_plane)
             continue;
         const int    a = m_plan.planes[size_t(s.plane)].axis, u = (a + 1) % 3, v = (a + 2) % 3;
         const double r = std::max(0.5, s.footprint_radius);
@@ -492,11 +908,52 @@ void GLGizmoSplitToFit::on_render()
             m_sites_axes.render();
         glsafe(::glEnable(GL_DEPTH_TEST));
     }
+    // P5: the pieces' boxes and the labels, over the model as the dowels are.
+    const bool any_piece_box = std::any_of(m_piece_boxes.begin(), m_piece_boxes.end(), [](const GLModel &m) { return m.is_initialized(); });
+    if (any_piece_box || m_labels.is_initialized()) {
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        glsafe(::glLineWidth(2.0f));
+        for (GLModel &m : m_piece_boxes)
+            if (m.is_initialized())
+                m.render();
+        glsafe(::glLineWidth(1.5f));
+        if (m_labels.is_initialized())
+            m_labels.render();
+        glsafe(::glEnable(GL_DEPTH_TEST));
+    }
+
+    // P3: what a click in the Output Log points at, outlined over everything.
+    if (m_highlight.defined) {
+        if (!m_highlight_model.is_initialized()) {
+            GLModel::Geometry g;
+            g.format       = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+            const Vec3d mn = m_highlight.min, mx = m_highlight.max;
+            for (int k = 0; k < 8; ++k)
+                g.add_vertex(Vec3f(float((k & 1) ? mx.x() : mn.x()), float((k & 2) ? mx.y() : mn.y()), float((k & 4) ? mx.z() : mn.z())));
+            static const int edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 },
+                                              { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
+            for (const auto &e : edges)
+                g.add_line(unsigned(e[0]), unsigned(e[1]));
+            m_highlight_model.init_from(std::move(g));
+            m_highlight_model.set_color(ColorRGBA::ORANGE());
+        }
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        glsafe(::glLineWidth(3.0f));
+        m_highlight_model.render();
+        glsafe(::glEnable(GL_DEPTH_TEST));
+    }
     glsafe(::glLineWidth(1.0f));
 
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glDisable(GL_BLEND));
     shader->stop_using();
+
+    // P3: the plane handles, on top of the scene (picking agrees, see on_register_raycasters_for_picking()).
+    if (!m_grabbers.empty() && m_grabbers.size() == m_plan.planes.size()) {
+        update_grabbers();
+        glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
+        render_grabbers(0, m_grabbers.size() - 1, 0.f, false);
+    }
 }
 
 void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_limit)
@@ -616,26 +1073,55 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         input_mm(_L("Smallest part"), "##split_min_t", m_options.min_part_thickness, 1., 100.,
                  _L("The last part on an axis is never thinner than this: the plane before it moves in."));
 
-    // Planes: drag a value to move a plane; a moved plane is kept where it was put (orange).
+    // ---- plane adjustment (P3) ------------------------------------------------------------------------
+    if (m_imgui->bbl_checkbox(_L("Adjust planes automatically"), m_options.adjust_planes))
+        changed = true;
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Move each cut plane a little to a better place to cut: off thin necks and fine detail, clear of flat "
+                            "faces, and where dowels fit. A plane never moves so far that a part stops fitting the printer, and "
+                            "planes you moved yourself stay where you put them."),
+                         wrap_w);
+    if (m_options.adjust_planes)
+        input_mm(_L("Up to"), "##split_adjust_limit", m_options.adjust_limit, 1., 50.,
+                 _L("The furthest a plane may move from its even place."));
+
+    // Planes: drag a handle in the 3D view, or a value here; a moved plane is kept where it was put
+    // (orange). The plan is made again when the drag ends, not on every step of it.
     if (!m_plan.planes.empty() && ImGui::CollapsingHeader(into_u8(_L("Plane positions")).c_str())) {
-        for (const SplitPlane &pl : m_plan.planes) {
-            float pos = float(pl.pos);
+        for (size_t pi = 0; pi < m_plan.planes.size(); ++pi) {
+            const SplitPlane &pl  = m_plan.planes[pi];
+            float             pos = float(shown_pos(pi));
             label(from_u8(pl.name()));
             ImGui::PushItemWidth(field_w * 1.6f);
             const std::string id = "##split_plane_" + pl.name();
             if (ImGui::DragFloat(id.c_str(), &pos, 0.5f, float(m_plan.model_bbox.min[pl.axis]), float(m_plan.model_bbox.max[pl.axis]), "%.1f mm")) {
-                auto it = std::find_if(m_options.pinned.begin(), m_options.pinned.end(),
-                                       [&pl](const SplitPinnedPlane &p) { return p.axis == pl.axis && p.index == pl.index; });
-                if (it == m_options.pinned.end())
-                    m_options.pinned.push_back({ pl.axis, pl.index, double(pos) });
-                else
-                    it->pos = double(pos);
-                changed = true;
+                m_drag_plane    = int(pi);
+                m_drag_pos      = double(pos);
+                m_preview_dirty = true;
+                m_parent.set_as_dirty();
             }
+            // Let go (or typed in and confirmed): the plane is pinned and the plan made again.
+            const bool released = ImGui::IsItemDeactivated();
             ImGui::PopItemWidth();
             if (ImGui::IsItemHovered())
-                m_imgui->tooltip(_L("Drag to move this plane. A moved plane stays where you put it; a part that becomes too long turns red."),
+                m_imgui->tooltip(_L("Drag to move this plane (or drag its handle in the 3D view). A moved plane stays where you put it; "
+                                    "a part that becomes too long turns red."),
                                  wrap_w);
+            const ImVec4 grey = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            if (int(pi) == m_drag_plane) {
+                bool              too_long = false;
+                const std::string lengths  = drag_lengths(pi, m_drag_pos, &too_long);
+                ImGui::SameLine();
+                ImGuiWrapper::text_colored(too_long ? red : grey, from_u8(lengths));
+            } else if (pl.pinned) {
+                ImGui::SameLine();
+                ImGuiWrapper::text_colored(grey, _L("(yours)"));
+            } else if (pl.adjusted) {
+                ImGui::SameLine();
+                ImGuiWrapper::text_colored(grey, format_wxstr(_L("(moved %1% mm)"), Slic3r::format("%+.1f", pl.pos - pl.nominal)));
+            }
+            if (released && int(pi) == m_drag_plane && !m_dragging)
+                commit_drag();
         }
         if (!m_options.pinned.empty() && m_imgui->button(_L("Put planes back"))) {
             m_options.pinned.clear();
@@ -724,13 +1210,97 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
 
     ImGui::Separator();
 
+    // ---- labels (P5) --------------------------------------------------------------------------------
+    SplitLabelOptions &lb = m_options.labels;
+    if (m_imgui->bbl_checkbox(_L("Label the cut faces"), lb.enabled))
+        changed = true;
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Recess the same code into both faces of every pair of parts that fit together, so you can tell which "
+                            "part goes where. The codes are shown on the planes and listed in the Output Log."),
+                         wrap_w);
+    if (lb.enabled) {
+        label(_L("Style"));
+        ImGui::PushItemWidth(field_w * 1.8f);
+        const std::vector<wxString> styles = { _L("Code"), _L("Number"), _L("Dots") };
+        const int                   sel    = std::clamp(int(lb.style), 0, 2);
+        if (ImGui::BeginCombo("##split_label_style", into_u8(styles[size_t(sel)]).c_str())) {
+            for (int i = 0; i < 3; ++i)
+                if (ImGui::Selectable(into_u8(styles[size_t(i)]).c_str(), i == sel)) {
+                    lb.style = SplitLabelStyle(i);
+                    changed  = true;
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Code: the plane and face, like X1.2. Number: a running number for each pair. Dots: a small pattern "
+                                "of dots for the pair's number (the top-left dot is always there). Faces too small for text get the dots."),
+                             wrap_w);
+        input_mm(_L("Text height"), "##split_label_h", lb.height, 4., 30.,
+                 _L("The tallest the text gets. Smaller faces get smaller text, never under 4 mm; below that the dots."));
+        input_mm(_L("Depth"), "##split_label_d", lb.depth, 0.2, 3.,
+                 _L("How deep the label is recessed into each face. 0.6 mm is three 0.2 mm layers."));
+    }
+    // Small pieces: one threshold names them "_tiny", warns about them and, if asked, leaves them out.
+    {
+        bool  discard = m_options.discard_small;
+        if (m_imgui->bbl_checkbox(_L("Discard pieces smaller than"), discard)) {
+            m_options.discard_small = discard;
+            changed                 = true;
+        }
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Leave out crumbs smaller than this that the cuts break off. Off: they are kept as parts of their own, "
+                                "with \"_tiny\" at the end of their names so you can find and delete them by hand."),
+                             wrap_w);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(field_w);
+        double cm3 = m_options.small_piece_volume / 1000.;
+        if (ImGui::InputDouble("##split_small_piece", &cm3, 0.0, 0.0, "%.2f") && std::isfinite(cm3)) {
+            m_options.small_piece_volume = std::clamp(cm3, 0.01, 1000.) * 1000.;
+            changed                      = true;
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Pieces below this volume are marked \"_tiny\" and warned about, and left out when the box is ticked."),
+                             wrap_w);
+        ImGui::SameLine();
+        m_imgui->text(_L("cm3"));
+    }
+
+    ImGui::Separator();
+
     // ---- the result ---------------------------------------------------------------------------------
+    // P3 (owner, 2026-11-16): the parts table and the warnings fold into one "Output Log", collapsed by
+    // default. The one-line result stays in view, with a count of the warnings, so nothing goes unseen.
     const bool single_copy = mo->instances.size() == 1;
+    size_t     n_problems = 0, n_errors = 0, n_notes = 0;
+    for (const SplitWarning &w : m_plan.warnings) {
+        const Severity s = severity(w.kind);
+        if (s == Severity::Info)
+            ++n_notes;
+        else {
+            ++n_problems;
+            if (s == Severity::Error)
+                ++n_errors;
+        }
+    }
+    const ImVec4 grey = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    auto         count_badge = [&]() {
+        if (n_problems > 0) {
+            ImGui::SameLine();
+            ImGuiWrapper::text_colored(n_errors > 0 ? red : amber,
+                                       format_wxstr(_L_PLURAL("%1% warning", "%1% warnings", n_problems), n_problems));
+        } else if (n_notes > 0) {
+            ImGui::SameLine();
+            ImGuiWrapper::text_colored(grey, format_wxstr(_L_PLURAL("%1% note", "%1% notes", n_notes), n_notes));
+        }
+    };
     if (m_plan.valid) {
         // A rough plate count: the parts' footprints over the usable area, with room between them.
+        // P5: every piece is a part (and takes room on a plate); discarded ones are not.
         double footprint = 0.;
-        for (const SplitPart &p : m_plan.parts)
-            if (!p.empty)
+        for (const SplitPiece &p : m_plan.pieces)
+            if (!p.discarded)
                 footprint += p.size().x() * p.size().y();
         const double bed    = std::max(1., usable.size.x() * usable.size.y());
         const int    plates = std::max(1, int(std::ceil(footprint * 1.3 / bed)));
@@ -738,44 +1308,94 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         label(_L("Result"));
         if (m_plan.dowel_options.enabled)
             m_imgui->text(format_wxstr(pins ? _L("%1% parts, %2% pins, about %3% plates") : _L("%1% parts, %2% dowels, about %3% plates"),
-                                       m_plan.part_count(), m_plan.dowel_count(), plates));
+                                       m_plan.piece_count(), m_plan.dowel_count(), plates));
         else
-            m_imgui->text(format_wxstr(_L("%1% parts, about %2% plates"), m_plan.part_count(), plates));
-
-        const float row_h  = ImGui::GetTextLineHeightWithSpacing();
-        const float list_h = std::min(row_h * float(m_plan.part_count() + 1), em * 9.f);
-        ImGui::BeginChild("##split_parts", ImVec2(em * 26.f, list_h), true);
-        for (const SplitPart &p : m_plan.parts) {
-            if (p.empty)
-                continue;
-            m_imgui->text(from_u8(p.name.empty() ? mo->name : p.name));
-            ImGui::SameLine(em * 7.f);
-            m_imgui->text(from_u8(mm_size(p.size())));
-            ImGui::SameLine(em * 16.f);
-            if (p.fits)
-                m_imgui->text(_L("fits"));
-            else
-                ImGuiWrapper::text_colored(red, _L("does not fit"));
-            if (m_plan.dowel_options.enabled) {
-                // The holes this part gets: one per dowel on each of its faces.
-                size_t holes = 0;
-                for (int f : p.faces)
-                    if (f >= 0 && size_t(f) < m_plan.faces.size())
-                        holes += m_plan.faces[size_t(f)].sites.size();
-                ImGui::SameLine(em * 21.f);
-                m_imgui->text(format_wxstr(_L("%1% holes"), holes));
-            }
-        }
-        ImGui::EndChild();
+            m_imgui->text(format_wxstr(_L("%1% parts, about %2% plates"), m_plan.piece_count(), plates));
+        count_badge();
+        // P5: where the extra parts come from, and what is left out.
+        const size_t extra = m_plan.piece_count() > m_plan.part_count() ? m_plan.piece_count() - m_plan.part_count() : 0;
+        if (extra > 0)
+            ImGuiWrapper::text_colored(grey, format_wxstr(_L_PLURAL("(%1% loose piece is a part of its own)",
+                                                                    "(%1% loose pieces are parts of their own)", extra), extra));
+        if (const size_t gone = m_plan.discarded_count(); gone > 0)
+            ImGuiWrapper::text_colored(amber, format_wxstr(_L_PLURAL("%1% small piece left out (%2% cm3)", "%1% small pieces left out (%2% cm3)", gone),
+                                                           gone, Slic3r::format("%.2f", m_plan.discarded_volume() / 1000.)));
         if (m_plan.planes.empty())
             m_imgui->text_wrapped(_L("The model already fits the printer: there is nothing to split."), wrap_w);
+    } else {
+        // No plan: say why here, not only inside the folded log.
+        for (const SplitWarning &w : m_plan.warnings)
+            if (severity(w.kind) == Severity::Error) {
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap_w);
+                ImGui::PushStyleColor(ImGuiCol_Text, red);
+                ImGui::TextWrapped("! %s", into_u8(split_warning_text(w, m_plan)).c_str());
+                ImGui::PopStyleColor();
+                ImGui::PopTextWrapPos();
+            }
     }
     if (!single_copy)
         ImGuiWrapper::text_colored(red, format_wxstr(_L("This object has %1% copies. Split to Fit works on an object with one copy: "
                                                         "delete the other copies first."), mo->instances.size()));
 
-    // ---- warnings -----------------------------------------------------------------------------------
-    if (!m_plan.warnings.empty()) {
+    // ---- the Output Log: the parts table and the warnings, collapsed by default --------------------
+    const bool log_has_content = m_plan.valid || !m_plan.warnings.empty();
+    if (log_has_content) {
+        ImGui::SetNextItemOpen(m_output_log_open, ImGuiCond_Always);
+        m_output_log_open = ImGui::CollapsingHeader((into_u8(_L("Output Log")) + "##split_output_log").c_str());
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Every part with its size, and every warning. Click a warning to see where it is."), wrap_w);
+    }
+    if (log_has_content && m_output_log_open && m_plan.valid) {
+        // P5: one row per piece (the parts Apply makes), with the codes of its faces: an assembly list.
+        // A piece's name column is as wide as the longest name ("X1-Y2-Z1_b_tiny").
+        const float row_h  = ImGui::GetTextLineHeightWithSpacing();
+        const float list_h = std::min(row_h * float(m_plan.pieces.size() + 1), em * 12.f);
+        float       name_w = em * 6.f;
+        for (const SplitPiece &p : m_plan.pieces)
+            name_w = std::max(name_w, ImGui::CalcTextSize(p.name.c_str()).x + em);
+        const float size_x = name_w, fit_x = size_x + em * 9.f, holes_x = fit_x + em * 5.5f;
+        const float faces_x = m_plan.dowel_options.enabled ? holes_x + em * 4.5f : holes_x;
+        ImGui::BeginChild("##split_parts", ImVec2(std::max(em * 26.f, faces_x + em * 10.f), list_h), true, ImGuiWindowFlags_HorizontalScrollbar);
+        for (const SplitPiece &p : m_plan.pieces) {
+            const ImVec4 text_col = p.discarded ? grey : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            ImGuiWrapper::text_colored(text_col, from_u8(p.name.empty() ? mo->name : p.name));
+            ImGui::SameLine(size_x);
+            ImGuiWrapper::text_colored(text_col, from_u8(mm_size(p.size())));
+            ImGui::SameLine(fit_x);
+            if (p.discarded)
+                ImGuiWrapper::text_colored(grey, _L("left out"));
+            else if (p.fits)
+                m_imgui->text(_L("fits"));
+            else
+                ImGuiWrapper::text_colored(red, _L("does not fit"));
+            if (p.discarded)
+                continue;
+            if (m_plan.dowel_options.enabled) {
+                // The holes this piece gets: one per dowel of each pair it is in.
+                size_t holes = 0;
+                for (int mi : p.mates)
+                    holes += m_plan.mates[size_t(mi)].sites.size();
+                ImGui::SameLine(holes_x);
+                m_imgui->text(format_wxstr(_L("%1% holes"), holes));
+            }
+            // The codes of the faces it mates on (labelled or not): find the part with the same code.
+            std::string codes;
+            for (int mi : p.mates) {
+                if (!codes.empty())
+                    codes += ", ";
+                codes += m_plan.mates[size_t(mi)].code;
+            }
+            if (!codes.empty()) {
+                ImGui::SameLine(faces_x);
+                m_imgui->text(from_u8(codes));
+            }
+        }
+        ImGui::EndChild();
+    }
+
+    // ---- warnings (inside the Output Log) -----------------------------------------------------------
+    const SplitWarning *clicked = nullptr;
+    if (log_has_content && m_output_log_open && !m_plan.warnings.empty()) {
         m_imgui->text(format_wxstr(_L("Warnings (%1%)"), m_plan.warnings.size()));
         // A grid with dowels can warn about many faces: past a handful the list scrolls.
         const bool scroll = m_plan.warnings.size() > 6;
@@ -793,10 +1413,18 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
                 ImGui::PopStyleColor();
             }
             ImGui::PopTextWrapPos();
+            // A warning about a plane, a face or a part is shown in the 3D view when clicked.
+            if ((w.plane >= 0 || w.part >= 0 || w.face >= 0) && ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    clicked = &w;
+            }
         }
         if (scroll)
             ImGui::EndChild();
     }
+    if (clicked != nullptr)
+        show_warning(*clicked);
 
     ImGui::Separator();
 
@@ -832,10 +1460,10 @@ void GLGizmoSplitToFit::apply()
     Plater *plater = wxGetApp().plater();
 
     // D13: a part that does not fit is allowed, after a question.
-    if (const size_t bad = m_plan.parts_not_fitting(); bad > 0) {
+    if (const size_t bad = m_plan.pieces_not_fitting(); bad > 0) {
         MessageDialog dlg(plater,
                           format_wxstr(_L("%1% of the %2% parts will not fit the printer. Split anyway? You can turn or cut those parts "
-                                          "by hand afterwards."), bad, m_plan.part_count()),
+                                          "by hand afterwards."), bad, m_plan.piece_count()),
                           _L("Split to Fit"), wxYES_NO | wxICON_WARNING);
         if (dlg.ShowModal() != wxID_YES)
             return;

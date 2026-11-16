@@ -145,7 +145,10 @@ public:
         SlicingEmptyFirstLayer,
         // Head clearance check (GCode/HeadCollisionCheck.hpp): a Z-contoured print has moves where the
         // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
-        SlicingHeadCollision
+        SlicingHeadCollision,
+        // Curved tops (CurvedTops.hpp) asked for on a printer with no known head clearance: left planar.
+        // Raised in posContouring; appended, own id.
+        SlicingCurvedTopsUnavailable
     };
 
     typedef size_t TimeStamp;

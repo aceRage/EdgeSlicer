@@ -108,6 +108,9 @@ void SplitToFitJob::finalize(bool canceled, std::exception_ptr &eptr)
                                                                                                _u8L("%1% dowels to print were added.")) %
                           m_result.dowels.size())
                              .str();
+    // P5: the matching labels, two per pair of faces.
+    if (m_result.labels > 0)
+        summary += " " + (boost::format(_u8L("%1% matching labels were recessed into the cut faces.")) % m_result.labels).str();
     for (const SplitWarning &w : m_result.warnings)
         summary += "\n" + into_u8(split_warning_text(w, m_plan));
     if (m_result.warnings.empty())
