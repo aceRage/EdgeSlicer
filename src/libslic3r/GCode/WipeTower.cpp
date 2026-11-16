@@ -3465,10 +3465,6 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     const float capped        = per_nozzle && m_current_tool < m_filpar.size() && m_filpar[m_current_tool].nozzle_diameter > 0.f ?
                                     std::min(pw, m_filpar[m_current_tool].nozzle_diameter * Width_To_Nozzle_Ratio) : pw;
     const bool  grid_narrowed = capped + WT_EPSILON < pw;
-    auto        narrow        = [&writer, this, capped](float height) {
-        writer.set_extrusion_flow(flow_for(height, capped)).change_analyzer_line_width(capped);
-    };
-    auto        widen         = [&writer, pw](float flow) { writer.set_extrusion_flow(flow).change_analyzer_line_width(pw); };
 
     WipeTowerWriter writer(m_layer_height, pw, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(fill_flow)
@@ -3478,6 +3474,10 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         .set_arc_fitting(m_enable_arc_fitting)
         .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift);
+    auto        narrow        = [&writer, this, capped](float height) {
+        writer.set_extrusion_flow(flow_for(height, capped)).change_analyzer_line_width(capped);
+    };
+    auto        widen         = [&writer, pw](float flow) { writer.set_extrusion_flow(flow).change_analyzer_line_width(pw); };
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
 
