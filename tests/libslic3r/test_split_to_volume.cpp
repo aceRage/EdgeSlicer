@@ -684,10 +684,15 @@ void p2_check_dowel_apply(const indexed_triangle_set &its, const SplitUsableVolu
     const CutObjectBase &group = res.parts.front()->cut_id;
     REQUIRE_FALSE(group.id().invalid());
     REQUIRE(group.check_sum() == res.parts.size() + res.dowels.size());
+    // (CutObjectBase::is_equal() is not const.)
+    auto same_group = [&group](const ModelObject *o) {
+        return o->cut_id.id() == group.id() && o->cut_id.check_sum() == group.check_sum() &&
+               o->cut_id.connectors_cnt() == group.connectors_cnt();
+    };
     for (const ModelObject *o : res.parts)
-        REQUIRE(o->cut_id.is_equal(group));
+        REQUIRE(same_group(o));
     for (const ModelObject *o : res.dowels)
-        REQUIRE(o->cut_id.is_equal(group));
+        REQUIRE(same_group(o));
 
     // Parts closed, connector names unique within each part.
     std::map<std::string, std::pair<int, const ModelVolume *>> holes; // hole name -> (plan part, volume)
