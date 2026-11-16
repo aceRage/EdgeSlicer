@@ -459,3 +459,39 @@ TEST_CASE("ALM tower: the mixed-diameter tower warning only where the tower is n
     cfg.set_deserialize_strict({ { "wipe_tower_no_sparse_layers", "1" } });
     CHECK(tower_height_warnings(cfg).size() == 1);
 }
+
+// Owner hand test 2026-11-16 (test3): H3C 0.4 preset, rack 0.2 + 0.8, plate layer height 0.20. The 0.2 prints every layer
+// at the plate's height, but the layer height prompt read the 0.4 preset's limits (0.08 - 0.28) and said nothing. A 0.2
+// preset holds the same layer height to its 0.14 maximum; the rack's finest nozzle is now held to its own window.
+TEST_CASE("ALM tower: the plate's layer height limits come from the finest rack nozzle in use", "[ALMTower]")
+{
+    DynamicPrintConfig cfg = preset_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C",
+                                           "Bambu PLA Basic @BBL H3C 0.8 nozzle");
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.2,0.8" };
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0.2, 0.8 };
+    PrintConfig config;
+    config.apply(cfg, true);
+    REQUIRE(nozzle_diameter_for_filament(config, 1) == Approx(0.2));
+    REQUIRE(nozzle_diameter_for_filament(config, 2) == Approx(0.8));
+
+    RackLayerHeightLimit limit;
+    REQUIRE(rack_nozzle_layer_height_limits(config, { 1, 2 }, limit));
+    CHECK(limit.filament_id == 1);
+    CHECK(limit.nozzle_diameter == Approx(0.2));
+    CHECK(limit.max_height == Approx(0.14)); // the 0.2 preset's max_layer_height, and Bambu's 0.7 x d
+    CHECK(limit.min_height == Approx(0.04));
+    CHECK(limit.max_height < 0.2 - EPSILON); // test3's 0.20 is outside it
+
+    // Only the 0.8 in use: its window (the plate's layer height is what it prints).
+    REQUIRE(rack_nozzle_layer_height_limits(config, { 2 }, limit));
+    CHECK(limit.nozzle_diameter == Approx(0.8));
+    CHECK(limit.max_height > 0.28);
+
+    // The mounted 0.4 is the finest in use: the preset's own limits stay (no rack limit).
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0., 0.8 };
+    config.apply(cfg, true);
+    REQUIRE(nozzle_diameter_for_filament(config, 1) == Approx(0.4));
+    RackLayerHeightLimit untouched;
+    CHECK_FALSE(rack_nozzle_layer_height_limits(config, { 1, 2 }, untouched));
+    CHECK(untouched.max_height == 0.);
+}
