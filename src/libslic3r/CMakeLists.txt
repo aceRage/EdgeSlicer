@@ -558,6 +558,8 @@ set(lisbslic3r_sources
     FilamentSyncMatch.hpp
     PlateBedTypes.cpp
     PlateBedTypes.hpp
+    PrimeTowerDefaults.cpp
+    PrimeTowerDefaults.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp
