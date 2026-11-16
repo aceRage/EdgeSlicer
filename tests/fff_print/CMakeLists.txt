@@ -53,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bbs_tower_ramming.cpp
 	test_bbs_tower_h3c_parity.cpp
 	test_bbs_tower_leftovers.cpp
+	test_alm_tower.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_polyholes.cpp
