@@ -10,6 +10,8 @@
 #include "../Geometry/ConvexHull.hpp"
 #include "../Line.hpp"
 #include "../PrintConfig.hpp"
+#include "../AdaptiveLayerMerge.hpp"
+#include "../ToolSlots.hpp"
 #include "../libslic3r.h"
 
 #include <algorithm>
@@ -112,6 +114,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     // Both planners size every layer, so the tower has to fit its thinnest one: the first layer
     // when it is printed thinner than the rest.
     const double first_layer_height = opt_float("initial_layer_print_height");
+    const double base_layer_height  = layer_height;
     if (first_layer_height > EPSILON)
         layer_height = std::min(layer_height, first_layer_height);
 
@@ -208,9 +211,42 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         }
     }
 
+    // PR-C: on a mixed-diameter plate the Type 1 tower keeps one block per category and nozzle, each purge at its nozzle's
+    // tower width (Bambu Studio 2.9.1's per-diameter table: 0.4 mm for a 0.2 nozzle, 0.8 mm for 0.4 / 0.6 / 0.8) and on that
+    // nozzle's slab (its band on the plate's layer height, adaptive_layer_band_size()). The structure width follows the
+    // finest nozzle.
+    float mixed_structure_width = 0.f;
+    if (type1 && purges.size() > 1) {
+        std::vector<double> diameters;
+        for (size_t i = 0; i < filaments_cnt; ++i)
+            diameters.push_back(nozzle_diameter_for_filament(config, filament_ids[i] + 1));
+        const double finest = *std::min_element(diameters.begin(), diameters.end());
+        const double widest = *std::max_element(diameters.begin(), diameters.end());
+        if (finest > EPSILON && widest > finest + EPSILON) {
+            // The per-diameter table only where Bambu has its multi-diameter mode (a single-extruder rack); elsewhere each
+            // tool's own width (WipeTower::tool_line_width()).
+            auto per_nozzle_width = [&opt_float, hotend_rack](double d) {
+                static const double table_d[] = { 0.2, 0.4, 0.6, 0.8 };
+                static const double table_w[] = { 0.4, 0.8, 0.8, 0.8 };
+                for (size_t k = 0; hotend_rack && k < 4; ++k)
+                    if (std::abs(d - table_d[k]) < 1e-3)
+                        return table_w[k];
+                const double preset = opt_float("prime_tower_line_width");
+                return preset > 0. ? preset : d * 1.25;
+            };
+            for (size_t i = 0; i < filaments_cnt; ++i) {
+                purges[i].nozzle_diameter = float(diameters[i]);
+                purges[i].line_width      = float(per_nozzle_width(diameters[i]));
+                purges[i].slab_height     = float(double(adaptive_layer_band_size(diameters[i], finest, base_layer_height)) * base_layer_height);
+            }
+            mixed_structure_width = float(per_nozzle_width(finest));
+        }
+    }
+
     const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height), !type1);
     // Bambu Studio 2.9.1 prime_tower_line_width (Type1 only; 0 = from the nozzle diameter).
-    const float  tower_line_width = type1 ? float(std::max(0., opt_float("prime_tower_line_width"))) : 0.f;
+    const float  tower_line_width = mixed_structure_width > 0.f ? mixed_structure_width :
+                                    type1                       ? float(std::max(0., opt_float("prime_tower_line_width"))) : 0.f;
     const float  perimeter_width = tower_line_width > 0.f ? tower_line_width : float(nozzle_diameter) * 1.25f; // Width_To_Nozzle_Ratio
     // With nothing to purge, plan_tower_new sizes the tower for wrapping detection or the
     // stability minimum; WipeTower2 only knows the latter.
