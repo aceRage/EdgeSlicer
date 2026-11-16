@@ -4,6 +4,14 @@
 
 #include "plugin_test_utils.hpp"
 
+#ifdef _WIN32
+// OCCT Standard_Macro.hxx (via Format/STEP.hpp from bbs_3mf / Model) defines
+// WIN32_LEAN_AND_MEAN and NONLS before <windows.h>, so CP_ACP is never declared.
+// BackgroundSlicingProcess.hpp then pulls Boost.Asio through HttpServer.hpp.
+// These test TUs do not use the libslic3r_gui PCH.
+#include <boost/asio.hpp>
+#endif
+
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
