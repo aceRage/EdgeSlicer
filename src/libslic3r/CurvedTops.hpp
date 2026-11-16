@@ -1,8 +1,9 @@
 #ifndef slic3r_CurvedTops_hpp_
 #define slic3r_CurvedTops_hpp_
 
-// EdgeSlicer: curved (non-planar) top surfaces. Experimental, off by default (curved_tops_enabled),
-// and only on printers whose head clearance is known (curved_tops_head_clearance()).
+// EdgeSlicer: curved (non-planar) top surfaces. Experimental, off by default (curved_tops_enabled).
+// The print head comes from the head clearance model (HeadClearance.hpp, resolve_head_clearance()),
+// the one source the Z contouring collision check uses too. No head data = no curved tops.
 //
 // The idea and the surface selection rules (top-facing facets under a maximum angle, grouped
 // into surfaces, rejected when too small or taller than the nozzle clearance, deferred conformal
@@ -13,50 +14,92 @@
 // re-implementation on top of EdgeSlicer's Z contouring (ContourZ.hpp), whose per-point Z
 // samples, emitter and guards it reuses.
 //
-// Scope: one object, one instance, one nozzle, no raft, no variable layer height. See
-// tests/design_curved_tops.md for how it works, the limits and what is still to do.
+// Scope (P1 of tests/design_curved_tops_any_printer.md): one object, one instance, one filament,
+// by layer, no raft, no supports, no variable layer height, on the printers whose head file records
+// a curved print. See tests/design_curved_tops.md for how it works.
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace Slic3r {
 
 class PrintConfig;
 class PrintObject;
 class TriangleMesh;
+struct HeadClearance;
 namespace sla { class IndexedMesh; }
 
-// What the print head allows. A conformal layer is printed after the planar body below it, so
-// the nozzle tip runs over a surface that rises around it:
-//  - nozzle_height_mm: how far the nozzle tip reaches below everything else on the head (heater
-//    block, silicone sock, fan duct). A curved surface may not be taller than this, otherwise the
-//    head body would meet the high part of the surface while the tip prints the low part.
-//  - max_slope_deg: the steepest slope the nozzle cone itself clears.
-struct CurvedTopsHeadClearance
+// Margin taken off the head's lowest part: a curved surface may rise at most (lowest part - margin).
+// The spike's "2.5 mm measured, 2.0 mm used". A process key in P2 (curved_tops_clearance_margin).
+static constexpr double CURVED_TOPS_CLEARANCE_MARGIN_MM = 0.5;
+// Taken off the nozzle flank's angle for the head's angle cap.
+static constexpr double CURVED_TOPS_FLANK_MARGIN_DEG    = 5.0;
+// Absolute ceiling for the surface angle, whatever the user or the head says (design D8, R3).
+static constexpr double CURVED_TOPS_MAX_ANGLE_CEILING   = 30.0;
+// A nozzle profile point this close above the tip is part of the tip land (the collision check's
+// default tolerance, HeadCollisionParams::tolerance).
+static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
+
+// What the print head allows a curved top, derived from the resolved head model. A conformal layer
+// is printed after the planar body below it, so the nozzle tip runs over a surface that rises
+// around it:
+//  - allowed_rise_mm: a surface may rise at most this much (lowest head part above the tip minus
+//    the margin), otherwise the head body would meet the high part of the surface while the tip
+//    prints the low part;
+//  - max_slope_deg: the steepest slope the nozzle flank clears, minus a margin, at most 30.
+struct CurvedTopsHeadLimits
 {
-    double      nozzle_height_mm = 1.5;
-    double      max_slope_deg    = 12.0;
-    const char *source           = "generic conservative default";
-    // False for the generic default: apply_curved_tops() leaves the object planar on a printer
-    // whose clearance nobody has given, and PrintObject::contour_z() raises SlicingCurvedTopsUnavailable.
-    bool        known            = false;
+    std::shared_ptr<const HeadClearance> head;
+    // A head model exists for this printer.
+    bool        known { false };
+    // Curved tops may run: known, with usable numbers, and (in P1, until the acknowledgement of P2)
+    // the head file records a curved print on this printer model.
+    bool        usable { false };
+    double      allowed_rise_mm { 0. };
+    double      max_slope_deg { 0. };
+    // Verified on hardware for this printer model (0 = not verified).
+    double      verified_rise_mm { 0. };
+    double      verified_angle_deg { 0. };
+    std::string verified_on;
+    // Where the numbers come from, for messages; why not usable, when not.
+    std::string source;
+    std::string refusal;
 };
 
-// Hard-coded per printer model for now: the Elegoo Centauri Carbon and the Bambu Lab X1 Carbon.
-// Every other printer gets the generic default with known = false. The next step is to take these
-// from the head-clearance model (HeadClearance.hpp, head_clearance_for_printer_model(), data in
-// resources/head_clearance), which the Z contouring head collision check already uses.
-CurvedTopsHeadClearance curved_tops_head_clearance(const PrintConfig &config);
+// The limits for a head on a printer model (head may be null: no data).
+CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model);
+// Same, through resolve_head_clearance().
+CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config);
 
-// The user's maximum angle, limited by the head.
-double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadClearance &head);
+// The user's maximum angle, limited by the head and the absolute ceiling.
+double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head);
 
 // Flow multiplier for a bead whose real height is `gap` while it was planned for `height`:
 // the first conformal layer fills whatever the stepped planar body below left, between 1 and 2
 // layer heights.
 double curved_tops_gap_flow(double gap, double height);
 
+// What apply_curved_tops() did. Exactly one of `refusal` (the object stays planar) and `summary`
+// (the block was built) is set when curved tops was asked for.
+struct CurvedTopsResult
+{
+    bool                     applied { false };
+    // Why the object is printed planar; empty when applied.
+    std::string              refusal;
+    // One line about the block: surfaces, rise and slope used against what is allowed, head data.
+    std::string              summary;
+    // Further notes for the user (surfaces left flat, beyond what has been printed, not ironed).
+    std::vector<std::string> notes;
+};
+
 // Clips the planar extrusions that sit inside the curved band and appends the conformal layers
 // to the object's top layer. Called from PrintObject::contour_z() after Z contouring, only when
-// curved_tops_enabled is set. Returns false (and leaves the object planar) when a guard refuses.
-bool apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla::IndexedMesh &imesh);
+// curved_tops_enabled is set. A refusal leaves the object planar and says why.
+CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla::IndexedMesh &imesh);
+
+// True when the object's top layer carries a curved-tops block.
+bool has_curved_tops_block(const PrintObject &object);
 
 } // namespace Slic3r
 

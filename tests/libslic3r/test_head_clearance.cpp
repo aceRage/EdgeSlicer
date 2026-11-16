@@ -9,6 +9,7 @@
 #include <boost/filesystem.hpp>
 
 #include <libslic3r/HeadClearance.hpp>
+#include <libslic3r/Utils.hpp>
 
 using namespace Slic3r;
 
@@ -103,6 +104,98 @@ TEST_CASE("Head clearance: shipped data files load and cover the first printers"
         INFO(model);
         CHECK(n == 1);
     }
+
+    // Curved tops P1: the X1 head's sock is at the owner's 2.5 mm measurement (it was a 4 mm estimate),
+    // the CC1's lowered to the same 2.5 mm (a guess), and only the X1 Carbon and the CC1 record a
+    // curved print. The X1 and X1E share the X1 Carbon's file but are not verified.
+    for (const HeadClearance &h : heads) {
+        INFO(h.id);
+        if (h.id == "bambu-x1" || h.id == "elegoo-centauri-carbon") {
+            CHECK(h.lowest_box_z() == Approx(2.5));
+            REQUIRE(h.curved_tops_verified.has_value());
+            CHECK(h.curved_tops_verified->rise_mm == Approx(1.8));
+            CHECK(h.curved_tops_verified->angle_deg == Approx(10.3));
+            CHECK(h.nozzle_flank_angle_deg(0.1) > 35.);
+        } else
+            CHECK_FALSE(h.curved_tops_verified.has_value());
+        CHECK(h.curved_tops_verified_for("Bambu Lab X1 Carbon") == (h.id == "bambu-x1"));
+        CHECK(h.curved_tops_verified_for("Elegoo Centauri Carbon") == (h.id == "elegoo-centauri-carbon"));
+        CHECK_FALSE(h.curved_tops_verified_for("Bambu Lab X1E"));
+        CHECK_FALSE(h.curved_tops_verified_for("Bambu Lab X1"));
+    }
+}
+
+TEST_CASE("Head clearance: the optional curved_tops record", "[HeadClearance]")
+{
+    // A file without it (MINIMAL_HEAD) still loads, with no record.
+    auto plain = parse_head_clearance_json(MINIMAL_HEAD);
+    REQUIRE(plain.has_value());
+    CHECK_FALSE(plain->curved_tops_verified.has_value());
+    CHECK_FALSE(plain->curved_tops_verified_for("Test Printer"));
+
+    const std::string base = R"({"schema": "edgeslicer.head_clearance.v1", "id": "x", "printer_models": ["A", "B"],
+        "nozzle": {"profile": [[0, 0.5], [1, 1.5]]}, "boxes": [{"min": [-1, -1, 3], "max": [1, 1, 4]}], )";
+    auto with = parse_head_clearance_json(base + R"("curved_tops": {"verified_printer_models": ["A"], "verified_rise_mm": 1.5,
+        "verified_angle_deg": 9, "verified_on": "2026-11-16"}})");
+    REQUIRE(with.has_value());
+    REQUIRE(with->curved_tops_verified.has_value());
+    CHECK(with->curved_tops_verified->on == "2026-11-16");
+    CHECK(with->curved_tops_verified_for("A"));
+    CHECK_FALSE(with->curved_tops_verified_for("B"));
+    CHECK_FALSE(with->curved_tops_verified_for(""));
+
+    // Refused: no printer models, no numbers, a model the file does not list, not an object.
+    CHECK_FALSE(parse_head_clearance_json(base + R"("curved_tops": {"verified_rise_mm": 1.5, "verified_angle_deg": 9}})").has_value());
+    CHECK_FALSE(parse_head_clearance_json(base + R"("curved_tops": {"verified_printer_models": ["A"], "verified_angle_deg": 9}})").has_value());
+    CHECK_FALSE(parse_head_clearance_json(base + R"("curved_tops": {"verified_printer_models": ["C"], "verified_rise_mm": 1.5,
+        "verified_angle_deg": 9}})").has_value());
+    CHECK_FALSE(parse_head_clearance_json(base + R"("curved_tops": 3})").has_value());
+}
+
+TEST_CASE("Head clearance: nozzle flank angle", "[HeadClearance]")
+{
+    auto head = parse_head_clearance_json(MINIMAL_HEAD);
+    REQUIRE(head.has_value());
+    // Land radius 0.5. (1, 1.5): atan(1 / 1) = 45. (2, 1.5): atan(2 / 1) = 63.4. (3, 3.0): atan(3 / 2.5) = 50.2.
+    CHECK(head->nozzle_flank_angle_deg(0.1) == Approx(45.).margin(1e-6));
+    // A tiny chamfer at the tip counts as land below the tolerance, and binds above it.
+    auto chamfer = parse_head_clearance_json(R"({"schema": "edgeslicer.head_clearance.v1", "id": "c", "printer_models": [],
+        "nozzle": {"profile": [[0, 0.3], [0.05, 0.48], [1, 1.3]]}})");
+    REQUIRE(chamfer.has_value());
+    CHECK(chamfer->nozzle_flank_angle_deg(0.1) == Approx(std::atan2(1., 1.0) * 180. / M_PI).margin(1e-6));
+    CHECK(chamfer->nozzle_flank_angle_deg(0.01) == Approx(std::atan2(0.05, 0.18) * 180. / M_PI).margin(1e-6));
+}
+
+// Design 2.1: one resolver. Precedence in P1: the first file (in load order) that lists the
+// printer_model; no generic default when none does.
+TEST_CASE("Head clearance: resolver precedence", "[HeadClearance]")
+{
+    auto make = [](const std::string &id, const std::string &models) {
+        auto h = parse_head_clearance_json(R"({"schema": "edgeslicer.head_clearance.v1", "id": ")" + id +
+                                           R"(", "printer_models": [)" + models + R"(], "nozzle": {"profile": [[0, 0.5]]}})");
+        REQUIRE(h.has_value());
+        return std::make_shared<const HeadClearance>(std::move(*h));
+    };
+    const HeadClearancePtrs heads = { make("a", R"("P1", "P2")"), make("b", R"("P2", "P3")") };
+    REQUIRE(resolve_head_clearance("P1", heads) != nullptr);
+    CHECK(resolve_head_clearance("P1", heads)->id == "a");
+    CHECK(resolve_head_clearance("P2", heads)->id == "a"); // listed twice: the first file wins
+    CHECK(resolve_head_clearance("P3", heads)->id == "b");
+    CHECK(resolve_head_clearance("P4", heads) == nullptr); // nothing: no generic default
+    CHECK(resolve_head_clearance("", heads) == nullptr);
+    CHECK(resolve_head_clearance("P1", HeadClearancePtrs{}) == nullptr);
+
+    // The shipped set, read the way the app reads it.
+    const std::string saved = resources_dir();
+    set_resources_dir((boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources").string());
+    const HeadClearancePtr x1c = resolve_head_clearance("Bambu Lab X1 Carbon");
+    const HeadClearancePtr x1e = resolve_head_clearance("Bambu Lab X1E");
+    const HeadClearancePtr none = resolve_head_clearance("Generic Printer");
+    set_resources_dir(saved);
+    REQUIRE(x1c != nullptr);
+    CHECK(x1c->id == "bambu-x1");
+    CHECK(x1e == x1c);
+    CHECK(none == nullptr);
 }
 
 // ---------------------------------------------------------------------------------------------

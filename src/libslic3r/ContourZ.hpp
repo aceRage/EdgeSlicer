@@ -54,6 +54,9 @@ struct ContourZSamples
     //    clears every surface of the object, and only then moves in XY and descends vertically.
     bool               curved_top   = false;
     float              safe_z_delta = 0.f;
+    //  - exit_lift: the last path of a curved block. After it the emitter retracts (and wipes) and
+    //    lifts to base + safe_z_delta before anything else moves the head (design R5).
+    bool               exit_lift    = false;
     // Per-sample flow multiplier (same order as points); empty means 1.
     std::vector<float> flow;
 

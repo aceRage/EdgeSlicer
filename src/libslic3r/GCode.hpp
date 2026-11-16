@@ -78,10 +78,13 @@ public:
     // height; empty where the line was laid flat. The wipe keeps to these heights, as the line was laid, rather
     // than ploughing back through it at the height it ended at.
     std::vector<double> heights;
+    // EdgeSlicer, curved tops: the stored path is a curved-tops line. The wipe back along it is held to
+    // the curved paths' speed cap (CURVED_TOPS_MAX_SPEED_MM_S), like the line itself. False otherwise.
+    bool curved_top { false };
 
     Wipe() : enable(false) {}
     bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); this->heights.clear(); }
+    void reset_path() { this->path = Polyline(); this->heights.clear(); this->curved_top = false; }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
     // Orca: rebuild the stored path while deduplicating shared path boundaries.
@@ -356,6 +359,9 @@ public:
     // EdgeSlicer, curved tops: retract (and wipe) where the nozzle is, lift straight up to
     // safe_z, travel level at safe_z. The caller descends. See GCode.cpp.
     std::string     curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z);
+    // EdgeSlicer, curved tops: after the last path of a curved block, retract (and wipe) where the
+    // nozzle is and lift straight up to safe_z before anything else can move the head (design R5).
+    std::string     curved_tops_exit_lift(ExtrusionRole role, double safe_z);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
     // extra: Bambu Studio's extra_retract, filament pushed on top of the unretract (nothing when nothing is retracted).

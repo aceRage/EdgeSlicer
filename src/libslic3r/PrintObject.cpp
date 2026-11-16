@@ -900,14 +900,19 @@ void PrintObject::contour_z()
     m_print->throw_if_canceled();
 
     if (curved_tops) {
-        // Refuses (and leaves the object planar) on a printer with no known head clearance; tell the user.
-        apply_curved_tops(*this, mesh, imesh);
-        if (!curved_tops_head_clearance(m_print->config()).known)
+        // A refusal leaves the object planar; every refusal and every block is reported to the user.
+        const CurvedTopsResult ct = apply_curved_tops(*this, mesh, imesh);
+        if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                                          Slic3r::format(_u8L("Curved tops is experimental and for now only available on the Elegoo Centauri Carbon "
-                                                              "and the Bambu Lab X1 Carbon. %1% is printed with flat top layers."),
-                                                         this->model_object()->name),
+                                          Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
+                                                         this->model_object()->name, ct.refusal),
                                           PrintStateBase::SlicingCurvedTopsUnavailable);
+        else {
+            std::string msg = ct.summary;
+            for (const std::string &note : ct.notes)
+                msg += "\n" + note;
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
+        }
     }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";

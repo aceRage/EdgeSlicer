@@ -147,8 +147,13 @@ public:
         // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
         SlicingHeadCollision,
         // Curved tops (CurvedTops.hpp) asked for on a printer with no known head clearance: left planar.
-        // Raised in posContouring; appended, own id.
-        SlicingCurvedTopsUnavailable
+        // Raised in posContouring; appended, own id. Also every other refusal of curved tops (the
+        // object prints planar), each naming its reason.
+        SlicingCurvedTopsUnavailable,
+        // Curved tops built a block: one summary line (rise and slope used against the limits, head data)
+        // plus any notes (surfaces left flat, beyond what has been printed). Raised in posContouring;
+        // appended, own id.
+        SlicingCurvedTopsSummary
     };
 
     typedef size_t TimeStamp;

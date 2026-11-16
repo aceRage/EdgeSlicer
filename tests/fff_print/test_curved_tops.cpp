@@ -1,25 +1,37 @@
 // EdgeSlicer: curved tops, experimental (src/libslic3r/CurvedTops.cpp).
 //
 //  * OFF (the default): no conformal path anywhere and the extruded Z never goes back down.
-//  * ON on a printer with no known head clearance: refused, the slice stays planar.
+//  * ON on a printer with no head data, or with an estimated head nobody has printed curved tops
+//    with: refused, the slice is the feature-off slice, and the user is told why.
 //  * ON, a 30 mm puck with a 1.2 mm spherical cap: conformal paths are appended to the top layer
 //    and, after the last planar layer, the G-code extrudes below that layer's Z (the curved
 //    layers follow the cap down to its rim).
-//  * The pure helpers: head clearance, effective angle, first-layer gap flow.
+//  * P1 hardening (tests/design_curved_tops_any_printer.md): the head limits come from the head
+//    model only, every guard refuses visibly, the block ends with a lift, its wipes are speed
+//    capped, and the head clearance check stops the export on a contact.
+//  * The pure helpers: head limits, effective angle, first-layer gap flow.
+//
+// The head model is read from resources/head_clearance, so every case that slices with curved
+// tops on points resources_dir() at the source tree's resources (ResourcesDirGuard).
 
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <functional>
+#include <fstream>
 #include <memory>
 #include <cmath>
 #include <cstdlib>
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/ContourZ.hpp"
 #include "libslic3r/CurvedTops.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/HeadClearance.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
@@ -39,6 +51,19 @@ using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
 namespace {
+
+// resources_dir() is empty in the test runner; the head model lives in resources/head_clearance.
+// Points it at `dir` (default: the source tree's resources) for the life of the guard.
+struct ResourcesDirGuard
+{
+    std::string saved;
+    explicit ResourcesDirGuard(const std::string &dir = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources").string())
+        : saved(resources_dir())
+    {
+        set_resources_dir(dir);
+    }
+    ~ResourcesDirGuard() { set_resources_dir(saved); }
+};
 
 // A cylinder of radius r and height h_cyl topped by a spherical cap of height h_cap.
 TriangleMesh make_capped_puck(double r, double h_cyl, double h_cap, int rings = 24, int sectors = 96)
@@ -122,10 +147,15 @@ double extrusion_dip(const std::string &gcode)
     return lowest;
 }
 
-void slice_puck(Print &print, Model &model, bool curved_tops,
-                std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
+using ConfigItems = std::vector<std::pair<std::string, std::string>>;
+
+void slice_puck_items(Print &print, Model &model, bool curved_tops, const ConfigItems &extra, int filaments = 1)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    if (filaments > 1) {
+        config.set_num_extruders(unsigned(filaments));
+        config.set_num_filaments(unsigned(filaments));
+    }
     config.set_deserialize_strict({
         // Curved tops run only on a printer with a known head clearance.
         { "printer_model",              "Elegoo Centauri Carbon" },
@@ -137,9 +167,18 @@ void slice_puck(Print &print, Model &model, bool curved_tops,
         { "curved_tops_layers",         "3" },
         { "curved_tops_max_angle",      "15" },
     });
-    config.set_deserialize_strict(extra);
+    for (const auto &[key, value] : extra)
+        config.set_deserialize_strict(key, value);
     Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, config);
     print.process();
+}
+
+void slice_puck(Print &print, Model &model, bool curved_tops, std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
+{
+    ConfigItems items;
+    for (const ConfigBase::SetDeserializeItem &item : extra)
+        items.emplace_back(item.opt_key, item.opt_value);
+    slice_puck_items(print, model, curved_tops, items);
 }
 
 // Every travel inside the curved block, checked against what is already printed. The block starts
@@ -308,49 +347,117 @@ static std::string gcode_without_curved_tops_key(const std::string &gcode)
     return out;
 }
 
-static std::string curved_tops_unavailable_warning(const PrintObject &po)
+static std::string object_warning(const PrintObject &po, PrintStateBase::SlicingNotificationType id)
 {
     for (const PrintStateBase::Warning &w : po.step_state_with_warnings(posContouring).warnings)
-        if (w.message_id == int(PrintStateBase::SlicingCurvedTopsUnavailable))
+        if (w.message_id == int(id))
             return w.message;
     return {};
 }
 
-// A printer with no hard-coded head clearance (here the X1E, and a made-up model) must not get curved
-// tops on a guessed clearance: the output is the feature-off output, and the user is told.
-TEST_CASE("Curved tops: a printer with no known head clearance prints as with the feature off and warns", "[CurvedTops]")
+static std::string curved_tops_unavailable_warning(const PrintObject &po)
 {
-    const std::string printer_model = GENERATE(std::string("Bambu Lab X1E"), std::string("Generic Printer"));
-    INFO("printer_model = " << printer_model);
+    return object_warning(po, PrintStateBase::SlicingCurvedTopsUnavailable);
+}
 
+static size_t count_all_curved_paths(const PrintObject &object)
+{
+    size_t curved = 0;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions())
+            curved += count_curved_paths(&region->fills);
+    return curved;
+}
+
+// Curved tops on with `extra` must give exactly the feature-off G-code, leave no curved path, and
+// say why with a warning that contains `reason`.
+static void check_refused_like_off(const ConfigItems &extra, int filaments, const std::string &reason)
+{
     Print print_off;
     Model model_off;
-    slice_puck(print_off, model_off, false, { { "printer_model", printer_model } });
+    slice_puck_items(print_off, model_off, false, extra, filaments);
     const std::string gcode_off = Test::gcode(print_off);
     CHECK(curved_tops_unavailable_warning(*print_off.objects().front()).empty());
 
     Print print_on;
     Model model_on;
-    slice_puck(print_on, model_on, true, { { "printer_model", printer_model } });
-    const PrintObject *object = print_on.objects().front();
-    size_t curved = 0;
-    for (const Layer *layer : object->layers())
-        for (const LayerRegion *region : layer->regions())
-            curved += count_curved_paths(&region->fills);
-    CHECK(curved == 0);
-    CHECK_FALSE(object->layers().back()->curved_tops_block);
+    slice_puck_items(print_on, model_on, true, extra, filaments);
+    REQUIRE_FALSE(print_on.objects().empty());
+    for (const PrintObject *object : print_on.objects()) {
+        CHECK(count_all_curved_paths(*object) == 0);
+        CHECK_FALSE(object->layers().back()->curved_tops_block);
+    }
     const std::string gcode_on = Test::gcode(print_on);
     CHECK_THAT(extrusion_dip(gcode_on), WithinAbs(0., 1e-6));
     CHECK(gcode_without_curved_tops_key(gcode_on) == gcode_without_curved_tops_key(gcode_off));
 
-    const std::string warning = curved_tops_unavailable_warning(*object);
+    const std::string warning = curved_tops_unavailable_warning(*print_on.objects().front());
+    INFO("warning: " << warning);
     CHECK_FALSE(warning.empty());
-    CHECK(warning.find("Elegoo Centauri Carbon") != std::string::npos);
+    CHECK(warning.find(reason) != std::string::npos);
+    CHECK(object_warning(*print_on.objects().front(), PrintStateBase::SlicingCurvedTopsSummary).empty());
+}
+
+// D1: no head data = refuse, never a generic default. P1: an estimated head nobody has printed
+// curved tops with (the X1E shares the X1 Carbon's file; the U1 and the H2D have files of their own)
+// is refused as well until the acknowledgement of P2. Output = feature-off output, user told.
+TEST_CASE("Curved tops: a printer with no head data, or an unprinted estimate, prints as with the feature off and warns", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const std::string printer_model = GENERATE(std::string("Generic Printer"), std::string("Elegoo Centauri Carbon 2"),
+                                               std::string("Bambu Lab X1E"), std::string("Bambu Lab X1"), std::string("Snapmaker U1"),
+                                               std::string("Bambu Lab H2D"));
+    INFO("printer_model = " << printer_model);
+    const bool        has_file = printer_model != "Generic Printer" && printer_model != "Elegoo Centauri Carbon 2";
+    check_refused_like_off({ { "printer_model", printer_model } }, 1,
+                           has_file ? "is an estimate that no curved print has checked yet" : "has no print head clearance data");
+
+    // The message names the printers curved tops does run on.
+    Print print;
+    Model model;
+    slice_puck(print, model, true, { { "printer_model", printer_model } });
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    CHECK(warning.find("Elegoo Centauri Carbon.") != std::string::npos);
     CHECK(warning.find("Bambu Lab X1 Carbon") != std::string::npos);
 }
 
-TEST_CASE("Curved tops: the Centauri Carbon and the X1 Carbon still curve, with no warning", "[CurvedTops]")
+// Each guard of design 3.2 that P1 adds: the object prints planar, exactly as with the feature off,
+// and the warning names the reason.
+TEST_CASE("Curved tops: every new guard refuses, warns and prints as with the feature off", "[CurvedTops]")
 {
+    const ResourcesDirGuard resources;
+    struct Guard { const char *name; ConfigItems extra; int filaments; const char *reason; };
+    static const std::vector<Guard> guards = {
+        { "by object",           { { "print_sequence", "by object" } }, 1, "prints by object" },
+        { "local-Z dithering",   { { "dithering_local_z_mode", "1" } }, 1, "local-Z dithering" },
+        { "draft shield",        { { "skirt_loops", "1" }, { "draft_shield", "enabled" } }, 1, "draft shield" },
+        { "tall skirt",          { { "skirt_loops", "1" }, { "skirt_height", "3" } }, 1, "skirt taller than one layer" },
+        { "supports",            { { "enable_support", "1" } }, 1, "supports" },
+        { "two filaments",       { { "sparse_infill_filament", "2" }, { "solid_infill_filament", "2" } }, 2, "more than one filament" },
+        { "raft",                { { "raft_layers", "2" } }, 1, "raft" },
+    };
+    const size_t i = GENERATE(range(size_t(0), size_t(7)));
+    REQUIRE(i < guards.size());
+    const Guard &g = guards[i];
+    INFO("guard: " << g.name);
+    check_refused_like_off(g.extra, g.filaments, g.reason);
+}
+
+// A 1-layer skirt and a brim are far below the band: allowed (design 3.2).
+TEST_CASE("Curved tops: a one-layer skirt does not refuse", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    slice_puck(print, model, true, { { "skirt_loops", "1" }, { "skirt_height", "1" }, { "draft_shield", "disabled" } });
+    CHECK(print.objects().front()->layers().back()->curved_tops_block);
+    CHECK(curved_tops_unavailable_warning(*print.objects().front()).empty());
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
+TEST_CASE("Curved tops: the Centauri Carbon and the X1 Carbon still curve, with a summary and no refusal", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
     const std::string printer_model = GENERATE(std::string("Elegoo Centauri Carbon"), std::string("Bambu Lab X1 Carbon"));
     INFO("printer_model = " << printer_model);
     Print print;
@@ -363,10 +470,44 @@ TEST_CASE("Curved tops: the Centauri Carbon and the X1 Carbon still curve, with 
     CHECK(curved >= 6);
     CHECK(object->layers().back()->curved_tops_block);
     CHECK(curved_tops_unavailable_warning(*object).empty());
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("Curved tops on") != std::string::npos);
+    // 2.5 mm lowest head part less 0.5 mm margin: 2.00 mm allowed; the 1.2 mm cap is within what
+    // has been printed (1.8 mm, 10.3 deg), so no "beyond" note.
+    CHECK(summary.find("of 2.00 mm allowed") != std::string::npos);
+    CHECK(summary.find("goes beyond what has been printed") == std::string::npos);
+    // The head clearance check runs on this curved print and finds no contact (else this throws).
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
+// R1 with numbers: a cap taller than the head allows stays flat, and the warning says by how much.
+TEST_CASE("Curved tops: a surface rising more than the head allows is refused with the numbers", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "printer_model",              "Elegoo Centauri Carbon" },
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "enable_support",             "0" },
+        { "curved_tops_enabled",        "1" },
+        { "curved_tops_max_angle",      "15" },
+    });
+    // r = 30, cap 2.6 mm: edge slope about 9.9 deg, rise above the 2.0 mm allowed.
+    Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(30., 4., 2.6) }, print, model, config);
+    print.process();
+    CHECK_FALSE(print.objects().front()->layers().back()->curved_tops_block);
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    INFO("warning: " << warning);
+    CHECK(warning.find("more than the 2.00 mm the print head allows") != std::string::npos);
 }
 
 TEST_CASE("Curved tops: a gentle cap is printed as conformal layers", "[CurvedTops]")
 {
+    const ResourcesDirGuard resources;
     Print print;
     Model model;
     slice_puck(print, model, true);
@@ -396,6 +537,7 @@ TEST_CASE("Curved tops: travels in the curved block clear the printed surface", 
     const std::string hop  = GENERATE(std::string("Normal Lift"), std::string("Slope Lift"), std::string("Spiral Lift"), std::string("Auto Lift"));
     const std::string wipe = GENERATE(std::string("0"), std::string("1"));
     INFO("z_hop_types = " << hop << ", wipe = " << wipe);
+    const ResourcesDirGuard resources;
 
     Print print;
     Model model;
@@ -450,6 +592,7 @@ PresetBundle &bbl_bundle_for_curved_tops()
 TEST_CASE("Curved tops: the stock X1C process keeps its travels clear and its G-code intact", "[CurvedTops][X1C]")
 {
     PresetBundle &b = bbl_bundle_for_curved_tops();
+    const ResourcesDirGuard resources;
     REQUIRE(b.printers.select_preset_by_name("Bambu Lab X1 Carbon 0.4 nozzle", true));
     REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X1C", true));
     REQUIRE(b.filaments.select_preset_by_name("Bambu PLA Basic @BBL X1C", true));
@@ -515,35 +658,254 @@ TEST_CASE("Curved tops: the stock X1C process keeps its travels clear and its G-
     CHECK(m73 > 0);
 }
 
-TEST_CASE("Curved tops: head clearance and flow helpers", "[CurvedTops]")
+namespace {
+
+// What happens around the curved block, read back from the G-code. The block starts at the first
+// extrusion that moves Z along the move or goes below the highest Z extruded so far.
+struct BlockMoves
 {
-    PrintConfig cfg;
-    const CurvedTopsHeadClearance generic = curved_tops_head_clearance(cfg);
-    cfg.printer_model.value = "Elegoo Centauri Carbon";
-    const CurvedTopsHeadClearance cc1 = curved_tops_head_clearance(cfg);
-    cfg.printer_model.value = "Elegoo Centauri Carbon 2";
-    const CurvedTopsHeadClearance cc2 = curved_tops_head_clearance(cfg);
-    cfg.printer_model.value = "Bambu Lab X1 Carbon";
-    const CurvedTopsHeadClearance x1c = curved_tops_head_clearance(cfg);
-    cfg.printer_model.value = "Bambu Lab X1E";
-    const CurvedTopsHeadClearance x1e = curved_tops_head_clearance(cfg);
+    bool   curved          = false;
+    double highest         = -1e9; // highest extruded Z
+    // After the last extrusion, before the head next moves in X/Y (wipes aside): the highest Z reached.
+    double exit_lift_z     = -1e9;
+    bool   xy_after_last   = false; // some X/Y move (not a wipe) follows the last extrusion
+    size_t block_wipes     = 0;     // wipe moves from the first curved extrusion on
+    double max_block_wipe_f = 0.;   // their highest feedrate, mm/min
+};
 
-    CHECK_THAT(cc1.nozzle_height_mm, WithinAbs(2.0, 1e-9));
-    CHECK_THAT(cc1.max_slope_deg, WithinAbs(20.0, 1e-9));
-    CHECK_THAT(cc2.nozzle_height_mm, WithinAbs(generic.nozzle_height_mm, 1e-9));
-    // X1 Carbon: owner measured 2.5 mm tip to sock, 0.5 mm margin; slope unmeasured (20). Not the X1E.
-    CHECK_THAT(x1c.nozzle_height_mm, WithinAbs(2.0, 1e-9));
-    CHECK_THAT(x1c.max_slope_deg, WithinAbs(20.0, 1e-9));
-    CHECK_THAT(x1e.nozzle_height_mm, WithinAbs(generic.nozzle_height_mm, 1e-9));
-    // Only the two measured / chosen heads enable the feature.
-    CHECK_FALSE(generic.known);
+BlockMoves analyse_block(const std::string &gcode)
+{
+    struct Move { bool extrude, wipe, xy; double z0, z1, f; };
+    std::vector<Move> moves;
+    {
+        std::istringstream in(gcode);
+        std::string        line;
+        double x = 0., y = 0., z = 0., f = 0.;
+        bool   in_wipe = false;
+        while (std::getline(in, line)) {
+            if (line.rfind(";WIPE_START", 0) == 0)
+                in_wipe = true;
+            else if (line.rfind(";WIPE_END", 0) == 0)
+                in_wipe = false;
+            const std::string code = line.substr(0, line.find(';'));
+            if (code.rfind("G1 ", 0) != 0 && code.rfind("G0 ", 0) != 0 && code.rfind("G2 ", 0) != 0 && code.rfind("G3 ", 0) != 0)
+                continue;
+            auto word = [&code](char c, double &v) {
+                const auto pos = code.find(std::string(" ") + c);
+                if (pos == std::string::npos)
+                    return false;
+                v = std::atof(code.c_str() + pos + 2);
+                return true;
+            };
+            double nx = x, ny = y, nz = z, e = 0.;
+            word('X', nx);
+            word('Y', ny);
+            word('Z', nz);
+            word('E', e);
+            word('F', f);
+            const bool xy = nx != x || ny != y;
+            moves.push_back({ e > 0. && xy && !in_wipe, xy && (in_wipe || e < 0.), xy, z, nz, f });
+            x = nx; y = ny; z = nz;
+        }
+    }
+    BlockMoves out;
+    size_t first_curved = moves.size(), last_ext = moves.size();
+    for (size_t i = 0; i < moves.size(); ++i) {
+        if (!moves[i].extrude)
+            continue;
+        if (first_curved == moves.size() && (std::abs(moves[i].z1 - moves[i].z0) > 1e-6 || moves[i].z1 < out.highest - 1e-3))
+            first_curved = i;
+        out.highest = std::max(out.highest, moves[i].z1);
+        last_ext    = i;
+    }
+    out.curved = first_curved < moves.size();
+    if (!out.curved)
+        return out;
+    for (size_t i = first_curved; i < moves.size(); ++i)
+        if (moves[i].wipe) {
+            ++out.block_wipes;
+            out.max_block_wipe_f = std::max(out.max_block_wipe_f, moves[i].f);
+        }
+    for (size_t i = last_ext + 1; i < moves.size(); ++i) {
+        if (moves[i].wipe)
+            continue;
+        if (moves[i].xy) {
+            out.xy_after_last = true;
+            break;
+        }
+        out.exit_lift_z = std::max(out.exit_lift_z, moves[i].z1);
+    }
+    return out;
+}
+
+} // namespace
+
+// R5: after the block's last path the head lifts straight up to the safe Z (1 mm over the highest
+// curved point) before it moves anywhere, here before an end G-code that moves X/Y first, for every
+// z-hop type.
+TEST_CASE("Curved tops: the block ends with a lift to the safe Z", "[CurvedTops]")
+{
+    const std::string hop = GENERATE(std::string("Normal Lift"), std::string("Slope Lift"), std::string("Spiral Lift"), std::string("Auto Lift"));
+    INFO("z_hop_types = " << hop);
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    slice_puck(print, model, true, {
+        { "z_hop_types",        hop },
+        { "z_hop",              "0.4" },
+        { "wipe",               "1" },
+        { "wipe_distance",      "2" },
+        { "retraction_length",  "0.8" },
+        { "enable_arc_fitting", "0" },
+        { "machine_end_gcode",  "G1 X5 Y5 F6000" },
+    });
+    REQUIRE(print.objects().front()->layers().back()->curved_tops_block);
+    const BlockMoves b = analyse_block(Test::gcode(print));
+    INFO("highest extruded Z " << b.highest << ", exit lift Z " << b.exit_lift_z);
+    REQUIRE(b.curved);
+    CHECK(b.xy_after_last);
+    CHECK(b.exit_lift_z >= b.highest + 1.0 - 1e-3);
+
+    // With the feature off nothing of the kind is added: the end G-code's XY move comes before any
+    // Z move that high (the z-hop is 0.4 mm).
+    Print print_off;
+    Model model_off;
+    slice_puck(print_off, model_off, false, {
+        { "z_hop_types",        hop },
+        { "z_hop",              "0.4" },
+        { "machine_end_gcode",  "G1 X5 Y5 F6000" },
+    });
+    CHECK_FALSE(analyse_block(Test::gcode(print_off)).curved);
+}
+
+// Design 3.2, "Wipes": a wipe back along a curved line moves Z with it and keeps to the curved speed
+// cap, whatever the wipe speed says.
+TEST_CASE("Curved tops: wipes in the curved block keep to the curved speed cap", "[CurvedTops]")
+{
+    const std::string role_based = GENERATE(std::string("0"), std::string("1"));
+    INFO("role_based_wipe_speed = " << role_based);
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    slice_puck(print, model, true, {
+        { "wipe",                  "1" },
+        { "wipe_distance",         "2" },
+        { "wipe_speed",            "150" },
+        { "role_based_wipe_speed", role_based },
+        { "retraction_length",     "0.8" },
+        { "enable_arc_fitting",    "0" },
+    });
+    const BlockMoves b = analyse_block(Test::gcode(print));
+    INFO("wipes in the block " << b.block_wipes << ", fastest F " << b.max_block_wipe_f);
+    REQUIRE(b.curved);
+    CHECK(b.block_wipes >= 5);
+    CHECK(b.max_block_wipe_f > 0.);
+    CHECK(b.max_block_wipe_f <= CURVED_TOPS_MAX_SPEED_MM_S * 60. + 1e-6);
+}
+
+// D2: the head clearance check runs on a curved-only print (no Z contouring) with the head the
+// planner used, and a contact stops the export. The head here is deliberately wrong in a way the
+// planner's simple rules do not see: a nozzle 12 mm wide whose underside is only 0.1 mm above the
+// tip (the planner counts that as tip land), with every other part 20 mm up. Printing the cap's rim,
+// that underside meets the curved layers already laid over the higher middle. A Z contouring only
+// print with the same head keeps the warning and exports.
+TEST_CASE("Curved tops: a head contact on a curved print stops the export, a Z contouring print only warns", "[CurvedTops]")
+{
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("curvedtops_head_%%%%-%%%%");
+    boost::filesystem::create_directories(dir / "head_clearance");
+    {
+        std::ofstream f((dir / "head_clearance" / "wide-nozzle.json").string());
+        f << R"({
+    "schema": "edgeslicer.head_clearance.v1",
+    "id": "wide-nozzle-test",
+    "name": "Wrong test head",
+    "printer_models": ["Elegoo Centauri Carbon"],
+    "calibrated": false,
+    "source": "unit test",
+    "nozzle": { "profile": [[0.0, 0.5], [0.1, 12.0]] },
+    "boxes": [ {"name": "body", "min": [-30, -30, 20], "max": [30, 30, 60]} ],
+    "curved_tops": { "verified_printer_models": ["Elegoo Centauri Carbon"], "verified_rise_mm": 1.8, "verified_angle_deg": 10.3 }
+})";
+    }
+    {
+        const ResourcesDirGuard resources(dir.string());
+        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon") != nullptr);
+        REQUIRE(resolve_head_clearance("Elegoo Centauri Carbon")->id == "wide-nozzle-test");
+
+        Print print;
+        Model model;
+        slice_puck(print, model, true);
+        REQUIRE(print.objects().front()->layers().back()->curved_tops_block);
+        std::string error;
+        try {
+            Test::gcode(print);
+        } catch (const Slic3r::SlicingError &ex) {
+            error = ex.what();
+        }
+        INFO("error: " << error);
+        CHECK_FALSE(error.empty());
+        CHECK(error.find("Curved tops:") != std::string::npos);
+        CHECK(error.find("The G-code was not exported") != std::string::npos);
+
+        Print print_zaa;
+        Model model_zaa;
+        slice_puck(print_zaa, model_zaa, false, { { "zaa_enabled", "1" } });
+        CHECK_NOTHROW(Test::gcode(print_zaa));
+    }
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(dir, ec);
+}
+
+// The planner's two numbers come from the resolved head model and nothing else (design 2.1).
+TEST_CASE("Curved tops: head limits come from the head model only", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    auto limits = [](const std::string &model) {
+        PrintConfig cfg;
+        cfg.printer_model.value = model;
+        return curved_tops_head_limits(cfg);
+    };
+    const CurvedTopsHeadLimits cc1     = limits("Elegoo Centauri Carbon");
+    const CurvedTopsHeadLimits x1c     = limits("Bambu Lab X1 Carbon");
+    const CurvedTopsHeadLimits x1e     = limits("Bambu Lab X1E");
+    const CurvedTopsHeadLimits u1      = limits("Snapmaker U1");
+    const CurvedTopsHeadLimits h2d     = limits("Bambu Lab H2D");
+    const CurvedTopsHeadLimits cc2     = limits("Elegoo Centauri Carbon 2");
+    const CurvedTopsHeadLimits generic = limits("");
+
+    // Usable: a head model exists, and its file records a curved print on this printer model.
     CHECK(cc1.known);
+    CHECK(cc1.usable);
     CHECK(x1c.known);
+    CHECK(x1c.usable);
+    CHECK(x1e.known);
+    CHECK_FALSE(x1e.usable);
+    CHECK(u1.known);
+    CHECK_FALSE(u1.usable);
+    CHECK(h2d.known);
+    CHECK_FALSE(h2d.usable);
     CHECK_FALSE(cc2.known);
-    CHECK_FALSE(x1e.known);
+    CHECK_FALSE(cc2.usable);
+    CHECK_FALSE(generic.known);
+    CHECK_FALSE(generic.usable);
+    CHECK_FALSE(generic.refusal.empty());
 
+    // X1 Carbon: sock 2.5 mm above the tip (owner measured) less the 0.5 mm margin. The CC1 file's
+    // sock is set to the same 2.5 mm (a guess). Both flanks clear well over 35 degrees: the 30 degree
+    // ceiling binds.
+    CHECK_THAT(x1c.allowed_rise_mm, WithinAbs(2.0, 1e-9));
+    CHECK_THAT(cc1.allowed_rise_mm, WithinAbs(2.0, 1e-9));
+    CHECK_THAT(x1e.allowed_rise_mm, WithinAbs(2.0, 1e-9));
+    CHECK_THAT(x1c.max_slope_deg, WithinAbs(30.0, 1e-9));
+    CHECK_THAT(cc1.max_slope_deg, WithinAbs(30.0, 1e-9));
+    CHECK_THAT(x1c.verified_rise_mm, WithinAbs(1.8, 1e-9));
+    CHECK_THAT(x1c.verified_angle_deg, WithinAbs(10.3, 1e-9));
+    CHECK_THAT(x1e.verified_rise_mm, WithinAbs(0.0, 1e-9));
+
+    // D8: the default 15 stays 15, nothing goes above 30.
     CHECK_THAT(curved_tops_effective_max_angle(15., cc1), WithinAbs(15., 1e-9));
-    CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(20., 1e-9));
+    CHECK_THAT(curved_tops_effective_max_angle(35., cc1), WithinAbs(30., 1e-9));
+    CHECK_THAT(curved_tops_effective_max_angle(40., x1c), WithinAbs(30., 1e-9));
 
     CHECK_THAT(curved_tops_gap_flow(0.2, 0.2), WithinAbs(1.0, 1e-9));
     CHECK_THAT(curved_tops_gap_flow(0.3, 0.2), WithinAbs(1.5, 1e-9));
