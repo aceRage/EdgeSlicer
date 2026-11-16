@@ -30,6 +30,7 @@ struct TowerExtrusion
     int    tool;
     double z;
     double height;
+    bool   purge; // inside the purge of a tool change ("; CP TOOLCHANGE WIPE" .. "; CP TOOLCHANGE END")
 };
 
 // The extruding moves of one tower result. The G-code before "[change_filament_gcode]" runs with the outgoing filament, the
@@ -40,7 +41,8 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
     static const std::regex e_re(R"(\bE([0-9.]+))");
     std::istringstream      in(gcode);
     std::string             line;
-    int                     tool = tool_before;
+    int                     tool  = tool_before;
+    bool                    purge = false;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
@@ -49,13 +51,17 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
             tool = tool_after;
             continue;
         }
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
+            purge = true;
+        else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
+            purge = false;
         if (line.size() > 0 && line[0] == ';' && std::regex_search(line, m, height_re)) {
             height = std::stod(m[1].str());
             continue;
         }
         if (line.rfind("G1 ", 0) == 0 && (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
             std::regex_search(line, m, e_re) && std::stod(m[1].str()) > 0.)
-            out.push_back({ tool, z, r3(height) });
+            out.push_back({ tool, z, r3(height), purge });
     }
 }
 
@@ -141,6 +147,17 @@ const WipeTower::ToolChangeResult *change_to(const std::vector<WipeTower::ToolCh
     return nullptr;
 }
 
+// The heights the purge of `tool` is laid at on the layer at z. A visit merges the wall and the band fills into the tool
+// change (merge_tcr), so the result's layer_height is that of its first part; the purge's own HEIGHT tags are what count.
+std::set<double> purge_heights(const std::vector<TowerExtrusion> &extrusions, int tool, double z)
+{
+    std::set<double> out;
+    for (const TowerExtrusion &e : extrusions)
+        if (e.purge && e.tool == tool && std::abs(e.z - z) < 1e-4)
+            out.insert(e.height);
+    return out;
+}
+
 void check_windows(const std::vector<TowerExtrusion> &extrusions, const std::vector<WipeTower::NozzleLadder> &ladders)
 {
     for (const TowerExtrusion &e : extrusions) {
@@ -170,30 +187,33 @@ TEST_CASE("ALM tower, direct: 0.4 + 0.8 at 0.2 mm - the 0.8 purges on its 0.4 mm
     // One band per nozzle (Bambu Studio's (category, diameter, lane) block key), the same category.
     CHECK(t->tower->blocks().size() >= 2);
 
+    const std::vector<TowerExtrusion> extrusions = tower_extrusions(t->result);
     for (size_t layer = 0; layer < 12; layer += 2) {
         CAPTURE(layer);
-        const WipeTower::ToolChangeResult *purge = change_to(t->result[layer], 1);
-        REQUIRE(purge != nullptr);
+        REQUIRE(change_to(t->result[layer], 1) != nullptr);
         // Layer 0 rests on the bed at the first layer's height; every band top above it lays one 0.4 mm slab, the object's.
-        CHECK_THAT(purge->layer_height, WithinAbs(layer == 0 ? 0.2 : 0.4, 1e-4));
+        CHECK(purge_heights(extrusions, 1, 0.2 * (layer + 1)) == std::set<double>{ layer == 0 ? 0.2 : 0.4 });
     }
     // The 0.4 nozzle purges at the base height.
     for (size_t layer = 1; layer < 12; layer += 2) {
-        const WipeTower::ToolChangeResult *purge = change_to(t->result[layer], 0);
-        REQUIRE(purge != nullptr);
-        CHECK_THAT(purge->layer_height, WithinAbs(0.2, 1e-4));
+        CAPTURE(layer);
+        REQUIRE(change_to(t->result[layer], 0) != nullptr);
+        CHECK(purge_heights(extrusions, 0, 0.2 * (layer + 1)) == std::set<double>{ 0.2 });
     }
-    check_windows(tower_extrusions(t->result), ladders);
+    check_windows(extrusions, ladders);
 }
 
 TEST_CASE("ALM tower, direct: 0.2 + 0.8 at 0.1 mm - layers the 0.8 merges over are left out", "[ALMTower]")
 {
     const std::vector<WipeTower::NozzleLadder> ladders{ { 0.04f, 0.14f, 1 }, { 0.16f, 0.56f, 4 } };
-    const auto                                 t = plan("0.2,0.8", 0.1, 16, 4, &ladders);
-    REQUIRE(t->result.size() == 16);
+    // 13 layers, ending on a band top: above the last tool change a tower has nothing to lay down and generate() leaves
+    // those layers out, as before.
+    const auto                                 t = plan("0.2,0.8", 0.1, 13, 4, &ladders);
+    REQUIRE(t->result.size() == 13);
     CHECK(t->tower->merged_slabs_active());
+    const std::vector<TowerExtrusion> extrusions = tower_extrusions(t->result);
 
-    for (size_t layer = 0; layer < 16; ++layer) {
+    for (size_t layer = 0; layer < 13; ++layer) {
         CAPTURE(layer);
         // The two layers without a tool change before each band top hold one material that the change above takes over:
         // the tower prints nothing there (Bambu Studio absorb_run_into_next_layer()), and the emitter leaves them out.
@@ -202,14 +222,19 @@ TEST_CASE("ALM tower, direct: 0.2 + 0.8 at 0.1 mm - layers the 0.8 merges over a
         REQUIRE(!t->result[layer].empty());
         CHECK(t->result[layer].front().combined_away == skipped);
         if (layer % 4 == 0) {
-            const WipeTower::ToolChangeResult *purge = change_to(t->result[layer], 1);
-            REQUIRE(purge != nullptr);
-            CHECK_THAT(purge->layer_height, WithinAbs(layer == 0 ? 0.1 : 0.4, 1e-4));
+            REQUIRE(change_to(t->result[layer], 1) != nullptr);
+            // Layer 0 is the first layer, laid at its sliced height as the object's is (Edge never merges layer 0).
+            CHECK(purge_heights(extrusions, 1, 0.1 * (layer + 1)) == std::set<double>{ layer == 0 ? 0.1 : 0.4 });
         }
     }
     // The tower reaches the top of the plan.
-    CHECK_THAT(t->result.back().front().print_z, WithinAbs(1.6, 1e-4));
-    check_windows(tower_extrusions(t->result), ladders);
+    CHECK_THAT(t->result.back().front().print_z, WithinAbs(1.3, 1e-4));
+    // The first layer is every nozzle's sliced first layer (the object's too); above it nothing leaves its window.
+    std::vector<TowerExtrusion> above_first;
+    for (const TowerExtrusion &e : extrusions)
+        if (e.z > 0.1 + 1e-4)
+            above_first.push_back(e);
+    check_windows(above_first, ladders);
 }
 
 TEST_CASE("ALM tower, direct: a tower never told about mixed diameters is planned as before", "[ALMTower]")

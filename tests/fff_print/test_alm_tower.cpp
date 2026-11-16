@@ -21,6 +21,7 @@
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -125,6 +126,7 @@ struct TowerExtrusion
     int    tool;
     double z;
     double height;
+    bool   purge; // inside the purge of a tool change ("; CP TOOLCHANGE WIPE" .. "; CP TOOLCHANGE END")
 };
 
 void collect_extrusions(const std::string &gcode, int tool_before, int tool_after, double z, double height, std::vector<TowerExtrusion> &out)
@@ -133,7 +135,8 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
     static const std::regex e_re(R"(\bE([0-9.]+))");
     std::istringstream      in(gcode);
     std::string             line;
-    int                     tool = tool_before;
+    int                     tool  = tool_before;
+    bool                    purge = false;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
@@ -142,13 +145,17 @@ void collect_extrusions(const std::string &gcode, int tool_before, int tool_afte
             tool = tool_after;
             continue;
         }
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos)
+            purge = true;
+        else if (line.find("; CP TOOLCHANGE END") != std::string::npos)
+            purge = false;
         if (!line.empty() && line[0] == ';' && std::regex_search(line, m, height_re)) {
             height = std::stod(m[1].str());
             continue;
         }
         if (line.rfind("G1 ", 0) == 0 && (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
             std::regex_search(line, m, e_re) && std::stod(m[1].str()) > 0.)
-            out.push_back({ tool, z, r3(height) });
+            out.push_back({ tool, z, r3(height), purge });
     }
 }
 
@@ -158,7 +165,10 @@ struct Sliced
     std::unique_ptr<Print>      print;
     std::vector<TowerExtrusion> extrusions;     // every tower extrusion that reaches the G-code
     std::set<double>            coarse_object_z; // print_z of every layer the coarse cube prints
-    std::map<double, double>    coarse_purge;   // print_z -> slab height of each change to the coarse filament
+    std::map<double, std::set<double>> coarse_purge;  // print_z -> heights of the coarse filament's purge there
+    std::set<double>            coarse_change;  // print_z of every tool change to the coarse filament
+    std::set<double>            coarse_visit;   // print_z of every tower extrusion of the coarse filament
+    double                      first_z = 0.;   // the first layer's print_z
     double                      tower_top = 0.;
     size_t                      skipped   = 0;  // tower layers merged out (combined_away)
     std::vector<AdaptiveLayerHeightRange> windows;
@@ -188,9 +198,16 @@ std::unique_ptr<Sliced> slice(const DynamicPrintConfig &cfg, double height)
             if (s->extrusions.size() > before)
                 s->tower_top = std::max(s->tower_top, double(tcr.print_z));
             if (tcr.new_tool == 1 && tcr.initial_tool != 1)
-                s->coarse_purge[r3(tcr.print_z)] = r3(tcr.layer_height);
+                s->coarse_change.insert(r3(tcr.print_z));
         }
     }
+    for (const TowerExtrusion &e : s->extrusions)
+        if (e.tool == 1) {
+            s->coarse_visit.insert(r3(e.z));
+            if (e.purge)
+                s->coarse_purge[r3(e.z)].insert(e.height);
+        }
+    s->first_z = r3(print.objects().front()->layers().front()->print_z);
     for (const PrintObject *object : print.objects()) {
         if (object->model_object()->name != "cube1")
             continue;
@@ -229,6 +246,10 @@ void check_plate(const Sliced &s, double object_height, bool exact_slab)
         REQUIRE(e.tool >= 0);
         REQUIRE(e.tool < 2);
         heights[e.tool].insert(e.height);
+        // The first layer is laid at its sliced height by every nozzle, the objects' first layer too (Edge's
+        // AdaptiveLayerMerge never merges layer 0).
+        if (e.z <= s.first_z + 1e-4)
+            continue;
         const AdaptiveLayerHeightRange &w = s.windows[e.tool];
         if (w.max_height < 0.2 && std::abs(e.height - 0.2) < 1e-6)
             continue;
@@ -243,23 +264,32 @@ void check_plate(const Sliced &s, double object_height, bool exact_slab)
         CHECK(!set.empty());
     }
 
-    // Every slab the coarse nozzle prints on the object has its tower visit at the same Z, with the object slab's height.
-    double prev = 0.;
-    for (double z : s.coarse_object_z) {
-        CAPTURE(z, prev);
-        const auto it = s.coarse_purge.find(z);
-        if (prev > 0.) {
-            REQUIRE(it != s.coarse_purge.end());
-            if (exact_slab)
-                CHECK_THAT(it->second, WithinAbs(r3(z - prev), 2e-3));
-        }
-        prev = z;
-    }
-    // And the coarse filament never comes to the tower between its slabs.
-    for (const auto &[z, h] : s.coarse_purge) {
+    // The coarse filament comes to the tower on the slabs it prints on the object, at the same Z: every change to it is on
+    // one of its object slab tops (a slab it starts already loaded needs no visit), and its purge there is as thick as the
+    // object slab.
+    REQUIRE(s.coarse_change.size() > 2);
+    size_t exact = 0;
+    for (double z : s.coarse_change) {
         CAPTURE(z);
-        CHECK(s.coarse_object_z.count(z) == 1);
+        const auto it = s.coarse_object_z.find(z);
+        REQUIRE(it != s.coarse_object_z.end());
+        CHECK(s.coarse_visit.count(z) == 1);
+        if (it == s.coarse_object_z.begin())
+            continue; // the first layer
+        const double slab   = r3(z - *std::prev(it));
+        const auto   purges = s.coarse_purge.find(z);
+        REQUIRE(purges != s.coarse_purge.end());
+        CAPTURE(slab);
+        for (double h : purges->second) {
+            CAPTURE(h);
+            if (exact_slab)
+                CHECK(std::abs(h - slab) < 2e-3);
+            else
+                CHECK(h <= slab + 2e-3); // a lane may keep a purge on a thinner slab, never a thicker one
+        }
+        ++exact;
     }
+    CHECK(exact > 1);
     // The tower is as tall as the objects.
     CHECK_THAT(s.tower_top, WithinAbs(object_height, 2e-3));
 }
@@ -290,7 +320,7 @@ TEST_CASE("ALM tower: H3C 0.4 + 0.8 - the 0.8's tower slabs are its object slabs
     for (const auto &[z, h] : s->coarse_purge)
         if (z > 0.21) {
             CAPTURE(z);
-            CHECK_THAT(h, WithinAbs(0.4, 2e-3));
+            CHECK(h == std::set<double>{ 0.4 });
         }
 }
 
