@@ -14,6 +14,8 @@
 #include <slic3r/plugin/PluginManager.hpp>
 #include <slic3r/plugin/PluginTrust.hpp>
 #include <slic3r/plugin/PythonInterpreter.hpp>
+#include <slic3r/plugin/ipc/PluginHostClient.hpp>
+#include <slic3r/plugin/ipc/PluginSandbox.hpp>
 #include <slic3r/Utils/HomePluginsLogic.hpp>
 
 #include <chrono>
@@ -526,7 +528,10 @@ TEST_CASE("enable and run succeed when pinned; removing the pin refuses run", "[
     REQUIRE(load_and_wait(manager, "Trust_Echo", error));
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
-    const ScriptCompletion ok = wait_for_script(manager, "Trust_Echo", "Echo");
+    const ScriptCompletion ok      = wait_for_script(manager, "Trust_Echo", "Echo");
+    const auto             sandbox = plugin_ipc::PluginHostClient::instance().last_sandbox_report();
+    INFO("script error: " << ok.error);
+    INFO("sandbox kind=" << sandbox.kind << " applied=" << sandbox.applied << " detail=" << sandbox.detail);
     REQUIRE(ok.error.empty());
     CHECK(ok.result.message == "trust-ok");
 
@@ -846,7 +851,10 @@ TEST_CASE("reload after extract-dir tamper still imports hashed wheel bytes", "[
     REQUIRE(load_and_wait(manager, "Trust_Echo", error));
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
-    const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
+    const ScriptCompletion first   = wait_for_script(manager, "Trust_Echo", "Echo");
+    const auto             sandbox = plugin_ipc::PluginHostClient::instance().last_sandbox_report();
+    INFO("script error: " << first.error);
+    INFO("sandbox kind=" << sandbox.kind << " applied=" << sandbox.applied << " detail=" << sandbox.detail);
     REQUIRE(first.error.empty());
     CHECK(first.result.message == "from-wheel");
 
@@ -890,7 +898,10 @@ TEST_CASE("planted pyc is not used on reload", "[PluginTrust][Python]")
     REQUIRE(load_and_wait(manager, "Trust_Echo", error));
     REQUIRE(manager.is_plugin_loaded("Trust_Echo"));
 
-    const ScriptCompletion first = wait_for_script(manager, "Trust_Echo", "Echo");
+    const ScriptCompletion first   = wait_for_script(manager, "Trust_Echo", "Echo");
+    const auto             sandbox = plugin_ipc::PluginHostClient::instance().last_sandbox_report();
+    INFO("script error: " << first.error);
+    INFO("sandbox kind=" << sandbox.kind << " applied=" << sandbox.applied << " detail=" << sandbox.detail);
     REQUIRE(first.error.empty());
     CHECK(first.result.message == "trust-ok");
 
