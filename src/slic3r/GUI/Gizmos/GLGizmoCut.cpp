@@ -11704,24 +11704,6 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
     if (connector_attributes.type == CutConnectorType::TacJoint)
         return tac_joint_connector_mesh(m_tac_joint);
 
-    int   sectorCount{ 1 };
-    switch (CutConnectorShape(connector_attributes.shape)) {
-    case CutConnectorShape::Triangle:
-        sectorCount = 3;
-        break;
-    case CutConnectorShape::Square:
-        sectorCount = 4;
-        break;
-    case CutConnectorShape::Circle:
-        sectorCount = 360;
-        break;
-    case CutConnectorShape::Hexagon:
-        sectorCount = 6;
-        break;
-    default:
-        break;
-    }
-
     if (connector_attributes.type == CutConnectorType::FlexiJoint) {
         // The flexi bodies are generated in millimetres; normalize them by the same
         // (radius, radius, height) the renderer/raycaster/bbox checks scale connectors by.
@@ -11742,55 +11724,17 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
         return connector_mesh;
     }
 
-    if (connector_attributes.type == CutConnectorType::Snap)
-        connector_mesh = its_make_snap(1.0, 1.0, m_snap_space_proportion, m_snap_bulge_proportion);
-    else if (connector_attributes.style == CutConnectorStyle::Prism)
-        connector_mesh = its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
-    else if (connector_attributes.type == CutConnectorType::Plug)
-        connector_mesh = its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
-    else
-        connector_mesh = its_make_frustum_dowel(1.0, 1.0, sectorCount);
+    // Plug / Dowel / Snap: the shared libslic3r mesh (Split to Fit P2 moved it there, unchanged).
+    connector_mesh = cut_connector_unit_mesh(connector_attributes, m_snap_space_proportion, m_snap_bulge_proportion);
 
     return connector_mesh;
 }
 
 void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& connector_name)
 {
-    if (mo->cut_connectors.empty())
-        return;
-
-    using namespace Geometry;
-
-    size_t connector_id = mo->cut_id.connectors_cnt();
-    for (const CutConnector& connector : mo->cut_connectors) {
-        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
-            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
-            continue;
-        }
-        if (connector.attribs.type == CutConnectorType::PushFit) {
-            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
-            continue;
-        }
-        if (connector.attribs.type == CutConnectorType::TacJoint) {
-            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
-            continue;
-        }
-        TriangleMesh mesh = TriangleMesh(get_connector_mesh(connector.attribs));
-        // Mesh will be centered when loading.
-        ModelVolume* new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
-
-        // Transform the new modifier to be aligned inside the instance
-        new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
-            rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
-            scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
-
-        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
-        new_volume->name = connector_name + "-" + std::to_string(++connector_id);
-    }
-    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
-
-    // delete all connectors
-    mo->cut_connectors.clear();
+    // Split to Fit P2: the baking lives in libslic3r now (bake_cut_connectors), moved unchanged, so
+    // the grid split and the tests run it headless.
+    bake_cut_connectors(mo, connector_name, m_snap_space_proportion, m_snap_bulge_proportion);
 }
 
 

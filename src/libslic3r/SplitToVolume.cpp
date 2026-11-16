@@ -1,5 +1,7 @@
 #include "SplitToVolume.hpp"
 
+#include "AABBTreeIndirect.hpp"
+#include "AABBTreeLines.hpp"
 #include "ClipperUtils.hpp"
 #include "Config.hpp"
 #include "CutUtils.hpp"
@@ -7,6 +9,7 @@
 #include "Geometry.hpp"
 #include "Model.hpp"
 #include "PrintConfig.hpp"
+#include "PushFit.hpp"
 #include "TriangleMesh.hpp"
 #include "TriangleMeshSlicer.hpp"
 
@@ -149,7 +152,141 @@ static Transform3d plane_rotation(int axis)
     return r;
 }
 
+// ---- dowels (P2) ----
+
+// The smallest dowel the scale-down goes to (mm).
+static constexpr double DOWEL_MIN_DIAMETER = 2.;
+// A dowel shorter than this share of its diameter on either side holds nothing: the site is dropped.
+static constexpr double DOWEL_MIN_HALF_PER_DIAMETER = 0.75;
+// Ray hits closer than this to the plane are the plane's own surface, not the far side (mm).
+static constexpr double RAY_EPS = 1e-4;
+
+static CutConnectorShape dowel_shape(SplitDowelShape s)
+{
+    switch (s) {
+    case SplitDowelShape::Square: return CutConnectorShape::Square;
+    case SplitDowelShape::Hexagon: return CutConnectorShape::Hexagon;
+    case SplitDowelShape::Triangle: return CutConnectorShape::Triangle;
+    default: return CutConnectorShape::Circle;
+    }
+}
+
+static bool dowel_is_round(const SplitDowelOptions &opt)
+{
+    return opt.type == SplitConnectorType::Pin || opt.shape == SplitDowelShape::Round;
+}
+
+// How much deeper than the dowel's own half-length its hole goes, beyond the face (mm).
+static double hole_extra_depth(const SplitDowelOptions &opt)
+{
+    return opt.type == SplitConnectorType::Pin ? double(PushFitParams().depth_clearance) : 0.5 * opt.depth_tolerance;
+}
+
+// The connector the Cut tool would make for this dowel: at `pos` (the cut's frame), axis along
+// the plane normal (`rotation`), `half` into each side.
+static CutConnector site_connector(const SplitDowelOptions &opt, double diameter, double half, const Vec3d &pos,
+                                   const Transform3d &rotation)
+{
+    if (opt.type == SplitConnectorType::Pin) {
+        CutConnector c(pos, rotation, float(0.5 * diameter), float(2. * half), 0.f, 0.f, 0.f,
+                       CutConnectorAttributes(CutConnectorType::PushFit, CutConnectorStyle::Prism, CutConnectorShape::Circle));
+        PushFitParams p = PushFitParams();
+        p.diameter        = float(diameter);
+        p.length_upper    = float(half);
+        p.length_lower    = float(half);
+        p.clearance_upper = float(opt.tolerance);
+        p.clearance_lower = float(opt.tolerance);
+        // The default pin is the 6 mm one; keep its features in proportion on a scaled-down pin.
+        p.flat_depth  = float(0.15 * diameter);
+        p.slot_width  = float(std::min(1., diameter / 6.));
+        p.slot_length = float(std::min(double(p.slot_length), 0.6 * half));
+        p.preset      = int(PushFitPreset::Custom);
+        c.pushfit     = p;
+        return c;
+    }
+    // A Dowel's height is its whole length; it straddles the plane symmetrically.
+    return CutConnector(pos, rotation, float(0.5 * diameter), float(2. * half), float(opt.tolerance), float(opt.depth_tolerance), 0.f,
+                        CutConnectorAttributes(CutConnectorType::Dowel, CutConnectorStyle::Prism, dowel_shape(opt.shape)));
+}
+
+static double site_footprint_radius(const SplitDowelOptions &opt, double diameter, double half)
+{
+    return cut_connector_footprint_radius(site_connector(opt, diameter, half, Vec3d::Zero(), Transform3d::Identity()));
+}
+
 } // namespace split_to_volume_detail
+
+std::vector<Vec2d> split_pick_sites(const ExPolygon &island, const BoundingBoxf &allowed, double inset, int max_count,
+                                    double min_spacing, const std::function<bool(const Vec2d &)> &accept, int max_rejects)
+{
+    using namespace split_to_volume_detail;
+    std::vector<Vec2d> out;
+    if (max_count <= 0 || island.contour.points.size() < 3 || !allowed.defined || allowed.max.x() <= allowed.min.x() ||
+        allowed.max.y() <= allowed.min.y())
+        return out;
+
+    // Where a centre may go.
+    ExPolygons area = intersection_ex(offset_ex(island, -float(scale_(std::max(0., inset)))),
+                                      Polygons{ scaled_rect(allowed.min.x(), allowed.min.y(), allowed.max.x(), allowed.max.y()) });
+    if (area.empty())
+        return out;
+
+    // Candidates on a square grid: about a millimetre apart, coarser on a big face.
+    const double       area_mm2 = expolygons_area_mm2(area);
+    const double       step     = std::max({ 1., 0.25 * inset, std::sqrt(area_mm2 / 4000.) });
+    const BoundingBox  bb       = get_extents(area);
+    std::vector<Vec2d> cand;
+    const Vec2d        lo = unscale(bb.min);
+    const Vec2d        hi = unscale(bb.max);
+    for (double v = lo.y() + 0.5 * step; v < hi.y(); v += step)
+        for (double u = lo.x() + 0.5 * step; u < hi.x(); u += step)
+            if (section_contains(area, Vec2d(u, v)))
+                cand.emplace_back(u, v);
+    // A region smaller than the grid: its middle (or a point of its edge, which is still inset).
+    if (cand.empty())
+        for (const ExPolygon &ex : area) {
+            const Point c = ex.contour.centroid();
+            cand.push_back(ex.contains(c) ? unscale(c) : unscale(ex.contour.points.front()));
+        }
+
+    // Clearance of every candidate from the face's outline.
+    const AABBTreeLines::LinesDistancer<Line> outline(island.lines());
+    std::vector<double>                        clr(cand.size());
+    for (size_t i = 0; i < cand.size(); ++i)
+        clr[i] = outline.distance_from_lines<false>(Point::new_scale(cand[i].x(), cand[i].y())) * SCALING_FACTOR;
+
+    std::vector<bool> alive(cand.size(), true);
+    int               rejects = 0;
+    while (int(out.size()) < max_count) {
+        int    best       = -1;
+        double best_score = -1.;
+        for (size_t i = 0; i < cand.size(); ++i) {
+            if (!alive[i])
+                continue;
+            double d = std::numeric_limits<double>::max();
+            for (const Vec2d &p : out)
+                d = std::min(d, (cand[i] - p).norm());
+            if (!out.empty() && d < min_spacing - 1e-9)
+                continue;
+            const double score = out.empty() ? clr[i] : std::min(clr[i], 0.5 * d);
+            // Ties go to the earlier candidate, so the same face always gives the same sites.
+            if (score > best_score + 1e-9) {
+                best_score = score;
+                best       = int(i);
+            }
+        }
+        if (best < 0)
+            break;
+        alive[size_t(best)] = false;
+        if (accept && !accept(cand[size_t(best)])) {
+            if (++rejects > max_rejects)
+                break;
+            continue;
+        }
+        out.push_back(cand[size_t(best)]);
+    }
+    return out;
+}
 
 // ---- names ------------------------------------------------------------------------------------------
 
@@ -318,6 +455,199 @@ SplitUsableVolume split_usable_volume(const SplitPrinterVolume &printer, const S
 }
 
 // ---- the plan ---------------------------------------------------------------------------------------
+
+namespace split_to_volume_detail {
+
+// Design 3.6. For every cut face: its islands (the plane's section clipped to the face's cell),
+// largest first; on each, up to "max per face" centres inset from the outline by the wall margin
+// and the footprint, kept out of a band along every other plane that bounds the face, and checked
+// for depth along both normals; then the face's picks are taken island by island in turn up to the
+// cap. A face with no room tries smaller dowels; a face that ends with one round dowel tries two
+// smaller ones before it warns.
+static void place_dowels(SplitPlan &plan, const indexed_triangle_set &mesh, const std::vector<ExPolygons> &sections,
+                         const std::array<std::vector<double>, 3> &positions, const std::function<void()> &cancel_point)
+{
+    const SplitDowelOptions &opt = plan.dowel_options;
+    if (opt.diameter <= 0. || opt.length <= 0. || opt.max_per_face <= 0)
+        return;
+
+    const auto tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.vertices, mesh.indices);
+    // Material along `dir` from `origin` (mm): the first surface the ray meets. A ray that meets
+    // nothing started outside the material.
+    std::vector<igl::Hit> hits;
+    auto depth_along = [&](const Vec3d &origin, const Vec3d &dir) {
+        AABBTreeIndirect::intersect_ray_all_hits(mesh.vertices, mesh.indices, tree, origin, dir, hits);
+        for (const igl::Hit &h : hits)
+            if (double(h.t) > RAY_EPS)
+                return double(h.t);
+        return 0.;
+    };
+
+    const Vec3d lo        = plan.model_bbox.min;
+    const Vec3d hi        = plan.model_bbox.max;
+    auto        cell_lo   = [&](int a, int c) { return c == 0 ? lo[a] : positions[a][size_t(c) - 1]; };
+    auto        cell_hi   = [&](int a, int c) { return c == plan.counts[a] - 1 ? hi[a] : positions[a][size_t(c)]; };
+    const double req_half = 0.5 * opt.length;
+    const double extra    = hole_extra_depth(opt);
+    const double inf      = std::numeric_limits<double>::max();
+    // An island smaller than this could not hold even the smallest dowel: no warning for it.
+    const double worth_area = PI * (opt.wall_margin + 0.5 * DOWEL_MIN_DIAMETER) * (opt.wall_margin + 0.5 * DOWEL_MIN_DIAMETER);
+
+    std::vector<double> scales{ 1. };
+    if (opt.scale_down)
+        for (double s : { 0.75, 0.5 })
+            if (opt.diameter * s >= DOWEL_MIN_DIAMETER - 1e-9)
+                scales.push_back(s);
+
+    for (SplitFace &face : plan.faces) {
+        cancel_point();
+        const SplitPlane &pl = plan.planes[size_t(face.plane)];
+        const int a = pl.axis, ua = u_axis(a), va = v_axis(a);
+        const SplitCell &cell = face.cell_below;
+        const double u0 = cell_lo(ua, cell[ua]), u1 = cell_hi(ua, cell[ua]);
+        const double w0 = cell_lo(va, cell[va]), w1 = cell_hi(va, cell[va]);
+
+        ExPolygons islands = intersection_ex(sections[size_t(face.plane)], Polygons{ scaled_rect(u0, w0, u1, w1) });
+        islands.erase(std::remove_if(islands.begin(), islands.end(),
+                                     [](const ExPolygon &ex) { return ex.area() * SCALING_FACTOR * SCALING_FACTOR < MIN_FACE_AREA; }),
+                      islands.end());
+        std::stable_sort(islands.begin(), islands.end(), [](const ExPolygon &l, const ExPolygon &r) { return l.area() > r.area(); });
+        face.islands = int(islands.size());
+        if (islands.empty())
+            continue;
+
+        // Room along the normal before the next parallel plane (a model end is left to the depth check).
+        const double room_below = pl.index > 0 ? pl.pos - positions[a][size_t(pl.index) - 1] : inf;
+        const double room_above = size_t(pl.index) + 1 < positions[a].size() ? positions[a][size_t(pl.index) + 1] - pl.pos : inf;
+
+        struct Pick { Vec2d uv; double half; int island; };
+        bool had_room = false;
+        // The picks for one dowel size, island by island (each list in pick order).
+        auto picks_at = [&](double scale) {
+            std::vector<std::vector<Pick>> per_island(islands.size());
+            const double d  = opt.diameter * scale;
+            const double fp = site_footprint_radius(opt, d, req_half);
+            // The keep-out bands along the planes bounding this face (not along the model's own ends).
+            BoundingBoxf allowed(Vec2d(u0, w0), Vec2d(u1, w1));
+            const double band = fp + opt.corner_keepout;
+            if (cell[ua] > 0) allowed.min.x() += band;
+            if (cell[ua] < plan.counts[ua] - 1) allowed.max.x() -= band;
+            if (cell[va] > 0) allowed.min.y() += band;
+            if (cell[va] < plan.counts[va] - 1) allowed.max.y() -= band;
+            if (allowed.max.x() <= allowed.min.x() || allowed.max.y() <= allowed.min.y())
+                return per_island;
+            for (size_t ii = 0; ii < islands.size(); ++ii) {
+                std::vector<Pick> &picks = per_island[ii];
+                double             half  = 0.;
+                auto accept = [&](const Vec2d &uv) {
+                    had_room = true;
+                    // The depth check: the centre and 8 points round the footprint, both ways.
+                    double up = inf, down = inf;
+                    for (int k = 0; k <= 8; ++k) {
+                        Vec3d p = Vec3d::Zero();
+                        p[a]    = pl.pos;
+                        p[ua]   = uv.x();
+                        p[va]   = uv.y();
+                        if (k > 0) {
+                            const double t = 2. * PI * double(k - 1) / 8.;
+                            p[ua] += fp * std::cos(t);
+                            p[va] += fp * std::sin(t);
+                        }
+                        Vec3d n = Vec3d::Zero();
+                        n[a]    = 1.;
+                        up      = std::min(up, depth_along(p, n));
+                        down    = std::min(down, depth_along(p, -n));
+                    }
+                    half = std::min({ req_half, up - opt.min_material - extra, down - opt.min_material - extra,
+                                      room_above - opt.corner_keepout - extra, room_below - opt.corner_keepout - extra });
+                    if (half < DOWEL_MIN_HALF_PER_DIAMETER * d)
+                        return false;
+                    picks.push_back({ uv, half, int(ii) });
+                    return true;
+                };
+                split_pick_sites(islands[ii], allowed, opt.wall_margin + fp, opt.max_per_face, opt.min_spacing, accept);
+            }
+            return per_island;
+        };
+        // Island by island in turn: every island gets its first dowel before any gets a second.
+        auto merged = [&](const std::vector<std::vector<Pick>> &per_island) {
+            std::vector<Pick> out;
+            for (size_t round = 0; int(out.size()) < opt.max_per_face; ++round) {
+                bool any = false;
+                for (const std::vector<Pick> &picks : per_island)
+                    if (round < picks.size() && int(out.size()) < opt.max_per_face) {
+                        out.push_back(picks[round]);
+                        any = true;
+                    }
+                if (!any)
+                    break;
+            }
+            return out;
+        };
+
+        std::vector<Pick> chosen;
+        size_t            level = 0;
+        for (; level < scales.size(); ++level) {
+            chosen = merged(picks_at(scales[level]));
+            if (!chosen.empty())
+                break;
+        }
+        // One round dowel lets the parts turn: two smaller ones lock them, if they fit.
+        if (chosen.size() == 1 && dowel_is_round(opt) && opt.max_per_face >= 2)
+            for (size_t l = level + 1; l < scales.size(); ++l) {
+                std::vector<Pick> two = merged(picks_at(scales[l]));
+                if (two.size() >= 2) {
+                    chosen = std::move(two);
+                    level  = l;
+                    break;
+                }
+            }
+
+        if (chosen.empty()) {
+            plan.warnings.push_back({ SplitWarning::Kind::NoDowelOnFace, face.plane, -1,
+                                      had_room ? SPLIT_NO_DOWEL_TOO_THIN : SPLIT_NO_DOWEL_TOO_SMALL, face.id });
+            continue;
+        }
+
+        const double d        = opt.diameter * scales[level];
+        const double fp       = site_footprint_radius(opt, d, req_half);
+        double       shortest = inf;
+        std::vector<bool> island_has(islands.size(), false);
+        for (const Pick &pk : chosen) {
+            SplitSite s;
+            s.face             = face.id;
+            s.plane            = face.plane;
+            s.island           = pk.island;
+            s.pos[a]           = pl.pos;
+            s.pos[ua]          = pk.uv.x();
+            s.pos[va]          = pk.uv.y();
+            s.diameter         = d;
+            s.half_length      = pk.half;
+            s.footprint_radius = fp;
+            s.shortened        = pk.half < req_half - 1e-6;
+            s.scaled_down      = level > 0;
+            s.name             = face.mate_code + "-" + std::to_string(face.sites.size() + 1);
+            shortest           = std::min(shortest, pk.half);
+            island_has[size_t(pk.island)] = true;
+            face.sites.push_back(int(plan.sites.size()));
+            plan.sites.push_back(std::move(s));
+        }
+        int without = 0;
+        for (size_t ii = 0; ii < islands.size(); ++ii)
+            if (!island_has[ii] && islands[ii].area() * SCALING_FACTOR * SCALING_FACTOR >= worth_area)
+                ++without;
+        if (without > 0)
+            plan.warnings.push_back({ SplitWarning::Kind::IslandsWithoutDowel, face.plane, -1, double(without), face.id });
+        if (chosen.size() == 1 && dowel_is_round(opt))
+            plan.warnings.push_back({ SplitWarning::Kind::DowelCanTurn, face.plane, -1, 0., face.id });
+        if (level > 0)
+            plan.warnings.push_back({ SplitWarning::Kind::DowelScaledDown, face.plane, -1, d, face.id });
+        if (shortest < req_half - 1e-6)
+            plan.warnings.push_back({ SplitWarning::Kind::DowelShortened, face.plane, -1, 2. * shortest, face.id });
+    }
+}
+
+} // namespace split_to_volume_detail
 
 SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVolume &usable, const SplitOptions &options,
                           std::function<void()> throw_on_cancel)
@@ -605,7 +935,12 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
             }
     }
 
-    // 6. Model-wide warnings.
+    // 6. Dowel sites (P2, design 3.6), face by face.
+    plan.dowel_options = options.dowels;
+    if (options.dowels.enabled && !plan.faces.empty())
+        place_dowels(plan, mesh, sections, positions, cancel_point);
+
+    // 7. Model-wide warnings.
     if (hollow_plane >= 0)
         plan.warnings.push_back({ SplitWarning::Kind::HollowModel, hollow_plane, -1, hollow_wall });
     if (const size_t open = its_num_open_edges(mesh); open > 0)
@@ -707,6 +1042,35 @@ struct SplitApplyRun
     bool                           stopped{ false };
     // (object in scratch, its cell)
     std::vector<std::pair<ModelObject *, SplitCell>> leaves;
+    // P2: the dowel / pin objects the cuts made (in scratch).
+    std::vector<ModelObject *> dowels;
+
+    // The sites of plane `plane_idx` on faces inside the piece's cells [lo, hi).
+    std::vector<const SplitSite *> sites_in(int plane_idx, int axis, const SplitCell &lo, const SplitCell &hi) const
+    {
+        std::vector<const SplitSite *> out;
+        if (plane_idx < 0)
+            return out;
+        for (const SplitSite &s : plan.sites) {
+            if (s.plane != plane_idx || s.face < 0 || size_t(s.face) >= plan.faces.size())
+                continue;
+            const SplitCell &c      = plan.faces[size_t(s.face)].cell_below;
+            bool             inside = true;
+            for (int b = 0; b < 3; ++b)
+                if (b != axis && (c[b] < lo[b] || c[b] >= hi[b]))
+                    inside = false;
+            if (inside)
+                out.push_back(&s);
+        }
+        return out;
+    }
+
+    // A loose dowel or pin a cut made: one connector solid and nothing else.
+    static bool is_dowel_object(const ModelObject &o)
+    {
+        return o.volumes.size() == 1 && o.volumes.front()->is_model_part() && o.volumes.front()->cut_info.is_connector &&
+               is_separate_pin_connector_type(o.volumes.front()->cut_info.connector_type);
+    }
 
     void run(ModelObject *piece, SplitCell lo, SplitCell hi)
     {
@@ -731,6 +1095,25 @@ struct SplitApplyRun
         const double nominal = clear_of_vertices(*piece, axis, positions[axis][size_t(m) - 1]);
         const size_t open_in = model_part_open_edges(*piece);
 
+        // P2: this plane's dowels on this piece, baked as connectors just before the cut (the Cut
+        // tool's own path: bake_cut_connectors(), then a cut with CreateDowels). They sit in the
+        // frame the cut matrix is in: the world without the instance's offset.
+        const std::vector<const SplitSite *> sites = sites_in(plan.plane_index(axis, m - 1), axis, lo, hi);
+        const size_t                         baked_from = piece->volumes.size();
+        if (!sites.empty()) {
+            const Vec3d offset = piece->instances.front()->get_offset();
+            for (const SplitSite *s : sites) {
+                Vec3d pos = s->pos;
+                pos[axis] = nominal;
+                piece->cut_connectors.push_back(site_connector(plan.dowel_options, s->diameter, s->half_length, pos - offset, plane_rotation(axis)));
+            }
+            bake_cut_connectors(piece, "Dowel");
+            // The site's own name, so holes and dowels say where they belong ("X1.2-1_A").
+            for (size_t i = 0; i < sites.size() && baked_from + i < piece->volumes.size(); ++i)
+                piece->volumes[baked_from + i]->name = sites[i]->name;
+        }
+        double baked_at = nominal;
+
         std::vector<ModelObject *> below, above;
         // A cut that opens edges the piece did not have is made again a little to the side (at most
         // three times, 0.01 mm apart); the last try is kept whatever it gives (warned after Apply).
@@ -743,9 +1126,20 @@ struct SplitApplyRun
             Vec3d       point  = Vec3d::Zero();
             point[axis]        = pos;
             const Transform3d cut_matrix = Geometry::translation_transform(point - offset) * plane_rotation(axis);
+            // The dowels follow the plane when a retry moves it.
+            if (!sites.empty() && pos != baked_at) {
+                Vec3d shift = Vec3d::Zero();
+                shift[axis] = pos - baked_at;
+                for (size_t i = baked_from; i < piece->volumes.size(); ++i)
+                    piece->volumes[i]->set_offset(piece->volumes[i]->get_offset() + shift);
+                baked_at = pos;
+            }
 
-            Cut cut(piece, 0, cut_matrix,
-                    ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepPaint);
+            ModelObjectCutAttributes attributes = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                                  ModelObjectCutAttribute::KeepPaint;
+            if (!sites.empty())
+                attributes = attributes | ModelObjectCutAttribute::CreateDowels;
+            Cut cut(piece, 0, cut_matrix, attributes);
             const ModelObjectPtrs &res = cut.perform_with_plane();
             size_t open_out = 0;
             for (const ModelObject *r : res)
@@ -757,6 +1151,12 @@ struct SplitApplyRun
             for (const ModelObject *r : res) {
                 if (r == nullptr || r->volumes.empty() || r->instances.empty())
                     continue;
+                if (!sites.empty() && is_dowel_object(*r)) {
+                    ModelObject *copy = scratch.add_object(*r);
+                    copy_assembled_poses(*r, *copy);
+                    dowels.push_back(copy);
+                    continue;
+                }
                 // Which side: by the box, not by the order (an empty half is dropped by the cut).
                 const BoundingBoxf3 bb   = r->instance_bounding_box(0);
                 ModelObject        *copy = scratch.add_object(*r);
@@ -814,12 +1214,54 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         return plan.cell_index(l.second) < plan.cell_index(r.second);
     });
 
+    // P2: the dowels, in site order, named after their site (D7: "-Dowel-" as the Cut tool names them).
+    std::vector<ModelObject *> dowels;
+    {
+        const bool        pin  = plan.dowel_options.type == SplitConnectorType::Pin;
+        const std::string base = object.name;
+        std::vector<std::pair<size_t, ModelObject *>> ordered;
+        for (ModelObject *d : run.dowels) {
+            const std::string &vname = d->volumes.front()->name;
+            size_t             order = plan.sites.size();
+            for (size_t i = 0; i < plan.sites.size(); ++i)
+                if (plan.sites[i].name == vname) {
+                    order = i;
+                    break;
+                }
+            ordered.emplace_back(order, d);
+        }
+        std::stable_sort(ordered.begin(), ordered.end(), [](const auto &l, const auto &r) { return l.first < r.first; });
+        for (const auto &od : ordered) {
+            const ModelObject *d    = od.second;
+            ModelObject       *copy = result.model->add_object(*d);
+            copy_assembled_poses(*d, *copy);
+            copy->name = base + (pin ? "-Pin-" : "-Dowel-") + d->volumes.front()->name;
+            copy->invalidate_bounding_box();
+            dowels.push_back(copy);
+        }
+    }
+
+    // Cut links (D10): linked when dowels exist (or the object already was); the check sum counts the
+    // objects of the group, as the Cut tool keeps it.
     CutObjectBase linked;
     const bool    was_linked = !object.cut_id.id().invalid();
-    if (was_linked) {
-        linked.copy(object.cut_id);
-        if (run.leaves.size() > 1)
-            linked.increase_check_sum(run.leaves.size() - 1);
+    const bool    link       = was_linked || !dowels.empty();
+    if (link) {
+        if (was_linked)
+            linked.copy(object.cut_id);
+        else
+            linked.init();
+        const size_t made = run.leaves.size() + dowels.size();
+        if (made > 1)
+            linked.increase_check_sum(made - 1);
+        linked.increase_connectors_cnt(dowels.size());
+    }
+    for (ModelObject *d : dowels) {
+        if (link)
+            d->cut_id.copy(linked);
+        else
+            d->cut_id.invalidate();
+        result.dowels.push_back(d);
     }
 
     for (const auto &[leaf, cell] : run.leaves) {
@@ -828,8 +1270,10 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         const std::string suffix = split_cell_name(cell, plan.counts);
         if (!suffix.empty())
             part->name = object.name.empty() ? suffix : object.name + " " + suffix;
-        if (was_linked)
+        if (link)
             part->cut_id.copy(linked);
+        else
+            part->cut_id.invalidate();
         part->invalidate_bounding_box();
 
         const int pi = plan.cell_index(cell);
