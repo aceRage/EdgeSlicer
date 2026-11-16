@@ -358,7 +358,8 @@ public:
     std::string     curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
-    std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
+    // extra: Bambu Studio's extra_retract, filament pushed on top of the unretract (nothing when nothing is retracted).
+    std::string     unretract(double extra = 0.) { return m_writer.unlift() + m_writer.unretract(extra); }
     // Orca #15144: defer_temp_wait (wait_for_temp_on_wipe_tower) raises the new filament's target ahead
     // of the tool change and leaves the blocking wait to the wipe tower.
     std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false, bool defer_temp_wait = false);

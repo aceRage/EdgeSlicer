@@ -1404,6 +1404,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Otherwise, leave control to the user completely.
     std::string        toolchange_gcode_str;
     bool               side_scrape_deretract_pending = false;
+    // The extra unretract of a contact change's pre-extrusion (tower interface features), here or after the side scrape.
+    double             side_scrape_extra_unretract   = 0.;
     const std::string& change_filament_gcode = gcodegen.config().change_filament_gcode.value;
     //        m_max_layer_z = std::max(m_max_layer_z, tcr.print_z);
     if (!change_filament_gcode.empty()) {
@@ -1566,10 +1568,30 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
             flush.set(config);
         }
-        // BBS: the extruder-change retraction pair must be published BEFORE the template is
-        // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
-        // R{retraction_distance_when_ec}) - and it is keyed by the filament being switched TO.
-        set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
+        // Bambu Studio 2.9.1 (GCode.cpp append_tcr 1073-1084): with the tower interface features a contact-layer tool
+        // change is a prime tower interface, and the H2 series / H3C change_filament_gcode purges for it
+        // ({if is_prime_tower_interface && filament_tower_interface_purge_volume != 0} G150.1, M620.13 W0 L.. T.. R0.0).
+        // Without the features the print-wide stubs (false, 0, 0) stay in place.
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            new_extruder_id >= 0) {
+            const FullPrintConfig &cfg              = gcodegen.config();
+            const size_t           filament         = size_t(new_extruder_id);
+            int                    interface_temp   = cfg.filament_tower_interface_print_temp.get_at(filament);
+            if (interface_temp == -1)
+                interface_temp = cfg.nozzle_temperature_range_high.get_at(filament);
+            config.set_key_value("is_prime_tower_interface", new ConfigOptionBool(tcr.is_contact));
+            config.set_key_value("filament_tower_interface_purge_volume",
+                                 new ConfigOptionFloat(cfg.filament_tower_interface_purge_volume.get_at(filament)));
+            config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInt(interface_temp));
+        }
+        // BBS: change_filament_gcode reads the extruder-change retraction pair as
+        // "M620.11 K{0|1} I[current_filament_id] ... R{retraction_distance_when_ec}", so the pair belongs to the
+        // OUTGOING filament, like the id on that line. Bambu Studio 2.9.1 never sets it before the template:
+        // the parser still holds the values of the filament loaded last (GCode.cpp 1262-1268, set after the
+        // change for the new filament; start 2932-2938). Publish the outgoing pair explicitly; the incoming
+        // filament's pair is published after the change, below.
+        if (previous_extruder_id >= 0)
+            set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(previous_extruder_id));
         toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_extruder_id, &config);
         check_add_eol(toolchange_gcode_str);
 
@@ -1615,11 +1637,16 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
         // unretract before wiping. Bambu Studio 2.9.1 (GCode.cpp append_tcr 1245-1252): with the side scrape only the
         // Z unlift happens here; the E unretract waits for the end of the scrape ([wipe_tower_deretract_gcode]).
+        // Bambu Studio 2.9.1 (GCode.cpp 1237-1244): a contact change with the tower interface features pre-extrudes
+        // filament_tower_interface_pre_extrusion_length more at its start outside the tower.
+        if (gcodegen.config().enable_tower_interface_features.value && TowerInterface::bambu_features_supported(gcodegen.config()) &&
+            tcr.is_contact && new_extruder_id >= 0)
+            side_scrape_extra_unretract = gcodegen.config().filament_tower_interface_pre_extrusion_length.get_at(size_t(new_extruder_id));
         if (tcr.side_scrape) {
             toolchange_gcode_str += gcodegen.writer().unlift();
             side_scrape_deretract_pending = true;
         } else
-            toolchange_gcode_str += gcodegen.unretract();
+            toolchange_gcode_str += gcodegen.unretract(side_scrape_extra_unretract);
         check_add_eol(toolchange_gcode_str);
     }
 
@@ -1676,7 +1703,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     gcodegen.placeholder_parser().set("current_extruder",
                                       new_extruder_id < 0 ? new_extruder_id : int(gcodegen.writer().output_tool(unsigned(new_extruder_id))));
     set_cut_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
-    // (the _ec pair was published above, before change_filament_gcode was expanded)
+    // The incoming filament is now the loaded one: the next change_filament_gcode (and filament_start_gcode)
+    // read its _ec pair, as in Bambu Studio 2.9.1 GCode.cpp 1262-1268.
+    set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
 
     // Process the start filament gcode.
     std::string        start_filament_gcode_str;
@@ -1708,7 +1737,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // tower's base. Not `z`: an uncompacted tower's `z` may still carry the retract lift here.
     std::string side_scrape_deretract_str;
     if (side_scrape_deretract_pending)
-        side_scrape_deretract_str = gcodegen.writer().unretract();
+        side_scrape_deretract_str = gcodegen.writer().unretract(side_scrape_extra_unretract);
     double scrape_z_top = double(tcr.print_z) + m_z_offset;
     double scrape_z_low = double(tcr.side_scrape_z_low) + m_z_offset;
     if (tcr.side_scrape) {
@@ -13889,8 +13918,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             flush.set(dyn_config);
         }
 
-        // BBS: as above - the _ec pair has to be in the parser before the template reads it.
-        set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
+        // BBS: as in append_tcr - the template's _ec pair is the OUTGOING filament's (it goes on the
+        // "M620.11 K.. I[current_filament_id]" line). Bambu Studio 2.9.1 set_extruder publishes the new
+        // filament's pair only after the template (GCode.cpp 8905 then 8953-8959).
+        if (previous_extruder_id >= 0)
+            set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(previous_extruder_id));
         toolchange_gcode_parsed = placeholder_parser_process("change_filament_gcode", change_filament_gcode, extruder_id, &dyn_config);
         check_add_eol(toolchange_gcode_parsed);
         // FanMover skips spans bracketed by "; custom gcode" ... "; custom gcode end" (prefix match,
@@ -13953,7 +13985,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     this->placeholder_parser().set("current_extruder", m_writer.output_tool(extruder_id));
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
     // BBS: re-publish for everything that runs AFTER the toolchange (filament_start_gcode and the
-    // rest of the layer). change_filament_gcode itself already saw these values above.
+    // rest of the layer, and the next change_filament_gcode if it has no outgoing filament id).
     set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
     // Append the filament start G-code.

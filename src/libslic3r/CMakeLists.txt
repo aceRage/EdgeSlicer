@@ -162,6 +162,8 @@ set(lisbslic3r_sources
     BuildVolume.hpp
     ExtruderAreas.cpp
     ExtruderAreas.hpp
+    SplitToVolume.cpp
+    SplitToVolume.hpp
     calib.cpp
     calib.hpp
     Circle.cpp

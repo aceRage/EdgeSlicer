@@ -88,8 +88,51 @@ TEST_CASE("Rib footprint extends the ribs, not the body, below the stability min
     CHECK_THAT(WipeTower::rib_footprint_side(0.f, 30.f, 8.f, 0.f, 5.f), WithinAbs(0.f, 1e-6f));
 }
 
+// calc_block_infill_gap(): on a short rectangle tower a block with ramming lays its purge rows at the ramming pitch once
+// that pitch, stretched to the stability minimum, reaches twice the ramming width (an H2D with two PLAs, 60 mm wide,
+// 40 mm tall: the generator prints 13 mm). The footprint estimate follows it.
+TEST_CASE("Footprint estimate: purge rows at the ramming pitch on a short tower with ramming", "[WipeTower][TowerDepthTable]") {
+    const float ncpw   = WipeTower::nozzle_change_perimeter_width(0.4f);
+    const float pw     = 0.5f;
+    const float nc_gap = ncpw + 0.5f * pw; // 150 % infill gap
+    const std::vector<WipeTower::PurgeEstimate> purges{ { 45.f, 100, 4.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    const float area      = 0.2f * (pw - 0.2f * float(1. - PI / 4.));
+    const float rows      = std::ceil(45.f / area / (60.f - 2.f * pw));
+    const float nc_length = 4.f * float(PI) * 1.75f * 1.75f / 4.f / (0.2f * (ncpw - 0.2f * float(1. - PI / 4.)));
+    const float rams      = std::ceil(nc_length / (60.f - ncpw - pw));
+    REQUIRE(rows == 9.f);
+    // Without a height (a rib tower): purge rows at the purge gap.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f),
+               WithinAbs(pw + rows * 0.75f + rams * nc_gap, 1e-4f));
+    // A 40 mm rectangle tower: the purge rows move to the ramming pitch.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(pw + rows * nc_gap + rams * nc_gap, 1e-4f));
+    // Without ramming nothing aligns.
+    const std::vector<WipeTower::PurgeEstimate> plain{ { 45.f, 100, 0.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f), 1e-6f));
+}
+
+// Bambu Studio 2.9.1 / Orca stability table for the Type 1 tower (D4); WipeTower2 keeps its own.
+TEST_CASE("The Type 1 tower uses Bambu Studio's stability depth table", "[WipeTower][TowerDepthTable]") {
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(2.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(52.5f), WithinAbs(12.5f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(100.f), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(300.f), WithinAbs(50.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(350.f), WithinAbs(60.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-5f));
+    // WipeTower2 (Type 2): unchanged, 20 mm up to 100 mm, 40 mm from 250 mm.
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f, true), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f, true), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f, true), WithinAbs(40.f, 1e-5f));
+    // The rib footprint follows the table of its generator.
+    CHECK(WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f, true) > WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f) + 5.f);
+}
+
 TEST_CASE("Brim width estimate matches each generator's loop quantization", "[WipeTower]") {
-    const float spacing = 0.5f - 0.2f * float(1. - M_PI_4);
+    const float spacing = 0.5f - 0.2f * float(1. - PI / 4.);
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, true), WithinAbs(7.f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, false), WithinAbs(7.5f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(0.f, 0.4f, 0.2f, true), WithinAbs(0.f, 1e-6f));
@@ -1259,8 +1302,8 @@ TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower po
     const double brim = wtd.brim_width;
     // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
     // to it, so the footprint is at least that deep.
-    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
-    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
 
     const Vec2d              anchor(140., 140.);
     const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));

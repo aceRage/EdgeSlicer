@@ -14,10 +14,11 @@
 //                                        outside the tower and run in through a wall gap;
 //   C  wipe_tower_interface_extra_prime  push filament_tower_interface_pre_extrusion_length + 2 mm
 //                                        through the standing nozzle before the purge.
-// Neither generator has Bambu's planner, so an interface is a tool change picked by
-// wipe_tower_interface_trigger (every change, material change, material family change), never on
-// the tower's first layer. Bambu's firmware purge (M620.13 in the H2 change_filament_gcode) is not
-// part of this; its placeholders stay stubbed off in GCode.cpp.
+// An interface here is a tool change picked by wipe_tower_interface_trigger (every change, material
+// change, material family change), never on the tower's first layer. Bambu Studio's own switch,
+// enable_tower_interface_features, works on the Type 1 tower's contact layers instead (WipeTower,
+// GCode::append_tcr: run-in, wall gaps, firmware purge M620.13); while it is on, that tower does not
+// use these options. WipeTower2 never reads it.
 //
 // B needs the wall gaps (wipe_tower_wall_gap) and is off without them: the run-in line crosses the
 // tower's outer wall only through a gap cut on the interface layer and the GAP_LAYERS - 1 layers
@@ -73,6 +74,9 @@ struct Settings
     bool run_in      = false; // already false when wipe_tower_wall_gap is off
     bool extra_prime = false;
     int  trigger     = 1;     // titMaterialChange
+    // Orca #12266 enable_tower_interface_cooldown_during_tower: the normal temperature goes back on right after the
+    // interface heat-up, at the start of the purge, instead of after it.
+    bool cooldown_during_tower = false;
 
     bool any() const { return temp || run_in || extra_prime; }
     // Reads the process options; a key the config lacks takes its declared default.
@@ -80,6 +84,10 @@ struct Settings
 };
 
 FilamentKind filament_kind(const ConfigBase &config, unsigned int filament);
+// Bambu Studio 2.9.1 offers enable_tower_interface_features (ConfigManipulation.cpp:1096-1102, Tab.cpp:5276-5281) on
+// printers that handle hotends as extruders (H3C) or have more than one extruder (H2D, H2C, X2D); here it also only
+// takes effect there.
+bool         bambu_features_supported(const ConfigBase &config);
 float        run_in_distance(const ConfigBase &config, unsigned int filament);
 
 // Room the run-in needs beyond the tower body on every side: the longest run-in distance of a

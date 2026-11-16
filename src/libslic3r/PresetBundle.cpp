@@ -5380,8 +5380,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
 
-    // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
-    // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
+    // The bundled vendor presets keep the shipped meaning of Bambu Studio's prime_tower_skip_points:
+    // see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
 
     // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;

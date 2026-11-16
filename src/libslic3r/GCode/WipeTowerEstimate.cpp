@@ -180,7 +180,8 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
             const unsigned int         id = filament_ids[i];
             WipeTower::PurgeEstimate purge;
             purge.prime_volume      = saving_mode ? 15.f : (bbl_printer || hotend_rack) ? float(float_at("filament_prime_volume", id, prime_volume)) : float(prime_volume);
-            purge.category          = int_at("filament_adhesiveness_category", id, 0);
+            const TowerInterface::FilamentKind kind = TowerInterface::filament_kind(config, id);
+            purge.category          = WipeTower::adhesiveness_category(int_at("filament_adhesiveness_category", id, 0), kind.type, kind.is_support);
             purge.filament_diameter = float(float_at("filament_diameter", id, 1.75));
             purges.push_back(purge);
             if (dual_nozzle) {
@@ -207,7 +208,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         }
     }
 
-    const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height));
+    const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height), !type1);
     // Bambu Studio 2.9.1 prime_tower_line_width (Type1 only; 0 = from the nozzle diameter).
     const float  tower_line_width = type1 ? float(std::max(0., opt_float("prime_tower_line_width"))) : 0.f;
     const float  perimeter_width = tower_line_width > 0.f ? tower_line_width : float(nozzle_diameter) * 1.25f; // Width_To_Nozzle_Ratio
@@ -225,7 +226,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
             // filament kept for timelapse or wrapping) sizes for the idle depth.
             const bool   has_purge = !type1 && volume > EPSILON;
             const double square    = has_purge ? std::sqrt(volume / layer_height * extra_spacing) : idle_depth;
-            side = WipeTower::rib_footprint_side(float(square), float(square), float(rib_width), float(extra_rib_length), float(max_object_height));
+            side = WipeTower::rib_footprint_side(float(square), float(square), float(rib_width), float(extra_rib_length), float(max_object_height), !type1);
         }
         footprint.width = footprint.depth = side;
     } else {
@@ -233,7 +234,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         if (type1) {
             // plan_tower_new stretches a short purge stack to the stability minimum behind its
             // leading perimeter width.
-            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), tower_line_width)));
+            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), tower_line_width, float(max_object_height))));
         } else {
             depth = volume / (layer_height * width);
             // The flush volumes already hold the spacing between wipes.
@@ -250,8 +251,12 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         footprint.brim_width = WipeTower::get_auto_brim_by_height(float(max_object_height));
     footprint.brim_width = WipeTower::estimate_brim_real_width(float(footprint.brim_width), float(nozzle_diameter), float(first_layer_height > EPSILON ? first_layer_height : layer_height), !type1, tower_line_width);
     // A tower interface run-in starts outside the tower (wipe_tower_interface_run_in): both
-    // generators report its room through the brim width, so the reserved area covers it.
-    footprint.brim_width = std::max(footprint.brim_width, TowerInterface::run_in_reserve(config, filament_ids, perimeter_width));
+    // generators report its room through the brim width, so the reserved area covers it. Not on a Type 1 tower that
+    // uses Bambu Studio's interface features instead (WipeTower: m_interface off); their contact-layer run-in reserves
+    // nothing, as in Bambu Studio, and Print::validate() warns about parts in its way.
+    const bool bbs_interface = type1 && opt_bool("enable_tower_interface_features") && TowerInterface::bambu_features_supported(config);
+    if (!bbs_interface)
+        footprint.brim_width = std::max(footprint.brim_width, TowerInterface::run_in_reserve(config, filament_ids, perimeter_width));
     return footprint;
 }
 

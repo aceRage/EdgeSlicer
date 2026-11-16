@@ -430,7 +430,9 @@ TEST_CASE("H3C: the tower interface temperature lines name the filament (I)", "[
 {
     auto interface_config = [](const Machine &m) {
         DynamicPrintConfig cfg = machine_config(m);
-        cfg.set_deserialize_strict({ { "wipe_tower_interface_temp", "1" },
+        // Edge's option A; Bambu's own interface features (on in the H3C / H2C presets) would take it over.
+        cfg.set_deserialize_strict({ { "enable_tower_interface_features", "0" },
+                                     { "wipe_tower_interface_temp", "1" },
                                      { "wipe_tower_interface_trigger", "every_toolchange" },
                                      { "filament_tower_interface_print_temp", "250,250" } });
         return cfg;

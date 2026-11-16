@@ -9,6 +9,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "WipeTowerDialog.hpp"
 
 #include "Search.hpp"
@@ -3956,7 +3957,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_sparse_layers_combination", "multimaterial_settings_prime_tower#combine-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
-        // Tower interface options (per-filament values on the filament Multimaterial page).
+        // Tower interface features: Bambu Studio 2.9.1's switch (Type 1 tower, contact layers), then the Edge options
+        // (per-filament values on the filament Multimaterial page). Kept together for a later master toggle.
+        optgroup->append_single_option_line("enable_tower_interface_features", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("enable_tower_interface_cooldown_during_tower", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_extra_prime", "multimaterial_settings_prime_tower");
@@ -6338,6 +6342,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_tower_interface_print_temp");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_dist");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_length");
+        optgroup->append_single_option_line("filament_tower_interface_purge_volume");
 
         optgroup = page->new_optgroup(L("Tool change parameters with single extruder MM printers"), "param_toolchange");
         optgroup->append_single_option_line("filament_loading_speed_start", "semm");
@@ -7014,6 +7019,10 @@ void TabFilament::toggle_options()
         const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
+        // Bambu Studio 2.9.1 (Tab.cpp:5276-5281): the firmware interface purge exists where Bambu offers the tower
+        // interface features, multi-extruder and hotend-as-extruder printers. The other interface rows also serve
+        // the Edge interface options on every printer and stay.
+        toggle_line("filament_tower_interface_purge_volume", TowerInterface::bambu_features_supported(cfg));
 
         // #1052 review S2: shown where they are used, the mirror of the process "Prime volume" grey-out
         // (WipeTower::bambu_prime_volume() on Bambu Lab printers). The hotend-change prime needs a hotend change on

@@ -1128,12 +1128,12 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 class DynamicPrintConfig;
 
 // While one of these is alive on a thread, configs loaded on that thread keep the shipped meaning
-// of two Bambu Studio keys that the vendor presets under resources/profiles carry:
-// enable_tower_interface_features is not fanned out into the wipe_tower_interface_* options
-// (PrintConfigDef::handle_legacy_composite) and prime_tower_skip_points is not read into
-// wipe_tower_wall_gap (Format/BambuKeyAliases.cpp). PresetBundle::load_vendor_configs_from_json
-// holds one, so the bundled system presets print exactly as before these mappings existed, while
-// a Bambu project, a Bambu preset the user imports and a loose preset file are still mapped.
+// of a Bambu Studio key that the vendor presets under resources/profiles carry:
+// prime_tower_skip_points is not read into wipe_tower_wall_gap (Format/BambuKeyAliases.cpp).
+// PresetBundle::load_vendor_configs_from_json holds one, so the bundled system presets print
+// exactly as before that mapping existed, while a Bambu project, a Bambu preset the user imports
+// and a loose preset file are still mapped. (enable_tower_interface_features used to be fanned out
+// into the wipe_tower_interface_* options here too; it is Bambu Studio's own switch again.)
 // Set kMapSystemPresetTowerKeys to true to map the bundled presets as well.
 class SystemPresetTowerKeysScope
 {
@@ -1145,7 +1145,7 @@ public:
     SystemPresetTowerKeysScope(const SystemPresetTowerKeysScope &) = delete;
     SystemPresetTowerKeysScope &operator=(const SystemPresetTowerKeysScope &) = delete;
 
-    // True while the keys above are to be left as the vendor preset has them.
+    // True while the key above is to be left as the vendor preset has it.
     static bool active() { return s_active; }
 
 private:
@@ -2450,6 +2450,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
     // Per-row speed multipliers of the tower purge ("" = the built-in ramp), per filament.
     ((ConfigOptionStrings,            filament_prime_tower_speed_factor_curve))
+    // Bambu Studio 2.9.1 tower interface features (enable_tower_interface_features): the firmware purge of a contact
+    // layer tool change (M620.13 L in the H2 / H3C change_filament_gcode), per filament.
+    ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
+    // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
+    ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.
@@ -2637,8 +2642,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               wipe_tower_interface_run_in))
     ((ConfigOptionBool,               wipe_tower_interface_extra_prime))
     ((ConfigOptionEnum<TowerInterfaceTrigger>, wipe_tower_interface_trigger))
-    // Bambu Studio's single switch for its interface bundle. Load-only: handle_legacy_composite
-    // fans it out into the options above; nothing reads it otherwise.
+    // Bambu Studio 2.9.1's switch for its tower interface features on contact layers: the Type 1 tower
+    // (WipeTower) and change_filament_gcode (is_prime_tower_interface) read it. The options above stay
+    // off on that tower while it is on; WipeTower2 ignores it.
     ((ConfigOptionBool,               enable_tower_interface_features))
     ((ConfigOptionInts,               filament_tower_interface_print_temp))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))

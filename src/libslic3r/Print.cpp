@@ -17,6 +17,7 @@
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
 #include "LocalesUtils.hpp"
+#include <set>
 #include "LocalZOrderOptimizer.hpp"
 #include "MixedSublayer.hpp"
 #include "ShortestPath.hpp"
@@ -1171,9 +1172,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_interface_extra_prime"
             || opt_key == "wipe_tower_interface_trigger"
             || opt_key == "enable_tower_interface_features"
+            || opt_key == "enable_tower_interface_cooldown_during_tower"
             || opt_key == "filament_tower_interface_print_temp"
             || opt_key == "filament_tower_interface_pre_extrusion_dist"
             || opt_key == "filament_tower_interface_pre_extrusion_length"
+            || opt_key == "filament_tower_interface_purge_volume"
             || opt_key == "wipe_tower_filament"
             || opt_key == "wiping_volumes_extruders"
             || opt_key == "dithering_local_z_infill"
@@ -2461,6 +2464,55 @@ static Polygons estimated_prime_tower_outline(const Print &print, bool with_brim
     return outline;
 }
 
+// Review #1062 (a): with Bambu Studio's tower interface features a contact-layer purge or fill starts up to
+// filament_tower_interface_pre_extrusion_dist beside the tower's left or right wall (WipeTower::contact_run_in_start).
+// Bambu Studio reserves no room for it and neither does this tree; Print::validate() only warns. Contact layers exist
+// only where at least two purge blocks (adhesiveness categories) are used, which is all that is known before slicing,
+// so the warning is conservative. Returns the longest such distance, 0 when no run-in can happen.
+static double bbs_contact_run_in_reach(const Print &print)
+{
+    const PrintConfig &config = print.config();
+    if (!config.enable_prime_tower.value || !config.enable_tower_interface_features.value || print.wipe_tower_type() != WipeTowerType::Type1 ||
+        !TowerInterface::bambu_features_supported(config))
+        return 0.;
+    std::set<int> categories;
+    double        reach = 0.;
+    for (unsigned int f : print.extruders(true)) {
+        const int  configured = config.filament_adhesiveness_category.values.empty() ? 0 : config.filament_adhesiveness_category.get_at(f);
+        const bool support    = config.filament_is_support.values.empty() ? false : bool(config.filament_is_support.get_at(f));
+        const std::string type = config.filament_type.values.empty() ? std::string() : config.filament_type.get_at(f);
+        categories.insert(WipeTower::adhesiveness_category(configured, type, support));
+        if (!config.filament_tower_interface_pre_extrusion_dist.values.empty())
+            reach = std::max(reach, double(config.filament_tower_interface_pre_extrusion_dist.get_at(f)));
+    }
+    return categories.size() > 1 ? reach : 0.;
+}
+
+// The strip of the bed the contact run-in may print in: the tower body widened by `reach` on its left and right.
+static Polygons bbs_contact_run_in_strip(const Print &print, double reach)
+{
+    if (reach <= EPSILON)
+        return {};
+    const Polygons body = estimated_prime_tower_outline(print, false);
+    if (body.empty())
+        return {};
+    BoundingBox box = get_extents(body);
+    box.min.x() -= coord_t(scale_(reach));
+    box.max.x() += coord_t(scale_(reach));
+    return { box.polygon() };
+}
+
+static std::string bbs_contact_run_in_warning(double reach)
+{
+    return L("Prime Tower") +
+           (boost::format(L(": on layers where a material starts or stops on the tower, its purge starts up to %1% mm to the left or "
+                            "right of the tower (tower interface features), and a part is that close, so it may be touched there. "
+                            "Move the part further from the tower or turn off \"Enable tower interface features\".")) %
+            float_to_string_decimal_point(reach, 1))
+               .str() +
+           "\n";
+}
+
 // Review #1056 S1: how far the side scrape reaches beyond the tower brim - the part of its ring the brim
 // does not already reserve. 0 with the scrape off or with a brim at least as wide as the scrape's reach.
 static double side_scrape_ring_beyond_brim(const Print &print)
@@ -2650,6 +2702,17 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
             warning->string += L("Prime Tower") + L(" is too close to others, and collisions may be caused.\n");
         }
     }
+    // Review #1062 (a): parts in the strip the contact-layer run-in prints in.
+    if (warning) {
+        const double   reach = bbs_contact_run_in_reach(print);
+        const Polygons strip = bbs_contact_run_in_strip(print, reach);
+        if (!strip.empty() && !intersection(convex_hulls_other, strip).empty()) {
+            if (!warning->string.empty() && warning->string.back() != '\n')
+                warning->string += "\n";
+            warning->string += bbs_contact_run_in_warning(reach);
+            warning->is_warning = true;
+        }
+    }
     // Dual-nozzle (H2D / H2C / X2D): every nozzle that changes filament purges into the tower, so it must sit
     // where each of them reaches. With automatic filament grouping the nozzles are not known before slicing,
     // so this is only a warning (the tower outline is an estimate too). A manual grouping names the nozzles,
@@ -2696,6 +2759,15 @@ static StringObjectException by_object_tower_clearance_warning(const Print &prin
             if (! intersection(Polygons{ hull }, tower).empty()) {
                 StringObjectException w;
                 w.string     = L("Prime Tower") + L(" is too close to others, and collisions may be caused.\n");
+                w.is_warning = true;
+                return w;
+            }
+            // Review #1062 (a): the strip the contact-layer run-in prints in.
+            const double   reach = bbs_contact_run_in_reach(print);
+            const Polygons strip = bbs_contact_run_in_strip(print, reach);
+            if (! strip.empty() && ! intersection(Polygons{ hull }, strip).empty()) {
+                StringObjectException w;
+                w.string     = bbs_contact_run_in_warning(reach);
                 w.is_warning = true;
                 return w;
             }
@@ -7664,6 +7736,9 @@ void Print::_make_wipe_tower()
         // acceleration (an object setting in this fork, read like the G-code writer does).
         wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
                                                         unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
+        // Bambu Studio 2.9.1 (Print.cpp:4220): the first tower layer purges at the process' initial_layer_flow_ratio,
+        // which loads into bottom_solid_infill_flow_ratio here.
+        wipe_tower.set_first_layer_flow_ratio(float(m_default_region_config.bottom_solid_infill_flow_ratio.value));
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
