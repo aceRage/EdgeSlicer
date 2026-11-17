@@ -2017,6 +2017,17 @@ TEST_CASE("AppContainer leaves a pre-existing Low label on fs_readwrite after cl
 
     REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(user_rw.string()));
     REQUIRE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    const fs::path inner_dir  = user_rw / "already-low-dir";
+    const fs::path inner_file = user_rw / "already-low.txt";
+    fs::create_directories(inner_dir, ec);
+    REQUIRE_FALSE(ec);
+    {
+        boost::nowide::ofstream out(inner_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << "pre-grant";
+    }
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(inner_dir.string()));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(inner_file.string()));
 
     plugin_ipc::SandboxSpec spec;
     spec.plugin_key        = unique_test_plugin_key("FsRw_PreLow");
@@ -2028,6 +2039,8 @@ TEST_CASE("AppContainer leaves a pre-existing Low label on fs_readwrite after cl
     CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
     plugin_ipc::close_parent_sandbox();
     CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(inner_dir.string()));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(inner_file.string()));
 }
 
 TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[PluginSandbox][windows][acl]")

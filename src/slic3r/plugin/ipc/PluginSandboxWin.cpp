@@ -695,17 +695,25 @@ bool file_has_extra_data_streams(const std::wstring& wide)
     return extra;
 }
 
+bool path_created_at_or_after_grant(const std::string& path, std::uint64_t granted_at)
+{
+    if (granted_at == 0)
+        return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!query_file_info(boost::nowide::widen(path), info))
+        return false;
+    return filetime_to_u64(info.ftCreationTime) >= granted_at;
+}
+
 bool file_eligible_for_low_copy_replace(const std::string& path, std::uint64_t granted_at)
 {
-    if (!is_regular_nonsymlink(path) || granted_at == 0)
+    if (!is_regular_nonsymlink(path) || !path_created_at_or_after_grant(path, granted_at))
         return false;
     const std::wstring            wide = boost::nowide::widen(path);
     BY_HANDLE_FILE_INFORMATION    info{};
     if (!query_file_info(wide, info))
         return false;
     if (info.nNumberOfLinks > 1)
-        return false;
-    if (filetime_to_u64(info.ftCreationTime) < granted_at)
         return false;
     if (file_has_extra_data_streams(wide))
         return false;
@@ -1124,12 +1132,15 @@ bool remove_session_from_journals(const std::string& package_sid)
 
 // Files a Low-IL helper creates inherit a Low mandatory label even when the parent
 // directory was not labelled (user fs_readwrite) or after the directory label is
-// restored (Edge work dirs). Bounded walk: skip symlinks, cap entries so a user
-// folder cannot stall close/sweep. WRITE_OWNER is required to edit a mandatory
-// label; when it is missing (Modify-only folders), copy-replace only files created
-// at/after this session's grant time that are Low-labelled, have one link, and
-// have no extra ADS. Pre-grant / hard-linked / ADS files are left labelled
-// (policy skip, not a grant failure) so MOTW and sibling names survive.
+// restored (Edge work dirs). Bounded walk: skip the grant root (restore_label_sddl
+// handles a label this process added), skip symlinks, cap entries so a user
+// folder cannot stall close/sweep. Creation >= grant time gates every label
+// removal, not only copy-replace, so a pre-existing Low file or dir is left
+// labelled. WRITE_OWNER is required to edit a mandatory label; when it is missing
+// (Modify-only folders), copy-replace only files created at/after this session's
+// grant time that are Low-labelled, have one link, and have no extra ADS.
+// Pre-grant / hard-linked / ADS files are left labelled (policy skip, not a
+// grant failure) so MOTW and sibling names survive.
 bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
 {
     namespace fs = boost::filesystem;
@@ -1144,18 +1155,23 @@ bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
             return;
         if (!path_has_low_integrity_label(s))
             return;
+        if (!path_created_at_or_after_grant(s, granted_at)) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL strip skipped (pre-grant) for " << s;
+            return;
+        }
         if (set_label_sddl(s, {}) && !path_has_low_integrity_label(s))
             return;
         if (!path_has_low_integrity_label(s))
             return;
         if (!file_eligible_for_low_copy_replace(s, granted_at)) {
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped (pre-grant, hard link, or ADS) for " << s;
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped (hard link or ADS) for " << s;
             return;
         }
         if (!copy_replace_file_as_user(s) || path_has_low_integrity_label(s))
             ok = false;
     };
-    strip_one(path);
+    // Never strip the grant root here. revoke_one_grant restores original_label
+    // only when grant.low_label is set; a folder that was already Low stays Low.
     if (!fs::is_directory(path, ec) || ec)
         return ok;
     constexpr int k_max_entries = 4096;
@@ -1215,8 +1231,9 @@ bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source,
             ok = false;
     }
     // Walk write-granted trees so helper-created files (edge-plugin-host.log,
-    // post_process.gcode, plugin output in fs_readwrite) lose Low. Journal-sourced
-    // copy-replace stays inside known user-rw roots / write grants and grant-time.
+    // post_process.gcode, plugin output in fs_readwrite) lose Low. The grant root
+    // is not stripped here. Creation >= grant time gates every label removal.
+    // Journal-sourced copy-replace stays inside known user-rw roots / write grants.
     const std::uint64_t granted_at = session ? session->granted_at : g_win.granted_at;
     if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path, granted_at))
         ok = false;

@@ -216,7 +216,10 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   and cannot write up). The parent adds that label only when the root is not
   already Low, journals the ACE and the prior label SDDL, and on close/sweep
   revokes the ACE and restores **only** a label it added — a folder that was
-  already Low stays Low. Copy-replace is never used to apply or restore a
+  already Low stays Low. Close/sweep never strip the grant root unless this
+  process added the label, and they apply the grant-time filter before any
+  label removal (not only copy-replace) so a pre-existing Low file or dir
+  inside the tree keeps its label. Copy-replace is never used to apply or restore a
   user folder's label. If `WRITE_OWNER` is missing, spawn fail-closes for
   that root with a clear error rather than leaving it read-only. Changing a
   mandatory label on helper-created files still needs `WRITE_OWNER`; when

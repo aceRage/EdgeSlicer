@@ -140,7 +140,9 @@ void  close_parent_sandbox();
 // those paths sit outside this process's current roots (moved install, portable
 // copy, test binary vs GUI). Hosted `fs_readwrite` roots get package-SID modify
 // and a Low label when needed for writes; close/sweep restore only a label this
-// process added (WRITE_OWNER failure fail-closes that root). Copy-replace of
+// process added (WRITE_OWNER failure fail-closes that root). Close/sweep skip
+// the grant root unless this process added the label, and apply grant-time
+// before any label removal. Copy-replace of
 // Low-IL files stays inside this process's known user-rw roots (current data_dir,
 // remembered spec data_dirs, plugin dirs, python_home, helper, resources, temp)
 // and only rewrites files created at/after the session grant time that are
