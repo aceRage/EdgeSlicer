@@ -28,6 +28,7 @@
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/VariableWidth.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include "test_data.hpp"
@@ -3122,6 +3123,38 @@ TEST_CASE("Gap fill inserted into an ordered fill prints a near-duplicate closed
     CHECK(gap_fill_length == Approx(1.6).margin(0.05));
     CHECK(lines_in_order == line_starts);
     for (ExtrusionEntity *ee : entities)
+        delete ee;
+}
+
+// EdgeSlicer: variable_width() lays each part of a line as wide as the part is on average, the line's last part too.
+// The last part used to be weighed by the width at the start of each of its segments, which laid the tip of a line
+// narrowing to its end too wide (and the tip of one widening to its end too narrow).
+TEST_CASE("Variable width lays the last part of a tapering line at its average width", "[Fill][GapFill][Regression]")
+{
+    // A wide first segment, then a step down and a narrowing of 0.04 mm over the last two segments: the line is cut
+    // at the step, and the narrowing, under the 0.05 mm limit, is the last part.
+    ThickPolyline taper;
+    taper.points = { Point::new_scale(0., 0.), Point::new_scale(4., 0.), Point::new_scale(6., 0.), Point::new_scale(8., 0.) };
+    taper.width  = { scaled<double>(0.4), scaled<double>(0.4), scaled<double>(0.3), scaled<double>(0.27),
+                     scaled<double>(0.27), scaled<double>(0.26) };
+    taper.endpoints = { true, true };
+    const Flow flow(0.45f, 0.2f, 0.4f);
+
+    ExtrusionEntitiesPtr out;
+    variable_width(ThickPolylines{ taper }, erGapFill, flow, out);
+    REQUIRE(out.size() == 2);
+    auto *first = dynamic_cast<const ExtrusionPath *>(out.front());
+    auto *last  = dynamic_cast<const ExtrusionPath *>(out.back());
+    REQUIRE(first != nullptr);
+    REQUIRE(last != nullptr);
+
+    // A path's width is its gap's width plus what the rounded sides of the extrusion leave unfilled.
+    const double unfilled = 0.2 * (1. - 0.25 * PI);
+    CHECK(first->width - unfilled == Approx(0.4).margin(1e-4));
+    // (2 x 0.285 + 2 x 0.265) / 4 = 0.275; the start widths would give (2 x 0.3 + 2 x 0.27) / 4 = 0.285.
+    CHECK(last->width - unfilled == Approx(0.275).margin(1e-4));
+    CHECK(last->last_point() == Point::new_scale(8., 0.));
+    for (ExtrusionEntity *ee : out)
         delete ee;
 }
 
