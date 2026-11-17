@@ -2019,31 +2019,39 @@ TEST_CASE("AppContainer sweep drops ALL APPLICATION PACKAGES journal SIDs", "[Pl
     CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
 }
 
-TEST_CASE("AppContainer sweep ignores journal paths outside known roots", "[PluginSandbox][windows][acl]")
+TEST_CASE("AppContainer sweep keeps skipped journal entries and does not delete the session", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();
     if (!probe.appcontainer)
         SKIP("AppContainer unavailable: " + probe.reason);
 
-    ScopedDataDir data("plugin-sandbox-journal-outside-root");
+    ScopedDataDir data("plugin-sandbox-journal-skip-keep");
     CloseSandbox  close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = unique_test_plugin_key("Journal_Outside");
+    spec.plugin_key        = unique_test_plugin_key("Journal_SkipKeep");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     std::string error;
     REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
     const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
     REQUIRE_FALSE(sid_str.empty());
-    const std::wstring profile = plugin_ipc::win_appcontainer_profile_name(spec.plugin_key);
+    const std::wstring profile     = plugin_ipc::win_appcontainer_profile_name(spec.plugin_key);
+    const std::string  journal     = plugin_ipc::win_acl_journal_path_for_testing();
+    const std::string  journal_dir = fs::path(journal).parent_path().string();
     plugin_ipc::close_parent_sandbox();
 
+    // The journal tree is never actionable. Skipping it must keep the session so a
+    // later sweep can still see the remainder (do not delete the journal).
     write_acl_journal(nlohmann::json::array({
         {{"package_sid", boost::nowide::narrow(sid_str)},
          {"profile_name", boost::nowide::narrow(profile)},
+         {"data_dir", spec.data_dir},
+         {"python_home", ""},
+         {"helper_dir", ""},
+         {"resources_dir", ""},
          {"grants", nlohmann::json::array({
-                        {{"path", "C:\\Windows"},
+                        {{"path", journal_dir},
                          {"permissions", 1179817},
                          {"inheritance", 3},
                          {"write", true},
@@ -2052,9 +2060,109 @@ TEST_CASE("AppContainer sweep ignores journal paths outside known roots", "[Plug
                          {"original_label", ""}},
                     })}},
     }));
-    REQUIRE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+    REQUIRE(journal_file_exists(journal));
     plugin_ipc::sweep_stale_parent_sandbox_grants();
-    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+    REQUIRE(journal_file_exists(journal));
+    CHECK(journal_grant_path_count(journal) == 1);
+}
+
+TEST_CASE("AppContainer sweep revokes python_home and helper ACEs outside this process's roots", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-journal-foreign-roots");
+    CloseSandbox              close_guard;
+    boost::system::error_code ec;
+    const fs::path foreign_base   = plugin_ipc::helper_path().parent_path().parent_path() / fs::unique_path("orca-foreign-roots-%%%%-%%%%");
+    const fs::path foreign_python = foreign_base / "python";
+    const fs::path foreign_helper = foreign_base / "helper";
+    fs::create_directories(foreign_python, ec);
+    REQUIRE_FALSE(ec);
+    fs::create_directories(foreign_helper, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{foreign_base};
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Foreign_Roots");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.python_home       = foreign_python.string();
+    spec.extra_paths.push_back({foreign_helper.string(), false, false});
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK(path_dacl_has_sid(foreign_python.string(), package.sid));
+    CHECK(path_dacl_has_sid(foreign_helper.string(), package.sid));
+    const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
+    REQUIRE(journal_file_exists(journal));
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    CHECK(path_dacl_has_sid(foreign_python.string(), package.sid));
+    CHECK(path_dacl_has_sid(foreign_helper.string(), package.sid));
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(path_dacl_has_sid(foreign_python.string(), package.sid));
+    CHECK_FALSE(path_dacl_has_sid(foreign_helper.string(), package.sid));
+    CHECK_FALSE(journal_file_exists(journal));
+}
+
+TEST_CASE("AppContainer sweep keeps the journal session when a revoke fails", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-journal-revoke-fail");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-revoke-fail-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    CloseSandbox close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Revoke_Fail");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.write_root        = dir.string();
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
+    REQUIRE(journal_file_exists(journal));
+    REQUIRE(journal_grant_path_count(journal) >= 1);
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    REQUIRE(restrict_dacl_to_modify(dir.string()));
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    REQUIRE(journal_file_exists(journal));
+    CHECK(journal_grant_path_count(journal) >= 1);
 }
 
 TEST_CASE("AppContainer sweep treats a vanished grant path as already revoked", "[PluginSandbox][windows][acl]")
