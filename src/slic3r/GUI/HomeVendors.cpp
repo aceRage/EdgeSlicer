@@ -75,10 +75,33 @@ static Vendors::Response http_call(const Vendors::Request& req, size_t limit, in
     http.clear_headers().follow_redirects(false).timeout_connect(15).timeout_max(timeout_seconds > 0 ? timeout_seconds : limit > LIST_LIMIT ? 1800 : 120).size_limit(limit);
     for (const auto& [k, v] : req.headers)
         http.header(k, v);
+    // The last block of headers (after any redirects), names lower-cased.
+    auto parse_headers = [](const std::string& raw) {
+        std::map<std::string, std::string> headers;
+        const size_t       last = raw.rfind("HTTP/");
+        std::istringstream lines(last == std::string::npos ? raw : raw.substr(last));
+        std::string        line;
+        while (std::getline(lines, line)) {
+            const size_t colon = line.find(':');
+            if (colon == std::string::npos)
+                continue;
+            std::string value = line.substr(colon + 1);
+            while (!value.empty() && (value.back() == '\r' || value.back() == ' '))
+                value.pop_back();
+            value.erase(0, value.find_first_not_of(' '));
+            headers[lower(line.substr(0, colon))] = value;
+        }
+        return headers;
+    };
+    bool head_sent = false;
     if (req.sink)
-        http.on_body([&req, &out](unsigned status, const char* data, size_t size) {
-            if (status >= 200 && status < 300)
+        http.on_body([&req, &out, &raw_headers, &head_sent, &parse_headers](unsigned status, const char* data, size_t size) {
+            if (status >= 200 && status < 300) {
+                if (!head_sent && req.on_head) // the headers are all in before the first piece of the body
+                    req.on_head(int(status), parse_headers(raw_headers));
+                head_sent = true;
                 return req.sink(data, size);
+            }
             if (out.body.size() < 64 * 1024) // an error page: kept for the message
                 out.body.append(data, std::min(size, 64 * 1024 - out.body.size()));
             return true;
@@ -97,20 +120,7 @@ static Vendors::Response http_call(const Vendors::Request& req, size_t limit, in
                 out.error = error;
         })
         .perform_sync();
-    // The last block of headers (after any redirects).
-    const size_t last = raw_headers.rfind("HTTP/");
-    std::istringstream lines(last == std::string::npos ? raw_headers : raw_headers.substr(last));
-    std::string        line;
-    while (std::getline(lines, line)) {
-        const size_t colon = line.find(':');
-        if (colon == std::string::npos)
-            continue;
-        std::string value = line.substr(colon + 1);
-        while (!value.empty() && (value.back() == '\r' || value.back() == ' '))
-            value.pop_back();
-        value.erase(0, value.find_first_not_of(' '));
-        out.headers[lower(line.substr(0, colon))] = value;
-    }
+    out.headers = parse_headers(raw_headers);
     return out;
 }
 
@@ -1188,36 +1198,74 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id, bo
 
     std::weak_ptr<bool> alive = m_alive;
     auto                cancel = m_cancel;
-    std::thread([this, alive, cancel, spec = c->spec, secrets = secrets_of(c->spec), url, direct, target, label, open_path]() {
-        const Vendors::HttpFn list_http = [](const Vendors::Request& q) { return http_call(q, LIST_LIMIT); };
+    std::thread([this, alive, cancel, spec = c->spec, secrets = secrets_of(c->spec), url, direct, target, label, open_path, file_name]() {
         const Vendors::HttpFn file_http = [](const Vendors::Request& q) { return http_call(q, FILE_LIMIT); };
         std::string error;
         std::string file_url = url;
-        if (!direct) // the endpoint answers with a short-lived link to the file
-            file_url = Vendors::resolve_download(spec, secrets,
-                                                 Vendors::fetch(spec, secrets, list_http, url, true, nullptr, 5, spec.download_method), error);
+        // Straight to disk as it arrives (a model can be hundreds of MB), then into place.
+        const fs::path part = target.string() + ".part";
+        bool           wrote = false, write_failed = false, answer_is_file = false;
+        std::string    disposition_name;
+        boost::nowide::ofstream f;
+        auto write = [&](const char* data, size_t size) {
+            if (*cancel)
+                return false;
+            f.write(data, std::streamsize(size));
+            wrote = true;
+            return bool(f) || !(write_failed = true);
+        };
+        Vendors::Response r;
+        if (!direct) {
+            // The endpoint answers with a short-lived link to the file (JSON), or with the file itself.
+            // Its answer is not size-capped like a list page: when it is the file it streams to disk.
+            const Vendors::EndpointResult e = Vendors::call_download_endpoint(
+                spec, secrets, file_http, url,
+                [&](const std::string& name) {
+                    disposition_name = name;
+                    f.open(part.string().c_str(), std::ios::binary | std::ios::trunc);
+                    if (!f)
+                        write_failed = true;
+                    return bool(f);
+                },
+                write);
+            if (e.kind == Vendors::EndpointResult::Kind::Failed)
+                error = e.error;
+            else if (e.kind == Vendors::EndpointResult::Kind::Link)
+                file_url = e.link;
+            else {
+                answer_is_file = true;
+                r.status       = e.status;
+                r.error        = e.error;
+            }
+        }
         bool saved = false;
+        fs::path final_target = target;
+        std::string final_open = open_path;
         if (error.empty() && !*cancel) {
-            // Straight to disk as it arrives (a model can be hundreds of MB), then into place.
-            const fs::path part = target.string() + ".part";
-            bool           wrote = false, write_failed = false;
-            Vendors::Response r;
-            {
-                boost::nowide::ofstream f(part.string().c_str(), std::ios::binary | std::ios::trunc);
+            if (!answer_is_file) {
+                f.open(part.string().c_str(), std::ios::binary | std::ios::trunc);
                 if (!f)
                     write_failed = true;
                 else
-                    r = Vendors::fetch(spec, secrets, file_http, file_url, true, [&](const char* data, size_t size) {
-                        if (*cancel)
-                            return false;
-                        f.write(data, std::streamsize(size));
-                        wrote = true;
-                        return bool(f) || !(write_failed = true);
-                    });
+                    r = Vendors::fetch(spec, secrets, file_http, file_url, true, write);
             }
+            f.close();
             boost::system::error_code ec;
             if (!write_failed && r.status >= 200 && r.status < 300 && wrote) {
-                fs::rename(part, target, ec);
+                // The file's own name (Content-Disposition) replaces the suggested one only when the user
+                // kept the suggestion, the name is plain ASCII with a model extension, and nothing is there yet.
+                if (answer_is_file && !disposition_name.empty() && target.filename().string() == file_name) {
+                    const std::string own = safe_file_name(disposition_name);
+                    const fs::path    candidate = target.parent_path() / own;
+                    if (!own.empty() && !Vendors::model_extension(own).empty() &&
+                        std::all_of(own.begin(), own.end(), [](unsigned char ch) { return ch < 0x80; }) && !fs::exists(candidate, ec)) {
+                        final_target = candidate;
+                        if (!open_path.empty())
+                            final_open = open_path.substr(0, open_path.find_last_of("/\\") + 1) + own;
+                    }
+                    ec.clear();
+                }
+                fs::rename(part, final_target, ec);
                 saved = !ec;
                 write_failed = !!ec;
             }
@@ -1229,7 +1277,7 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id, bo
                                           : _u8L("The download was empty.");
             }
         }
-        wxGetApp().CallAfter([this, alive, saved, error, target, label, open_path]() {
+        wxGetApp().CallAfter([this, alive, saved, error, target = final_target, label, open_path = final_open]() {
             if (alive.expired())
                 return;
             if (saved) {

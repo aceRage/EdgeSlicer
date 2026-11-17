@@ -413,7 +413,9 @@ Spec spec_from_json(const json& j)
             throw std::runtime_error("The download method must be GET or POST.");
         s.download_method = method.empty() ? std::string("GET") : method;
     }
-    if (!s.download_path.empty() && s.download_url_path.empty())
+    // A path with no "url_field" key at all keeps its old default "url". A blank one (the key present
+    // and empty) means the endpoint's answer IS the file.
+    if (!s.download_path.empty() && s.download_url_path.empty() && !(dl.is_object() && dl.contains("url_field")))
         s.download_url_path = "url";
 
     const json& quota = obj(j, "quota");
@@ -1154,6 +1156,187 @@ std::string resolve_download(const Spec& spec, const Secrets& secrets, const Res
     } catch (...) {
         error = host_of(spec.base_url) + " did not answer with JSON.";
         return std::string();
+    }
+}
+
+std::string content_disposition_name(const std::string& v)
+{
+    auto base = [](std::string name) {
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos)
+            name.erase(0, slash + 1);
+        name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }), name.end());
+        return trim(name);
+    };
+    const std::string l    = lower(v);
+    const size_t      star = l.find("filename*=");
+    if (star != std::string::npos) { // filename*=UTF-8''percent%20encoded
+        const size_t q1 = v.find('\'', star + 10);
+        const size_t q2 = q1 == std::string::npos ? q1 : v.find('\'', q1 + 1);
+        if (q2 != std::string::npos) {
+            const size_t end = v.find(';', q2 + 1);
+            const std::string enc = trim(v.substr(q2 + 1, end == std::string::npos ? std::string::npos : end - q2 - 1));
+            std::string out;
+            for (size_t i = 0; i < enc.size(); ++i) {
+                if (enc[i] == '%' && i + 2 < enc.size() && std::isxdigit((unsigned char) enc[i + 1]) && std::isxdigit((unsigned char) enc[i + 2])) {
+                    out += char(std::stoi(enc.substr(i + 1, 2), nullptr, 16));
+                    i += 2;
+                } else
+                    out += enc[i];
+            }
+            out = base(out);
+            if (!out.empty())
+                return out;
+        }
+    }
+    const size_t at = l.find("filename=");
+    if (at == std::string::npos)
+        return std::string();
+    size_t p = at + 9;
+    while (p < v.size() && v[p] == ' ')
+        ++p;
+    if (p < v.size() && v[p] == '"') {
+        const size_t end = v.find('"', p + 1);
+        return base(v.substr(p + 1, end == std::string::npos ? std::string::npos : end - p - 1));
+    }
+    const size_t end = v.find(';', p);
+    return base(v.substr(p, end == std::string::npos ? std::string::npos : end - p));
+}
+
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string&)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file)
+{
+    enum Mode { Undecided, AsJson, AsFile, AsPage, FileNotOpened };
+    constexpr size_t JSON_LIMIT = 4u * 1024 * 1024;
+    struct State
+    {
+        int                                status { 0 };
+        std::map<std::string, std::string> headers;
+        Mode                               mode { Undecided };
+        std::string                        json;
+        bool                               json_too_big { false };
+        int64_t                            size { 0 };
+        std::string                        file_name;
+    } st;
+    std::string last_url = url;
+
+    const HttpFn wrapped = [&](const Request& q) {
+        last_url = q.url;
+        Request r = q;
+        r.on_head = [&st](int status, const std::map<std::string, std::string>& headers) {
+            st.status  = status;
+            st.headers = headers;
+            st.mode    = Undecided;
+        };
+        return http(r);
+    };
+    auto header = [&st](const char* name) {
+        auto it = st.headers.find(name);
+        return it == st.headers.end() ? std::string() : it->second;
+    };
+    auto media_type = [&header]() {
+        std::string ct = lower(header("content-type"));
+        ct             = trim(ct.substr(0, ct.find(';')));
+        return ct;
+    };
+    const std::function<bool(const char*, size_t)> sink = [&](const char* data, size_t size) {
+        if (st.mode == Undecided) {
+            const std::string media = media_type();
+            if (media == "application/json" || (media.size() > 5 && media.compare(media.size() - 5, 5, "+json") == 0))
+                st.mode = AsJson;
+            else if (media == "text/html" || media == "application/xhtml+xml")
+                st.mode = AsPage;
+            else if (media.empty() || media == "text/plain") { // no say from the server: look at the first character
+                char first = 0;
+                for (size_t i = 0; i < size && first == 0; ++i)
+                    if (!std::isspace((unsigned char) data[i]))
+                        first = data[i];
+                st.mode = first == '{' || first == '[' || first == 0 ? AsJson : first == '<' ? AsPage : AsFile;
+            } else
+                st.mode = AsFile;
+            if (st.mode == AsFile) {
+                st.file_name = content_disposition_name(header("content-disposition"));
+                if (!begin_file(st.file_name))
+                    st.mode = FileNotOpened;
+            }
+        }
+        st.size += int64_t(size);
+        switch (st.mode) {
+        case AsJson:
+            if (st.json.size() + size > JSON_LIMIT) {
+                st.json_too_big = true;
+                return false;
+            }
+            st.json.append(data, size);
+            return true;
+        case AsFile: return write_file(data, size);
+        default: return false;
+        }
+    };
+
+    const Response resp = fetch(spec, secrets, wrapped, url, true, sink, 5, spec.download_method);
+    if (st.mode == Undecided && resp.status >= 200 && resp.status < 300 && !resp.body.empty()) { // an HttpFn that returns the body
+        if (st.headers.empty())
+            st.headers = resp.headers;
+        st.status = resp.status;
+        sink(resp.body.data(), resp.body.size());
+    }
+
+    EndpointResult out;
+    out.status = resp.status != 0 ? resp.status : st.status;
+    {
+        std::string ct = header("content-type");
+        if (has_control(ct))
+            ct.clear();
+        out.content_type = ct.substr(0, 100);
+    }
+    out.size = st.size;
+    const std::string host      = host_of(spec.base_url);
+    const std::string final_host = host_of(last_url);
+    BOOST_LOG_TRIVIAL(info) << "Vendor download endpoint: status " << out.status << ", content-type \"" << out.content_type << "\", " << out.size
+                            << " bytes, host " << final_host;
+    const std::string detail = out.status == 0 ? std::string()
+                                               : " (HTTP " + std::to_string(out.status) + ", " + (out.content_type.empty() ? std::string("no content type") : out.content_type) + ")";
+
+    if (st.mode == AsPage) {
+        out.error = host + " answered with a web page instead of a file or JSON." + detail;
+        return out;
+    }
+    if (st.json_too_big) {
+        out.error = host + " answered with JSON that is far too large." + detail;
+        return out;
+    }
+    if (st.mode == AsFile || st.mode == FileNotOpened) {
+        // The caller judges the transfer (its own write errors, `status`, `error`, `size`).
+        out.kind      = EndpointResult::Kind::File;
+        out.file_name = st.file_name;
+        if (resp.status < 200 || resp.status >= 300)
+            out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+        out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    switch (st.mode) {
+    case AsJson: {
+        if (spec.download_url_path.empty()) {
+            out.error = host + " answered with JSON, but \"File link in its answer at\" is empty, so there is no link to read." + detail;
+            return out;
+        }
+        Response answer;
+        answer.status = 200;
+        answer.body   = st.json;
+        std::string error;
+        out.link = resolve_download(spec, secrets, answer, error);
+        if (out.link.empty())
+            out.error = error + detail;
+        else
+            out.kind = EndpointResult::Kind::Link;
+        return out;
+    }
+    default: out.error = host + " answered with nothing." + detail; return out;
     }
 }
 

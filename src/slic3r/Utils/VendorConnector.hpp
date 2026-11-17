@@ -124,6 +124,9 @@ struct Request
     // Optional: a successful (2xx) body goes here in pieces instead of into Response::body, so a big
     // file never sits in memory. false stops the transfer.
     std::function<bool(const char* data, size_t size)> sink;
+    // Optional, with a sink: called once, before the first piece of a 2xx body goes to the sink, with
+    // the status and the response headers (names lower-cased), so the sink can tell what is coming.
+    std::function<void(int status, const std::map<std::string, std::string>& headers)> on_head;
     // "GET" or "POST". A POST is sent with an empty body (Content-Length: 0). Only the download
     // endpoint is ever a POST; every other request is a GET.
     std::string method { "GET" };
@@ -300,6 +303,35 @@ std::string download_url(const Spec& spec, const Item& item, const SubItem* sub,
 // The request carries spec.download_method when it is not direct.
 // The file URL in the download endpoint's answer, or "" with `error` set.
 std::string resolve_download(const Spec& spec, const Secrets& secrets, const Response& response, std::string& error);
+
+// What a download endpoint answered. The answer is judged by its Content-Type (with no Content-Type or
+// text/plain, by its first character):
+//   JSON (application/json, +json)  -> Link: the file's address at download_url_path (a spec with no
+//                                      download_url_path has nowhere to read it: an error);
+//   a web page (text/html)          -> Failed (never saved as a model);
+//   anything else                   -> File: the answer IS the file, streamed to write_file as it arrives.
+// Redirects are followed by fetch(), so a redirect to the file ends as a File.
+struct EndpointResult
+{
+    enum class Kind { Failed, Link, File };
+    Kind        kind { Kind::Failed };
+    std::string error;        // Failed: for the user (status and content type included), never a secret
+    std::string link;         // Link: the file's address
+    std::string file_name;    // File: the name in Content-Disposition, "" when there is none
+    int         status { 0 };
+    std::string content_type; // as sent
+    int64_t     size { 0 };   // bytes of the answer
+};
+// Calls the endpoint `url` (spec.download_method) through `http`. For a File answer begin_file(name) is
+// called before the first byte (false = could not open it: nothing is read on); write_file gets the
+// body in pieces (false stops). `http` must call Request::on_head (when set) before the first piece of
+// a 2xx body it hands to Request::sink; a 2xx body returned in Response::body is handled as well.
+// Logs one info line: status, content type, size and the final host.
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string& name)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file);
+// The file name in a Content-Disposition value (filename*= preferred), without any folder, "" if none.
+std::string content_disposition_name(const std::string& value);
 
 // Request plumbing, exposed for the tests.
 Request     authorize(const Spec& spec, const Secrets& secrets, const std::string& url);

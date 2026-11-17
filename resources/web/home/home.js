@@ -1772,7 +1772,7 @@
     { group: 'Download (optional)', fields: [
       { path: 'download.method', label: 'Method', options: [['GET', 'GET'], ['POST', 'POST (empty body)']] },
       { path: 'download.path', label: 'Endpoint path', hint: '/models/{id}/download?profile={sub.id}', wide: true },
-      { path: 'download.url_field', label: 'File link in its answer at', hint: 'download_url' },
+      { path: 'download.url_field', label: 'File link in its answer at (blank: the answer is the file itself)', hint: 'download_url' },
       { path: 'download.direct_field', label: 'Or: direct link field of a file' },
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
     ] },

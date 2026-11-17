@@ -1684,3 +1684,241 @@ TEST_CASE("vendors: connector files written before the download method existed l
         CHECK(spec_to_json(spec_from_json(out)) == out);
     }
 }
+
+// ---- a download endpoint that answers with the file itself ----
+
+namespace {
+// What a vendor's server does with a request: a 2xx body goes to the sink in small pieces (after
+// on_head), like the app's HTTP call; anything else is returned whole.
+Response serve(const Request& q, int status, std::map<std::string, std::string> headers, const std::string& body)
+{
+    Response r;
+    r.status  = status;
+    r.headers = headers;
+    if (status >= 200 && status < 300 && q.sink) {
+        if (q.on_head)
+            q.on_head(status, headers);
+        for (size_t i = 0; i < body.size(); i += 7)
+            if (!q.sink(body.data() + i, std::min<size_t>(7, body.size() - i)))
+                break;
+    } else
+        r.body = body;
+    return r;
+}
+
+json file_answer_spec_json(bool with_url_field)
+{
+    json j = cpl3d_spec_json();
+    j["download"] = {{"path", "/designs/{id}/files/{sub.id}/download"}, {"method", "POST"}};
+    if (with_url_field)
+        j["download"]["url_field"] = "url";
+    else
+        j["download"]["url_field"] = "";
+    return j;
+}
+
+struct Saved
+{
+    bool        begun { false };
+    std::string name, data;
+};
+EndpointResult call_endpoint(const Spec& s, const HttpFn& http, Saved& saved)
+{
+    return call_download_endpoint(
+        s, cpl3d_secrets(), http, "https://www.cpl3d.com/api/v1/designs/3/files/103/download",
+        [&saved](const std::string& name) {
+            saved.begun = true;
+            saved.name  = name;
+            return true;
+        },
+        [&saved](const char* d, size_t n) {
+            saved.data.append(d, n);
+            return true;
+        });
+}
+} // namespace
+
+TEST_CASE("vendors: a download endpoint may answer with the file itself", "[Vendors]")
+{
+    const Spec s = spec_from_json(file_answer_spec_json(false));
+    CHECK(s.download_url_path.empty()); // blank link field: the answer is the file
+    std::string model("PK\x03\x04 binary ", 12);
+    model.push_back('\0');
+    model += "\xff\xfe model data that is longer than one piece";
+
+    SECTION("a binary answer is saved as the file, byte for byte")
+    {
+        std::vector<Request> log;
+        HttpFn http = [&](const Request& q) {
+            log.push_back(q);
+            return serve(q, 200, {{"content-type", "application/octet-stream"}}, model);
+        };
+        Saved saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::File);
+        CHECK(e.status == 200);
+        CHECK(e.content_type == "application/octet-stream");
+        CHECK(e.size == int64_t(model.size()));
+        CHECK(saved.begun);
+        CHECK(saved.data == model);
+        CHECK(saved.name.empty());
+        REQUIRE(log.size() == 1);
+        CHECK(log[0].method == "POST");
+        CHECK(header_of(log[0], "Authorization") == std::string("Bearer ") + KEY);
+    }
+    SECTION("a model media type or a zip is a file too, even when the connector names a link field")
+    {
+        const Spec with_link = spec_from_json(file_answer_spec_json(true));
+        HttpFn     http      = [&](const Request& q) { return serve(q, 200, {{"content-type", "model/3mf"}}, model); };
+        Saved      saved;
+        CHECK(call_endpoint(with_link, http, saved).kind == EndpointResult::Kind::File);
+        CHECK(saved.data == model);
+    }
+    SECTION("the name in Content-Disposition is reported")
+    {
+        HttpFn http = [&](const Request& q) {
+            return serve(q, 200, {{"content-type", "application/octet-stream"}, {"content-disposition", "attachment; filename=\"AMS V2.3mf\""}}, model);
+        };
+        Saved saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.file_name == "AMS V2.3mf");
+        CHECK(saved.name == "AMS V2.3mf");
+        CHECK(content_disposition_name("attachment; filename*=UTF-8''Benchy%20v2.3mf") == "Benchy v2.3mf");
+        CHECK(content_disposition_name("attachment; filename=\"a.3mf\"; filename*=UTF-8''b%20c.3mf") == "b c.3mf");
+        CHECK(content_disposition_name("attachment; filename=plain.stl") == "plain.stl");
+        CHECK(content_disposition_name("attachment; filename=\"../../evil.3mf\"") == "evil.3mf");
+        CHECK(content_disposition_name("attachment").empty());
+        CHECK(content_disposition_name("").empty());
+    }
+    SECTION("a redirect to the file: followed as a GET, no credentials off-site")
+    {
+        std::vector<Request> log;
+        HttpFn http = [&](const Request& q) {
+            log.push_back(q);
+            if (q.url.find("/download") != std::string::npos)
+                return serve(q, 302, {{"location", "https://cdn.example/files/f.3mf"}}, "");
+            return serve(q, 200, {{"content-type", "application/octet-stream"}, {"content-disposition", "attachment; filename=f.3mf"}}, model);
+        };
+        Saved saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::File);
+        CHECK(saved.data == model);
+        CHECK(saved.name == "f.3mf");
+        REQUIRE(log.size() == 2);
+        CHECK(log[0].method == "POST");
+        CHECK(log[1].method == "GET");
+        CHECK(log[1].headers.empty());
+        CHECK(log[1].url == "https://cdn.example/files/f.3mf");
+    }
+    SECTION("an HttpFn that returns the body whole is handled too")
+    {
+        HttpFn http = [&](const Request&) {
+            Response r;
+            r.status  = 200;
+            r.headers = {{"content-type", "application/zip"}};
+            r.body    = model;
+            return r;
+        };
+        Saved saved;
+        CHECK(call_endpoint(s, http, saved).kind == EndpointResult::Kind::File);
+        CHECK(saved.data == model);
+    }
+}
+
+TEST_CASE("vendors: a download endpoint answering with JSON still gives a link", "[Vendors]")
+{
+    const Spec s = spec_from_json(file_answer_spec_json(true));
+    const std::string json_body = R"({"url":"https://cdn.example/file.3mf","expires_in":300})";
+    for (const char* type : {"application/json", "application/json; charset=utf-8", "application/vnd.api+json"}) {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {{"content-type", type}}, json_body); };
+        Saved  saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        INFO(type);
+        CHECK(e.kind == EndpointResult::Kind::Link);
+        CHECK(e.link == "https://cdn.example/file.3mf");
+        CHECK_FALSE(saved.begun);
+    }
+    SECTION("no Content-Type: a body that starts like JSON is JSON")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {}, "  " + json_body); };
+        Saved  saved;
+        CHECK(call_endpoint(s, http, saved).kind == EndpointResult::Kind::Link);
+    }
+    SECTION("JSON with no link field set is an error that says so")
+    {
+        const Spec blank = spec_from_json(file_answer_spec_json(false));
+        HttpFn     http  = [&](const Request& q) { return serve(q, 200, {{"content-type", "application/json"}}, json_body); };
+        Saved      saved;
+        const EndpointResult e = call_endpoint(blank, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::Failed);
+        CHECK(e.error.find("File link in its answer at") != std::string::npos);
+        CHECK(e.error.find("application/json") != std::string::npos);
+        CHECK_FALSE(saved.begun);
+    }
+    SECTION("JSON without the link at url_field is an error with the status")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {{"content-type", "application/json"}}, R"({"other":1})"); };
+        Saved  saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::Failed);
+        CHECK(e.error.find("no file address") != std::string::npos);
+        CHECK(e.error.find("HTTP 200") != std::string::npos);
+    }
+}
+
+TEST_CASE("vendors: a web page is never saved as a model, and failures say what came back", "[Vendors]")
+{
+    const Spec s = spec_from_json(file_answer_spec_json(false));
+    SECTION("text/html with status 200")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {{"content-type", "text/html; charset=utf-8"}}, "<html><body>Sign in</body></html>"); };
+        Saved  saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::Failed);
+        CHECK(e.error.find("www.cpl3d.com answered with a web page instead of a file or JSON.") == 0);
+        CHECK(e.error.find("text/html") != std::string::npos);
+        CHECK_FALSE(saved.begun);
+        CHECK(saved.data.empty());
+    }
+    SECTION("no Content-Type and a body that starts with <")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {}, "<!doctype html><title>x</title>"); };
+        Saved  saved;
+        CHECK(call_endpoint(s, http, saved).kind == EndpointResult::Kind::Failed);
+        CHECK_FALSE(saved.begun);
+    }
+    SECTION("an error status keeps the API's message and adds status and content type")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 403, {{"content-type", "application/json"}}, R"({"error":"Downloads need a plan"})"); };
+        Saved  saved;
+        const EndpointResult e = call_endpoint(s, http, saved);
+        CHECK(e.kind == EndpointResult::Kind::Failed);
+        CHECK(e.status == 403);
+        CHECK(e.error.find("Downloads need a plan") != std::string::npos);
+        CHECK(e.error.find("HTTP 403") != std::string::npos);
+        CHECK(e.error.find("application/json") != std::string::npos);
+        CHECK(e.error.find(KEY) == std::string::npos);
+    }
+    SECTION("an empty 200 answer")
+    {
+        HttpFn http = [&](const Request& q) { return serve(q, 200, {{"content-type", "application/octet-stream"}}, ""); };
+        Saved  saved;
+        CHECK(call_endpoint(s, http, saved).kind != EndpointResult::Kind::Link);
+    }
+}
+
+TEST_CASE("vendors: a blank link field means the answer is the file, an absent one keeps its old default", "[Vendors]")
+{
+    // Written before: a path and no url_field key reads the link at "url".
+    json old = cpl3d_spec_json();
+    old["download"] = {{"path", "/f/{sub.id}"}};
+    CHECK(spec_from_json(old).download_url_path == "url");
+    // A key that is there and blank: the answer is the file; it is written and read back as blank.
+    json blank = cpl3d_spec_json();
+    blank["download"] = {{"path", "/f/{sub.id}"}, {"url_field", ""}};
+    const Spec b = spec_from_json(blank);
+    CHECK(b.download_url_path.empty());
+    CHECK(spec_from_json(spec_to_json(b)).download_url_path.empty());
+    // Set: as before.
+    CHECK(spec_from_json(cpl3d_spec_json()).download_url_path == "download_url");
+}
