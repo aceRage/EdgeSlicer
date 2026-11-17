@@ -171,13 +171,17 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   no-op inside an AppContainer / `in_child_process`). There is no
   `%LOCALAPPDATA%` / `Packages/*/AC` copy — `SHGetKnownFolderPath` inside the
   helper would resolve to the container folder. Sweep accepts only SIDs that
-  match a derived `EdgeSlicer.ph.*` profile (never `S-1-15-2-1`) and paths
+  match a derived `EdgeSlicer.ph.*` / test `EdgeSlicer.t.*` profile (never
+  `S-1-15-2-1`) and paths
   under known roots (current `data_dir`, remembered spec data dirs, plugin
   dirs, `python_home`, helper, `resources_dir`, temp). Copy-replace of Low-IL
   files from a journal session stays inside that session's write grants
   under those roots. A leftover helper-writable
   `{data_dir}/plugin_host/acl_journal.json` is deleted unread. Permanent
-  uninstall calls `DeleteAppContainerProfile` for that plugin key.
+  uninstall of that exact plugin key calls `DeleteAppContainerProfile`
+  (`close_host` and test teardown never delete a pre-existing profile).
+  Test-only plugin keys (`test.…`) use the `EdgeSlicer.t.*` moniker so they
+  cannot collide with shipping `EdgeSlicer.ph.*` profiles.
   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
   already removed so a vanished temp dir cannot pin the journal forever. The
   journal is a list of sessions (package SID + profile name + grants) and is

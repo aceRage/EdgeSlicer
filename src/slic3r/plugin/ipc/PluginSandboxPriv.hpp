@@ -14,6 +14,7 @@ bool  prepare_win_appcontainer(const SandboxSpec& spec, std::string& error);
 void  close_win_appcontainer();
 void  sweep_win_acl_journal();
 void  delete_win_appcontainer_profile(const std::string& plugin_key);
+void  delete_win_test_created_appcontainer_profile(const std::string& plugin_key);
 void* win_security_capabilities();
 void* win_pipe_security_attributes();
 #ifdef _WIN32

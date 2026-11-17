@@ -23,6 +23,7 @@ bool  prepare_win_appcontainer(const SandboxSpec&, std::string&) { return true; 
 void  close_win_appcontainer() {}
 void  sweep_win_acl_journal() {}
 void  delete_win_appcontainer_profile(const std::string&) {}
+void  delete_win_test_created_appcontainer_profile(const std::string&) {}
 void* win_security_capabilities() { return nullptr; }
 void* win_pipe_security_attributes() { return nullptr; }
 
@@ -67,6 +68,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <cwctype>
 #include <iterator>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -107,16 +109,23 @@ void resolve_apis()
     g_apis_ok = p_CreateProfile && p_DeriveSid;
 }
 
+bool plugin_key_is_test_only(const std::string& plugin_key) { return plugin_key.size() >= 5 && plugin_key.compare(0, 5, "test.") == 0; }
+
 std::wstring profile_name(const std::string& plugin_key)
 {
     // Fixed-length name so two long keys cannot truncate to the same profile.
+    // Test-only keys (`test.…`) use a distinct moniker prefix so they cannot collide
+    // with a shipping `EdgeSlicer.ph.*` profile even if the FNV hashes match.
     std::uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : plugin_key) {
         hash ^= static_cast<std::uint64_t>(c);
         hash *= 1099511628211ull;
     }
     wchar_t buf[48];
-    swprintf(buf, 48, L"EdgeSlicer.ph.%016llx", static_cast<unsigned long long>(hash));
+    if (plugin_key_is_test_only(plugin_key))
+        swprintf(buf, 48, L"EdgeSlicer.t.%016llx", static_cast<unsigned long long>(hash));
+    else
+        swprintf(buf, 48, L"EdgeSlicer.ph.%016llx", static_cast<unsigned long long>(hash));
     return buf;
 }
 
@@ -259,7 +268,8 @@ struct WinState
     bool                         ready = false;
 };
 
-std::vector<std::string> g_known_journal_data_dirs;
+std::vector<std::string>        g_known_journal_data_dirs;
+std::unordered_set<std::string> g_created_profile_keys; // CreateAppContainerProfile succeeded (not ALREADY_EXISTS)
 
 WinState g_win;
 bool     g_low_label_used_copy_replace = false;
@@ -432,20 +442,21 @@ bool path_is_acl_journal_tree(const std::string& path)
 
 bool is_edgeslicer_profile_name(const std::wstring& name)
 {
-    constexpr wchar_t k_prefix[] = L"EdgeSlicer.ph.";
-    constexpr size_t  k_prefix_n = 14;
-    constexpr size_t  k_hex_n    = 16;
-    if (name.size() != k_prefix_n + k_hex_n)
-        return false;
-    if (::_wcsnicmp(name.c_str(), k_prefix, k_prefix_n) != 0)
-        return false;
-    for (size_t i = k_prefix_n; i < name.size(); ++i) {
-        const wchar_t c   = name[i];
-        const bool    hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
-        if (!hex)
+    auto matches = [&](const wchar_t* prefix, size_t prefix_n) {
+        constexpr size_t k_hex_n = 16;
+        if (name.size() != prefix_n + k_hex_n)
             return false;
-    }
-    return true;
+        if (::_wcsnicmp(name.c_str(), prefix, prefix_n) != 0)
+            return false;
+        for (size_t i = prefix_n; i < name.size(); ++i) {
+            const wchar_t c   = name[i];
+            const bool    hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+            if (!hex)
+                return false;
+        }
+        return true;
+    };
+    return matches(L"EdgeSlicer.ph.", 14) || matches(L"EdgeSlicer.t.", 13);
 }
 
 bool sid_is_well_known_appcontainer_group(const std::string& sid) { return sid == "S-1-15-2-1" || sid == "S-1-15-2-2"; }
@@ -1270,6 +1281,10 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     HRESULT            hr = p_CreateProfile(name.c_str(), L"EdgeSlicer plugin host", L"OS sandbox for edge-plugin-host", nullptr, 0, &sid);
     if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
         hr = p_DeriveSid(name.c_str(), &sid);
+    } else if (SUCCEEDED(hr) && sid != nullptr && !spec.plugin_key.empty()) {
+        // Only profiles this process actually created. ERROR_ALREADY_EXISTS is a pre-existing
+        // profile (previous run, another test, or a real plugin) and must not be torn down.
+        g_created_profile_keys.insert(spec.plugin_key);
     }
     if (FAILED(hr) || sid == nullptr) {
         error = "CreateAppContainerProfile failed";
@@ -1573,6 +1588,8 @@ std::string win_acl_journal_path_for_testing()
     return acl_journal_path_for(Slic3r::data_dir()).string();
 }
 
+// Permanent uninstall of this exact plugin_key only. close/sweep/test teardown must not
+// call this for a profile they did not create in this process.
 void delete_win_appcontainer_profile(const std::string& plugin_key)
 {
     resolve_apis();
@@ -1584,6 +1601,54 @@ void delete_win_appcontainer_profile(const std::string& plugin_key)
         hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND))
         return;
     BOOST_LOG_TRIVIAL(warning) << "DeleteAppContainerProfile failed for " << plugin_key;
+}
+
+void delete_win_test_created_appcontainer_profile(const std::string& plugin_key)
+{
+    if (g_created_profile_keys.erase(plugin_key) == 0)
+        return;
+    delete_win_appcontainer_profile(plugin_key);
+}
+
+bool win_create_appcontainer_profile_for_testing(const std::string& plugin_key, std::string& error)
+{
+    resolve_apis();
+    if (!p_CreateProfile || plugin_key.empty()) {
+        error = "CreateAppContainerProfile APIs are not available";
+        return false;
+    }
+    const std::wstring name = profile_name(plugin_key);
+    PSID               sid  = nullptr;
+    HRESULT            hr = p_CreateProfile(name.c_str(), L"EdgeSlicer plugin host", L"OS sandbox for edge-plugin-host", nullptr, 0, &sid);
+    if (sid != nullptr)
+        ::FreeSid(sid);
+    if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+        return true;
+    error = "CreateAppContainerProfile failed";
+    return false;
+}
+
+bool win_appcontainer_profile_exists_for_testing(const std::string& plugin_key)
+{
+    resolve_apis();
+    if (plugin_key.empty())
+        return false;
+    const std::wstring name            = profile_name(plugin_key);
+    wchar_t            local[MAX_PATH] = {};
+    const DWORD        n               = ::GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH)
+        return false;
+    namespace fs                       = boost::filesystem;
+    const fs::path            packages = fs::path(local) / L"Packages";
+    boost::system::error_code ec;
+    if (!fs::is_directory(packages, ec) || ec)
+        return false;
+    for (fs::directory_iterator it(packages, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring folder = it->path().filename().wstring();
+        if (folder.size() >= name.size() && ::_wcsnicmp(folder.c_str(), name.c_str(), name.size()) == 0)
+            return true;
+    }
+    return false;
 }
 
 bool win_low_label_used_copy_replace_for_testing() { return g_low_label_used_copy_replace; }

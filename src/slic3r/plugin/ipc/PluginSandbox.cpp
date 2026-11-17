@@ -423,6 +423,17 @@ void delete_parent_sandbox_profile(const std::string& plugin_key)
 #endif
 }
 
+void delete_test_created_parent_sandbox_profile(const std::string& plugin_key)
+{
+#ifdef _WIN32
+    if (in_child_process())
+        return;
+    delete_win_test_created_appcontainer_profile(plugin_key);
+#else
+    (void) plugin_key;
+#endif
+}
+
 #ifdef _WIN32
 std::vector<std::string> parent_sandbox_known_roots()
 {

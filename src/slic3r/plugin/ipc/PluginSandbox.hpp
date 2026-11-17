@@ -132,17 +132,22 @@ void  close_parent_sandbox();
 // the helper-writable `plugin_host` log dir, and not `%LOCALAPPDATA%` / Packages\\*\\AC).
 // The path is resolved once at grant time and stored on the session; close/revoke never
 // re-reads the global. An explicit DACL excludes the package SID and ALL APPLICATION
-// PACKAGES. Sweep accepts only derived `EdgeSlicer.ph.*` package SIDs and paths under
-// known roots (current data_dir, remembered spec data_dirs, plugin dirs, python_home,
-// helper, resources, temp). Copy-replace of Low-IL files is limited to write grants
-// inside those roots. The journal exists from before the first ACE until after the last
+// PACKAGES. Sweep accepts only derived `EdgeSlicer.ph.*` / test `EdgeSlicer.t.*`
+// package SIDs and paths under known roots (current data_dir, remembered spec
+// data_dirs, plugin dirs, python_home, helper, resources, temp). Copy-replace of
+// Low-IL files is limited to write grants inside those roots. The journal exists
+// from before the first ACE until after the last
 // ACE is removed; leftover package-SID ACEs are recorded even when RX is already present.
 // ALL APPLICATION PACKAGES RX (Program Files) is not journaled. A missing journal
 // directory is created; spawn fails only when no data dir is resolvable.
 void sweep_stale_parent_sandbox_grants();
-// Windows: DeleteAppContainerProfile for this plugin_key (permanent uninstall). No-op
-// elsewhere, if the profile is missing, or while a host still uses it.
+// Windows: DeleteAppContainerProfile for this exact plugin_key on **permanent uninstall**
+// only. Never general cleanup, never close_host, never test teardown of a pre-existing
+// profile. No-op elsewhere, if the profile is missing, or while a host still uses it.
 void delete_parent_sandbox_profile(const std::string& plugin_key);
+// Test-only: DeleteAppContainerProfile iff this process's CreateAppContainerProfile
+// succeeded (not ERROR_ALREADY_EXISTS). No-op on POSIX and for pre-existing profiles.
+void delete_test_created_parent_sandbox_profile(const std::string& plugin_key);
 
 #ifdef _WIN32
 // Named-pipe SECURITY_ATTRIBUTES that lets the AppContainer SID connect. nullptr when unused.
@@ -168,6 +173,9 @@ std::string win_acl_journal_path_for_testing();
 bool        win_low_label_used_copy_replace_for_testing();
 // Packages\<family>\AC when the current AppContainer SID is known; empty otherwise.
 std::wstring win_appcontainer_localappdata_path();
+// Pre-create a profile without recording it as test-created (simulates a leftover).
+bool win_create_appcontainer_profile_for_testing(const std::string& plugin_key, std::string& error);
+bool win_appcontainer_profile_exists_for_testing(const std::string& plugin_key);
 #endif
 
 // Test-only: EDGE_PLUGIN_SANDBOX=0 / FORCE_UNAVAILABLE, same gate as EDGE_PLUGIN_HOST.

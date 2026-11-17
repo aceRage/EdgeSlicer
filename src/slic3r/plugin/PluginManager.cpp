@@ -2226,6 +2226,7 @@ bool PluginManager::delete_installed_plugin_package(const PluginDescriptor& plug
     if (!delete_plugin_root(resolved_root, plugin.plugin_key, error))
         return false;
 
+    // Permanent uninstall of this exact plugin_key only — not host close or test teardown.
     plugin_ipc::delete_parent_sandbox_profile(plugin.plugin_key);
 
     {
@@ -2366,7 +2367,7 @@ bool PluginManager::finalize_cloud_plugin_removal(const PluginDescriptor& plugin
                                        [&plugin](const Plugin& entry) { return entry.descriptor.plugin_key == plugin.plugin_key; }),
                         m_plugins.end());
     }
-    plugin_ipc::delete_parent_sandbox_profile(plugin.plugin_key);
+    plugin_ipc::delete_parent_sandbox_profile(plugin.plugin_key); // exact key, permanent uninstall only
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Removed cloud-only plugin: " << plugin.plugin_key;
     return true;
 }
