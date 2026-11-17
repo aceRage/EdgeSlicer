@@ -2008,6 +2008,13 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // EdgeSlicer, curved tops (P2): the block is checked against the support layers, so new supports
+        // re-plan it. Walls a block already cut are regenerated first (posPerimeters invalidates
+        // posContouring), so a block now refused leaves an uncut planar top. Objects without curved
+        // tops on invalidate exactly as before. Called from Print::apply(), under the state mutex the
+        // slicing thread writes m_curved_tops_clipped under.
+        if (m_config.curved_tops_enabled.value)
+            invalidated |= this->invalidate_step(m_curved_tops_clipped ? posPerimeters : posContouring);
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.

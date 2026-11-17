@@ -9,7 +9,10 @@
 //  * P1 hardening (tests/design_curved_tops_any_printer.md): the head limits come from the head
 //    model only, every guard refuses visibly, the block ends with a lift, its wipes are speed
 //    capped, and the head clearance check stops the export on a contact.
-//  * The pure helpers: head limits, effective angle, first-layer gap flow.
+//  * The pure helpers: head limits, effective angle, first-layer gap flow, the head's reach.
+//  * P2 (part of it): supports no longer refuse by themselves, only when they reach into the curved
+//    layers within the head's reach; a surface taller than the head allows is curved over its upper
+//    part; a max angle above the cap is said.
 //
 // The head model is read from resources/head_clearance, so every case that slices with curved
 // tops on points resources_dir() at the source tree's resources (ResourcesDirGuard).
@@ -445,14 +448,13 @@ TEST_CASE("Curved tops: every new guard refuses, warns and prints as with the fe
         { "local-Z dithering",   { { "dithering_local_z_mode", "1" } }, 1, "local-Z dithering" },
         { "draft shield",        { { "skirt_loops", "1" }, { "draft_shield", "enabled" } }, 1, "draft shield" },
         { "tall skirt",          { { "skirt_loops", "1" }, { "skirt_height", "3" } }, 1, "skirt taller than one layer" },
-        { "supports",            { { "enable_support", "1" } }, 1, "supports" },
+        // Supports and side stabilizers no longer refuse by themselves (P2): see the support cases below.
         { "two filaments",       { { "sparse_infill_filament", "2" }, { "solid_infill_filament", "2" } }, 2, "more than one filament" },
         { "raft",                { { "raft_layers", "2" } }, 1, "raft" },
-        { "stabilizers",         { { "stabilizer_supports", "auto" } }, 1, "side stabilizers" },
         { "Z contouring",        { { "zaa_enabled", "1" } }, 1, "Z contouring is on for it as well" },
         { "printable height",    { { "printable_height", "5.5" } }, 1, "above the printable height" },
     };
-    const size_t i = GENERATE(range(size_t(0), size_t(10)));
+    const size_t i = GENERATE(range(size_t(0), size_t(8)));
     REQUIRE(i < guards.size());
     const Guard &g = guards[i];
     INFO("guard: " << g.name);
@@ -497,8 +499,12 @@ TEST_CASE("Curved tops: the Centauri Carbon and the X1 Carbon still curve, with 
     CHECK_NOTHROW(Test::gcode(print));
 }
 
-// R1 with numbers: a cap taller than the head allows stays flat, and the warning says by how much.
-TEST_CASE("Curved tops: a surface rising more than the head allows is refused with the numbers", "[CurvedTops]")
+// P2, partial curving (R1 still holds for the curved part): a cap rising 2.6 mm where the head allows
+// 2.0 is curved over its top 2.0 mm, from the planar layer top at Z 4.6, and printed flat below it.
+// Every curved bead lies at least one layer above that layer top (the flat part stands no higher than
+// it), the lowest curved beads sit right at one layer above it (the boundary reads as a layer step), the
+// slope the head check is told is the curved part's only, and the head check finds no contact.
+TEST_CASE("Curved tops: a surface rising more than the head allows is curved over its upper part", "[CurvedTops]")
 {
     const ResourcesDirGuard resources;
     Print print;
@@ -512,13 +518,55 @@ TEST_CASE("Curved tops: a surface rising more than the head allows is refused wi
         { "curved_tops_enabled",        "1" },
         { "curved_tops_max_angle",      "15" },
     });
-    // r = 30, cap 2.6 mm: edge slope about 9.9 deg, rise above the 2.0 mm allowed.
+    // r = 30, cap 2.6 mm (Z 4.0 to 6.6): edge slope about 9.9 deg, rise above the 2.0 mm allowed.
     Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(30., 4., 2.6) }, print, model, config);
     print.process();
-    CHECK_FALSE(print.objects().front()->layers().back()->curved_tops_block);
-    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
-    INFO("warning: " << warning);
-    CHECK(warning.find("more than the 2.00 mm the print head allows") != std::string::npos);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layers().back()->curved_tops_block);
+    CHECK(curved_tops_unavailable_warning(*object).empty());
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("rise 2.00 mm of 2.00 mm allowed") != std::string::npos);
+    CHECK(summary.find("Partly curved: 1 surface(s) rise up to 2.60 mm") != std::string::npos);
+    CHECK(summary.find("The top 2.00 mm (from Z 4.60 mm to 6.60 mm) is curved; the part below Z 4.60 mm prints as flat layers") !=
+          std::string::npos);
+
+    // The cut is a planar layer top, and that layer still prints (the flat plateau under the block).
+    const double cut = 4.6, h = 0.2;
+    const Layer *cut_layer = nullptr;
+    for (const Layer *layer : object->layers())
+        if (std::abs(layer->print_z - cut) < 1e-6)
+            cut_layer = layer;
+    REQUIRE(cut_layer != nullptr);
+    CHECK(cut_layer->has_extrusions());
+
+    // Every curved sample at least one layer above the cut, the lowest ones right there.
+    const Layer *top   = object->layers().back();
+    double       min_z = 1e9, max_z = -1e9;
+    std::function<void(const ExtrusionEntity *)> visit = [&](const ExtrusionEntity *e) {
+        if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+            for (const ExtrusionEntity *child : c->entities)
+                visit(child);
+        } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+            if (p->z_contour != nullptr && p->z_contour->curved_top)
+                for (const float dz : p->z_contour->z) {
+                    min_z = std::min(min_z, top->print_z + double(dz));
+                    max_z = std::max(max_z, top->print_z + double(dz));
+                }
+        }
+    };
+    for (const LayerRegion *region : top->regions())
+        visit(&region->fills);
+    CHECK(min_z >= cut + h - 1e-4);
+    CHECK(min_z < cut + h + 0.05);
+    CHECK(max_z <= 6.6 + 1e-3);
+    CHECK(max_z > 6.5);
+    // The cap's outer facets slope about 9.7 degrees; the facets reaching above Z 4.6 (out to r = 27.5)
+    // at most about 8.9: the head check is told the curved part's slope, not the flat part's.
+    CHECK(top->curved_tops_slope_deg < 9.3f);
+    CHECK(top->curved_tops_slope_deg > 8.0f);
+
+    CHECK_NOTHROW(Test::gcode(print));
 }
 
 TEST_CASE("Curved tops: a gentle cap is printed as conformal layers", "[CurvedTops]")
@@ -966,8 +1014,7 @@ TEST_CASE("Curved tops: a guard input changed after a curved slice refuses on re
     static const std::vector<Change> changes = {
         { "draft shield",     {}, { { "skirt_loops", "1" }, { "draft_shield", "enabled" } }, 1, "draft shield" },
         { "tall skirt",       { { "skirt_loops", "1" } }, { { "skirt_height", "3" } }, 1, "skirt taller than one layer" },
-        { "supports",         {}, { { "enable_support", "1" } }, 1, "supports" },
-        { "stabilizers",      {}, { { "stabilizer_supports", "auto" } }, 1, "side stabilizers" },
+        // Supports: see "Curved tops: turning supports on and off after a slice re-decides" (P2).
         { "by object",        {}, { { "print_sequence", "by object" } }, 1, "prints by object" },
         { "local-Z",          {}, { { "dithering_local_z_mode", "1" } }, 1, "local-Z dithering" },
         { "second filament",  {}, { { "sparse_infill_filament", "2" }, { "solid_infill_filament", "2" } }, 2, "more than one filament" },
@@ -979,7 +1026,7 @@ TEST_CASE("Curved tops: a guard input changed after a curved slice refuses on re
         // (see "raft re-slice control" below: off-reslice vs fresh differs at the same line, and a full
         // invalidation makes both identical again). Pre-existing re-slice history in the raft code.
     };
-    const size_t i = GENERATE(range(size_t(0), size_t(9)));
+    const size_t i = GENERATE(range(size_t(0), size_t(7)));
     REQUIRE(i < changes.size());
     const Change &c = changes[i];
     INFO("change: " << c.name);
@@ -1214,7 +1261,9 @@ TEST_CASE("Curved tops: an unfinished curved step over cut walls is redone from 
 }
 
 // Review finding e: R1 across surfaces. Two caps on one object, each rising 1 mm (under the 2.0 mm the
-// head allows) but 2 mm apart in height: the block spans 3 mm and is refused, with the numbers.
+// head allows) but 2 mm apart in height: the block would span 3 mm. P2: the block is cut at 2.0 mm
+// below the highest point (Z 5.0), so the high cap is curved whole and the low one (up to Z 5.0) stays
+// flat, and the summary says so.
 TEST_CASE("Curved tops: surfaces at different heights are limited by the block's whole height span", "[CurvedTops]")
 {
     const ResourcesDirGuard resources;
@@ -1228,11 +1277,29 @@ TEST_CASE("Curved tops: surfaces at different heights are limited by the block's
     Model model;
     Test::init_print(std::vector<TriangleMesh>{ low }, print, model, puck_config(true, {}));
     print.process();
-    CHECK_FALSE(top_block(print));
-    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
-    INFO("warning: " << warning);
-    CHECK(warning.find("2 curved surfaces together span 3.00 mm") != std::string::npos);
-    CHECK(warning.find("more than the 2.00 mm the print head allows") != std::string::npos);
+    REQUIRE(top_block(print));
+    const PrintObject *object = print.objects().front();
+    CHECK(curved_tops_unavailable_warning(*object).empty());
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("1 surface(s), 3 curved layers; rise 2.00 mm of 2.00 mm allowed") != std::string::npos);
+    CHECK(summary.find("1 lower surface(s) stay flat") != std::string::npos);
+    // Every curved path is over the high cap (x > 0 in the object's frame), none over the low one.
+    size_t over_low = 0, over_high = 0;
+    std::function<void(const ExtrusionEntity *)> visit = [&](const ExtrusionEntity *e) {
+        if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+            for (const ExtrusionEntity *child : c->entities)
+                visit(child);
+        } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+            if (p->z_contour != nullptr && p->z_contour->curved_top)
+                ++(unscale<double>(p->polyline.first_point().x()) < 0. ? over_low : over_high);
+        }
+    };
+    for (const LayerRegion *region : object->layers().back()->regions())
+        visit(&region->fills);
+    CHECK(over_low == 0);
+    CHECK(over_high >= 6);
+    CHECK_NOTHROW(Test::gcode(print));
 }
 
 // Review finding d: a cap steeper than the 10.3 degrees the owner printed (about 11 at the rim). The
@@ -1265,4 +1332,203 @@ TEST_CASE("Curved tops: an 11 degree cap exports on both printers, with the beyo
     }
     INFO("error: " << error);
     CHECK(error.empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// P2: supports and side stabilizers, the head's reach, the angle notice
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// A solid of revolution. profile: (r, z) from the bottom centre (r = 0) round the outside to the top
+// centre (r = 0), counter-clockwise in the (r, z) half plane.
+TriangleMesh make_revolved(const std::vector<std::pair<double, double>> &profile, int sectors = 96)
+{
+    indexed_triangle_set its;
+    const size_t         m = profile.size();
+    its.vertices.emplace_back(0.f, 0.f, float(profile.front().second));
+    for (size_t i = 1; i + 1 < m; ++i)
+        for (int j = 0; j < sectors; ++j) {
+            const double a = 2.0 * M_PI * double(j) / double(sectors);
+            its.vertices.emplace_back(float(profile[i].first * std::cos(a)), float(profile[i].first * std::sin(a)), float(profile[i].second));
+        }
+    const int top = int(its.vertices.size());
+    its.vertices.emplace_back(0.f, 0.f, float(profile.back().second));
+    auto ring = [sectors](size_t i, int j) { return int(1 + (i - 1) * size_t(sectors) + size_t(j % sectors)); };
+    for (int j = 0; j < sectors; ++j)
+        its.indices.emplace_back(0, ring(1, j + 1), ring(1, j));
+    for (size_t i = 1; i + 2 < m; ++i)
+        for (int j = 0; j < sectors; ++j) {
+            its.indices.emplace_back(ring(i, j), ring(i, j + 1), ring(i + 1, j + 1));
+            its.indices.emplace_back(ring(i, j), ring(i + 1, j + 1), ring(i + 1, j));
+        }
+    for (int j = 0; j < sectors; ++j)
+        its.indices.emplace_back(ring(m - 2, j), ring(m - 2, j + 1), top);
+    return TriangleMesh(std::move(its));
+}
+
+// A mushroom: stem r = 8 from Z 0 to 4, a disc r = 15 from Z 4 to 4.6 overhanging it all round, and a
+// 1.2 mm spherical cap on the disc (Z 4.6 to 5.8, rim slope about 9 degrees). With supports on, the
+// support under the disc's overhang tops out at Z 3.8 (0.2 top Z distance), right under the cap.
+TriangleMesh make_mushroom()
+{
+    const double r = 15., base = 4.6, h_cap = 1.2;
+    const double rs = (r * r + h_cap * h_cap) / (2.0 * h_cap);
+    std::vector<std::pair<double, double>> profile = { { 0., 0. }, { 8., 0. }, { 8., 4. }, { r, 4. }, { r, base } };
+    const int rings = 24;
+    for (int i = 1; i < rings; ++i) {
+        const double rr = r * double(rings - i) / double(rings);
+        profile.emplace_back(rr, base + std::sqrt(rs * rs - rr * rr) - (rs - h_cap));
+    }
+    profile.emplace_back(0., base + h_cap);
+    return make_revolved(profile);
+}
+
+ConfigItems mushroom_items(int curved_layers, bool supports)
+{
+    return { { "curved_tops_layers", std::to_string(curved_layers) }, { "enable_support", supports ? "1" : "0" },
+             { "support_top_z_distance", "0.2" } };
+}
+
+void slice_mushroom(Print &print, Model &model, bool curved_tops, const ConfigItems &items)
+{
+    Test::init_print(std::vector<TriangleMesh>{ make_mushroom() }, print, model, puck_config(curved_tops, items));
+    print.process();
+}
+
+// The highest support layer that carries anything.
+double highest_support_z(const PrintObject &object)
+{
+    double z = 0.;
+    for (const SupportLayer *layer : object.support_layers())
+        if (!layer->support_islands.empty() || !layer->support_fills.entities.empty())
+            z = std::max(z, layer->print_z);
+    return z;
+}
+
+} // namespace
+
+// Six curved layers put the band bottom at Z 3.4 (4.6 - 6 x 0.2); the support under the disc stands up
+// to Z 3.8, right under the curved surface: the object prints planar, as with curved tops off, and the
+// warning names the supports.
+TEST_CASE("Curved tops: supports reaching into the curved layers near the surface refuse, with the reason", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const ConfigItems       items = mushroom_items(6, true);
+
+    Print print_off;
+    Model model_off;
+    slice_mushroom(print_off, model_off, false, items);
+    const std::string gcode_off = Test::gcode(print_off);
+
+    Print print_on;
+    Model model_on;
+    slice_mushroom(print_on, model_on, true, items);
+    const PrintObject *object = print_on.objects().front();
+    REQUIRE(highest_support_z(*object) > 3.4 + 1e-3);
+    CHECK_FALSE(object->layers().back()->curved_tops_block);
+    CHECK(count_all_curved_paths(*object) == 0);
+    const std::string warning = curved_tops_unavailable_warning(*object);
+    INFO("warning: " << warning);
+    CHECK(warning.find("its supports (or side stabilizers) reach Z ") != std::string::npos);
+    CHECK(warning.find("into the curved layers (from Z 3.40 mm), within ") != std::string::npos);
+    const std::string gcode_on = Test::gcode(print_on);
+    CHECK_THAT(extrusion_dip(gcode_on), WithinAbs(0., 1e-6));
+    CHECK(gcode_without_curved_tops_key(gcode_on) == gcode_without_curved_tops_key(gcode_off));
+}
+
+// Two curved layers put the band bottom at Z 4.2, above the support's top at 3.8: the supports stay,
+// the top is curved, and the head check (which sees the support extrusions) finds no contact.
+TEST_CASE("Curved tops: supports that stay below the curved layers keep the top curved", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    slice_mushroom(print, model, true, mushroom_items(2, true));
+    const PrintObject *object = print.objects().front();
+    const double       support_top = highest_support_z(*object);
+    INFO("support top " << support_top);
+    REQUIRE(support_top > 3.);
+    CHECK(support_top < 4.2 - 1e-3);
+    CHECK(object->layers().back()->curved_tops_block);
+    CHECK(count_all_curved_paths(*object) >= 4);
+    CHECK(curved_tops_unavailable_warning(*object).empty());
+    CHECK_FALSE(object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary).empty());
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
+// The guard record and the support step re-decide after a change: curved without supports, planar
+// with supports reaching into the band (walls regenerated, output = feature-off output), curved again
+// with them off (output = the first slice).
+TEST_CASE("Curved tops: turning supports on and off after a slice re-decides", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const ConfigItems       no_support = mushroom_items(6, false);
+    const ConfigItems       support    = mushroom_items(6, true);
+
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_mushroom() }, print, model, puck_config(true, no_support));
+    const std::string gcode_curved = Test::gcode(print);
+    REQUIRE(top_block(print));
+
+    print.apply(model, puck_config(true, support));
+    const std::string gcode_refused = Test::gcode(print);
+    CHECK_FALSE(top_block(print));
+    CHECK(count_all_curved_paths(*print.objects().front()) == 0);
+    const std::string warning = curved_tops_unavailable_warning(*print.objects().front());
+    INFO("warning: " << warning);
+    CHECK(warning.find("supports (or side stabilizers) reach") != std::string::npos);
+    CHECK_THAT(extrusion_dip(gcode_refused), WithinAbs(0., 1e-6));
+
+    print.apply(model, puck_config(true, no_support));
+    const std::string gcode_again = Test::gcode(print);
+    CHECK(top_block(print));
+    CHECK(curved_tops_unavailable_warning(*print.objects().front()).empty());
+    CHECK(gcode_without_curved_tops_key(gcode_again) == gcode_without_curved_tops_key(gcode_curved));
+
+    // The refused re-slice equals the feature-off slice with supports: nothing was left cut.
+    print.apply(model, puck_config(false, support));
+    CHECK(gcode_without_curved_tops_key(gcode_refused) == gcode_without_curved_tops_key(Test::gcode(print)));
+}
+
+// C: a max angle above what curved tops uses is not silent. The summary says which value is used.
+TEST_CASE("Curved tops: a max angle above the cap is used as the cap and said", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const std::string angle = GENERATE(std::string("15"), std::string("30"));
+    INFO("curved_tops_max_angle = " << angle);
+    Print print;
+    Model model;
+    slice_puck_items(print, model, true, { { "curved_tops_max_angle", angle } });
+    REQUIRE(top_block(print));
+    const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    if (angle == "30") {
+        CHECK(summary.find("of 20.0 degrees allowed") != std::string::npos);
+        CHECK(summary.find("Curved tops max angle is set to 30.0 degrees; 20.0 degrees is used") != std::string::npos);
+    } else {
+        CHECK(summary.find("of 15.0 degrees allowed") != std::string::npos);
+        CHECK(summary.find("Curved tops max angle is set to") == std::string::npos);
+    }
+    CHECK_THAT(curved_tops_effective_max_angle(30., curved_tops_head_limits(print.config())), WithinAbs(20., 1e-9));
+}
+
+// The support check's reach comes from the head model: the nozzle outline low down, the boxes above
+// their bottoms, unlimited once the gantry is that low.
+TEST_CASE("Curved tops: the head's reach around the nozzle", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const HeadClearancePtr  x1 = resolve_head_clearance("Bambu Lab X1 Carbon");
+    REQUIRE(x1 != nullptr);
+    // Nozzle profile (0.05, 0.48), (0.25, 0.65): halfway between at 0.15.
+    CHECK_THAT(curved_tops_head_reach_mm(*x1, 0.05), WithinAbs(0.48, 1e-9));
+    CHECK_THAT(curved_tops_head_reach_mm(*x1, 0.15), WithinAbs(0.565, 1e-9));
+    // Below the sock (2.5): the nozzle only. Above it: the sock box, +-12 mm, as its corner circle.
+    CHECK(curved_tops_head_reach_mm(*x1, 2.4) < 2.4);
+    CHECK_THAT(curved_tops_head_reach_mm(*x1, 2.6), WithinAbs(std::hypot(12., 12.), 1e-9));
+    // Above the housing and ducts (5): their farthest corner (35, 40).
+    CHECK_THAT(curved_tops_head_reach_mm(*x1, 6.), WithinAbs(std::hypot(35., 40.), 1e-9));
+    // Above the gantry (34): unlimited.
+    CHECK(std::isinf(curved_tops_head_reach_mm(*x1, 35.)));
 }

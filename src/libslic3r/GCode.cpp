@@ -3266,7 +3266,9 @@ WipeTowerType GCode::wipe_tower_type() const
 // time are untouched.
 // EdgeSlicer, curved tops (design D2): it also runs for objects with curved tops on, with the same
 // head the planner used (resolve_head_clearance). A contact on a print that carries a curved block
-// stops the export with an error; a Z contouring only print keeps the warning below.
+// stops the export with an error; a Z contouring only print keeps the warning below. Every extrusion in
+// the G-code is an obstacle, support and side-stabilizer extrusions included (curved tops P2 lets an
+// object with supports keep its curved top when the planner finds them out of the head's way).
 static void check_head_clearance(Print &print, const GCodeProcessorResult &result)
 {
     // An object with curved tops on whose planner refused prints planar (and was told why): it is not

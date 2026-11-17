@@ -6525,9 +6525,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
 
         // ZAA (Z contouring): after infill and ironing, before path simplification.
+        // EdgeSlicer, curved tops (P2): an object with curved tops on runs this step after its supports
+        // (below), so the curved block is checked against the final support layers.
         for (PrintObject *obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
-                obj->contour_z();
+                if (! obj->curved_tops_after_support())
+                    obj->contour_z();
             }
             else {
                 if (obj->set_started(posContouring))
@@ -6549,6 +6552,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 }
             }
         );
+
+        for (PrintObject *obj : m_objects)
+            if (need_slicing_objects.count(obj) != 0 && obj->curved_tops_after_support())
+                obj->contour_z();
 
         for (PrintObject* obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
@@ -6584,8 +6591,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 obj->make_perimeters();
                 obj->infill();
                 obj->ironing();
-                obj->contour_z();
-                obj->generate_support_material();
+                // Curved tops (P2): after the supports, as above.
+                if (obj->curved_tops_after_support()) {
+                    obj->generate_support_material();
+                    obj->contour_z();
+                } else {
+                    obj->contour_z();
+                    obj->generate_support_material();
+                }
                 obj->detect_overhangs_for_lift();
                 obj->estimate_curled_extrusions();
             }

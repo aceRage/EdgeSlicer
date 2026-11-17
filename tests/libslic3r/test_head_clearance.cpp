@@ -388,6 +388,18 @@ TEST_CASE("Head collision check: the curved-tops slope allowance covers only the
         CHECK(r.hits.front().part == "nozzle");
     }
 
+    // Support and stabilizer extrusions are obstacles like any other (curved tops P2 allows supports):
+    // a support bead beyond the land, under the cone, met by a curved extrusion on the block's layer.
+    for (const ExtrusionRole role : { erSupportMaterial, erSupportMaterialInterface, erSupportTransition }) {
+        auto moves = neighbour_case(0.9f, 1.5f, EMoveType::Extrude);
+        moves[1].extrusion_role = role;
+        const HeadCollisionReport r = check_head_collisions(moves, head, sloped(20.));
+        INFO("support role " << int(role));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK_FALSE(r.hits.front().travel);
+    }
+
     // Boxes are never relaxed: material reaching 0.5 into the duct (bottom 4 above the tip) 5 mm away.
     // (The descent before it meets the duct too; the extrusion's own hit is the one checked.)
     {

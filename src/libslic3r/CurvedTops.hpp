@@ -15,8 +15,11 @@
 // samples, emitter and guards it reuses.
 //
 // Scope (P1 of tests/design_curved_tops_any_printer.md): one object, one instance, one filament,
-// by layer, no raft, no supports, no variable layer height, on the printers whose head file records
-// a curved print. See tests/design_curved_tops.md for how it works.
+// by layer, no raft, no variable layer height, on the printers whose head file records a curved
+// print. See tests/design_curved_tops.md for how it works.
+// P2 (part of it): supports and side stabilizers no longer refuse by themselves; the block is planned
+// after them and refused only when they reach into the curved layers within the head's reach. A
+// surface rising more than the head allows is curved over its upper part and printed flat below.
 
 #include <memory>
 #include <string>
@@ -42,6 +45,9 @@ static constexpr double CURVED_TOPS_MAX_ANGLE_CEILING   = 20.0;
 // A nozzle profile point this close above the tip is part of the tip land (the collision check's
 // default tolerance, HeadCollisionParams::tolerance).
 static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
+// Added to the head's reach when supports are checked against the curved block (design R2: nozzle
+// radius + 0.5 mm).
+static constexpr double CURVED_TOPS_REACH_MARGIN_MM     = 0.5;
 
 // What the print head allows a curved top, derived from the resolved head model. A conformal layer
 // is printed after the planar body below it, so the nozzle tip runs over a surface that rises
@@ -77,6 +83,13 @@ CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config);
 // The user's maximum angle, limited by the head and the absolute ceiling.
 double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head);
 
+// How far from the nozzle axis (mm, in XY) any part of the head reaches below `height` above the tip:
+// the nozzle outline where its underside is lower than `height`, and every head box whose bottom is
+// lower than it, taken as the circle round the axis through its farthest corner. +infinity when a box
+// spanning the whole X range (a gantry) is that low. Used to decide whether support material standing
+// `height` above the lowest curved tip is close enough to the curved surface to be met.
+double curved_tops_head_reach_mm(const HeadClearance &head, double height);
+
 // Flow multiplier for a bead whose real height is `gap` while it was planned for `height`:
 // the first conformal layer fills whatever the stepped planar body below left, between 1 and 2
 // layer heights.
@@ -97,7 +110,9 @@ struct CurvedTopsResult
 
 // Clips the planar extrusions that sit inside the curved band and appends the conformal layers
 // to the object's top layer. Called from PrintObject::contour_z() after Z contouring, only when
-// curved_tops_enabled is set. A refusal leaves the object planar and says why.
+// curved_tops_enabled is set. For such an object Print::process() runs that step after the support
+// step, so the object's support layers (supports, side stabilizers) are final here and are checked
+// against the block. A refusal leaves the object planar and says why.
 CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh, const sla::IndexedMesh &imesh);
 
 // True when the object's top layer carries a curved-tops block.
