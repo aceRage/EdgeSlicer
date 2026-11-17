@@ -157,22 +157,36 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   and spawn fail-closes if that fails. There is no path-substring exemption. A
   missing `data_dir` skips the traverse ACE with a warning (the helper
   `set_data_dir` treats not-found as create). Each grant is journalled **before**
-  it is applied, under `{data_dir}/plugin_host/acl_journal.json` **and**
-  `%LOCALAPPDATA%\EdgeSlicer\plugin_host\acl_journal.json`, so grants on
-  `python_home` / the helper dir / `resources_dir` survive a `data_dir` change.
-  The journal is a list of sessions (package SID + grants) and is deleted only
-  after every ACE in a session is removed. `PluginManager::initialize`, CLI after
-  `set_data_dir`, G-code viewer startup, and the next `prepare` revoke anything
-  the journals still list (crash/kill leftover ACEs and Low labels) except the
-  live session. `close_win_appcontainer` revokes, restores the original SACL
-  mandatory label on Edge-created work dirs, walks write-granted trees (bounded)
-  to strip Low labels from files the Low-IL helper created (`edge-plugin-host.log`,
-  `post_process.gcode`, plugin output in user `fs_readwrite`), and clears the
-  journal. Changing a mandatory label needs `WRITE_OWNER`; when that is missing
-  (Modify-only folders such as a `C:\Dev` tree) the strip **logs** the
-  `SetNamedSecurityInfo` error and copy-replaces the file as the user (create
-  new Medium-IL file, copy contents, delete/replace — `ReplaceFile` is not used
-  because it copies the Low label). Hosted G-code that Edge writes out of
+  it is applied, in a **parent-only** file at
+  `{data_dir}/plugin_host_acl/acl_journal.json`. That directory is a sibling of
+  the helper-writable `plugin_host` log dir and is never granted to the package
+  SID or ALL APPLICATION PACKAGES; an explicit protected DACL allows only the
+  creating user and SYSTEM. The helper must not read or write the journal
+  (`PluginManager::initialize` skips the sweep in-process; journal functions
+  no-op inside an AppContainer / `in_child_process`). There is no
+  `%LOCALAPPDATA%` / `Packages/*/AC` copy — `SHGetKnownFolderPath` inside the
+  helper would resolve to the container folder. Sweep accepts only SIDs that
+  match a derived `EdgeSlicer.ph.*` profile (never `S-1-15-2-1`) and paths
+  under known roots (`data_dir`, plugin dirs, `python_home`, helper,
+  `resources_dir`, temp). Copy-replace of Low-IL files from a journal session
+  stays inside that session's write grants under those roots. A leftover
+  helper-writable `{data_dir}/plugin_host/acl_journal.json` is deleted unread.
+  `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
+  already removed so a vanished temp dir cannot pin the journal forever. The
+  journal is a list of sessions (package SID + profile name + grants) and is
+  deleted only after every ACE in a session is removed. Parent
+  `PluginManager::initialize`, CLI after `set_data_dir`, G-code viewer
+  startup, and the next `prepare` revoke anything the journal still lists
+  except the live session. `close_win_appcontainer` revokes, restores the
+  original SACL mandatory label on Edge-created work dirs, walks write-granted
+  trees (bounded) to strip Low labels from files the Low-IL helper created
+  (`edge-plugin-host.log`, `post_process.gcode`, plugin output in user
+  `fs_readwrite`), and clears the journal. Changing a mandatory label needs
+  `WRITE_OWNER`; when that is missing (Modify-only folders such as a `C:\Dev`
+  tree) the strip **logs** the `SetNamedSecurityInfo` error and copy-replaces
+  the file as the user (create new Medium-IL file, copy contents,
+  delete/replace — `ReplaceFile` is not used because it copies the Low label).
+  A successful copy-replace is logged. Hosted G-code that Edge writes out of
   `plugin_data` is stripped of a Low label after the write. Low-IL labels are
   applied only to Edge-owned write dirs (`plugin_data`, host-log, `write_root`),
   not to user-chosen `fs_readwrite` folders. `apply_dir_acl`

@@ -125,13 +125,17 @@ bool  prepare_parent_sandbox(const SandboxSpec& spec, std::string& error);
 void* parent_sandbox_security_capabilities(); // Windows STARTUPINFOEX blob; nullptr elsewhere
 void  close_parent_sandbox();
 // Windows: revoke package-SID ACEs and restore Low-IL labels listed in the grant journal
-// left by a crash/kill, then delete the journal. No-op on POSIX and when no journal exists.
-// Call on every process start that can spawn the helper (GUI PluginManager::initialize,
-// CLI after data_dir is set, and prepare). Journals live under the current data_dir and
-// `%LOCALAPPDATA%\EdgeSlicer\plugin_host` so grants on python_home / helper / resources
-// survive a data_dir change. The journal exists from before the first ACE until after
-// the last ACE is removed; leftover package-SID ACEs are recorded even when RX is already
-// present. ALL APPLICATION PACKAGES RX (Program Files) is not journaled.
+// left by a crash/kill, then delete the journal. No-op on POSIX, in the helper, and when
+// no journal exists. Call on every **parent** process start that can spawn the helper
+// (GUI PluginManager::initialize, CLI after data_dir is set, and prepare). The journal
+// is parent-only at `{data_dir}/plugin_host_acl/acl_journal.json` (not the helper-writable
+// `plugin_host` log dir, and not `%LOCALAPPDATA%` / Packages\\*\\AC). An explicit DACL
+// excludes the package SID and ALL APPLICATION PACKAGES. Sweep accepts only derived
+// `EdgeSlicer.ph.*` package SIDs and paths under known roots (data_dir, plugin dirs,
+// python_home, helper, resources, temp). Copy-replace of Low-IL files is limited to
+// write grants inside those roots. The journal exists from before the first ACE until
+// after the last ACE is removed; leftover package-SID ACEs are recorded even when RX is
+// already present. ALL APPLICATION PACKAGES RX (Program Files) is not journaled.
 void sweep_stale_parent_sandbox_grants();
 
 #ifdef _WIN32
@@ -155,7 +159,6 @@ bool win_apply_low_integrity_label_for_testing(const std::string& path);
 // If LABEL_SECURITY_INFORMATION fails (no WRITE_OWNER), copy-replaces a regular file as the user.
 void        win_clear_low_integrity_label(const std::string& path);
 std::string win_acl_journal_path_for_testing();
-std::string win_stable_acl_journal_path_for_testing();
 bool        win_low_label_used_copy_replace_for_testing();
 // Packages\<family>\AC when the current AppContainer SID is known; empty otherwise.
 std::wstring win_appcontainer_localappdata_path();

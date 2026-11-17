@@ -1,6 +1,7 @@
 #include "PluginSandbox.hpp"
 #include "PluginSandboxPriv.hpp"
 #include "PluginHostProcess.hpp"
+#include "PluginIpcProtocol.hpp"
 
 #include <libslic3r/Utils.hpp>
 #include <slic3r/GUI/GUI_App.hpp>
@@ -370,6 +371,10 @@ bool apply_os_sandbox(const SandboxSpec& spec, SandboxReport& report, std::strin
 bool prepare_parent_sandbox(const SandboxSpec& spec, std::string& error)
 {
 #ifdef _WIN32
+    if (in_child_process()) {
+        error = "AppContainer parent sandbox is parent-only";
+        return false;
+    }
     if (sandbox_env_disable_requested() || sandbox_env_force_unavailable())
         return true;
     return prepare_win_appcontainer(spec, error);
@@ -392,6 +397,8 @@ void* parent_sandbox_security_capabilities()
 void close_parent_sandbox()
 {
 #ifdef _WIN32
+    if (in_child_process())
+        return;
     close_win_appcontainer();
 #endif
 }
@@ -399,9 +406,32 @@ void close_parent_sandbox()
 void sweep_stale_parent_sandbox_grants()
 {
 #ifdef _WIN32
+    if (in_child_process())
+        return;
     sweep_win_acl_journal();
 #endif
 }
+
+#ifdef _WIN32
+std::vector<std::string> parent_sandbox_known_roots()
+{
+    std::vector<std::string> roots;
+    auto                     add = [&](std::string path) {
+        if (path.empty())
+            return;
+        for (const std::string& existing : roots) {
+            if (existing == path)
+                return;
+        }
+        roots.push_back(std::move(path));
+    };
+    add(Slic3r::data_dir());
+    add(Slic3r::resources_dir());
+    add(PythonInterpreter::bundled_python_home());
+    add(helper_path().parent_path().string());
+    return roots;
+}
+#endif
 
 #ifdef _WIN32
 void* parent_sandbox_pipe_security_attributes() { return win_pipe_security_attributes(); }
