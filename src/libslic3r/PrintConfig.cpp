@@ -6150,7 +6150,11 @@ void PrintConfigDef::init_fff_params()
                       "Monotonic: straight lines, crossing direction every layer, always laid next to the line before "
                       "in one direction.\n"
                       "Concentric: loops following the outline of the curved surface inward, with variable line "
-                      "width in the middle so the centre is neither left open nor over-filled.");
+                      "width in the middle so the centre is neither left open nor over-filled.\n"
+                      "The curved layers make their own paths: one wall loop (outer wall line width) and this fill (top "
+                      "surface line width), with their own gap fill. They do not follow the top surface pattern, the wall "
+                      "and top wall counts, \"Only one wall on top surfaces\", the wall generator or the gap fill setting, "
+                      "and they are not ironed. The flow ratios (print, filament, top surface) apply as usual.");
     def->enum_keys_map = &ConfigOptionEnum<CurvedTopsPattern>::get_enum_values();
     def->enum_values.push_back("monotonic");
     def->enum_values.push_back("concentric");
