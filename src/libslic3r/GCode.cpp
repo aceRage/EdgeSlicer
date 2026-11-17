@@ -5300,7 +5300,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     } else {
                         file.write(this->retract());
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z));
+                    // m_max_layer_z is the top of the layers without the Z offset, which every layer is
+                    // printed with (change_layer): with an offset above 0 the nozzle went down into the
+                    // copy just finished.
+                    file.write(m_writer.travel_to_z(m_max_layer_z + m_config.z_offset.value));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
