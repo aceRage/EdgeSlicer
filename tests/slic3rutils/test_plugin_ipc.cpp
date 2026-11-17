@@ -196,7 +196,7 @@ class Stamp(orca.slicing.SlicingPipelineCapabilityBase):
             return orca.ExecutionResult.success()
         if not ctx.gcode_path:
             return orca.ExecutionResult.failure(orca.PluginResult.FatalError, "missing gcode_path")
-        with open(ctx.gcode_path, "a", encoding="utf-8") as f:
+        with open(ctx.gcode_path, "a", encoding="utf-8", newline="") as f:
             f.write(STAMP)
         return orca.ExecutionResult.success("stamped")
 
@@ -839,9 +839,9 @@ const char* const WRITE_PROBE_SOURCE_PREFIX = R"PY(# /// script
 # ///
 import os, time, orca
 
-STARTED_PATH = "__STARTED_PATH__"
-GO_PATH = "__GO_PATH__"
-PROBE_PATH = "__PROBE_PATH__"
+STARTED_PATH = r'''__STARTED_PATH__'''
+GO_PATH = r'''__GO_PATH__'''
+PROBE_PATH = r'''__PROBE_PATH__'''
 
 class Probe(orca.script.ScriptPluginCapabilityBase):
     def get_name(self):
@@ -880,8 +880,8 @@ const char* const WAIT_STAMP_SOURCE_PREFIX = R"PY(# /// script
 # ///
 import os, time, orca
 
-STARTED_PATH = "__STARTED_PATH__"
-GO_PATH = "__GO_PATH__"
+STARTED_PATH = r'''__STARTED_PATH__'''
+GO_PATH = r'''__GO_PATH__'''
 STAMP = (
     "; EDGE_PIPELINE_STAMP begin\n"
     "; EdgeSlicer pipeline plugin stamp v1\n"
@@ -903,7 +903,7 @@ class Stamp(orca.slicing.SlicingPipelineCapabilityBase):
             time.sleep(0.05)
         if not ctx.gcode_path:
             return orca.ExecutionResult.failure(orca.PluginResult.FatalError, "missing gcode_path")
-        with open(ctx.gcode_path, "a", encoding="utf-8") as f:
+        with open(ctx.gcode_path, "a", encoding="utf-8", newline="") as f:
             f.write(STAMP)
         return orca.ExecutionResult.success("stamped")
 
@@ -944,14 +944,14 @@ TEST_CASE("Concurrent script and post-process each get their own result; script 
     write_file(gcode, "G1 X10 Y10 E0.1\n");
 
     std::string stamp_src = WAIT_STAMP_SOURCE_PREFIX;
-    stamp_src             = replace_placeholder(stamp_src, "__STARTED_PATH__", stamp_started.string());
-    stamp_src             = replace_placeholder(stamp_src, "__GO_PATH__", stamp_go.string());
+    stamp_src             = replace_placeholder(stamp_src, "__STARTED_PATH__", stamp_started.generic_string());
+    stamp_src             = replace_placeholder(stamp_src, "__GO_PATH__", stamp_go.generic_string());
     write_plugin(data_dir_guard, "PipelineStamp", stamp_src);
 
     std::string probe_src = WRITE_PROBE_SOURCE_PREFIX;
-    probe_src             = replace_placeholder(probe_src, "__STARTED_PATH__", script_started.string());
-    probe_src             = replace_placeholder(probe_src, "__GO_PATH__", script_go.string());
-    probe_src             = replace_placeholder(probe_src, "__PROBE_PATH__", probe.string());
+    probe_src             = replace_placeholder(probe_src, "__STARTED_PATH__", script_started.generic_string());
+    probe_src             = replace_placeholder(probe_src, "__GO_PATH__", script_go.generic_string());
+    probe_src             = replace_placeholder(probe_src, "__PROBE_PATH__", probe.generic_string());
     write_plugin(data_dir_guard, "Ipc_Probe", probe_src);
 
     PluginManager& manager = PluginManager::instance();

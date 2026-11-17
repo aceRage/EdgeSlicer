@@ -94,7 +94,7 @@ class Stamp(orca.slicing.SlicingPipelineCapabilityBase):
             return orca.ExecutionResult.success()
         if not ctx.gcode_path:
             return orca.ExecutionResult.failure(orca.PluginResult.FatalError, "missing gcode_path")
-        with open(ctx.gcode_path, "a", encoding="utf-8") as f:
+        with open(ctx.gcode_path, "a", encoding="utf-8", newline="") as f:
             f.write(STAMP)
         return orca.ExecutionResult.success("stamped")
 
