@@ -94,7 +94,9 @@ std::vector<double> fin_beads(double w, const Configs &c, double layer_height = 
     const coord_t wall_0_inset = -coord_t(ext_width / 2 - ext_spacing / 2);
 
     Arachne::WallToolPathsParams params = Arachne::make_paths_params(kLayerId, c.object, c.print, &c.region);
-    Arachne::WallToolPaths       wall_tool_paths(to_polygons(last), ext_spacing, spacing_x, 2, wall_0_inset, layer_height, params);
+    // WallToolPaths keeps a reference to the outline: it has to outlive the generator.
+    const Polygons               outline = to_polygons(last);
+    Arachne::WallToolPaths       wall_tool_paths(outline, ext_spacing, spacing_x, 2, wall_0_inset, layer_height, params);
     return widths_at_middle(wall_tool_paths.getToolPaths());
 }
 
