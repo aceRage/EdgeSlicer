@@ -68,19 +68,20 @@ std::string strip_tree_wildcard(std::string path)
     return path;
 }
 
-void add_unique_path(std::vector<SandboxPath>& paths, std::string path, bool write, bool low_label = false)
+void add_unique_path(std::vector<SandboxPath>& paths, std::string path, bool write, bool low_label = false, bool fail_closed_low = false)
 {
     path = strip_tree_wildcard(std::move(path));
     if (path.empty())
         return;
     for (SandboxPath& existing : paths) {
         if (existing.path == path) {
-            existing.write     = existing.write || write;
-            existing.low_label = existing.low_label || low_label;
+            existing.write           = existing.write || write;
+            existing.low_label       = existing.low_label || low_label;
+            existing.fail_closed_low = existing.fail_closed_low || fail_closed_low;
             return;
         }
     }
-    paths.push_back(SandboxPath{std::move(path), write, low_label});
+    paths.push_back(SandboxPath{std::move(path), write, low_label, fail_closed_low});
 }
 
 bool path_exists(const std::string& path)
@@ -123,7 +124,7 @@ nlohmann::json sandbox_spec_to_json(const SandboxSpec& spec)
 {
     nlohmann::json extra = nlohmann::json::array();
     for (const SandboxPath& p : spec.extra_paths)
-        extra.push_back({{"path", p.path}, {"write", p.write}, {"low_label", p.low_label}});
+        extra.push_back({{"path", p.path}, {"write", p.write}, {"low_label", p.low_label}, {"fail_closed_low", p.fail_closed_low}});
     return {
         {"plugin_key", spec.plugin_key},       {"python_home", spec.python_home}, {"plugin_root", spec.plugin_root},
         {"write_root", spec.write_root},       {"data_dir", spec.data_dir},       {"extra_paths", std::move(extra)},
@@ -150,7 +151,8 @@ bool sandbox_spec_from_json(const nlohmann::json& json, SandboxSpec& spec, std::
         for (const auto& item : json["extra_paths"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
                 continue;
-            add_unique_path(spec.extra_paths, item["path"].get<std::string>(), item.value("write", false), item.value("low_label", false));
+            add_unique_path(spec.extra_paths, item["path"].get<std::string>(), item.value("write", false), item.value("low_label", false),
+                            item.value("fail_closed_low", false));
         }
     }
     return true;
@@ -191,7 +193,8 @@ bool sandbox_specs_equal(const SandboxSpec& a, const SandboxSpec& b)
         return false;
     for (size_t i = 0; i < a.extra_paths.size(); ++i) {
         if (a.extra_paths[i].path != b.extra_paths[i].path || a.extra_paths[i].write != b.extra_paths[i].write ||
-            a.extra_paths[i].low_label != b.extra_paths[i].low_label)
+            a.extra_paths[i].low_label != b.extra_paths[i].low_label ||
+            a.extra_paths[i].fail_closed_low != b.extra_paths[i].fail_closed_low)
             return false;
     }
     return true;
@@ -336,9 +339,10 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
         // AppContainer is Low IL. The helper cannot write up into a Medium folder, so each
         // fs_readwrite root gets package-SID modify plus a Low label when one is not already
         // present. The parent journals both and restores them on close/sweep. Missing
-        // WRITE_OWNER fail-closes that root rather than leaving it read-only.
+        // WRITE_OWNER fail-closes that user root rather than leaving it read-only. Edge
+        // work dirs (plugin_host, plugin_data, write_root) warn and continue instead.
         if (ensure_grant_directory(stripped))
-            add_unique_path(spec.extra_paths, stripped, true, true);
+            add_unique_path(spec.extra_paths, stripped, true, true, true);
     }
     return spec;
 }

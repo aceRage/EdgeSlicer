@@ -1137,7 +1137,7 @@ TEST_CASE("make_sandbox_spec marks fs_readwrite extras writable and Low-labelled
     const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec(descriptor, permissions, {});
     bool granted = false;
     for (const auto& extra : spec.extra_paths) {
-        if (extra.path == user_rw.string() && extra.write && extra.low_label)
+        if (extra.path == user_rw.string() && extra.write && extra.low_label && extra.fail_closed_low)
             granted = true;
     }
     CHECK(granted);
@@ -1984,13 +1984,57 @@ TEST_CASE("AppContainer fail-closes fs_readwrite when WRITE_OWNER is missing", "
     spec.plugin_key        = unique_test_plugin_key("FsRw_NoWO");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
-    spec.extra_paths.push_back({user_rw.string(), true, true});
+    spec.extra_paths.push_back({user_rw.string(), true, true, true});
     std::string error;
     const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
     INFO("prepare error: " << error);
     REQUIRE_FALSE(ok);
     CHECK(error.find("WRITE_OWNER") != std::string::npos);
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+}
+
+TEST_CASE("AppContainer hosted run succeeds when data_dir has no WRITE_OWNER", "[PluginSandbox][windows][acl][Python]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data("plugin-sandbox-nowo-host");
+    REQUIRE(restrict_dacl_dac_without_write_owner(data.dir.string()));
+
+    write_plugin(data, "Sandbox_NoWO", R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "NoWO Echo"
+# type = "script"
+# ///
+import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        return orca.ExecutionResult.success("nowo-ok")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY");
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Sandbox_NoWO", error));
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_NoWO", "Echo");
+    INFO("nowo host: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "nowo-ok");
 }
 
 TEST_CASE("AppContainer leaves a pre-existing Low label on fs_readwrite after close", "[PluginSandbox][windows][acl]")

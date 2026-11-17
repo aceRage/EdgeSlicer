@@ -1560,7 +1560,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
 
-    auto grant_or_fail = [&](const std::string& path, bool write, bool apply_low) {
+    auto grant_or_fail = [&](const std::string& path, bool write, bool apply_low, bool fail_closed_low = false) {
         if (path.empty())
             return true;
         const DWORD perms = write ? k_acl_rw : k_acl_ro;
@@ -1611,13 +1611,21 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             error = "AppContainer ACL grant failed for " + path;
             return false;
         }
-        // Low IL is required for AppContainer writes (no-write-up). Fail closed when
-        // WRITE_OWNER is missing rather than leaving the root read-only. Do not copy-replace
-        // the user folder to apply a label.
+        // Low IL is required for AppContainer writes (no-write-up). User fs_readwrite
+        // fail-closes when WRITE_OWNER is missing rather than leaving the root read-only.
+        // Edge work dirs warn and continue (r22). Do not copy-replace the folder to apply a label.
         if (grant.low_label && !label_low_integrity(path)) {
-            error = "AppContainer Low-IL label failed for " + path +
-                    " (WRITE_OWNER is required to make this folder writable to the helper)";
-            return false;
+            if (fail_closed_low) {
+                error = "AppContainer Low-IL label failed for " + path +
+                        " (WRITE_OWNER is required to make this folder writable to the helper)";
+                return false;
+            }
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer low-IL label skipped for " << path;
+            g_win.grants.back().low_label = false;
+            if (!persist_acl_journal(sid)) {
+                error = "AppContainer ACL journal failed for " + path;
+                return false;
+            }
         }
         return true;
     };
@@ -1691,7 +1699,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
                 continue;
             }
         }
-        if (!grant_or_fail(extra.path, extra.write, extra.write && extra.low_label)) {
+        if (!grant_or_fail(extra.path, extra.write, extra.write && extra.low_label, extra.fail_closed_low)) {
             clear_win_state();
             return false;
         }

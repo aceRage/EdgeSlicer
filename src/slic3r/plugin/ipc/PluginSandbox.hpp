@@ -37,6 +37,9 @@ struct SandboxPath
     // host-log, write_root, and user fs_readwrite). Skip if the path is already Low; restore
     // only a label this process added.
     bool low_label = false;
+    // User fs_readwrite only: spawn fails if the Low label cannot be set (no WRITE_OWNER).
+    // Edge work dirs (plugin_host, plugin_data, write_root) warn and continue.
+    bool fail_closed_low = false;
 };
 
 // What the child should lock down to. Built on the Edge side from p4 grants plus the
@@ -140,7 +143,8 @@ void  close_parent_sandbox();
 // those paths sit outside this process's current roots (moved install, portable
 // copy, test binary vs GUI). Hosted `fs_readwrite` roots get package-SID modify
 // and a Low label when needed for writes; close/sweep restore only a label this
-// process added (WRITE_OWNER failure fail-closes that root). Close/sweep skip
+// process added (WRITE_OWNER failure fail-closes that user root). Edge work dirs
+// warn and continue if the Low label cannot be set. Close/sweep skip
 // the grant root unless this process added the label, and apply grant-time
 // before any label removal. Copy-replace of
 // Low-IL files stays inside this process's known user-rw roots (current data_dir,

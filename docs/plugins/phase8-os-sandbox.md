@@ -221,7 +221,10 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   label removal (not only copy-replace) so a pre-existing Low file or dir
   inside the tree keeps its label. Copy-replace is never used to apply or restore a
   user folder's label. If `WRITE_OWNER` is missing, spawn fail-closes for
-  that root with a clear error rather than leaving it read-only. Changing a
+  that **user** `fs_readwrite` root with a clear error rather than leaving it
+  read-only. Edge-owned work dirs (`plugin_host`, `plugin_data`, `write_root`)
+  log a warning and continue so a Modify-only tree (no `WRITE_OWNER`) can still
+  run hosted plugins. Changing a
   mandatory label on helper-created files still needs `WRITE_OWNER`; when
   that is missing the strip **logs** the `SetNamedSecurityInfo` error and
   copy-replaces only files created at/after the session grant time that are
