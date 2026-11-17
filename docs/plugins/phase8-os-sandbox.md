@@ -152,11 +152,19 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   AppContainer token includes as a group. If the package can already RX, the grant is
   skipped with a warning (a Program Files install has no `WRITE_DAC`). Otherwise the
   ACE is applied and spawn fail-closes if that fails. There is no path-substring
-  exemption. Each grant is journalled under `{data_dir}/plugin_host/acl_journal.json`
-  before it is applied; `PluginManager::initialize` and the next `prepare` revoke
-  anything the journal still lists (crash/kill leftover ACEs and Low labels) and then
-  delete it. `close_win_appcontainer` revokes, restores the original SACL mandatory
-  label on Edge-created work dirs, and clears the journal. Low-IL labels are applied
+  exemption. A missing `data_dir` skips the traverse ACE with a warning (the helper
+  `set_data_dir` treats not-found as create). Each grant is journalled under
+  `{data_dir}/plugin_host/acl_journal.json` before it is applied; grant *paths* in
+  that journal may sit outside `data_dir` (`python_home`, user `fs_readwrite`, the
+  helper dir). `PluginManager::initialize`, CLI after `set_data_dir`, G-code viewer
+  startup, and the next `prepare` revoke anything the journal still lists
+  (crash/kill leftover ACEs and Low labels) and then delete it.
+  `close_win_appcontainer` revokes, restores the original SACL mandatory
+  label on Edge-created work dirs, walks write-granted trees (bounded) to strip
+  Low labels from files the Low-IL helper created (`edge-plugin-host.log`,
+  `post_process.gcode`, plugin output in user `fs_readwrite`), and clears the
+  journal. Hosted G-code that Edge writes out of `plugin_data` is stripped of a
+  Low label after the write. Low-IL labels are applied
   only to Edge-owned write dirs (`plugin_data`, host-log, `write_root`), not to
   user-chosen `fs_readwrite` folders. `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating

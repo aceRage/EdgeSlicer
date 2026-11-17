@@ -168,6 +168,8 @@ bool PluginManager::initialize(bool install_hooks)
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Plugin manager initialized";
 
+    // Windows: leftover package-SID ACEs / Low labels from a crash. CLI and G-code
+    // viewer also call this after data_dir is set; prepare sweeps again before spawn.
     plugin_ipc::sweep_stale_parent_sandbox_grants();
 
     return true;

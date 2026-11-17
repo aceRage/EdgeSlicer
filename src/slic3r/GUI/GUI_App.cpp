@@ -119,6 +119,7 @@
 #include "slic3r/plugin/EdgePythonInclude.hpp"
 #include "slic3r/plugin/PluginManager.hpp"
 #include "slic3r/plugin/PythonInterpreter.hpp"
+#include "slic3r/plugin/ipc/PluginSandbox.hpp"
 #endif
 
 #include "../Utils/PresetUpdater.hpp"
@@ -4134,6 +4135,11 @@ bool GUI_App::on_init_inner()
         if (plater_ != nullptr)
             // ensure the selected technology is ptFFF
             plater_->set_printer_technology(ptFFF);
+#ifdef EDGE_PYTHON_PLUGINS
+        // G-code viewer skips PluginManager::initialize. Still sweep leftover AppContainer
+        // ACEs from a previous crash so a headless/viewer start does not leave them.
+        plugin_ipc::sweep_stale_parent_sandbox_grants();
+#endif
     }
     else {
         set_startup_splash_phase(_L("Loading current presets"), 85);
