@@ -211,22 +211,28 @@ if (EDGE_PYTHON_PLUGINS)
     endif ()
     add_executable(fake-plugin-host fake_plugin_host.cpp)
     add_dependencies(${_TEST_NAME}_tests edge-plugin-host fake-plugin-host)
+    # Do not use $<TARGET_FILE_DIR:slic3rutils_tests> from other targets: that genex
+    # adds a reverse dependency and cycles with add_dependencies(tests helper).
+    if (CMAKE_CONFIGURATION_TYPES)
+        set(_tests_bin_dir "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+    else ()
+        set(_tests_bin_dir "${CMAKE_CURRENT_BINARY_DIR}")
+    endif ()
     # edge-plugin-host is defined in src/slic3r/; CMake forbids POST_BUILD from here.
-    # This target still copies when the tests (or an explicit ninja of this name) build.
     add_custom_target(copy-edge-plugin-host-for-tests
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_tests_bin_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"
-            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
+            "${_tests_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
         DEPENDS edge-plugin-host
         COMMENT "Copying edge-plugin-host for plugin tests"
         VERBATIM)
     add_dependencies(${_TEST_NAME}_tests copy-edge-plugin-host-for-tests)
     add_custom_command(TARGET fake-plugin-host POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_tests_bin_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:fake-plugin-host>"
-            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:fake-plugin-host>"
+            "${_tests_bin_dir}/$<TARGET_FILE_NAME:fake-plugin-host>"
         COMMENT "Copying fake-plugin-host for spawn fail-fast tests"
         VERBATIM)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
