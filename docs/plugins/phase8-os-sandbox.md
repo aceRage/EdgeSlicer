@@ -141,8 +141,14 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 - Windows: the Job object kills every assigned process; `ACTIVE_PROCESS=1` stops them spawning.
   AppContainer profile names are a fixed-length FNV hash of `plugin_key` (no truncation
   collisions). Directory ACLs are granted at the folder with inheritance (not a recursive
-  walk), checked fail-closed, and revoked on `close_win_appcontainer`. The 1 GiB job process
-  memory cap is a named constant, not plugin-configurable.
+  walk), checked fail-closed, and revoked on `close_win_appcontainer`. `grant_dir_acl`
+  appends a package-SID ACE onto the existing DACL, which already allows the creating
+  user. The IPC named-pipe DACL is
+  `D:(A;;GA;;;<package SID>)(A;;GA;;;<TokenUser>)(A;;GA;;;SY)S:(ML;;NW;;;LW)` — not BA,
+  because a non-elevated token has Administrators as deny-only and the AppContainer
+  access check requires both the user/groups SID and the package SID (helper exit 1005
+  otherwise). Job objects and OVERLAPPED events are unnamed (parent-only / assigned by
+  handle). The 1 GiB job process memory cap is a named constant, not plugin-configurable.
 - macOS / POSIX: process group kill (`kill(-pid)`). `setsid` / `setpgid` / `setpgrp` are
   denied after the Linux sandbox applies so grandchildren cannot leave the group. The helper
   exec env is an allow-list (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` /

@@ -121,6 +121,11 @@ void  close_parent_sandbox();
 void* parent_sandbox_pipe_security_attributes();
 // Fixed-length FNV-1a profile name (no truncation collisions). Tests cover the hash.
 std::wstring win_appcontainer_profile_name(const std::string& plugin_key);
+// Named-pipe SECURITY_DESCRIPTOR used for AppContainer IPC. DACL grants GENERIC_ALL to the
+// package SID, the current process TokenUser, and SYSTEM (not BA: a non-elevated token has
+// Administrators as deny-only, so the user/groups check fails). SACL is Low IL + no-write-up.
+// Caller LocalFree's *out_sd. container_sid / out_sd are PSID / PSECURITY_DESCRIPTOR.
+bool win_build_pipe_security_descriptor(void* container_sid, void** out_sd, std::string& error);
 #endif
 
 // Test-only: EDGE_PLUGIN_SANDBOX=0 / FORCE_UNAVAILABLE, same gate as EDGE_PLUGIN_HOST.

@@ -131,6 +131,9 @@ bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mo
     // One SetNamedSecurityInfoW. An inheritable ACE does propagate to existing
     // children (that is the grant). Do not SET then immediately REVOKE — that was
     // the redundant second walk. Grants live until close_win_appcontainer.
+    // SetEntriesInAclW below appends this package-SID ACE onto the existing DACL,
+    // which already allows the creating user; the user-plus-package rule is met
+    // without replacing the DACL.
     ea.grfInheritance      = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
@@ -209,7 +212,83 @@ void clear_win_state()
     g_win.ready   = false;
 }
 
+bool token_user_sid_string(HANDLE token, std::wstring& out, std::string& error)
+{
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        error = "GetTokenInformation(TokenUser) failed";
+        return false;
+    }
+    std::vector<BYTE> buf(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        error = "GetTokenInformation(TokenUser) failed";
+        return false;
+    }
+    const auto* tu = reinterpret_cast<const TOKEN_USER*>(buf.data());
+    if (tu == nullptr || tu->User.Sid == nullptr || !::IsValidSid(tu->User.Sid)) {
+        error = "GetTokenInformation(TokenUser) failed";
+        return false;
+    }
+    LPWSTR sid_str = nullptr;
+    if (!::ConvertSidToStringSidW(tu->User.Sid, &sid_str) || sid_str == nullptr) {
+        error = "ConvertSidToStringSid failed for TokenUser";
+        return false;
+    }
+    out.assign(sid_str);
+    ::LocalFree(sid_str);
+    return true;
+}
+
 } // namespace
+
+bool win_build_pipe_security_descriptor(void* container_sid, void** out_sd, std::string& error)
+{
+    if (container_sid == nullptr || out_sd == nullptr) {
+        error = "AppContainer named-pipe security descriptor failed";
+        return false;
+    }
+    auto* sid = static_cast<PSID>(container_sid);
+    if (!::IsValidSid(sid)) {
+        error = "ConvertSidToStringSid failed for AppContainer SID";
+        return false;
+    }
+    LPWSTR package_str = nullptr;
+    if (!::ConvertSidToStringSidW(sid, &package_str) || package_str == nullptr) {
+        error = "ConvertSidToStringSid failed for AppContainer SID";
+        return false;
+    }
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        ::LocalFree(package_str);
+        error = "OpenProcessToken failed for TokenUser";
+        return false;
+    }
+    std::wstring user_str;
+    const bool   got_user = token_user_sid_string(token, user_str, error);
+    ::CloseHandle(token);
+    if (!got_user) {
+        ::LocalFree(package_str);
+        return false;
+    }
+    // AppContainer must pass the access check for both its user/groups and its package SID.
+    // A non-elevated token carries BA as deny-only, so (A;;GA;;;BA) fails the user check
+    // (ERROR_ACCESS_DENIED, helper exit 1005). Grant TokenUser and SYSTEM instead.
+    std::wstring sddl = L"D:(A;;GA;;;";
+    sddl += package_str;
+    sddl += L")(A;;GA;;;";
+    sddl += user_str;
+    sddl += L")(A;;GA;;;SY)S:(ML;;NW;;;LW)";
+    ::LocalFree(package_str);
+
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
+        error = "AppContainer named-pipe security descriptor failed";
+        return false;
+    }
+    *out_sd = sd;
+    return true;
+}
 
 bool probe_win_sandbox(SandboxProbe& probe)
 {
@@ -349,34 +428,25 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
 
-    // Named pipe SD. DACL is the container SID + Admins only (no Everyone, no ALL APPLICATION
-    // PACKAGES). SACL is Low IL + no-write-up so the AppContainer host can CreateFile GENERIC_WRITE.
+    // Named pipe SD. DACL is package SID + current TokenUser + SYSTEM (no Everyone, no ALL
+    // APPLICATION PACKAGES, no BA). SACL is Low IL + no-write-up so the host can CreateFile
+    // GENERIC_WRITE. See win_build_pipe_security_descriptor for the user-plus-package rule.
     //
     // Other kernel objects shared with the host:
     //   * ConnectNamedPipe / Channel OVERLAPPED events are unnamed and parent-only.
     //   * The Job object is unnamed; the child is assigned by handle, not by name.
     //   * No file mappings. Writable grant directories are labelled Low above.
-    LPWSTR sid_str = nullptr;
-    if (!::ConvertSidToStringSidW(sid, &sid_str) || sid_str == nullptr) {
-        error = "ConvertSidToStringSid failed for AppContainer SID";
+    // Filesystem grants append a package-SID ACE onto the existing DACL (grant_dir_acl),
+    // which already allows the creating user.
+    void* sd = nullptr;
+    if (!win_build_pipe_security_descriptor(sid, &sd, error) || sd == nullptr) {
         clear_win_state();
         return false;
     }
-    std::wstring sddl = L"D:(A;;GA;;;";
-    sddl += sid_str;
-    sddl += L")(A;;GA;;;BA)S:(ML;;NW;;;LW)";
-    ::LocalFree(sid_str);
-
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
-        error = "AppContainer named-pipe security descriptor failed";
-        clear_win_state();
-        return false;
-    }
-    g_win.pipe_sd                      = sd;
+    g_win.pipe_sd                      = static_cast<PSECURITY_DESCRIPTOR>(sd);
     g_win.pipe_acl                     = nullptr; // DACL/SACL live inside the self-relative SD
     g_win.pipe_sa.nLength              = sizeof(SECURITY_ATTRIBUTES);
-    g_win.pipe_sa.lpSecurityDescriptor = sd;
+    g_win.pipe_sa.lpSecurityDescriptor = g_win.pipe_sd;
     g_win.pipe_sa.bInheritHandle       = FALSE;
     g_win.ready                        = true;
     return true;

@@ -329,6 +329,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 
+    // Unnamed: the child is assigned by handle and never opens this object by name.
     HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
     if (job == nullptr) {
         ::CloseHandle(pipe);
@@ -394,6 +395,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     // plugin_root / write_root from the running child.
 
     OVERLAPPED ov{};
+    // Unnamed, parent-only. The AppContainer child never opens this event.
     ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (ov.hEvent == nullptr) {
         ::TerminateProcess(pi.hProcess, 1);
