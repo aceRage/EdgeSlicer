@@ -2316,7 +2316,7 @@ TEST_CASE("Curved tops P3: out-of-range override values are clamped and said", "
     cfg.curved_tops_dev_angle_ceiling.value    = std::numeric_limits<double>::quiet_NaN();
     const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(cfg, true);
     REQUIRE(dev.active);
-    CHECK_THAT(dev.safe_lift_mm, WithinAbs(0.2, 1e-12));
+    CHECK_THAT(dev.safe_lift_mm, WithinAbs(0.2, 1e-6)); // the option range is stored as float
     CHECK_THAT(dev.clearance_margin_mm, WithinAbs(0.0, 1e-12));
     CHECK_THAT(dev.speed_cap_mm_s, WithinAbs(1.0, 1e-12));
     CHECK_THAT(dev.angle_ceiling_deg, WithinAbs(CURVED_TOPS_MAX_ANGLE_CEILING, 1e-12));
