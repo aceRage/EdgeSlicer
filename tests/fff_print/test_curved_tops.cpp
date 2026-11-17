@@ -1492,6 +1492,43 @@ TEST_CASE("Curved tops: turning supports on and off after a slice re-decides", "
     CHECK(gcode_without_curved_tops_key(gcode_refused) == gcode_without_curved_tops_key(Test::gcode(print)));
 }
 
+// B, the owner's arm: the surface flat enough to curve is only the middle of a rounded top, and its
+// steeper flanks stand in the band whole curving would need. With a 5 degree maximum the 1.2 mm cap
+// of the 30 mm puck is curved only within r = 8.2 (Z 4.84 to 5.2); the ring outside stands up to the
+// layer at Z 4.8 within the band (from Z 4.24). Instead of refusing (P1), the cut is raised to that
+// layer: the flanks print flat up to Z 4.8 and the curved layers start a layer above it.
+TEST_CASE("Curved tops: material beside a surface raises the cut instead of refusing", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    Print print;
+    Model model;
+    slice_puck(print, model, true, { { "curved_tops_max_angle", "5" } });
+    const PrintObject *object = print.objects().front();
+    REQUIRE(top_block(print));
+    CHECK(curved_tops_unavailable_warning(*object).empty());
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("Partly curved: below Z 4.80 mm, parts of the object next to the curved surface stand where the print head "
+                       "would pass") != std::string::npos);
+    CHECK(summary.find("the part below Z 4.80 mm prints as flat layers") != std::string::npos);
+    double min_z = 1e9;
+    const Layer *top = object->layers().back();
+    std::function<void(const ExtrusionEntity *)> visit = [&](const ExtrusionEntity *e) {
+        if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+            for (const ExtrusionEntity *child : c->entities)
+                visit(child);
+        } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+            if (p->z_contour != nullptr && p->z_contour->curved_top)
+                for (const float dz : p->z_contour->z)
+                    min_z = std::min(min_z, top->print_z + double(dz));
+        }
+    };
+    for (const LayerRegion *region : top->regions())
+        visit(&region->fills);
+    CHECK(min_z >= 4.8 + 0.2 - 1e-4);
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
 // C: a max angle above what curved tops uses is not silent. The summary says which value is used.
 TEST_CASE("Curved tops: a max angle above the cap is used as the cap and said", "[CurvedTops]")
 {
