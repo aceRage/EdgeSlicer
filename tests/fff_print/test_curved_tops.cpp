@@ -1492,6 +1492,144 @@ TEST_CASE("Curved tops: turning supports on and off after a slice re-decides", "
     CHECK(gcode_without_curved_tops_key(gcode_refused) == gcode_without_curved_tops_key(Test::gcode(print)));
 }
 
+// Review (a): the reach decides. Generated supports in the band always stand under the curved surface
+// (whatever holds them up is object material beside the surface, which raises the cut), so a support
+// island is placed by hand in the band of a curved puck (r = 15, CC1 head, band bottom Z 3.4) and the
+// object re-planned from fresh walls with that support layer in place. CC1 head: nozzle reach at 0.4 mm
+// above the band bottom 0.82 mm (+0.5 margin = 1.32); at 2.6 mm the sock box (+-12 mm) is in reach
+// (16.97 + 0.5 = 17.47).
+TEST_CASE("Curved tops: support in the band is refused within the head's reach and kept beyond it", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    struct Case { const char *name; double z, x; bool kept; const char *reason; };
+    static const std::vector<Case> cases = {
+        { "in the band, beyond the nozzle's reach", 3.8, 18.0, true, "" },
+        { "in the band, within the nozzle's reach", 3.8, 16.0, false, "reach Z 3.80 mm, into the curved layers (from Z 3.40 mm), within 1.32 mm" },
+        { "high enough for the sock to reach",      6.0, 18.0, false, "reach Z 6.00 mm, into the curved layers (from Z 3.40 mm), within 17.47 mm" },
+        { "below the band, touching the surface",   3.2, 15.5, true, "" },
+    };
+    const size_t i = GENERATE(range(size_t(0), size_t(4)));
+    REQUIRE(i < cases.size());
+    const Case &c = cases[i];
+    INFO("case: " << c.name);
+
+    Print print;
+    Model model;
+    slice_puck(print, model, true);
+    REQUIRE(top_block(print));
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object->support_layers().empty());
+    // A 1 mm square support island centred at (x, 0).
+    SupportLayer *support = object->add_support_layer(0, 0, 0.2, c.z);
+    support->support_islands.emplace_back(Polygon({ Point::new_scale(c.x - 0.5, -0.5), Point::new_scale(c.x + 0.5, -0.5),
+                                                    Point::new_scale(c.x + 0.5, 0.5), Point::new_scale(c.x - 0.5, 0.5) }));
+    CurvedTopsTestAccess::invalidate(*object, posPerimeters);
+    print.process();
+    const std::string warning = curved_tops_unavailable_warning(*object);
+    INFO("warning: " << warning);
+    CHECK(top_block(print) == c.kept);
+    if (c.kept)
+        CHECK(warning.empty());
+    else {
+        CHECK(warning.find(c.reason) != std::string::npos);
+        CHECK(count_all_curved_paths(*object) == 0);
+    }
+}
+
+// Review (c), whole curving: P1's tolerance (1 mm2 per layer outside the footprint grown by 0.5 mm) is
+// kept there. A 0.9 x 0.9 mm pin 0.6 mm beside the puck's rim (0.81 mm2) rising to Z 5.0 passes the
+// planner; the curved rim beads run down to about Z 3.6 next to it, and the head check stops the export.
+TEST_CASE("Curved tops: a pin beside a whole curved top that the planner tolerates is stopped by the head check", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    TriangleMesh puck = make_capped_puck(15., 4., 1.2);
+    TriangleMesh pin(its_make_cube(0.9, 0.9, 5.0));
+    pin.translate(15.6f, -0.45f, 0.f);
+    puck.merge(pin);
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ puck }, print, model, puck_config(true, {}));
+    print.process();
+    REQUIRE(top_block(print));
+    std::string error;
+    try {
+        Test::gcode(print);
+    } catch (const Slic3r::SlicingError &ex) {
+        error = ex.what();
+    }
+    INFO("error: " << error);
+    CHECK(error.find("Curved tops:") != std::string::npos);
+    CHECK(error.find("The G-code was not exported") != std::string::npos);
+}
+
+// Review (c), partial curving: there the tolerance does not reach above the lowest curved bead. The
+// same pin beside the 2.6 mm cap (cut by rise at Z 4.6), rising to Z 6.0: its flat walls above Z 4.8
+// would stand above the lowest curved beads, so the cut is raised to its top (Z 6.0); the curved
+// layers start at Z 6.2 and the export is clean.
+TEST_CASE("Curved tops: on the partial path nothing flat beside the curved part stands above its lowest bead", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    TriangleMesh puck = make_capped_puck(30., 4., 2.6);
+    TriangleMesh pin(its_make_cube(0.9, 0.9, 6.0));
+    pin.translate(30.6f, -0.45f, 0.f);
+    puck.merge(pin);
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ puck }, print, model, puck_config(true, {}));
+    print.process();
+    const PrintObject *object = print.objects().front();
+    REQUIRE(top_block(print));
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("Partly curved: below Z 6.00 mm, parts of the object next to the curved surface") != std::string::npos);
+    CHECK(summary.find("the part below Z 6.00 mm prints as flat layers") != std::string::npos);
+    double min_z = 1e9;
+    const Layer *top = object->layers().back();
+    std::function<void(const ExtrusionEntity *)> visit = [&](const ExtrusionEntity *e) {
+        if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+            for (const ExtrusionEntity *child : c->entities)
+                visit(child);
+        } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+            if (p->z_contour != nullptr && p->z_contour->curved_top)
+                for (const float dz : p->z_contour->z)
+                    min_z = std::min(min_z, top->print_z + double(dz));
+        }
+    };
+    for (const LayerRegion *region : top->regions())
+        visit(&region->fills);
+    CHECK(min_z >= 6.2 - 1e-4);
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
+// Review (d): a cut raised by material beside can lie below the head's rise floor. A 1.2 mm cap on a
+// 30 mm puck standing on a wider plate (r = 25, top Z 3.0), six curved layers: the plate is in the band
+// of whole curving (from Z 2.8), so the cut is the plate's top, Z 3.0 - more than 2.0 mm under the
+// apex. What is curved is the cap, Z 4.0 to 5.2: the summary reports that span, not 2.2 mm.
+TEST_CASE("Curved tops: the summary reports the span actually curved when material beside sets the cut", "[CurvedTops]")
+{
+    const ResourcesDirGuard resources;
+    const double r = 15., base = 4., h_cap = 1.2, rs = (r * r + h_cap * h_cap) / (2.0 * h_cap);
+    std::vector<std::pair<double, double>> profile = { { 0., 0. }, { 25., 0. }, { 25., 3. }, { r, 3. }, { r, base } };
+    for (int i = 1; i < 24; ++i) {
+        const double rr = r * double(24 - i) / 24.;
+        profile.emplace_back(rr, base + std::sqrt(rs * rs - rr * rr) - (rs - h_cap));
+    }
+    profile.emplace_back(0., base + h_cap);
+    Print print;
+    Model model;
+    Test::init_print(std::vector<TriangleMesh>{ make_revolved(profile) }, print, model, puck_config(true, { { "curved_tops_layers", "6" } }));
+    print.process();
+    const PrintObject *object = print.objects().front();
+    REQUIRE(top_block(print));
+    const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("rise 1.20 mm of 2.00 mm allowed") != std::string::npos);
+    CHECK(summary.find("The top 1.20 mm (from Z 4.00 mm to 5.20 mm) is curved; the part below Z 3.00 mm prints as flat layers") !=
+          std::string::npos);
+    CHECK(summary.find("goes beyond what has been printed") == std::string::npos);
+    CHECK_NOTHROW(Test::gcode(print));
+}
+
 // B, the owner's arm: the surface flat enough to curve is only the middle of a rounded top, and its
 // steeper flanks stand in the band whole curving would need. With a 5 degree maximum the 1.2 mm cap
 // of the 30 mm puck is curved only within r = 8.2 (Z 4.84 to 5.2); the ring outside stands up to the

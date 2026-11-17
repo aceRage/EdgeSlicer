@@ -564,13 +564,17 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     // whole, as in P1. Otherwise (P2, partial curving) the block is cut at `cut`, the first planar layer
     // top at most the allowed rise below the highest point: above it the surfaces are curved, below it
     // they print as ordinary flat layers, and the planar body is kept as a flat plateau up to `cut` under
-    // the curved part, so that nothing printed flat stands above the cut and every curved bead lies at
-    // least one layer above it.
+    // the curved part, and every curved bead lies at least one layer above the cut (cut + h).
     //
     // R2 (nothing beside the footprint in the band) decides the same way (P2): when material outside
     // the surfaces stands in the band of whole curving (the steep flanks of a rounded part, say), the
     // cut is raised to the highest layer top such material reaches, so it all prints flat below the
-    // plateau and every curved bead lies at least one layer above it. The check itself is unchanged.
+    // plateau. The check itself is unchanged (beside_z), so like P1's it tolerates a sliver of up to
+    // OUTSIDE_TOL_MM2 per layer and anything within 0.5 mm of the footprint. On the partial path that
+    // tolerance does not reach above the lowest curved bead: flat_above_z() raises the cut over every
+    // layer above cut + h that still has a planar extrusion outside the footprint, so nothing printed
+    // flat stands higher than the lowest curved bead, by construction. (Whole curving keeps P1's
+    // tolerance; there the head check is what stops a sliver that would be met, see the tests.)
     double z_top = -std::numeric_limits<double>::max(), z_bottom = std::numeric_limits<double>::max();
     for (const Surface3 &s : candidates) {
         z_top    = std::max(z_top, s.z_max);
@@ -586,6 +590,34 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             if (layer->print_z > above + EPSILON &&
                 area(diff_ex(layer->lslices, grown)) * SCALING_FACTOR * SCALING_FACTOR > OUTSIDE_TOL_MM2)
                 fail = std::max(fail, layer->print_z);
+        return fail;
+    };
+    // Partial path, strict: the highest layer above `above` with a planar extrusion (wall, fill, thin
+    // fill; centre line) outside the footprint grown by 0.05 mm, over 0.1 mm of it (-inf when none). The
+    // clip (step 4) removes planar material inside the footprint only, so this is exactly the flat
+    // material that would print above `above` beside the curved part.
+    const auto flat_above_z = [&object](const ExPolygons &fp, double above) {
+        const ExPolygons grown = offset_ex(fp, scale_(0.05));
+        double           fail  = -std::numeric_limits<double>::max();
+        for (const Layer *layer : object.layers()) {
+            if (layer->print_z <= above + EPSILON)
+                continue;
+            std::vector<const ExtrusionPath *> paths;
+            for (const LayerRegion *region : layer->regions()) {
+                collect_all_paths(&region->perimeters, paths);
+                collect_all_paths(&region->fills, paths);
+                collect_all_paths(&region->thin_fills, paths);
+            }
+            Polylines lines;
+            for (const ExtrusionPath *p : paths)
+                if (!path_is_curved(p) && p->polyline.size() >= 2)
+                    lines.push_back(p->polyline);
+            double outside = 0.;
+            for (const Polyline &pl : diff_pl(lines, grown))
+                outside += unscale<double>(pl.length());
+            if (outside > 0.1)
+                fail = std::max(fail, layer->print_z);
+        }
         return fail;
     };
     bool   partial  = false;
@@ -631,8 +663,11 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             for (const Surface3 &s : candidates)
                 if (s.z_max >= cut + h - EPSILON)
                     kept.push_back(s.footprint);
-            // Material beside what is kept, above the cut: raise the cut over it and try again.
-            const double fail = beside_z(kept, cut);
+            // Material beside what is kept, above the cut: raise the cut over it and try again. Then
+            // (strict, see above) flat extrusions beside it above the lowest curved bead (cut + h).
+            double fail = beside_z(kept, cut);
+            if (fail == -std::numeric_limits<double>::max())
+                fail = flat_above_z(kept, cut + h);
             if (fail > -std::numeric_limits<double>::max()) {
                 cut_min = beside = fail;
                 continue;
@@ -692,7 +727,17 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                          mm_str(cut)));
     }
     const ExPolygons &tip_area = partial ? layer_area.back() : footprint; // where the nozzle tip goes
-    const double rise_used   = z_hi - z_lo;
+    // What is actually curved: from the cut, or from the lowest curved surface when every one of them
+    // lies wholly above it (a cut raised by material beside them can be below their lowest point, and
+    // below the head's rise floor; the span reported must be the curved part's, review d).
+    double curved_lo = z_lo;
+    if (partial) {
+        curved_lo = std::numeric_limits<double>::max();
+        for (const Surface3 &s : surfaces)
+            curved_lo = std::min(curved_lo, s.z_min);
+        curved_lo = std::max(curved_lo, cut);
+    }
+    const double rise_used   = z_hi - curved_lo;
     const double band_bottom = partial ? cut : z_lo - n_layers * h;
 
     // 2. Clearance: nothing outside the surfaces may reach into the curved band. With partial curving
@@ -912,8 +957,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                      Slic3r::format(_u8L("Partly curved: %1% surface(s) rise up to %2% mm, more than the %3% mm the print head allows."),
                                     cut_surfaces, mm_str(cut_rise), mm_str(head.allowed_rise_mm))) +
                 " " +
-                Slic3r::format(_u8L("The top %1% mm (from Z %2% mm to %3% mm) is curved; the part below Z %2% mm prints as flat layers."),
-                               mm_str(z_hi - cut), mm_str(cut), mm_str(z_hi)));
+                Slic3r::format(_u8L("The top %1% mm (from Z %2% mm to %3% mm) is curved; the part below Z %4% mm prints as flat layers."),
+                               mm_str(rise_used), mm_str(curved_lo), mm_str(z_hi), mm_str(cut)));
         if (left_flat > 0)
             result.notes.push_back(Slic3r::format(_u8L("%1% lower surface(s) stay flat: the curved layers print as one block, which may span "
                                                        "at most %2% mm in height, and only the highest part of the object is curved."),
