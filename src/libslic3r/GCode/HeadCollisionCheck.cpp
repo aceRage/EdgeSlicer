@@ -125,7 +125,11 @@ struct Contact
 const std::string NOZZLE_PART = "nozzle";
 
 // Deepest contact of the head with its tip at p, or depth 0.
-Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, double tol, bool check_nozzle)
+// surface_tan > 0 (curved tops, extrusion moves only, HeadCollisionParams::extrusion_surface_slope_deg):
+// where the nozzle's underside is still within tol of the tip (the tip land, and a chamfer no higher
+// than tol), material up to d * surface_tan above the tip is the sloped surface being followed - the
+// neighbouring bead of a line laid on the slope - not an obstacle. Beyond the land nothing changes.
+Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, double tol, bool check_nozzle, double surface_tan)
 {
     Contact best;
     auto    consider = [&](float depth, const std::string &part) {
@@ -145,9 +149,12 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
         if (map.clamp(ix0, iy0, ix1, iy1) && map.coarse_max(ix0, iy0, ix1, iy1) > thr) {
             map.for_cells_above(ix0, iy0, ix1, iy1, thr, [&](int ix, int iy, float top) {
                 const double d = std::hypot(map.cx(ix) - p.x(), map.cy(iy) - p.y());
-                const double u = head.nozzle_underside_at(d);
+                double u = head.nozzle_underside_at(d);
                 if (std::isinf(u))
                     return;
+                // Curved tops, extrusions only: see surface_tan above.
+                if (surface_tan > 0. && u <= tol)
+                    u = std::max(u, d * surface_tan);
                 const double excess = double(top) - (p.z() + u);
                 if (excess > tol)
                     consider(float(excess), NOZZLE_PART);
@@ -245,13 +252,16 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
 
         // Ironing rubs the surface on purpose: only the boxes are checked for it.
         const bool check_nozzle = !(extrude && m.extrusion_role == erIroning);
+        const bool   relaxed     = extrude && params.extrusion_surface_slope_deg > 0. &&
+                                   m.layer_id >= params.extrusion_surface_slope_min_layer;
+        const double surface_tan = relaxed ? std::tan(std::min(params.extrusion_surface_slope_deg, 60.) * M_PI / 180.) : 0.;
 
         Contact      worst;
         const double len_xy = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();
         const int    n      = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
         for (int k = 1; k <= n; ++k) {
             const double t = double(k) / double(n);
-            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle);
+            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan);
             if (c.depth > worst.depth)
                 worst = c;
         }

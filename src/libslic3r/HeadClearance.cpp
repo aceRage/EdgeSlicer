@@ -14,6 +14,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include "PrintConfig.hpp"
 #include "Utils.hpp"
 #include "nlohmann/json.hpp"
 
@@ -46,10 +47,35 @@ double HeadClearance::lowest_box_z() const
     return z;
 }
 
+double HeadClearance::nozzle_flank_angle_deg(double land_tolerance) const
+{
+    if (this->nozzle_profile.empty())
+        return 0.;
+    const double r_land = this->nozzle_profile.front().second;
+    double       angle  = 90.;
+    for (const auto &[h, r] : this->nozzle_profile) {
+        if (h <= land_tolerance)
+            continue;
+        const double dr = r - r_land;
+        if (dr <= 0.)
+            continue; // straight up from the land's edge: clears any slope below 90
+        angle = std::min(angle, std::atan2(h, dr) * 180. / M_PI);
+    }
+    return angle;
+}
+
 bool HeadClearance::matches_printer_model(const std::string &printer_model) const
 {
     return !printer_model.empty() &&
            std::find(this->printer_models.begin(), this->printer_models.end(), printer_model) != this->printer_models.end();
+}
+
+bool HeadClearance::curved_tops_verified_for(const std::string &printer_model) const
+{
+    if (!this->curved_tops_verified || printer_model.empty() || !this->matches_printer_model(printer_model))
+        return false;
+    const auto &models = this->curved_tops_verified->printer_models;
+    return std::find(models.begin(), models.end(), printer_model) != models.end();
 }
 
 static bool read_vec3(const nlohmann::json &j, Vec3d &out)
@@ -142,6 +168,33 @@ std::optional<HeadClearance> parse_head_clearance_json(const std::string &json_t
             head.boxes.push_back(std::move(b));
         }
     }
+
+    // Optional: curved tops printed with this head.
+    if (root.contains("curved_tops")) {
+        const nlohmann::json &ct = root["curved_tops"];
+        if (!ct.is_object())
+            return fail(head.id + ": curved_tops must be an object");
+        HeadClearanceCurvedTopsVerified v;
+        if (ct.contains("verified_printer_models")) {
+            if (!ct["verified_printer_models"].is_array())
+                return fail(head.id + ": curved_tops.verified_printer_models must be an array");
+            for (const nlohmann::json &m : ct["verified_printer_models"])
+                if (m.is_string() && !m.get<std::string>().empty())
+                    v.printer_models.push_back(m.get<std::string>());
+        }
+        if (ct.contains("verified_rise_mm") && ct["verified_rise_mm"].is_number())
+            v.rise_mm = ct["verified_rise_mm"].get<double>();
+        if (ct.contains("verified_angle_deg") && ct["verified_angle_deg"].is_number())
+            v.angle_deg = ct["verified_angle_deg"].get<double>();
+        v.on   = ct.value("verified_on", std::string());
+        v.note = ct.value("verified_note", std::string());
+        if (!(v.rise_mm > 0.) || !(v.angle_deg > 0.) || v.printer_models.empty())
+            return fail(head.id + ": curved_tops needs verified_printer_models, verified_rise_mm > 0 and verified_angle_deg > 0");
+        for (const std::string &m : v.printer_models)
+            if (!head.matches_printer_model(m))
+                return fail(head.id + ": curved_tops.verified_printer_models lists '" + m + "', which printer_models does not");
+        head.curved_tops_verified = std::move(v);
+    }
     return head;
 }
 
@@ -171,12 +224,12 @@ std::vector<HeadClearance> load_head_clearances(const std::string &dir, std::vec
     return out;
 }
 
-std::shared_ptr<const HeadClearance> head_clearance_for_printer_model(const std::string &printer_model)
+HeadClearancePtrs shipped_head_clearances()
 {
-    static std::mutex                                        mutex;
-    static bool                                              loaded = false;
-    static std::string                                       loaded_from;
-    static std::vector<std::shared_ptr<const HeadClearance>> heads;
+    static std::mutex        mutex;
+    static bool              loaded = false;
+    static std::string       loaded_from;
+    static HeadClearancePtrs heads;
 
     std::lock_guard<std::mutex> lock(mutex);
     const std::string           dir = (boost::filesystem::path(resources_dir()) / "head_clearance").string();
@@ -190,10 +243,32 @@ std::shared_ptr<const HeadClearance> head_clearance_for_printer_model(const std:
         loaded      = true;
         loaded_from = dir;
     }
-    for (const auto &h : heads)
-        if (h->matches_printer_model(printer_model))
+    return heads;
+}
+
+HeadClearancePtr resolve_head_clearance(const std::string &printer_model, const HeadClearancePtrs &heads)
+{
+    // Source 1 (printer preset values) arrives with P2. Source 2: the first file listing the model.
+    for (const HeadClearancePtr &h : heads)
+        if (h && h->matches_printer_model(printer_model))
             return h;
+    // Source 3: nothing. Deliberately no generic default.
     return nullptr;
+}
+
+HeadClearancePtr resolve_head_clearance(const std::string &printer_model)
+{
+    return resolve_head_clearance(printer_model, shipped_head_clearances());
+}
+
+HeadClearancePtr resolve_head_clearance(const PrintConfig &config)
+{
+    return resolve_head_clearance(config.printer_model.value);
+}
+
+std::shared_ptr<const HeadClearance> head_clearance_for_printer_model(const std::string &printer_model)
+{
+    return resolve_head_clearance(printer_model);
 }
 
 } // namespace Slic3r

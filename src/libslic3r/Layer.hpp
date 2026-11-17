@@ -264,6 +264,9 @@ public:
     // conformal layers. The planar layers under it were emptied on purpose (their material is in the
     // curved block), so the empty Z span below is not a printability gap.
     bool                    curved_tops_block { false };
+    // With curved_tops_block: the steepest facet slope (degrees) of the surfaces the block follows. The
+    // head clearance check lets the tip land meet the neighbouring bead up to this slope, no further.
+    float                   curved_tops_slope_deg { 0.f };
     // Mixed-layer-height band merge: true when this layer takes part in a merge and carries no extrusions of its
     // own. What it would have printed moved up into the group top, so the empty Z span is not a printability gap
     // and the layer above must not be reported as unsupported. A merged band that had nothing printable to begin

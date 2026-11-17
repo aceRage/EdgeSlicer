@@ -1,3 +1,4 @@
+#include "CurvedTops.hpp"
 #include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
@@ -2577,6 +2578,34 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 update_apply_status(this->invalidate_steps({psWipeTower, psGCodeExport}));
             m_support_interface_temperatures = std::move(resolved);
         }
+    }
+
+    // EdgeSlicer, curved tops (review finding a): the guards in apply_curved_tops() read settings of
+    // the print, the object and the other objects (supports, skirt, sequence, filaments, copies...)
+    // whose change does not by itself re-run posContouring, and a block already cut the planar walls
+    // under it. When anything a guard read differs from the last run, or a run was left unfinished
+    // over cut walls (a cancel), regenerate the object's walls: posPerimeters invalidates the fills
+    // and posContouring after it, so the block is planned again on uncut layers. Objects without
+    // curved tops on are not looked at, so a print without the feature invalidates exactly as before.
+    // Review r2: the record holds verdicts, not counts, and an object that was refused (walls not cut,
+    // so its G-code is already the planar one) and is still refused by a setting is left alone: adding
+    // a part to a plate where every part is refused re-slices nothing. (Its refusal text may then name
+    // the earlier reason until the object is sliced again.) The record is read under the state mutex
+    // this function holds; the slicing thread writes it under the same mutex.
+    int multi_filament = -1; // computed once, for the first object that needs it
+    for (PrintObject *object : m_objects) {
+        if (!object->config().curved_tops_enabled.value)
+            continue;
+        const bool unfinished = object->curved_tops_clipped() && !object->is_step_done_unguarded(posContouring);
+        bool       regenerate = unfinished;
+        if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
+            if (multi_filament < 0)
+                multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
+            if (object->curved_tops_guard_inputs_used() != curved_tops_guard_inputs(*object, multi_filament))
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament);
+        }
+        if (regenerate)
+            update_apply_status(object->invalidate_step(posPerimeters));
     }
 
     // Update SlicingParameters for each object where the SlicingParameters is not valid.
