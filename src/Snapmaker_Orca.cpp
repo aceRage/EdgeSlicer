@@ -5332,6 +5332,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -5765,6 +5770,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
