@@ -1922,3 +1922,29 @@ TEST_CASE("vendors: a blank link field means the answer is the file, an absent o
     // Set: as before.
     CHECK(spec_from_json(cpl3d_spec_json()).download_url_path == "download_url");
 }
+
+TEST_CASE("vendors: a large model answer streams through unchanged", "[Vendors]")
+{
+    // The shape of a real answer: 200, model/3mf, a zip body of many MB, a quoted file name, a rate header.
+    const Spec s = spec_from_json(file_answer_spec_json(true));
+    std::string big("PK\x03\x04", 4);
+    big.append(3u * 1024 * 1024, '\0');
+    for (size_t i = 0; i < big.size(); i += 4099)
+        big[i] = char(i / 4099);
+    HttpFn http = [&](const Request& q) {
+        Response r;
+        r.status  = 200;
+        r.headers = {{"content-type", "model/3mf"}, {"content-disposition", "attachment; filename=\"Big Model.3mf\""}, {"x-ratelimit-day-remaining", "41"}};
+        if (q.on_head)
+            q.on_head(200, r.headers);
+        for (size_t i = 0; i < big.size(); i += 65536)
+            q.sink(big.data() + i, std::min<size_t>(65536, big.size() - i));
+        return r;
+    };
+    Saved saved;
+    const EndpointResult e = call_endpoint(s, http, saved);
+    CHECK(e.kind == EndpointResult::Kind::File);
+    CHECK(e.size == int64_t(big.size()));
+    CHECK(e.file_name == "Big Model.3mf");
+    CHECK(saved.data == big);
+}
