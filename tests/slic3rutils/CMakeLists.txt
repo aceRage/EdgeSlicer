@@ -211,6 +211,22 @@ if (EDGE_PYTHON_PLUGINS)
     endif ()
     add_executable(fake-plugin-host fake_plugin_host.cpp)
     add_dependencies(${_TEST_NAME}_tests edge-plugin-host fake-plugin-host)
+    # Copy whenever the helper rebuilds. The tests POST_BUILD below does not run when
+    # only edge-plugin-host changes.
+    add_custom_command(TARGET edge-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host for plugin tests"
+        VERBATIM)
+    add_custom_command(TARGET fake-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:fake-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:fake-plugin-host>"
+        COMMENT "Copying fake-plugin-host for spawn fail-fast tests"
+        VERBATIM)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"
@@ -246,7 +262,7 @@ if (EDGE_PYTHON_PLUGINS)
 endif ()
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 if (MSVC)
-    target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
+    target_link_libraries(${_TEST_NAME}_tests Setupapi.lib Advapi32.lib)
 endif ()
 
 # hms_lookup_tests.cpp includes slic3r/GUI/HMS.hpp, which pulls GUI_App.hpp and so the wxWidgets

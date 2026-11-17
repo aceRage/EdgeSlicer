@@ -385,6 +385,22 @@ endif ()
 if (EDGE_PYTHON_PLUGINS)
     set(_edge_python_bin_dir "$<TARGET_FILE_DIR:Snapmaker_Orca>")
     add_dependencies(Snapmaker_Orca edge-plugin-host)
+    # Copy whenever the helper itself rebuilds. A POST_BUILD on Snapmaker_Orca does not
+    # run when only edge-plugin-host changes, which left a stale helper next to the app
+    # on Windows. make_directory so a clean helper-first build still has the app output dir.
+    add_custom_command(TARGET edge-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_edge_python_bin_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host next to EdgeSlicer"
+        VERBATIM)
+    if (APPLE)
+        add_custom_command(TARGET edge-plugin-host POST_BUILD
+            COMMAND sh -c "codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '${_edge_python_bin_dir}/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
+            COMMENT "Signing edge-plugin-host with App Sandbox entitlements"
+            VERBATIM)
+    endif ()
     add_custom_command(TARGET Snapmaker_Orca POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"
