@@ -792,6 +792,10 @@ public:
     void               set_curved_tops_clipped(bool clipped);
     const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
     void               set_curved_tops_guard_inputs_used(std::string inputs);
+    // Curved tops on (P2): Print::process() runs posContouring after posSupportMaterial for this object,
+    // so the block is planned against the final support layers; a change to the supports re-plans it
+    // (invalidate_step). False for every object without curved tops: their step order is unchanged.
+    bool               curved_tops_after_support() const { return m_config.curved_tops_enabled.value && !m_instances.empty(); }
 
   private:
     // to be called from Print only.

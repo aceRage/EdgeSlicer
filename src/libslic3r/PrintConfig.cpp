@@ -6087,8 +6087,10 @@ void PrintConfigDef::init_fff_params()
                       "For now only available on the Elegoo Centauri Carbon and the Bambu Lab X1 Carbon, the printers "
                       "whose print head clearance is known. On any other printer the top layers stay flat and a "
                       "slicing warning says so.\n"
-                      "Only surfaces flatter than the maximum angle, and no taller than the print head's "
-                      "nozzle clearance, are bent. One object, one nozzle only. Watch the first print.");
+                      "Only surfaces flatter than the maximum angle are bent. A surface taller than the print "
+                      "head's nozzle clearance is curved over its upper part and printed flat below it. "
+                      "Supports are allowed as long as they stay out of the print head's way near the curved "
+                      "layers. One object, one nozzle only. Watch the first print.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -6105,7 +6107,8 @@ void PrintConfigDef::init_fff_params()
     def->label    = L("Curved tops max angle");
     def->category = L("Quality");
     def->tooltip  = L("Steepest surface slope that is printed curved. It is further limited by the print "
-                      "head's clearance for this printer.");
+                      "head's clearance for this printer, and never more than 20 degrees are used: a higher "
+                      "value acts as 20 (or as the head's limit, if lower), and the slicing summary says so.");
     def->sidetext = u8"°";	// degrees, don't need translation
     def->min      = 1;
     def->max      = 40;

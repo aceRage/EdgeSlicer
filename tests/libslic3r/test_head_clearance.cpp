@@ -388,6 +388,18 @@ TEST_CASE("Head collision check: the curved-tops slope allowance covers only the
         CHECK(r.hits.front().part == "nozzle");
     }
 
+    // Support and stabilizer extrusions are obstacles like any other (curved tops P2 allows supports):
+    // a support bead beyond the land, under the cone, met by a curved extrusion on the block's layer.
+    for (const ExtrusionRole role : { erSupportMaterial, erSupportMaterialInterface, erSupportTransition }) {
+        auto moves = neighbour_case(0.9f, 1.5f, EMoveType::Extrude);
+        moves[1].extrusion_role = role;
+        const HeadCollisionReport r = check_head_collisions(moves, head, sloped(20.));
+        INFO("support role " << int(role));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK_FALSE(r.hits.front().travel);
+    }
+
     // Boxes are never relaxed: material reaching 0.5 into the duct (bottom 4 above the tip) 5 mm away.
     // (The descent before it meets the duct too; the extrusion's own hit is the one checked.)
     {
@@ -398,4 +410,25 @@ TEST_CASE("Head collision check: the curved-tops slope allowance covers only the
                 extrusion_duct_hit = true;
         CHECK(extrusion_duct_hit);
     }
+}
+
+// Curved tops P2, partial curving (review b): the lowest curved bead lies one layer (0.2) above the flat
+// plateau at the cut. Here the curved extrusion runs at Z 1.0 = cut + h, so the cut is Z 0.8. With the
+// curved block's slope allowance (10 degrees) on, as in a real curved print:
+//  - the plateau at the cut, right beside the tip in the land: clean;
+//  - the plateau level with the lowest bead (the flat layer at cut + h): clean;
+//  - a flat flank one layer above the lowest bead under the cone: a near miss, clean;
+//  - a flat flank two layers above it there (what the planner's cut must prevent): a nozzle contact,
+//    which stops a curved print's export.
+TEST_CASE("Head collision check: a curved bead beside the flat plateau and a flank above it", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+    CHECK(check_head_collisions(neighbour_case(0.45f, 0.8f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    CHECK(check_head_collisions(neighbour_case(0.45f, 1.0f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    CHECK(check_head_collisions(neighbour_case(0.9f, 1.2f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    const HeadCollisionReport r = check_head_collisions(neighbour_case(0.9f, 1.4f, EMoveType::Extrude), head, sloped(10.));
+    REQUIRE(r.hit_moves == 1);
+    CHECK(r.hits.front().part == "nozzle");
+    CHECK_FALSE(r.hits.front().travel);
+    CHECK(r.max_depth > 0.1f);
 }
