@@ -314,6 +314,22 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
                 ++report.parts[pi].hit_moves;
                 report.parts[pi].max_depth = std::max(report.parts[pi].max_depth, move_part_depth[pi]);
             }
+        // Curved tops P4: the nozzle's own tolerance. Only the nozzle (parts 0 and 1) may have touched, every
+        // nozzle contact within the tolerance, and the move must be one that lays or follows a bead (an
+        // extrusion, a wipe back along it) or drops / lifts at one point; never a horizontal travel.
+        if (worst.depth > 0.f && params.nozzle_contact_tolerance > 0. && m.layer_id >= params.nozzle_contact_min_layer &&
+            (extrude || m.type == EMoveType::Wipe || len_xy < 1e-3)) {
+            float nozzle = 0.f, other = 0.f;
+            for (size_t pi = 0; pi < move_part_depth.size(); ++pi) {
+                float &dst = pi < 2 ? nozzle : other;
+                dst        = std::max(dst, move_part_depth[pi]);
+            }
+            if (other <= 0.f && nozzle <= float(params.nozzle_contact_tolerance)) {
+                ++report.tolerated_moves;
+                report.tolerated_max_depth = std::max(report.tolerated_max_depth, nozzle);
+                worst.depth = 0.f;
+            }
+        }
         if (worst.depth > 0.f) {
             ++report.hit_moves;
             report.max_depth = std::max(report.max_depth, worst.depth);

@@ -1245,7 +1245,7 @@ static std::vector<std::string> s_Preset_print_options {
     "align_infill_direction_to_model", "center_of_surface_pattern", "separated_infills", "extra_solid_infills",
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
-    "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling", "zaa_max_segment_rate", "curved_tops_enabled", "curved_tops_layers", "curved_tops_max_angle",
+    "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling", "zaa_max_segment_rate", "curved_tops_enabled", "curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern",
     // EdgeSlicer, curved tops P3: developer overrides (Developer mode only; never in a system or vendor profile).
     "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin", "curved_tops_dev_flank_margin",
     "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin", "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap",

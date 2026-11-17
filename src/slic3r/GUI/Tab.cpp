@@ -3538,6 +3538,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("curved_tops_enabled");
         optgroup->append_single_option_line("curved_tops_layers");
         optgroup->append_single_option_line("curved_tops_max_angle");
+        optgroup->append_single_option_line("curved_tops_nozzle_tolerance");
+        optgroup->append_single_option_line("curved_tops_pattern");
 
         // EdgeSlicer, curved tops P3: developer overrides. Every line is comDevelop, so the whole group
         // shows only in Developer mode; the slicer ignores the values outside it (CurvedTops.hpp).

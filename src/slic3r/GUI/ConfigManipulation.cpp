@@ -1191,7 +1191,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     // EdgeSlicer: curved tops (experimental) detail settings.
     bool has_curved_tops = config->opt_bool("curved_tops_enabled");
-    for (auto el : {"curved_tops_layers", "curved_tops_max_angle"})
+    for (auto el : {"curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern"})
         toggle_line(el, has_curved_tops);
     // Curved tops P3: the developer overrides (their lines are comDevelop and need Developer mode on too).
     for (auto el : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",

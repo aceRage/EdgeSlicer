@@ -25,11 +25,15 @@
 #include <string>
 #include <vector>
 
+#include "ExPolygon.hpp"
+#include "Flow.hpp"
+#include "PrintConfig.hpp"
+
+struct indexed_triangle_set;
+
 namespace Slic3r {
 
-class PrintConfig;
 class PrintObject;
-class PrintObjectConfig;
 class TriangleMesh;
 struct HeadClearance;
 namespace sla { class IndexedMesh; }
@@ -129,6 +133,8 @@ struct CurvedTopsHeadLimits
     // Verified on hardware for this printer model (0 = not verified).
     double      verified_rise_mm { 0. };
     double      verified_angle_deg { 0. };
+    // P4: deepest nozzle contact printed cleanly (0 = not recorded).
+    double      verified_nozzle_contact_mm { 0. };
     std::string verified_on;
     // Where the numbers come from, for messages; why not usable, when not.
     std::string source;
@@ -192,6 +198,72 @@ bool has_curved_tops_block(const PrintObject &object);
 // the outcome do not re-slice. multi_filament: Print::extruders(true).size() > 1 when the caller has it
 // (computed once per apply), -1 to compute it here.
 std::string curved_tops_guard_inputs(const PrintObject &object, int multi_filament = -1);
+
+// ---- P4: the patch boundary, the fill patterns, the nozzle's contact tolerance ----
+
+// The edge of a curved patch is where the surface reaches the maximum angle. The surface's slope is taken
+// per vertex (the area-weighted normal of the facets round it that are within CURVED_TOPS_CREASE_DEG of
+// each other, so a sharp edge such as a cap's rim on a vertical wall does not tilt it) and interpolated
+// across each facet, and every facet is cut where that interpolated slope reaches the limit, instead of
+// being taken whole or not at all. The edge then runs smoothly across the facets rather than along their
+// sides. A facet steeper than the limit by more than CURVED_TOPS_EDGE_ANGLE_TOLERANCE_DEG never
+// contributes; one within it may contribute the part of it on the shallow side of the line (so the patch
+// may reach onto facets up to that much steeper than the limit, along its edge only). The outline is then
+// opened by CURVED_TOPS_EDGE_OPENING_MM (slivers narrower than twice that go; nothing is added) and
+// simplified with a deviation of at most CURVED_TOPS_EDGE_SIMPLIFY_MM (the only step that may move the
+// edge outward, by at most that much in XY).
+static constexpr double CURVED_TOPS_CREASE_DEG               = 30.0;
+static constexpr double CURVED_TOPS_EDGE_ANGLE_TOLERANCE_DEG = 2.0;
+static constexpr double CURVED_TOPS_EDGE_OPENING_MM          = 0.2;
+static constexpr double CURVED_TOPS_EDGE_SIMPLIFY_MM         = 0.05;
+// Slack added to the nozzle contact tolerance in the head check for the G-code's 0.001 mm rounding and the
+// height map's float sums.
+static constexpr double CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM = 0.005;
+
+// One top-facing facet's part inside the patch (print frame: Z = mesh Z - ground).
+struct CurvedTopsFacet
+{
+    Polygon xy;               // the part of the facet inside the patch, projected, CCW, scaled
+    double  z_min { 0. }, z_max { 0. };
+    Point   probe;            // a point inside xy
+    double  slope_deg { 0. }; // the facet's own slope
+};
+
+struct CurvedTopsCandidates
+{
+    std::vector<CurvedTopsFacet> facets;
+    // The patch outlines: the union of the facets' parts, healed, opened and simplified.
+    ExPolygons                   pieces;
+};
+
+// The candidate surfaces of a mesh: every facet part that faces up within max_angle_deg (see above) and has
+// nothing above it (a ray up from `probe` misses the mesh). `ground`: print Z = mesh Z - ground.
+// smooth_edge false gives P3's footprint (whole facets under the limit), for comparisons.
+CurvedTopsCandidates curved_tops_candidate_surfaces(const indexed_triangle_set &its, const sla::IndexedMesh &imesh, double max_angle_deg,
+                                                    double ground, bool smooth_edge = true);
+
+// One path of a curved layer's fill, before Z is put on it.
+struct CurvedTopsFillPath
+{
+    Points points;
+    float  width { 0.f };
+    double mm3_per_mm { 0. };
+};
+
+// The fill of curved layer k (0 = lowest) inside `area` (the region inside the wall loop, as the planar
+// solid fill would get it), for the pattern:
+//  - Monotonic: lines at 45 degrees (k even) or 135 (k odd), each laid next to the one before in one
+//    direction (the monotonic filler of the planar top surfaces);
+//  - Concentric: loops following the outline inward (Arachne, variable width where the loops close up),
+//    each closed loop starting at a seam that turns by the golden angle from layer to layer and loop to
+//    loop, so the starts do not line up.
+// pcfg / ocfg: for the Arachne parameters (nozzle diameter).
+std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
+                                                 const PrintConfig &pcfg, const PrintObjectConfig &ocfg);
+
+// The point of `loop` (closed, first point not repeated) where curved layer k's loop number `index` starts:
+// the vertex farthest along the direction turned by the golden angle per layer and loop, from `centre`.
+size_t curved_tops_seam_index(const Points &loop, const Point &centre, int k, int index);
 
 // True when a setting alone (not the mesh or the slice) makes apply_curved_tops() refuse this object.
 // Print::apply() leaves a refused object (planar, walls not cut) alone while this holds.
