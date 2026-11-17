@@ -64,6 +64,7 @@
 #include <sddl.h>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 #endif
 
 using namespace Slic3r;
@@ -1106,6 +1107,18 @@ TEST_CASE("make_sandbox_spec creates the shared python packages dir", "[PluginSa
     CHECK(granted);
 }
 
+TEST_CASE("host log dir is plugin_host not the ACL journal sibling", "[PluginSandbox]")
+{
+    ScopedDataDir           data("plugin-sandbox-log-vs-journal");
+    plugin_ipc::SandboxSpec spec;
+    spec.data_dir             = data.dir.string();
+    const std::string log_dir = plugin_ipc::host_child_log_dir(spec);
+    REQUIRE_FALSE(log_dir.empty());
+    CHECK(fs::path(log_dir).filename() == "plugin_host");
+    CHECK(fs::path(log_dir).filename() != "plugin_host_acl");
+    CHECK(fs::path(log_dir) != data.dir / "plugin_host_acl");
+}
+
 #ifdef _WIN32
 TEST_CASE("spawn fails fast when the helper exits before connecting", "[PluginSandbox][windows][spawn]")
 {
@@ -1477,6 +1490,38 @@ bool journal_file_exists(const std::string& path)
     return present;
 }
 
+size_t journal_grant_path_count(const std::string& path)
+{
+    if (!journal_file_exists(path))
+        return 0;
+    boost::nowide::ifstream in(path);
+    const auto              json = nlohmann::json::parse(in, nullptr, false);
+    if (json.is_discarded() || !json.is_object())
+        return 0;
+    size_t n = 0;
+    if (json.contains("sessions") && json["sessions"].is_array()) {
+        for (const auto& session : json["sessions"]) {
+            if (session.contains("grants") && session["grants"].is_array())
+                n += session["grants"].size();
+        }
+        return n;
+    }
+    if (json.contains("grants") && json["grants"].is_array())
+        return json["grants"].size();
+    return 0;
+}
+
+void write_acl_journal(const nlohmann::json& sessions)
+{
+    const std::string path = plugin_ipc::win_acl_journal_path_for_testing();
+    REQUIRE_FALSE(path.empty());
+    fs::create_directories(fs::path(path).parent_path());
+    nlohmann::json          body = {{"sessions", sessions}};
+    boost::nowide::ofstream out(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(out);
+    out << body.dump(1, '\t') << '\n';
+}
+
 TEST_CASE("AppContainer skips a RO grant when ALL APPLICATION PACKAGES already has RX", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();
@@ -1690,10 +1735,13 @@ TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[Plugi
 
     const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
     REQUIRE_FALSE(journal.empty());
+    CHECK(fs::path(journal).parent_path().filename() == "plugin_host_acl");
+    CHECK_FALSE(granted_paths_contain(fs::path(journal).parent_path().string()));
     {
         boost::system::error_code jec;
         REQUIRE(fs::exists(journal, jec));
         REQUIRE_FALSE(jec);
+        CHECK_FALSE(fs::exists(fs::path(data.dir) / "plugin_host" / "acl_journal.json", jec));
     }
 
     // Crash: in-memory grants/SID gone, journal and ACEs remain. Do not close/clear.
@@ -1801,9 +1849,6 @@ TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove
     {
         boost::system::error_code jec;
         fs::remove(plugin_ipc::win_acl_journal_path_for_testing(), jec);
-        const std::string stable = plugin_ipc::win_stable_acl_journal_path_for_testing();
-        if (!stable.empty())
-            fs::remove(stable, jec);
     }
 
     error.clear();
@@ -1855,9 +1900,17 @@ TEST_CASE("AppContainer journal stays while the host is alive and sweep drops py
 
     const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
     REQUIRE(journal_file_exists(journal));
-    const std::string stable = plugin_ipc::win_stable_acl_journal_path_for_testing();
-    if (!stable.empty())
-        CHECK(journal_file_exists(stable));
+    CHECK(fs::path(journal).parent_path().filename() == "plugin_host_acl");
+    CHECK_FALSE(granted_paths_contain(fs::path(journal).parent_path().string()));
+    {
+        boost::system::error_code jec;
+        CHECK_FALSE(fs::exists(fs::path(data.dir) / "plugin_host" / "acl_journal.json", jec));
+    }
+    const std::wstring ac_local = plugin_ipc::win_appcontainer_localappdata_path();
+    if (!ac_local.empty()) {
+        const fs::path ac_journal = fs::path(ac_local) / "EdgeSlicer" / "plugin_host" / "acl_journal.json";
+        CHECK_FALSE(journal_file_exists(ac_journal.string()));
+    }
 
     // Crash with the helper still running: drop in-memory grants, keep journal + ACEs.
     plugin_ipc::win_abandon_grants_for_testing();
@@ -1875,6 +1928,167 @@ TEST_CASE("AppContainer journal stays while the host is alive and sweep drops py
     CHECK_FALSE(path_dacl_has_sid(spec.python_home, package.sid));
     CHECK_FALSE(path_dacl_has_sid(helper_dir, package.sid));
     CHECK_FALSE(journal_file_exists(journal));
+}
+
+TEST_CASE("AppContainer ACL journal DACL excludes the package SID", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-journal-dacl");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-journal-dacl-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Journal_Dacl";
+    spec.data_dir   = data.dir.string();
+    spec.write_root = dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    LocalSid any(L"S-1-15-2-1");
+    REQUIRE(package.sid != nullptr);
+    REQUIRE(any.sid != nullptr);
+    const fs::path journal_dir = fs::path(plugin_ipc::win_acl_journal_path_for_testing()).parent_path();
+    CHECK_FALSE(granted_paths_contain(journal_dir.string()));
+    CHECK_FALSE(path_dacl_has_sid(journal_dir.string(), package.sid));
+    CHECK_FALSE(path_dacl_has_sid(journal_dir.string(), any.sid));
+    CHECK_FALSE(path_dacl_has_sid(plugin_ipc::win_acl_journal_path_for_testing(), package.sid));
+    CHECK_FALSE(path_dacl_has_sid(plugin_ipc::win_acl_journal_path_for_testing(), any.sid));
+}
+
+TEST_CASE("AppContainer sweep drops ALL APPLICATION PACKAGES journal SIDs", "[PluginSandbox][windows][acl]")
+{
+    ScopedDataDir  data("plugin-sandbox-journal-wellknown-sid");
+    const fs::path target = data.dir / "plugin_host";
+    fs::create_directories(target);
+    write_acl_journal(nlohmann::json::array({
+        {{"package_sid", "S-1-15-2-1"},
+         {"profile_name", ""},
+         {"grants", nlohmann::json::array({
+                        {{"path", target.string()},
+                         {"permissions", 1179817},
+                         {"inheritance", 3},
+                         {"write", true},
+                         {"low_label", false},
+                         {"existing", false},
+                         {"original_label", ""}},
+                    })}},
+    }));
+    REQUIRE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+}
+
+TEST_CASE("AppContainer sweep ignores journal paths outside known roots", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir data("plugin-sandbox-journal-outside-root");
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Journal_Outside";
+    spec.data_dir   = data.dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    const std::wstring profile = plugin_ipc::win_appcontainer_profile_name(spec.plugin_key);
+    plugin_ipc::close_parent_sandbox();
+
+    write_acl_journal(nlohmann::json::array({
+        {{"package_sid", boost::nowide::narrow(sid_str)},
+         {"profile_name", boost::nowide::narrow(profile)},
+         {"grants", nlohmann::json::array({
+                        {{"path", "C:\\Windows"},
+                         {"permissions", 1179817},
+                         {"inheritance", 3},
+                         {"write", true},
+                         {"low_label", false},
+                         {"existing", false},
+                         {"original_label", ""}},
+                    })}},
+    }));
+    REQUIRE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+}
+
+TEST_CASE("AppContainer sweep treats a vanished grant path as already revoked", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir data("plugin-sandbox-journal-vanished");
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Journal_Vanished";
+    spec.data_dir   = data.dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    const std::wstring profile = plugin_ipc::win_appcontainer_profile_name(spec.plugin_key);
+    plugin_ipc::close_parent_sandbox();
+
+    const fs::path vanished = fs::temp_directory_path() / fs::unique_path("orca-vanished-%%%%-%%%%");
+    {
+        boost::system::error_code ec;
+        REQUIRE_FALSE(fs::exists(vanished, ec) && !ec);
+    }
+    nlohmann::json grants = nlohmann::json::array();
+    for (int i = 0; i < 20; ++i) {
+        grants.push_back({{"path", (vanished / std::to_string(i)).string()},
+                          {"permissions", 1179817},
+                          {"inheritance", 3},
+                          {"write", true},
+                          {"low_label", false},
+                          {"existing", false},
+                          {"original_label", ""}});
+    }
+    write_acl_journal(nlohmann::json::array({
+        {{"package_sid", boost::nowide::narrow(sid_str)}, {"profile_name", boost::nowide::narrow(profile)}, {"grants", std::move(grants)}},
+    }));
+    REQUIRE(journal_grant_path_count(plugin_ipc::win_acl_journal_path_for_testing()) == 20);
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+
+    error.clear();
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    CHECK(journal_grant_path_count(plugin_ipc::win_acl_journal_path_for_testing()) == plugin_ipc::win_granted_paths_for_testing().size());
+    CHECK(journal_grant_path_count(plugin_ipc::win_acl_journal_path_for_testing()) < 20);
+    plugin_ipc::close_parent_sandbox();
+    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
 }
 
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")
