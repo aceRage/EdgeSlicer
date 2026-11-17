@@ -171,7 +171,7 @@ ScriptCompletion wait_for_script(PluginManager& manager, const std::string& plug
 
 TEST_CASE("Advertised orca API version refuses a newer requirement", "[PluginScripts]")
 {
-    CHECK(std::string(k_orca_api_version) == "1.0.0");
+    CHECK(std::string(k_orca_api_version) == "1.1.0");
 
     std::string error;
     CHECK(orca_api_version_supported("", error));
@@ -181,7 +181,7 @@ TEST_CASE("Advertised orca API version refuses a newer requirement", "[PluginScr
     CHECK(orca_api_version_supported(">=1.0.0", error));
     CHECK(orca_api_version_supported("<2", error));
     CHECK(orca_api_version_supported("<2.0.0", error));
-    CHECK(orca_api_version_supported("<=1.0.0", error));
+    CHECK(orca_api_version_supported("<=1.1.0", error));
 
     error.clear();
     CHECK_FALSE(orca_api_version_supported("1.0.0-beta", error));
@@ -602,13 +602,17 @@ import socket
 wrote = False
 spawned = False
 loopback_bound = False
-loopback_connect_audit = False
+fixed_port_bound = False
+moonraker_connected = False
+bound_connect_ok = False
 remote_bound = False
 remote_connected = False
 write_err = ''
 spawn_err = ''
 loopback_bind_err = ''
-loopback_connect_err = ''
+fixed_port_bind_err = ''
+moonraker_connect_err = ''
+bound_connect_err = ''
 remote_bind_err = ''
 remote_connect_err = ''
 try:
@@ -626,20 +630,36 @@ try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('127.0.0.1', 0))
     loopback_bound = True
+    bound = s.getsockname()
+    c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    c.settimeout(0.1)
+    try:
+        c.connect(bound)
+        bound_connect_ok = True
+    except PermissionError as e:
+        bound_connect_err = type(e).__name__
+    except OSError as e:
+        bound_connect_ok = True
+        bound_connect_err = type(e).__name__
+    c.close()
     s.close()
 except Exception as e:
     loopback_bind_err = type(e).__name__
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.1)
-    s.connect(('127.0.0.1', 1))
-    loopback_connect_audit = True
+    s.bind(('127.0.0.1', 34567))
+    fixed_port_bound = True
     s.close()
-except PermissionError as e:
-    loopback_connect_err = type(e).__name__
-except OSError as e:
-    loopback_connect_audit = True
-    loopback_connect_err = type(e).__name__
+except Exception as e:
+    fixed_port_bind_err = type(e).__name__
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.1)
+    s.connect(('127.0.0.1', 7125))
+    moonraker_connected = True
+    s.close()
+except Exception as e:
+    moonraker_connect_err = type(e).__name__
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('0.0.0.0', 0))
@@ -660,13 +680,32 @@ except Exception as e:
 
     CHECK_FALSE(locals["wrote"].cast<bool>());
     CHECK_FALSE(locals["spawned"].cast<bool>());
-    CHECK(locals["loopback_bound"].cast<bool>());
-    CHECK(locals["loopback_connect_audit"].cast<bool>());
+    CHECK_FALSE(locals["fixed_port_bound"].cast<bool>());
+    CHECK_FALSE(locals["moonraker_connected"].cast<bool>());
     CHECK_FALSE(locals["remote_bound"].cast<bool>());
     CHECK_FALSE(locals["remote_connected"].cast<bool>());
     CHECK(locals["write_err"].cast<std::string>() == "PermissionError");
     CHECK(locals["spawn_err"].cast<std::string>() == "PermissionError");
-    CHECK(locals["loopback_bind_err"].cast<std::string>().empty());
+    CHECK(locals["fixed_port_bind_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["moonraker_connect_err"].cast<std::string>() == "PermissionError");
     CHECK(locals["remote_bind_err"].cast<std::string>() == "PermissionError");
     CHECK(locals["remote_connect_err"].cast<std::string>() == "PermissionError");
+#ifdef _WIN32
+    CHECK(locals["loopback_bound"].cast<bool>());
+    CHECK(locals["loopback_bind_err"].cast<std::string>().empty());
+    CHECK(locals["bound_connect_ok"].cast<bool>());
+    locals["asyncio_ok"] = false;
+    py::exec(R"PY(
+import asyncio
+loop = asyncio.SelectorEventLoop()
+loop.close()
+asyncio_ok = True
+)PY",
+             py::globals(), locals);
+    CHECK(locals["asyncio_ok"].cast<bool>());
+#else
+    CHECK_FALSE(locals["loopback_bound"].cast<bool>());
+    CHECK(locals["loopback_bind_err"].cast<std::string>() == "PermissionError");
+    CHECK_FALSE(locals["bound_connect_ok"].cast<bool>());
+#endif
 }

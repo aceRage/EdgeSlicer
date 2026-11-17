@@ -20,21 +20,24 @@ struct PluginPermissions;
 // reader maps that form onto the boolean permission.
 inline constexpr const char* kThreadPermissionTarget = "thread";
 
-struct AuditDecision {
+struct AuditDecision
+{
     bool        allowed = true;
     std::string reason;
 };
 
-struct AuditViolation {
-    std::string            plugin_key;
-    std::string            event_name;
-    std::string            reason;
+struct AuditViolation
+{
+    std::string plugin_key;
+    std::string event_name;
+    std::string reason;
 };
 
 // A filesystem root a plugin may access while an audit context is active. allow_write is
 // false for a root that only grants reads (e.g. the bundled, shared resources folder) --
 // a write-shaped event never matches such a root, even though a read-shaped one does.
-struct AllowedRoot {
+struct AllowedRoot
+{
     boost::filesystem::path path;
     bool                    allow_write = true;
 };
@@ -58,8 +61,7 @@ enum class AuditEventCategory {
 // Uses weakly_canonical and component-wise comparison to reject traversal attacks. A candidate
 // whose final component is a dangling symlink is never inside: containment fails closed rather
 // than authorizing the destination a write through it would create.
-bool is_inside_allowed_root(const boost::filesystem::path& candidate,
-                            const boost::filesystem::path& allowed_root);
+bool is_inside_allowed_root(const boost::filesystem::path& candidate, const boost::filesystem::path& allowed_root);
 
 class PluginAuditManager
 {
@@ -88,6 +90,10 @@ public:
     // prompt-or-deny path instead.
     void add_global_allowed_root(const boost::filesystem::path& root, bool allow_write = true);
     void add_scoped_allowed_root(const boost::filesystem::path& root, bool allow_write = true);
+    // Hosted post-process: deny writes outside `root` even when a wider global root (data_dir)
+    // would allow them. `reason` is the PermissionError suffix and should name ctx.gcode_path.
+    void pin_writes_to(const boost::filesystem::path& root, const std::string& reason);
+    void clear_write_pin();
 
     // --- denied-filenames registry ---
     // Filenames a plugin may never touch, in any directory, regardless of the enclosing allowed
@@ -184,8 +190,7 @@ public:
     // applies it to raw socket events for the same host too. Like request_permissions, the request
     // may originate on a plugin load worker; denial aborts the plugin load without adding a
     // permission.
-    bool request_network_permissions(const std::string& plugin_key,
-                                     const std::vector<std::string>& urls);
+    bool request_network_permissions(const std::string& plugin_key, const std::vector<std::string>& urls);
 
     // Canonical scheme://host form used to store and match network permissions. Returns an empty
     // string unless `url` is an absolute http(s) URL with a host. The path, query, fragment,
@@ -199,8 +204,7 @@ public:
     // older full-URL grants remain exact. A bare host carries no scheme, so it matches the host of
     // a canonical scheme://host grant only; a full-URL grant does not authorize raw sockets to its
     // host, and a bare host never matches a different host.
-    static bool network_permission_matches(const std::vector<std::string>& granted,
-                                           const std::string& target);
+    static bool network_permission_matches(const std::vector<std::string>& granted, const std::string& target);
 
     void report_violation(const AuditViolation& violation);
     bool audit_denial_pending() const;
@@ -259,21 +263,23 @@ private:
     // Drops the references in `frames`, keeping the caller's error and denial state intact.
     void release_frames(std::vector<PyObject*>& frames);
 
-    static thread_local std::string                   m_current_plugin_key;
-    static thread_local std::string                   m_current_capability_name;
-    static thread_local std::vector<AllowedRoot>       m_scoped_allowed_roots;
-    static thread_local std::vector<PyObject*>         m_root_frames; // strong references
-    static thread_local int                            m_releasing_frames;
-    static thread_local bool                           m_audit_denial_pending;
-    static thread_local bool                           m_has_last_violation;
-    static thread_local AuditViolation                 m_last_violation;
+    static thread_local std::string              m_current_plugin_key;
+    static thread_local std::string              m_current_capability_name;
+    static thread_local std::vector<AllowedRoot> m_scoped_allowed_roots;
+    static thread_local boost::filesystem::path  m_write_pin;
+    static thread_local std::string              m_write_pin_reason;
+    static thread_local std::vector<PyObject*>   m_root_frames; // strong references
+    static thread_local int                      m_releasing_frames;
+    static thread_local bool                     m_audit_denial_pending;
+    static thread_local bool                     m_has_last_violation;
+    static thread_local AuditViolation           m_last_violation;
 
     // mutable: is_denied_filename() is a const query that must lock.
     mutable std::mutex m_mutex;
 
-    std::vector<AllowedRoot>             m_global_allowed_roots;
-    std::vector<std::string>             m_denied_filenames;
-    std::vector<std::string>             m_denied_path_keywords;
+    std::vector<AllowedRoot> m_global_allowed_roots;
+    std::vector<std::string> m_denied_filenames;
+    std::vector<std::string> m_denied_path_keywords;
 };
 
 // RAII guard that sets the current plugin key and capability name, restoring the previous
@@ -283,10 +289,10 @@ private:
 // Each scope owns the root frames recorded inside it and lets them go, as its own plugin, before
 // restoring the outer context. That needs the GIL whenever a frame is still held, so construct
 // the scope after the GIL guard, to be destroyed before it.
-// While constructing a host-owned asyncio loop, permit socket.__new__ (POSIX self-pipe)
-// and loopback-only socket.bind / socket.connect (Windows TCP socketpair emulation:
-// 127.0.0.1 or ::1, any port). Non-loopback bind/connect, writes, and subprocess stay
-// audited. The plugin's audit scope stays in place; this does not bypass it.
+// While constructing a host-owned asyncio loop: POSIX permits only socket.__new__
+// (socketpair). Windows additionally permits AF_INET/AF_INET6 SOCK_STREAM sockets,
+// bind to 127.0.0.1/::1 port 0, and connect only to a sockname bound inside this
+// same permit. Everything else stays audited. The plugin's audit scope stays in place.
 class ScopedEventLoopSocketPermit
 {
 public:
@@ -302,9 +308,7 @@ public:
 class ScopedPluginAuditContext
 {
 public:
-    explicit ScopedPluginAuditContext(
-        const std::string&                   plugin_key,
-        const std::string&                   capability_name = {});
+    explicit ScopedPluginAuditContext(const std::string& plugin_key, const std::string& capability_name = {});
 
     ~ScopedPluginAuditContext();
 
@@ -312,12 +316,12 @@ public:
     ScopedPluginAuditContext& operator=(const ScopedPluginAuditContext&) = delete;
 
 private:
-    std::string                   m_plugin_key;
-    std::string                   m_capability;
-    std::string                   m_previous_id;
-    std::string                   m_previous_capability;
-    std::vector<AllowedRoot>      m_previous_scoped_roots;
-    std::vector<PyObject*>        m_previous_root_frames;
+    std::string              m_plugin_key;
+    std::string              m_capability;
+    std::string              m_previous_id;
+    std::string              m_previous_capability;
+    std::vector<AllowedRoot> m_previous_scoped_roots;
+    std::vector<PyObject*>   m_previous_root_frames;
 };
 
 } // namespace Slic3r
