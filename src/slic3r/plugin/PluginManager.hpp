@@ -195,6 +195,10 @@ public:
     void remove_missing_plugins(const std::vector<std::string>& plugin_keys);
     // Packages whose .install_state.json marks them for auto-load.
     std::vector<std::string> get_enabled_plugin_keys() const;
+    // After discovery: load every sidecar-enabled package that still passes trust/integrity.
+    // Uses the same load_plugin() path as Home > Plugins Enable. One failure is logged onto that
+    // plugin's card and does not stop the others or startup. Fire-and-forget: does not wait.
+    void load_enabled_plugins();
     // The package owning a loaded capability, for the by-name dispatch path.
     bool try_get_plugin_descriptor_for_capability(const std::string& capability_name,
                                                   PluginCapabilityType type,
@@ -247,6 +251,12 @@ public:
     bool wait_for_plugin_load(const std::string& plugin_key, std::chrono::milliseconds timeout, std::string& error) const;
     bool cancel_plugin_load(const std::string& plugin_key);
     std::string get_plugin_load_error(const std::string& plugin_key) const;
+
+    // Records a capability skip (missing / unloaded / disabled) for tests, logs it, and raises a
+    // GUI warning notification when a plater exists. Duplicate messages within a few seconds do
+    // not spawn extra notifications (a slice hits this once per pipeline step).
+    void report_capability_skip(const std::string& msg);
+    std::vector<std::string> take_capability_skip_warnings();
 
     void set_capability_enabled(const PluginCapabilityId& id, bool enabled);
 
@@ -386,6 +396,8 @@ private:
     std::unordered_set<std::string> m_cancelled;
     std::map<std::string, std::string> m_load_errors;
     mutable std::condition_variable m_load_cv;
+    std::vector<std::string> m_capability_skip_warnings;
+    std::map<std::string, std::chrono::steady_clock::time_point> m_capability_skip_notified;
 
     // Sidecar readers and writers serialize on Slic3r::install_state_mutex() (PluginFsUtils),
     // shared with the audit grant writers. Taken before m_mutex, never after it.
@@ -490,13 +502,10 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
 
     const bool has_any = std::any_of(capabilities.values.begin(), capabilities.values.end(),
                                      [](const std::string& s) { return !s.empty(); });
-    // Headless --slice has no notification UI. Mirror skip/timeout warnings to stderr so a
-    // missing plugin or a 10s load timeout is not silent. Do not fail the slice: GUI
-    // skip-with-warning is the documented missing-plugin semantics.
-    auto warn_skip = [](const std::string& msg) {
-        BOOST_LOG_TRIVIAL(warning) << msg;
-        boost::nowide::cerr << msg << std::endl;
-    };
+    // Headless --slice has no notification UI. Mirror skip/timeout warnings to stderr and, when
+    // a plater exists, a GUI warning naming the plugin. Do not fail the slice: skip-with-warning
+    // is the documented missing-plugin semantics.
+    auto warn_skip = [&plugin_mgr](const std::string& msg) { plugin_mgr.report_capability_skip(msg); };
     if (has_any && !plugin_mgr.wait_for_all_plugin_loads(std::chrono::seconds(10))) {
         warn_skip(tag + ": timed out waiting for plugin loads; unresolved capabilities will be skipped");
     }
@@ -534,7 +543,8 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
         const std::string plugin_key = ref->uuid.empty() ? ref->name : ref->uuid;
 
         PluginDescriptor descriptor;
-        if (plugin_mgr.try_get_plugin_descriptor(plugin_key, descriptor)) {
+        const bool have_desc = plugin_mgr.try_get_plugin_descriptor(plugin_key, descriptor);
+        if (have_desc) {
             const auto trust = plugin_trust::evaluate(descriptor);
             if (!trust.allowed()) {
                 throw std::runtime_error(
@@ -546,6 +556,16 @@ void execute_capabilities_from_refs(const ConfigOptionStrings& capabilities,
         // only_enabled = false so that "not loaded" and "loaded but disabled" stay distinguishable
         // and each keeps its own diagnostic.
         auto cap = plugin_mgr.get_plugin_capability({type, cap_name, plugin_key}, /*only_enabled=*/false);
+        if (!cap) {
+            // Enabled + trusted but not yet loaded (startup auto-load still in flight, or Enable
+            // never ran): load on demand using the same path as Home > Plugins Enable.
+            if (have_desc && descriptor.enabled && !plugin_mgr.is_plugin_loaded(plugin_key)) {
+                plugin_mgr.load_plugin(plugin_key);
+                std::string load_error;
+                plugin_mgr.wait_for_plugin_load(plugin_key, std::chrono::seconds(10), load_error);
+                cap = plugin_mgr.get_plugin_capability({type, cap_name, plugin_key}, /*only_enabled=*/false);
+            }
+        }
         if (!cap) {
             warn_skip(tag + ": no loaded capability '" + cap_name + "' for plugin '" + plugin_key + "'; skipping");
             continue;

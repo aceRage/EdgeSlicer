@@ -4143,6 +4143,15 @@ bool GUI_App::on_init_inner()
             PluginManager& plugin_mgr = PluginManager::instance();
             plugin_mgr.initialize();
             plugin_mgr.discover_plugins(false, true);
+            // Sidecar enabled=true is the startup auto-load list. Discovery alone leaves the
+            // module unloaded, so Enable from Home would be the only way a restart restored it.
+            try {
+                plugin_mgr.load_enabled_plugins();
+            } catch (const std::exception& ex) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed: " << ex.what();
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "Plugin auto-load failed";
+            }
         }
 #endif
     }

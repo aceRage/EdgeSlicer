@@ -41,6 +41,26 @@ TEST_CASE("home plugins: trust labels pass through to the card", "[HomePlugins]"
     CHECK(plugin_card(untrusted)["trust"] == "Untrusted");
 }
 
+TEST_CASE("home plugins: enabled-not-loaded is distinct from loaded", "[HomePlugins]")
+{
+    PluginView v = sample_view();
+    v.loaded     = false;
+    v.enabled    = true;
+    v.error      = "";
+    const json card = plugin_card(v);
+    CHECK(card["loaded"] == false);
+    CHECK(card["enabled"] == true);
+    CHECK(card["error"] == "");
+    CHECK(card["loading"] == false);
+
+    PluginView err = v;
+    err.error      = "This plugin is untrusted.";
+    const json err_card = plugin_card(err);
+    CHECK(err_card["loaded"] == false);
+    CHECK(err_card["enabled"] == true);
+    CHECK(err_card["error"] == "This plugin is untrusted.");
+}
+
 TEST_CASE("home plugins: a card carries display fields only", "[HomePlugins]")
 {
     const json card = plugin_card(sample_view());

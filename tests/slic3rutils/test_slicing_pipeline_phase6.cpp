@@ -543,6 +543,73 @@ TEST_CASE("A missing pipeline plugin is skipped with a warning, not a silent run
     CHECK(warning.find("skip") != std::string::npos);
 }
 
+TEST_CASE("A missing capability skip is recorded as a visible warning, not a silent skip",
+          "[slicing_pipeline][Python][missing]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("pipeline-skip-warn");
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    manager.take_capability_skip_warnings();
+
+    ScopedTemporaryDir gcode_dir("pipeline-skip-gcode");
+    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    write_file(gcode, "G1 X10 Y10\n");
+
+    DynamicPrintConfig config = pipeline_config("GhostCap", "GhostPlugin");
+    std::exception_ptr ex;
+    CHECK(run_post_process(gcode, config, ex));
+    CHECK_FALSE(ex);
+    CHECK(read_file(gcode).find("EDGE_PIPELINE_STAMP") == std::string::npos);
+
+    const std::vector<std::string> skips = manager.take_capability_skip_warnings();
+    REQUIRE_FALSE(skips.empty());
+    bool named = false;
+    for (const std::string& skip : skips) {
+        if (skip.find("GhostPlugin") != std::string::npos && skip.find("skipping") != std::string::npos)
+            named = true;
+    }
+    CHECK(named);
+}
+
+TEST_CASE("An enabled trusted pipeline plugin is loaded on demand for post-process",
+          "[slicing_pipeline][Python][autoload]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("pipeline-ondemand");
+    const fs::path plugin_dir = write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
+    PluginInstallState on_state;
+    on_state.installed_from = "local";
+    on_state.enabled        = true;
+    REQUIRE(write_install_state(plugin_dir, on_state));
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string pin_error;
+    REQUIRE(approve_plugin_for_test("PipelineStamp", pin_error));
+    CHECK_FALSE(manager.is_plugin_loaded("PipelineStamp"));
+
+    const std::string original = "G1 X10 Y10 E0.1\n; original trailer\n";
+    ScopedTemporaryDir gcode_dir("pipeline-ondemand-gcode");
+    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    write_file(gcode, original);
+
+    DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
+    std::exception_ptr ex;
+    REQUIRE(run_post_process(gcode, config, ex));
+    REQUIRE_FALSE(ex);
+    CHECK(manager.is_plugin_loaded("PipelineStamp"));
+    CHECK(read_file(gcode).find(STAMP_BLOCK) != std::string::npos);
+
+    manager.unload_plugin("PipelineStamp");
+}
+
 TEST_CASE("Unresolved plugin capabilities produce the #16929 save warning", "[slicing_pipeline][Python][missing]")
 {
     ScopedPluginManager plugin_system;

@@ -1084,6 +1084,93 @@ TEST_CASE("The startup auto-load list only contains packages whose sidecar enabl
     CHECK(std::find(keys.begin(), keys.end(), "Bare_Plugin") == keys.end());
 }
 
+TEST_CASE("Startup auto-load loads an enabled trusted plugin", "[PluginLifecycle][Python][autoload]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("lifecycle-autoload-trusted");
+
+    const fs::path on_dir = write_plugin(data_dir_guard, "Enabled_Trusted", ECHO_PLUGIN_SOURCE);
+    PluginInstallState on_state;
+    on_state.installed_from = "local";
+    on_state.enabled        = true;
+    REQUIRE(write_install_state(on_dir, on_state));
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    std::string pin_error;
+    REQUIRE(approve_plugin_for_test("Enabled_Trusted", pin_error));
+    CHECK_FALSE(manager.is_plugin_loaded("Enabled_Trusted"));
+
+    manager.load_enabled_plugins();
+    std::string error;
+    REQUIRE(manager.wait_for_plugin_load("Enabled_Trusted", std::chrono::seconds(120), error));
+    INFO("load error: " << error);
+    CHECK(manager.is_plugin_loaded("Enabled_Trusted"));
+}
+
+TEST_CASE("Startup auto-load skips an untrusted or integrity-mismatched enabled plugin",
+          "[PluginLifecycle][Python][autoload]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir data_dir_guard("lifecycle-autoload-untrusted");
+
+    const fs::path untrusted_dir = write_plugin(data_dir_guard, "Enabled_Untrusted", ECHO_PLUGIN_SOURCE);
+    PluginInstallState untrusted_state;
+    untrusted_state.installed_from = "local";
+    untrusted_state.enabled        = true;
+    REQUIRE(write_install_state(untrusted_dir, untrusted_state));
+
+    const fs::path mismatched_dir = write_plugin(data_dir_guard, "Enabled_Mismatched", ECHO_PLUGIN_SOURCE);
+    PluginInstallState mismatched_state;
+    mismatched_state.installed_from = "local";
+    mismatched_state.enabled        = true;
+    REQUIRE(write_install_state(mismatched_dir, mismatched_state));
+
+    const fs::path trusted_dir = write_plugin(data_dir_guard, "Enabled_Trusted_Sibling", ECHO_PLUGIN_SOURCE);
+    PluginInstallState trusted_state;
+    trusted_state.installed_from = "local";
+    trusted_state.enabled        = true;
+    REQUIRE(write_install_state(trusted_dir, trusted_state));
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+
+    std::string pin_error;
+    REQUIRE(approve_plugin_for_test("Enabled_Trusted_Sibling", pin_error));
+    REQUIRE(approve_plugin_for_test("Enabled_Mismatched", pin_error));
+
+    // Integrity mismatch: pin the current tree, then change the package bytes.
+    {
+        std::ofstream out((mismatched_dir / "Enabled_Mismatched.py").string(), std::ios::binary | std::ios::app);
+        out << "\n# mutated after pin\n";
+    }
+
+    manager.load_enabled_plugins();
+
+    std::string trusted_error;
+    REQUIRE(manager.wait_for_plugin_load("Enabled_Trusted_Sibling", std::chrono::seconds(120), trusted_error));
+    INFO("trusted load error: " << trusted_error);
+    CHECK(manager.is_plugin_loaded("Enabled_Trusted_Sibling"));
+
+    CHECK_FALSE(manager.is_plugin_loaded("Enabled_Untrusted"));
+    const std::string untrusted_error = manager.get_plugin_load_error("Enabled_Untrusted");
+    INFO("untrusted error: " << untrusted_error);
+    CHECK_FALSE(untrusted_error.empty());
+    CHECK(untrusted_error.find("untrusted") != std::string::npos);
+
+    CHECK_FALSE(manager.is_plugin_loaded("Enabled_Mismatched"));
+    const std::string mismatched_error = manager.get_plugin_load_error("Enabled_Mismatched");
+    INFO("mismatched error: " << mismatched_error);
+    CHECK_FALSE(mismatched_error.empty());
+}
+
 TEST_CASE("Signing out drops every cloud plugin row, installed or not", "[PluginLifecycle][Python]")
 {
     ScopedPluginManager plugin_system;

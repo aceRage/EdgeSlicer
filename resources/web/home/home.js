@@ -1514,7 +1514,7 @@
     if (p.error) badges.push({ text: t('plugin_error', 'Error'), cls: 'warn' });
     else if (p.loading) badges.push({ text: t('loading', 'Loading...') });
     else if (p.loaded) badges.push({ text: t('loaded', 'Loaded'), cls: 'accent' });
-    else if (p.enabled) badges.push({ text: t('enabled', 'Enabled') });
+    else if (p.enabled) badges.push({ text: t('enabled_not_loaded', 'Enabled, not loaded'), cls: 'warn' });
     else badges.push({ text: t('not_loaded', 'Not loaded') });
     if (p.run_state === 'running') badges.push({ text: t('plugin_running', 'Running'), cls: 'accent' });
     else if (p.run_state === 'success') badges.push({ text: t('plugin_run_ok', 'Ran'), cls: 'accent' });

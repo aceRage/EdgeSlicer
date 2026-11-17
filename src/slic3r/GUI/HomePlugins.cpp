@@ -52,7 +52,7 @@ static HomeTab::PluginView view_of(PluginManager& mgr, const PluginDescriptor& d
     v.description      = d.description;
     v.source           = "local";
     v.loaded           = mgr.is_plugin_loaded(d.plugin_key);
-    v.enabled          = d.enabled || v.loaded;
+    v.enabled          = d.enabled;
     v.loading          = mgr.is_plugin_load_in_progress(d.plugin_key);
     v.error            = d.normalized_error();
     if (v.error.empty())

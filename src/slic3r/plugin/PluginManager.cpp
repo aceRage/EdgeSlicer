@@ -581,6 +581,42 @@ std::vector<std::string> PluginManager::get_enabled_plugin_keys() const
     return keys;
 }
 
+void PluginManager::load_enabled_plugins()
+{
+    const std::vector<std::string> keys = get_enabled_plugin_keys();
+    for (const std::string& key : keys) {
+        try {
+            if (is_plugin_loaded(key) || is_plugin_load_in_progress(key))
+                continue;
+
+            PluginDescriptor descriptor;
+            if (!try_get_plugin_descriptor(key, descriptor) || !descriptor.has_local_package())
+                continue;
+
+            const plugin_trust::TrustState trust = plugin_trust::evaluate(descriptor);
+            if (!trust.allowed()) {
+                const std::string message = trust.error.empty() ? plugin_trust::refuse_untrusted_message() : trust.error;
+                BOOST_LOG_TRIVIAL(error) << "[load_enabled_plugins] refusing plugin=" << key << " error=" << message;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_load_errors[key] = message;
+                }
+                set_plugin_error(key, message);
+                continue;
+            }
+
+            // Same path as Home > Plugins Enable: fire-and-forget load_plugin.
+            load_plugin(key);
+        } catch (const std::exception& ex) {
+            BOOST_LOG_TRIVIAL(error) << "[load_enabled_plugins] plugin=" << key << " error=" << ex.what();
+            set_plugin_error(key, ex.what());
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "[load_enabled_plugins] plugin=" << key << " unknown error";
+            set_plugin_error(key, _u8L("Unexpected plugin load failure"));
+        }
+    }
+}
+
 bool PluginManager::try_get_plugin_descriptor_for_capability(const std::string& capability_name,
                                                              PluginCapabilityType type,
                                                              PluginDescriptor& out) const
@@ -785,6 +821,51 @@ std::string PluginManager::get_plugin_load_error(const std::string& plugin_key) 
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto it = m_load_errors.find(plugin_key);
     return it == m_load_errors.end() ? std::string{} : it->second;
+}
+
+void PluginManager::report_capability_skip(const std::string& msg)
+{
+    bool notify = true;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_capability_skip_warnings.push_back(msg);
+        const auto now = std::chrono::steady_clock::now();
+        const auto it  = m_capability_skip_notified.find(msg);
+        if (it != m_capability_skip_notified.end() && now - it->second < std::chrono::seconds(5))
+            notify = false;
+        else
+            m_capability_skip_notified[msg] = now;
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << msg;
+    boost::nowide::cerr << msg << std::endl;
+
+    if (!notify || wxTheApp == nullptr)
+        return;
+
+    // Tests and headless slice have no plater; skip the CallAfter so we do not queue a callback
+    // onto an event loop that never runs.
+    if (GUI::wxGetApp().plater() == nullptr)
+        return;
+
+    GUI::wxGetApp().CallAfter([msg]() {
+        if (GUI::wxGetApp().is_closing())
+            return;
+        GUI::Plater* plater = GUI::wxGetApp().plater();
+        if (plater == nullptr || plater->get_notification_manager() == nullptr)
+            return;
+        plater->get_notification_manager()->push_notification(GUI::NotificationType::CustomNotification,
+                                                              GUI::NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                              msg);
+    });
+}
+
+std::vector<std::string> PluginManager::take_capability_skip_warnings()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<std::string> out;
+    out.swap(m_capability_skip_warnings);
+    return out;
 }
 
 bool PluginManager::cancel_plugin_load(const std::string& plugin_key)
