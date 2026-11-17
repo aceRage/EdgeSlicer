@@ -290,15 +290,49 @@ const std::string& custom_gcodes_dir()
 Slic3r::I18N::translate_fn_type Slic3r::I18N::translate_fn = nullptr;
 static std::string g_data_dir;
 
-void set_data_dir(const std::string &dir)
+static bool data_dir_is_access_denied(const boost::system::error_code& ec)
+{
+    if (!ec)
+        return false;
+    if (ec == boost::system::errc::permission_denied || ec == boost::system::errc::operation_not_permitted)
+        return true;
+#ifdef _WIN32
+    if (ec.value() == ERROR_ACCESS_DENIED)
+        return true;
+#endif
+    return false;
+}
+
+void set_data_dir(const std::string& dir)
 {
     g_data_dir = dir;
-    // error_code overloads: a throwing exists()/create_directory() aborts the AppContainer
-    // helper (exit 10) when data_dir itself is not listable. Create only when the path is
-    // confirmed missing; access-denied leaves g_data_dir set and does not throw.
-    boost::system::error_code ec;
-    if (!g_data_dir.empty() && !boost::filesystem::exists(g_data_dir, ec) && !ec)
-        boost::filesystem::create_directory(g_data_dir, ec);
+    if (g_data_dir.empty())
+        return;
+
+    // Throwing exists() (pre-7b5a6c86) returned false for a missing path and threw on access
+    // denied. exists(path, ec) also returns false for a missing path but always assigns ENOENT
+    // to ec, so "create only when !exists && !ec" skipped the create. file_not_found is the
+    // create case. Access denied is the AppContainer helper: leave g_data_dir set, do not throw.
+    // Other status errors still throw, matching the old exists().
+    boost::system::error_code            ec;
+    const boost::filesystem::file_status st = boost::filesystem::status(g_data_dir, ec);
+    if (boost::filesystem::exists(st))
+        return;
+    if (st.type() != boost::filesystem::file_not_found) {
+        if (data_dir_is_access_denied(ec))
+            return;
+        throw boost::filesystem::filesystem_error("boost::filesystem::status", boost::filesystem::path(g_data_dir), ec);
+    }
+
+    // create_directories: the old create_directory() needed the parent to already exist.
+    // Tests (and GUI first-run) call set_data_dir on a path whose parents are missing.
+    ec.clear();
+    boost::filesystem::create_directories(g_data_dir, ec);
+    if (!ec)
+        return;
+    if (data_dir_is_access_denied(ec))
+        return;
+    throw boost::filesystem::filesystem_error("boost::filesystem::create_directories", boost::filesystem::path(g_data_dir), ec);
 }
 
 const std::string& data_dir()

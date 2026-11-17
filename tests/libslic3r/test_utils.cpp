@@ -1171,3 +1171,25 @@ TEST_CASE("copy_file reports the OS error when the destination cannot be written
     REQUIRE(std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isdigit(c) != 0; }));
 #endif // _WIN32
 }
+
+TEST_CASE("set_data_dir creates a path whose parents do not exist", "[utils]")
+{
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("edgeslicer_set_data_dir_%%%%%%%%");
+    const boost::filesystem::path nested = scratch / "missing_parent" / "data";
+    REQUIRE_FALSE(boost::filesystem::exists(scratch));
+
+    struct RestoreDataDir
+    {
+        std::string prev;
+        RestoreDataDir() : prev(data_dir()) {}
+        ~RestoreDataDir() { set_data_dir(prev); }
+    } restore;
+
+    set_data_dir(nested.string());
+    CHECK(data_dir() == nested.string());
+    CHECK(boost::filesystem::is_directory(nested));
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(scratch, ec);
+}

@@ -146,7 +146,9 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   user. Subfolder grants do not make `data_dir` itself `GetFileAttributes`-able, so the
   parent also sets a non-inherited `FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE`
   ACE on `data_dir` (no list/read). `set_data_dir` uses `error_code` overloads so a
-  denied `status()` cannot abort the helper. The IPC named-pipe DACL is
+  denied `status()` cannot abort the helper, and `create_directories` so missing
+  parents are still created (a missing path sets ENOENT on `exists(path, ec)`, which
+  is the create case, not a denial). The IPC named-pipe DACL is
   `D:(A;;GA;;;<package SID>)(A;;GA;;;<TokenUser>)(A;;GA;;;SY)S:(ML;;NW;;;LW)` — not BA,
   because a non-elevated token has Administrators as deny-only and the AppContainer
   access check requires both the user/groups SID and the package SID (helper exit 1005
