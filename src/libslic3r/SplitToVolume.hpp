@@ -579,9 +579,9 @@ indexed_triangle_set split_object_mesh(const ModelObject &object, int instance);
 
 // ---- P4: lay a part on a cut face -----------------------------------------------------------------
 
-// The overhang of `mesh` turned by `rotation` (mm2): the area of the facets that face down more steeply
-// than `threshold_deg` from the horizontal (45: the usual limit), not counting the facets lying on the
-// bed (at its lowest point). `contact` gets the area of those bed facets (mm2).
+// The overhang of `mesh` turned by `rotation` (mm2): the area of the down-facing facets that lean more
+// than `threshold_deg` from vertical (45: the usual overhang limit), not counting the facets lying on
+// the bed (at its lowest point). `contact` gets the area of those bed facets (mm2).
 double split_overhang_area(const indexed_triangle_set &mesh, const Transform3d &rotation, double threshold_deg = 45.,
                            double *contact = nullptr);
 

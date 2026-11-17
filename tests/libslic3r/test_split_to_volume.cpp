@@ -1934,12 +1934,12 @@ TEST_CASE("Split to Fit P5: time of a plan on a big mesh", "[SplitToVolume][slow
 
 namespace {
 
-// A square pyramid standing on its apex: base 40 x 40 at z = 40, apex at the origin.
-indexed_triangle_set p4_pyramid_apex_down()
+// A square pyramid standing on its apex: base 40 x 40 at z = `h`, apex at the origin.
+indexed_triangle_set p4_pyramid_apex_down(float h = 40.f)
 {
     indexed_triangle_set its;
-    its.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(-20.f, -20.f, 40.f), Vec3f(20.f, -20.f, 40.f), Vec3f(20.f, 20.f, 40.f),
-                     Vec3f(-20.f, 20.f, 40.f) };
+    its.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(-20.f, -20.f, h), Vec3f(20.f, -20.f, h), Vec3f(20.f, 20.f, h),
+                     Vec3f(-20.f, 20.f, h) };
     its.indices.emplace_back(1, 2, 3);   // base, facing up
     its.indices.emplace_back(1, 3, 4);
     its.indices.emplace_back(0, 2, 1);   // sides, facing out and down
@@ -2007,16 +2007,18 @@ TEST_CASE("Split to Fit P4: overhang area", "[SplitToVolume]")
     REQUIRE_THAT(split_overhang_area(box_at(20., 20., 20.), Transform3d::Identity(), 45., &contact), WithinAbs(0., 1e-9));
     REQUIRE_THAT(contact, WithinRel(400., 1e-9));
 
-    // On its apex, all four sides overhang (their normals are 26.6 degrees off straight down).
-    const indexed_triangle_set pyramid = p4_pyramid_apex_down();
-    const double               sides   = 4. * 0.5 * 40. * std::sqrt(40. * 40. + 20. * 20.);
+    // A tall pyramid on its apex: its sides lean 26.6 degrees from vertical, inside the 45 degree limit.
+    REQUIRE_THAT(split_overhang_area(p4_pyramid_apex_down(40.f), Transform3d::Identity(), 45.), WithinAbs(0., 1e-9));
+    // A flat one (10 tall): all four sides overhang (they lean 63.4 degrees from vertical).
+    const indexed_triangle_set pyramid = p4_pyramid_apex_down(10.f);
+    const double               sides   = 4. * 0.5 * 40. * std::sqrt(10. * 10. + 20. * 20.);
     REQUIRE_THAT(split_overhang_area(pyramid, Transform3d::Identity(), 45., &contact), WithinRel(sides, 1e-6));
     REQUIRE_THAT(contact, WithinAbs(0., 1e-9));
     // Turned over onto its base: nothing overhangs, the base is on the bed.
     const Transform3d over(Eigen::AngleAxisd(PI, Vec3d::UnitX()));
     REQUIRE_THAT(split_overhang_area(pyramid, over, 45., &contact), WithinAbs(0., 1e-6));
     REQUIRE_THAT(contact, WithinRel(1600., 1e-6));
-    // A steeper limit (70 degrees) lets the sides through.
+    // A 70 degree limit lets those sides through.
     REQUIRE_THAT(split_overhang_area(pyramid, Transform3d::Identity(), 70.), WithinAbs(0., 1e-9));
 }
 

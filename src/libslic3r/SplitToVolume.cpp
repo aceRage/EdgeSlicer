@@ -2667,8 +2667,8 @@ double split_overhang_area(const indexed_triangle_set &mesh, const Transform3d &
         pts.push_back(R * v.cast<double>());
         zmin = std::min(zmin, pts.back().z());
     }
-    // A facet faces down more steeply than the threshold when its normal is within (90 - threshold)
-    // degrees of straight down.
+    // A down-facing facet leaning more than the threshold from vertical: its normal is within
+    // (90 - threshold) degrees of straight down, nz < -sin(threshold).
     const double limit    = -std::sin(threshold_deg * PI / 180.);
     static constexpr double ON_BED = 1e-2;
     double overhang = 0., bed = 0.;

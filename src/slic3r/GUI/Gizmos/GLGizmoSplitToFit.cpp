@@ -537,7 +537,11 @@ void GLGizmoSplitToFit::start_plan()
             result.reset();
         } catch (const std::exception &e) {
             BOOST_LOG_TRIVIAL(error) << "Split to Fit: planning failed: " << e.what();
-            result = cancel->load() ? nullptr : std::make_unique<SplitPlan>();
+            // A cancel that came back wrapped (from a parallel loop) is still a cancel; a real failure
+            // gives an empty plan, as before.
+            result.reset();
+            if (!cancel->load())
+                result = std::make_unique<SplitPlan>();
         }
         {
             std::lock_guard<std::mutex> lk(m_plan_mutex);
