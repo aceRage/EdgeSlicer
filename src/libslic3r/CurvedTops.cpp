@@ -130,7 +130,7 @@ CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &cfg, b
             return;
         }
         if (const ConfigOptionDef *def = print_config_def.get(key); def != nullptr) {
-            const double v = std::clamp(value, def->min, def->max);
+            const double v = std::clamp(value, double(def->min), double(def->max));
             if (v != value) {
                 clamped.push_back(Slic3r::format(_u8L("Developer override %1% %2%%3% is outside %4% to %5%; %6%%3% is used."), name,
                                                  num_str(value), unit, num_str(def->min), num_str(def->max), num_str(v)));
