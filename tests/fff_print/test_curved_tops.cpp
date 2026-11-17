@@ -1282,7 +1282,8 @@ TEST_CASE("Curved tops: surfaces at different heights are limited by the block's
     CHECK(curved_tops_unavailable_warning(*object).empty());
     const std::string summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
     INFO("summary: " << summary);
-    CHECK(summary.find("1 surface(s), 3 curved layers; rise 2.00 mm of 2.00 mm allowed") != std::string::npos);
+    // Review d: the span reported is what is curved, the high cap whole (Z 6.0 to 7.0), not down to the cut.
+    CHECK(summary.find("1 surface(s), 3 curved layers; rise 1.00 mm of 2.00 mm allowed") != std::string::npos);
     CHECK(summary.find("1 lower surface(s) stay flat") != std::string::npos);
     // Every curved path is over the high cap (x > 0 in the object's frame), none over the low one.
     size_t over_low = 0, over_high = 0;
@@ -1602,14 +1603,15 @@ TEST_CASE("Curved tops: on the partial path nothing flat beside the curved part 
 }
 
 // Review (d): a cut raised by material beside can lie below the head's rise floor. A 1.2 mm cap on a
-// 30 mm puck standing on a wider plate (r = 25, top Z 3.0), six curved layers: the plate is in the band
-// of whole curving (from Z 2.8), so the cut is the plate's top, Z 3.0 - more than 2.0 mm under the
-// apex. What is curved is the cap, Z 4.0 to 5.2: the summary reports that span, not 2.2 mm.
+// 30 mm puck (side wall from Z 3.18 to 4.0) standing on a wide cone too steep to curve (r 25 at Z 0 to
+// r 15 at Z 3.18, about 17.6 degrees), six curved layers: the cone's layer at Z 3.0 stands outside the
+// footprint in the band of whole curving (from Z 2.8), so the cut is Z 3.0 - more than 2.0 mm under
+// the apex. What is curved is the cap, Z 4.0 to 5.2: the summary reports that span, not 2.2 mm.
 TEST_CASE("Curved tops: the summary reports the span actually curved when material beside sets the cut", "[CurvedTops]")
 {
     const ResourcesDirGuard resources;
     const double r = 15., base = 4., h_cap = 1.2, rs = (r * r + h_cap * h_cap) / (2.0 * h_cap);
-    std::vector<std::pair<double, double>> profile = { { 0., 0. }, { 25., 0. }, { 25., 3. }, { r, 3. }, { r, base } };
+    std::vector<std::pair<double, double>> profile = { { 0., 0. }, { 25., 0. }, { r, 3.18 }, { r, base } };
     for (int i = 1; i < 24; ++i) {
         const double rr = r * double(24 - i) / 24.;
         profile.emplace_back(rr, base + std::sqrt(rs * rs - rr * rr) - (rs - h_cap));

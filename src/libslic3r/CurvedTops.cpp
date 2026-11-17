@@ -625,6 +625,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     double beside   = -std::numeric_limits<double>::max(); // highest such layer when it raised the cut
     for (const Surface3 &s : candidates)
         partial |= s.z_min < floor_z - EPSILON;
+    const bool by_rise = partial;
     if (partial)
         cut_min = floor_z;
     else {
@@ -686,7 +687,9 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             break;
         }
     // Why the block was cut, for the summary: the head's rise (floor_z) or material beside it.
-    const bool cut_by_beside = partial && beside > -std::numeric_limits<double>::max() && cut > floor_z + EPSILON;
+    // Beside decided when it raised the cut at all and the rise did not set it (a cut raised by material
+    // beside may lie below the rise floor, review d).
+    const bool cut_by_beside = partial && beside > -std::numeric_limits<double>::max() && (!by_rise || cut > floor_z + EPSILON);
 
     // The planar body is cut where the surfaces are (footprint). The block's own layers: each curved
     // layer k covers the footprint (whole surfaces), or, when partial, the part of it where layer k lies
