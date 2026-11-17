@@ -1333,3 +1333,54 @@ TEST_CASE("Z contouring: a wipe over a contoured line keeps to the line's height
     REQUIRE(wipes_over_contoured >= 5);
     CHECK(digging == 0);
 }
+
+// custom_gcode_changes_tool read the tool number from one character into the tool change prefix,
+// so with a prefix longer than "T" (the manual change's "; MANUAL_TOOL_CHANGE T", MakerWare's
+// "M135 T", Sailfish's "M108 T") a change the template already made was never seen, and the
+// writer's own command was added after it: every manual change was said twice.
+TEST_CASE("A tool change the change G-code makes with a long prefix is not written again", "[GCode][Regression]")
+{
+    const auto count = [](const std::string& text, const std::string& what) {
+        size_t n = 0;
+        for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1))
+            ++n;
+        return n;
+    };
+    const auto sliced = [](const std::string& change_filament_gcode) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(2);
+        config.set_num_filaments(2);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+        config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+        config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+        config.option<ConfigOptionBool>("manual_filament_change")->value         = true;
+        config.set_key_value("change_filament_gcode", new ConfigOptionString(change_filament_gcode));
+        config.set_deserialize_strict({
+            {"skirt_loops",         0},
+            {"brim_type",           "no_brim"},
+            {"print_sequence",      "by object"},
+            {"machine_start_gcode", ""},
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
+        model.objects[1]->volumes.front()->config.set("extruder", 2);
+        print.apply(model, config);
+        // The moves alone: the settings listed at the end hold the template's text too.
+        const std::string gcode = Test::gcode(print);
+        return gcode.substr(0, gcode.find("; EXECUTABLE_BLOCK_END"));
+    };
+
+    SECTION("the change G-code names the change itself") {
+        const std::string gcode = sliced("; change by hand\n; MANUAL_TOOL_CHANGE T[next_extruder]\n");
+        REQUIRE(count(gcode, "; change by hand") > 0);
+        CHECK(count(gcode, "; MANUAL_TOOL_CHANGE T1") == count(gcode, "; change by hand"));
+    }
+    SECTION("the change G-code does not: the writer names it once") {
+        const std::string gcode = sliced("; change by hand\n");
+        REQUIRE(count(gcode, "; change by hand") > 0);
+        CHECK(count(gcode, "; MANUAL_TOOL_CHANGE T1") == count(gcode, "; change by hand"));
+    }
+}
