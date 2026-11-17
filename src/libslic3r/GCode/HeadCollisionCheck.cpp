@@ -185,6 +185,31 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
     return best;
 }
 
+// Curved tops P3 (measurement only, never a contact): with the tip at p, lower `best` to the smallest
+// gap between a box's bottom and the material top under it. Only cells that would lower it are visited.
+void measure_box_clearance(const HeightMap &map, const HeadClearance &head, const Vec3d &p, HeadCollisionReport &report)
+{
+    for (const HeadClearanceBox &box : head.boxes) {
+        const double bottom = p.z() + box.min.z();
+        const double best   = report.min_box_clearance;
+        const float  thr    = std::isfinite(best) ? float(bottom - best) : NO_MATERIAL + 1.f;
+        if (map.global_max() <= thr)
+            continue;
+        int ix0 = box.spans_x ? 0 : map.ix_floor(p.x() + box.min.x());
+        int ix1 = box.spans_x ? map.nx() - 1 : map.ix_floor(p.x() + box.max.x());
+        int iy0 = map.iy_floor(p.y() + box.min.y()), iy1 = map.iy_floor(p.y() + box.max.y());
+        if (!map.clamp(ix0, iy0, ix1, iy1) || map.coarse_max(ix0, iy0, ix1, iy1) <= thr)
+            continue;
+        float top_max = NO_MATERIAL;
+        map.for_cells_above(ix0, iy0, ix1, iy1, thr, [&](int, int, float top) { top_max = std::max(top_max, top); });
+        if (top_max > NO_MATERIAL && bottom - double(top_max) < report.min_box_clearance) {
+            report.min_box_clearance          = bottom - double(top_max);
+            report.min_box_clearance_part     = box.name;
+            report.min_box_clearance_position = p.cast<float>();
+        }
+    }
+}
+
 } // namespace
 
 HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult::MoveVertex> &moves,
@@ -257,13 +282,16 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
         const double surface_tan = relaxed ? std::tan(std::min(params.extrusion_surface_slope_deg, 60.) * M_PI / 180.) : 0.;
 
         Contact      worst;
-        const double len_xy = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();
-        const int    n      = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
+        const double len_xy  = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();
+        const int    n       = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
+        const bool   measure = m.layer_id >= params.measure_clearance_from_layer;
         for (int k = 1; k <= n; ++k) {
             const double t = double(k) / double(n);
             const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan);
             if (c.depth > worst.depth)
                 worst = c;
+            if (measure)
+                measure_box_clearance(map, head, a + (cur - a) * t, report);
         }
         if (worst.depth > 0.f) {
             ++report.hit_moves;

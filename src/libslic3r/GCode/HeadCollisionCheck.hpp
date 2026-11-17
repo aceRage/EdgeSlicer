@@ -17,6 +17,7 @@
 // https://github.com/ZimengXiong/PancakeSlicer); this is a smaller, independent implementation.
 
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,12 @@ struct HeadCollisionReport
     float  max_depth { 0.f };
     // The first contact of the first hit moves, in print order, at most HeadCollisionParams::max_reported.
     std::vector<HeadCollisionHit> hits;
+    // Only with HeadCollisionParams::measure_clearance_from_layer: over every move on those layers, the
+    // smallest gap between a head box's bottom and the material already printed under it (negative =
+    // the box is in material), which box, and the tip position. +infinity when nothing was under a box.
+    double                        min_box_clearance { std::numeric_limits<double>::infinity() };
+    std::string                   min_box_clearance_part;
+    Vec3f                         min_box_clearance_position { Vec3f::Zero() };
 };
 
 struct HeadCollisionParams
@@ -63,6 +70,9 @@ struct HeadCollisionParams
     // relaxed. 0 (the default, and always for Z contouring only prints) = off.
     double       extrusion_surface_slope_deg { 0. };
     unsigned int extrusion_surface_slope_min_layer { 0 };
+    // Curved tops: also measure HeadCollisionReport::min_box_clearance over the moves on layers from
+    // this one on. The default (the largest value) measures nothing and changes nothing.
+    unsigned int measure_clearance_from_layer { std::numeric_limits<unsigned int>::max() };
 };
 
 HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult::MoveVertex> &moves,

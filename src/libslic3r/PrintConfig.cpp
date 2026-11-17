@@ -6111,9 +6111,91 @@ void PrintConfigDef::init_fff_params()
                       "value acts as 20 (or as the head's limit, if lower), and the slicing summary says so.");
     def->sidetext = u8"°";	// degrees, don't need translation
     def->min      = 1;
-    def->max      = 40;
+    // Up to 60 for the developer override of the 20 degree ceiling (P3); without it 20 is still the most used.
+    def->max      = 60;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(15));
+
+    // EdgeSlicer, curved tops P3: developer overrides. Shown only in Developer mode (comDevelop) and
+    // ignored by the slicer unless Developer mode is on (CurvedTops.hpp, curved_tops_developer_mode()).
+    // Every default is today's built-in value, so a key left at its default overrides nothing.
+    auto dev_float = [this](const char *key, const char *label, const char *tooltip, const char *sidetext, double min, double max,
+                            double value) {
+        ConfigOptionDef *d = this->add(key, coFloat);
+        d->label           = label;
+        d->category        = L("Quality");
+        d->tooltip         = tooltip;
+        d->sidetext        = sidetext;
+        d->min             = min;
+        d->max             = max;
+        d->mode            = comDevelop;
+        d->set_default_value(new ConfigOptionFloat(value));
+    };
+    auto dev_bool = [this](const char *key, const char *label, const char *tooltip) {
+        ConfigOptionDef *d = this->add(key, coBool);
+        d->label           = label;
+        d->category        = L("Quality");
+        d->tooltip         = tooltip;
+        d->mode            = comDevelop;
+        d->set_default_value(new ConfigOptionBool(false));
+    };
+    dev_float("curved_tops_dev_angle_ceiling", L("Angle ceiling"),
+              L("DEVELOPER OVERRIDE. The steepest slope curved tops ever uses, whatever the head allows (built in: 20). "
+                "Curved tops max angle and the head's flank still limit it."),
+              u8"°", 1, 60, 20);
+    dev_float("curved_tops_dev_head_lowest_part", L("Lowest head part above the tip"),
+              L("DEVELOPER OVERRIDE. Height of the lowest print head part (sock, heater block) above the nozzle tip, used "
+                "instead of the head data for the allowed rise. 0 = from the head data. Required when the printer has no "
+                "head data. The head check still uses the head data."),
+              L("mm"), 0, 50, 0);
+    dev_float("curved_tops_dev_clearance_margin", L("Clearance margin"),
+              L("DEVELOPER OVERRIDE. Taken off the lowest head part for the allowed rise (built in: 0.5 mm)."), L("mm"), 0, 5,
+              0.5);
+    dev_float("curved_tops_dev_flank_margin", L("Flank margin"),
+              L("DEVELOPER OVERRIDE. Taken off the nozzle flank's angle for the head's slope limit (built in: 5 degrees)."),
+              u8"°", 0, 30, 5);
+    dev_float("curved_tops_dev_land_tolerance", L("Land tolerance"),
+              L("DEVELOPER OVERRIDE. Nozzle outline points this close above the tip count as the tip land when the flank's "
+                "angle is measured (built in: 0.1 mm)."),
+              L("mm"), 0, 1, 0.1);
+    dev_float("curved_tops_dev_reach_margin", L("Reach margin"),
+              L("DEVELOPER OVERRIDE. Added to the head's reach when supports are checked against the curved layers (built "
+                "in: 0.5 mm)."),
+              L("mm"), 0, 20, 0.5);
+    dev_float("curved_tops_dev_speed_cap", L("Curved move speed cap"),
+              L("DEVELOPER OVERRIDE. Fastest curved extrusion (built in: 40 mm/s)."), L("mm/s"), 1, 500, 40);
+    dev_float("curved_tops_dev_wipe_speed_cap", L("Curved wipe speed cap"),
+              L("DEVELOPER OVERRIDE. Fastest wipe back along a curved line (built in: 40 mm/s)."), L("mm/s"), 1, 500, 40);
+    dev_float("curved_tops_dev_safe_lift", L("Travel and exit lift"),
+              L("DEVELOPER OVERRIDE. How far above the highest curved point travels in and out of the curved block run "
+                "(built in: 1 mm). The travel height must stay within the printable height."),
+              L("mm"), 0.2, 20, 1);
+    dev_bool("curved_tops_dev_contact_warning_only", L("Head contact is a warning only"),
+             L("DEVELOPER OVERRIDE. A head contact found by the head check on a curved print no longer stops the export: it is "
+               "reported as a critical warning (count, deepest contact, positions) and the G-code is exported. Do not print "
+               "such a file unattended."));
+    dev_bool("curved_tops_dev_allow_multiple_objects", L("Allow several objects or copies"),
+             L("DEVELOPER OVERRIDE. Curve the top even when the plate holds more than one object or copy."));
+    dev_bool("curved_tops_dev_allow_by_object", L("Allow by-object sequence"),
+             L("DEVELOPER OVERRIDE. Curve the top even when the plate prints by object."));
+    dev_bool("curved_tops_dev_allow_multi_filament", L("Allow several filaments or a prime tower"),
+             L("DEVELOPER OVERRIDE. Curve the top even when the plate uses more than one filament or has a prime tower."));
+    dev_bool("curved_tops_dev_allow_supports_in_reach", L("Allow supports within the head's reach"),
+             L("DEVELOPER OVERRIDE. Curve the top even when supports or side stabilizers reach into the curved layers within "
+               "the head's reach."));
+    dev_bool("curved_tops_dev_allow_material_beside", L("Allow material beside the surface"),
+             L("DEVELOPER OVERRIDE. Material next to the curved surface no longer raises where the curved layers start or "
+               "refuses the top: the surface is curved over the whole allowed rise anyway."));
+    dev_bool("curved_tops_dev_allow_z_contouring", L("Allow Z contouring on the same object"),
+             L("DEVELOPER OVERRIDE. Curve the top even when Z contouring is on for the object."));
+    dev_bool("curved_tops_dev_allow_raft", L("Allow a raft"), L("DEVELOPER OVERRIDE. Curve the top even when the object has a raft."));
+    dev_bool("curved_tops_dev_allow_variable_layer_height", L("Allow variable layer height"),
+             L("DEVELOPER OVERRIDE. Curve the top even when the object has a variable layer height."));
+    dev_bool("curved_tops_dev_allow_tall_skirt", L("Allow a draft shield or a tall skirt"),
+             L("DEVELOPER OVERRIDE. Curve the top even with a draft shield or a skirt taller than one layer."));
+    dev_bool("curved_tops_dev_allow_unverified_head", L("Allow unverified or missing head data"),
+             L("DEVELOPER OVERRIDE. Curve the top on a printer whose head data no curved print has checked, or that has no head "
+               "data at all (then set the lowest head part above the tip; the head check cannot run and says so)."));
 
     def = this->add("layer_change_gcode", coString);
     def->label = L("Layer change G-code");
@@ -13763,6 +13845,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Allow 3mf with newer version to be sliced.");
     def->cli_params = "option";
     def->set_default_value(new  ConfigOptionBool(false));
+
+    // EdgeSlicer, curved tops P3: the CLI's stand-in for the GUI's Developer mode.
+    def = this->add("curved_tops_dev_overrides", coBool);
+    def->label = L("Curved tops developer overrides");
+    def->tooltip = L("Let the curved_tops_dev_* settings act, as Developer mode does in the app. Off by default: the "
+                     "overrides a project or preset carries are then ignored.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
 
     // Ultra: headless / agent-friendly CLI additions
     def = this->add("progress_json", coBool);

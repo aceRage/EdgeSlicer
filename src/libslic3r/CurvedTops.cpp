@@ -23,6 +23,7 @@
 #include "CurvedTops.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -87,26 +88,145 @@ std::string only_on_verified_printers()
                           " " + Slic3r::format(_u8L("For now curved tops runs only on the printers it has been printed on: %1%."), list);
 }
 
+std::atomic<bool> g_curved_tops_developer_mode { false };
+
 } // namespace
 
-CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model)
+void set_curved_tops_developer_mode(bool on) { g_curved_tops_developer_mode.store(on); }
+bool curved_tops_developer_mode() { return g_curved_tops_developer_mode.load(); }
+
+CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &config)
+{
+    return curved_tops_dev_overrides(config, curved_tops_developer_mode());
+}
+
+CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &cfg, bool developer_mode)
+{
+    CurvedTopsDevOverrides set; // what the config asks for
+    const CurvedTopsDevOverrides builtin;
+    std::vector<std::string> &list = set.carried_list;
+    // A numeric override counts when it differs from its built-in value (its default).
+    const auto num = [&list](const ConfigOptionFloat &opt, double builtin_value, double &dst, const char *name, const char *unit) {
+        if (std::abs(opt.value - builtin_value) > 1e-9) {
+            dst = opt.value;
+            // Up to three decimals, trailing zeros dropped ("25", "0.15").
+            std::string v = float_to_string_decimal_point(opt.value, 3);
+            if (v.find('.') != std::string::npos) {
+                while (!v.empty() && v.back() == '0')
+                    v.pop_back();
+                if (!v.empty() && v.back() == '.')
+                    v.pop_back();
+            }
+            list.push_back(std::string(name) + " " + v + unit);
+        }
+    };
+    const auto flag = [&list](const ConfigOptionBool &opt, bool &dst, const char *name) {
+        if (opt.value) {
+            dst = true;
+            list.push_back(name);
+        }
+    };
+    num(cfg.curved_tops_dev_angle_ceiling, builtin.angle_ceiling_deg, set.angle_ceiling_deg, "angle ceiling", " deg");
+    num(cfg.curved_tops_dev_head_lowest_part, builtin.head_lowest_part_mm, set.head_lowest_part_mm, "lowest head part", " mm");
+    num(cfg.curved_tops_dev_clearance_margin, builtin.clearance_margin_mm, set.clearance_margin_mm, "clearance margin", " mm");
+    num(cfg.curved_tops_dev_flank_margin, builtin.flank_margin_deg, set.flank_margin_deg, "flank margin", " deg");
+    num(cfg.curved_tops_dev_land_tolerance, builtin.land_tolerance_mm, set.land_tolerance_mm, "land tolerance", " mm");
+    num(cfg.curved_tops_dev_reach_margin, builtin.reach_margin_mm, set.reach_margin_mm, "reach margin", " mm");
+    num(cfg.curved_tops_dev_speed_cap, builtin.speed_cap_mm_s, set.speed_cap_mm_s, "curved speed cap", " mm/s");
+    num(cfg.curved_tops_dev_wipe_speed_cap, builtin.wipe_speed_cap_mm_s, set.wipe_speed_cap_mm_s, "wipe speed cap", " mm/s");
+    num(cfg.curved_tops_dev_safe_lift, builtin.safe_lift_mm, set.safe_lift_mm, "travel/exit lift", " mm");
+    flag(cfg.curved_tops_dev_contact_warning_only, set.contact_warning_only, "head contact is a warning only");
+    flag(cfg.curved_tops_dev_allow_multiple_objects, set.allow_multiple_objects, "allow several objects or copies");
+    flag(cfg.curved_tops_dev_allow_by_object, set.allow_by_object, "allow by-object sequence");
+    flag(cfg.curved_tops_dev_allow_multi_filament, set.allow_multi_filament, "allow several filaments or a prime tower");
+    flag(cfg.curved_tops_dev_allow_supports_in_reach, set.allow_supports_in_reach, "allow supports within reach");
+    flag(cfg.curved_tops_dev_allow_material_beside, set.allow_material_beside, "allow material beside the surface");
+    flag(cfg.curved_tops_dev_allow_z_contouring, set.allow_z_contouring, "allow Z contouring");
+    flag(cfg.curved_tops_dev_allow_raft, set.allow_raft, "allow raft");
+    flag(cfg.curved_tops_dev_allow_variable_layer_height, set.allow_variable_layer_height, "allow variable layer height");
+    flag(cfg.curved_tops_dev_allow_tall_skirt, set.allow_tall_skirt, "allow draft shield or tall skirt");
+    flag(cfg.curved_tops_dev_allow_unverified_head, set.allow_unverified_head, "allow unverified or missing head data");
+
+    if (list.empty())
+        return builtin;
+    if (!developer_mode) {
+        // Ignored: the built-in values, but say what was carried.
+        CurvedTopsDevOverrides out;
+        out.carried      = true;
+        out.carried_list = std::move(list);
+        return out;
+    }
+    set.carried = true;
+    set.active  = true;
+    return set;
+}
+
+std::string CurvedTopsDevOverrides::record() const
+{
+    if (!this->carried)
+        return std::string();
+    std::string out = this->active ? "active:" : "ignored:";
+    for (const std::string &s : this->carried_list)
+        out += s + "|";
+    return out;
+}
+
+std::string CurvedTopsDevOverrides::active_message() const
+{
+    if (!this->active)
+        return std::string();
+    std::string out = _u8L("Curved tops developer overrides active:");
+    for (size_t i = 0; i < this->carried_list.size(); ++i)
+        out += (i == 0 ? " " : "; ") + this->carried_list[i];
+    return out + ". " + _u8L("The safety limits these replace were not verified on a print. Watch the print.");
+}
+
+std::string CurvedTopsDevOverrides::ignored_note() const
+{
+    if (!this->carried || this->active)
+        return std::string();
+    std::string names;
+    for (size_t i = 0; i < this->carried_list.size(); ++i)
+        names += (i == 0 ? "" : "; ") + this->carried_list[i];
+    return Slic3r::format(_u8L("The developer overrides in this project were ignored (Developer mode is off): %1%."), names);
+}
+
+CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model,
+                                             const CurvedTopsDevOverrides &dev)
 {
     CurvedTopsHeadLimits out;
-    out.head = head;
+    out.head                = head;
+    out.angle_ceiling_deg   = dev.angle_ceiling_deg;
+    out.clearance_margin_mm = dev.clearance_margin_mm;
     if (!head) {
         out.refusal = Slic3r::format(_u8L("EdgeSlicer has no print head clearance data for the printer model \"%1%\"."), printer_model) +
                       only_on_verified_printers();
+        // P3: no head data at all, curved on the developer's own numbers. The angle is then limited by
+        // the ceiling only (there is no nozzle outline), and nothing can check the export.
+        if (dev.active && dev.allow_unverified_head) {
+            if (dev.head_lowest_part_mm <= 0.)
+                out.refusal += " " + _u8L("The developer override for missing head data needs the lowest head part above the tip.");
+            else if (dev.head_lowest_part_mm - dev.clearance_margin_mm <= 0.)
+                out.refusal += " " + _u8L("The developer override leaves no room: the lowest head part is not above the clearance margin.");
+            else {
+                out.refusal.clear();
+                out.usable          = true;
+                out.allowed_rise_mm = dev.head_lowest_part_mm - dev.clearance_margin_mm;
+                out.max_slope_deg   = dev.angle_ceiling_deg;
+                out.source          = _u8L("no head data: developer override values, not checked");
+            }
+        }
         return out;
     }
     out.known  = true;
     out.source = head->name + (head->calibrated ? std::string() : " (" + _u8L("an estimate, not a measurement") + ")");
 
     // Allowed rise: the lowest head part above the tip, less the margin.
-    const double lowest = head->lowest_box_z();
-    out.allowed_rise_mm = std::isfinite(lowest) ? lowest - CURVED_TOPS_CLEARANCE_MARGIN_MM : 0.;
+    const double lowest = dev.head_lowest_part_mm > 0. ? dev.head_lowest_part_mm : head->lowest_box_z();
+    out.allowed_rise_mm = std::isfinite(lowest) ? lowest - dev.clearance_margin_mm : 0.;
     // Head angle cap: the nozzle flank, less a margin, never above the ceiling.
-    out.max_slope_deg = std::clamp(head->nozzle_flank_angle_deg(CURVED_TOPS_LAND_TOLERANCE_MM) - CURVED_TOPS_FLANK_MARGIN_DEG, 0.,
-                                   CURVED_TOPS_MAX_ANGLE_CEILING);
+    out.max_slope_deg = std::clamp(head->nozzle_flank_angle_deg(dev.land_tolerance_mm) - dev.flank_margin_deg, 0.,
+                                   dev.angle_ceiling_deg);
 
     const bool verified = head->curved_tops_verified_for(printer_model);
     if (verified) {
@@ -126,25 +246,28 @@ CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadCle
     else if (out.max_slope_deg <= 0.)
         out.refusal = Slic3r::format(_u8L("the nozzle outline in the print head data for %1% (%2%) clears no slope."), printer_model,
                                      head->name);
-    else if (!verified)
+    else if (!verified && !(dev.active && dev.allow_unverified_head))
         // P1: an estimated head nobody has printed curved tops with stays refused until the
         // acknowledgement (P2) lets the user take that risk knowingly.
         out.refusal = Slic3r::format(_u8L("the print head data for %1% (%2%) is an estimate that no curved print has checked yet."),
                                      printer_model, head->name) +
                       only_on_verified_printers();
-    else
+    else {
         out.usable = true;
+        if (!verified)
+            out.source += ", " + _u8L("no curved print checked it (developer override)");
+    }
     return out;
 }
 
-CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config)
+CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev)
 {
-    return curved_tops_head_limits(resolve_head_clearance(config), config.printer_model.value);
+    return curved_tops_head_limits(resolve_head_clearance(config), config.printer_model.value, dev);
 }
 
 double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head)
 {
-    return std::clamp(std::min(user_max_deg, head.max_slope_deg), 0.0, CURVED_TOPS_MAX_ANGLE_CEILING);
+    return std::clamp(std::min(user_max_deg, head.max_slope_deg), 0.0, head.angle_ceiling_deg);
 }
 
 double curved_tops_head_reach_mm(const HeadClearance &head, double height)
@@ -187,7 +310,6 @@ namespace {
 
 constexpr double SAMPLE_STEP_MM   = 0.5;   // XY resampling of conformal paths
 constexpr double MIN_AREA_MM2     = 4.0;   // smaller surfaces stay planar
-constexpr double SAFE_LIFT_MM     = 1.0;   // travel this far above the highest curved point
 constexpr double OUTSIDE_TOL_MM2  = 1.0;   // tolerated sliver of material outside a surface
 
 struct Surface3
@@ -366,11 +488,14 @@ struct GuardSettings
     double      printable_height { 0. };
     int         layers { 0 };
     double      angle { 0. }, layer_height { 0. };
+    // P3: the developer overrides in force (or "ignored"), see CurvedTopsDevOverrides::record().
+    CurvedTopsDevOverrides dev;
 
     bool blocked() const
     {
-        return !head_usable || not_alone || by_object || zaa || spiral || raft || vlh || multi_filament || smooth_tower || local_z ||
-               nozzles || skirt;
+        return !head_usable || (not_alone && !dev.allow_multiple_objects) || (by_object && !dev.allow_by_object) ||
+               (zaa && !dev.allow_z_contouring) || spiral || (raft && !dev.allow_raft) || (vlh && !dev.allow_variable_layer_height) ||
+               ((multi_filament || smooth_tower) && !dev.allow_multi_filament) || local_z || nozzles || (skirt && !dev.allow_tall_skirt);
     }
 };
 
@@ -379,8 +504,9 @@ GuardSettings guard_settings(const PrintObject &object, int multi_filament)
     const Print             &print = *object.print();
     const PrintConfig       &pcfg  = print.config();
     const PrintObjectConfig &ocfg  = object.config();
-    const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg);
     GuardSettings s;
+    s.dev = curved_tops_dev_overrides(ocfg);
+    const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg, s.dev);
     s.head             = (head.head ? head.head->id : std::string("-")) + "|" + pcfg.printer_model.value;
     s.head_usable      = head.usable;
     s.not_alone        = print.objects().size() != 1 || object.instances().size() != 1;
@@ -414,6 +540,8 @@ std::string curved_tops_guard_inputs(const PrintObject &object, int multi_filame
         << ";spiral=" << s.spiral << ";raft=" << s.raft << ";vlh=" << s.vlh << ";filaments=" << s.multi_filament
         << ";tower=" << s.smooth_tower << ";localz=" << s.local_z << ";nozzles=" << s.nozzles << ";skirt=" << s.skirt
         << ";support=" << s.support << ";height=" << s.printable_height << ";ct=" << s.layers << ',' << s.angle << ',' << s.layer_height;
+    // P3 (last, Print::apply() compares this tail on its own): the overrides in force.
+    out << ";dev=" << s.dev.record();
     return out.str();
 }
 
@@ -445,29 +573,33 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         remove_previous_conformal(region->fills);
 
     // Guards: what this version handles (design tests/design_curved_tops_any_printer.md, 3.2).
-    const PrintConfig         &pcfg = print->config();
-    const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg);
+    // P3: a developer override (Developer mode only) may switch a refusal that guards against a collision
+    // off, or widen a limit. Refusals that guard against output the code cannot get right (spiral vase,
+    // sub-layer plans, mixed nozzle diameters, the printable height) have no override.
+    const PrintConfig            &pcfg = print->config();
+    const CurvedTopsDevOverrides  dev  = curved_tops_dev_overrides(ocfg);
+    const CurvedTopsHeadLimits    head = curved_tops_head_limits(pcfg, dev);
     if (!head.usable)
         return refuse(head.refusal);
-    if (print->objects().size() != 1 || object.instances().size() != 1)
+    if ((print->objects().size() != 1 || object.instances().size() != 1) && !dev.allow_multiple_objects)
         return refuse(_u8L("there is more than one object or copy on the plate (curved tops handles one object for now)."));
-    if (pcfg.print_sequence.value == PrintSequence::ByObject)
+    if (pcfg.print_sequence.value == PrintSequence::ByObject && !dev.allow_by_object)
         return refuse(_u8L("the plate prints by object; curved tops needs the by-layer sequence."));
     // Z contouring moves the same top layers up and down; the curved-tops head check is also more
     // lenient on the block's extrusions than on Z contouring moves. One or the other per object.
-    if (object.need_z_contouring())
+    if (object.need_z_contouring() && !dev.allow_z_contouring)
         return refuse(_u8L("Z contouring is on for it as well; curved tops and Z contouring do not run on the same object."));
     if (pcfg.spiral_mode.value)
         return refuse(_u8L("spiral vase mode is on."));
-    if (ocfg.raft_layers.value > 0)
+    if (ocfg.raft_layers.value > 0 && !dev.allow_raft)
         return refuse(_u8L("it has a raft."));
-    if (object.model_object() != nullptr && !object.model_object()->layer_height_profile.empty())
+    if (object.model_object() != nullptr && !object.model_object()->layer_height_profile.empty() && !dev.allow_variable_layer_height)
         return refuse(_u8L("it has a variable layer height."));
     // The tower stands at layer height next to the part; with more than one filament there is one
     // (and tool changes). A smooth timelapse builds one even for a single filament.
-    if (print->extruders(true).size() > 1)
+    if (print->extruders(true).size() > 1 && !dev.allow_multi_filament)
         return refuse(_u8L("the plate uses more than one filament (curved tops handles one filament and no prime tower for now)."));
-    if (print->has_wipe_tower() && pcfg.timelapse_type.value == TimelapseType::tlSmooth)
+    if (print->has_wipe_tower() && pcfg.timelapse_type.value == TimelapseType::tlSmooth && !dev.allow_multi_filament)
         return refuse(_u8L("the smooth timelapse adds a prime tower to the plate."));
     // Same tests as Z contouring's guard (3) in need_z_contouring(): the band's layers must be plain.
     if (pcfg.dithering_local_z_mode.value)
@@ -478,7 +610,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         return refuse(_u8L("the plate mixes nozzle diameters (adaptive layer merge)."));
     // A draft shield stands about 2 mm from the part, inside the nozzle's reach; a skirt taller
     // than one layer may reach the curved band.
-    if (pcfg.skirt_loops.value > 0 && (pcfg.draft_shield.value != dsDisabled || pcfg.skirt_height.value > 1))
+    if (pcfg.skirt_loops.value > 0 && (pcfg.draft_shield.value != dsDisabled || pcfg.skirt_height.value > 1) && !dev.allow_tall_skirt)
         return refuse(_u8L("it has a draft shield or a skirt taller than one layer."));
     // Supports and side stabilizers (P2): no refusal here. Print::process() runs this step after the
     // support step for an object with curved tops on, and the block is checked against the support
@@ -490,7 +622,10 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     const double h         = ocfg.layer_height.value;
     const double max_angle = curved_tops_effective_max_angle(ocfg.curved_tops_max_angle.value, head);
     const double cos_max   = std::cos(max_angle * M_PI / 180.0);
-    const double ground    = imesh.ground_level();
+    // Mesh frame to print frame: print Z = mesh Z - ground. A raft (developer override only, refused
+    // above otherwise) lifts every object layer by object_print_z_min, which the mesh does not know.
+    const double z_shift   = ocfg.raft_layers.value > 0 ? object.slicing_parameters().object_print_z_min : 0.;
+    const double ground    = imesh.ground_level() - z_shift;
 
     // 1. Candidate facets.
     const indexed_triangle_set &its = mesh.its;
@@ -628,7 +763,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     const bool by_rise = partial;
     if (partial)
         cut_min = floor_z;
-    else {
+    else if (!dev.allow_material_beside) {
         ExPolygons all;
         for (const Surface3 &s : candidates)
             all.push_back(s.footprint);
@@ -657,8 +792,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                                       "(lowest head part %3% mm above the nozzle tip, less a %4% mm margin), and no layer "
                                                       "leaves a curved part above it."),
                                                  mm_str(z_top - z_bottom), mm_str(head.allowed_rise_mm),
-                                                 mm_str(head.allowed_rise_mm + CURVED_TOPS_CLEARANCE_MARGIN_MM),
-                                                 mm_str(CURVED_TOPS_CLEARANCE_MARGIN_MM)));
+                                                 mm_str(head.allowed_rise_mm + head.clearance_margin_mm),
+                                                 mm_str(head.clearance_margin_mm)));
             cut = *it;
             ExPolygons kept;
             for (const Surface3 &s : candidates)
@@ -666,8 +801,9 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                     kept.push_back(s.footprint);
             // Material beside what is kept, above the cut: raise the cut over it and try again. Then
             // (strict, see above) flat extrusions beside it above the lowest curved bead (cut + h).
-            double fail = beside_z(kept, cut);
-            if (fail == -std::numeric_limits<double>::max())
+            // P3: allow_material_beside skips both: the cut stays where the rise puts it.
+            double fail = dev.allow_material_beside ? -std::numeric_limits<double>::max() : beside_z(kept, cut);
+            if (fail == -std::numeric_limits<double>::max() && !dev.allow_material_beside)
                 fail = flat_above_z(kept, cut + h);
             if (fail > -std::numeric_limits<double>::max()) {
                 cut_min = beside = fail;
@@ -746,13 +882,20 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     // 2. Clearance: nothing outside the surfaces may reach into the curved band. With partial curving
     //    the lower part of a cut surface is inside the footprint: its layers above the cut are cut away
     //    below (step 4), and the ones up to the cut stand no higher than the cut, under every curved bead.
+    // P3 notes: what a developer override let through, said with the summary.
+    std::vector<std::string> dev_notes;
     const ExPolygons footprint_grown = offset_ex(footprint, scale_(0.5));
     for (const Layer *layer : object.layers())
         if (layer->print_z > band_bottom + EPSILON) {
             const double outside = area(diff_ex(layer->lslices, footprint_grown)) * SCALING_FACTOR * SCALING_FACTOR;
-            if (outside > OUTSIDE_TOL_MM2)
-                return refuse(Slic3r::format(_u8L("part of it next to the curved surface rises into the curved layers (at Z %1% mm)."),
-                                             mm_str(layer->print_z)));
+            if (outside > OUTSIDE_TOL_MM2) {
+                const std::string why = Slic3r::format(_u8L("part of it next to the curved surface rises into the curved layers (at Z %1% mm)."),
+                                                       mm_str(layer->print_z));
+                if (!dev.allow_material_beside)
+                    return refuse(why);
+                dev_notes.push_back(_u8L("Developer override: curved although ") + why);
+                break;
+            }
         }
 
     // 2b. Supports and side stabilizers (P2): generated before this step for an object with curved tops
@@ -765,9 +908,17 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         if (material.empty())
             continue;
         const double height = support->print_z - band_bottom;
-        const double reach  = curved_tops_head_reach_mm(*head.head, height) + CURVED_TOPS_REACH_MARGIN_MM;
+        // No head data (developer override only): the reach is unknown, so any support in the band counts.
+        const double reach  = head.head ? curved_tops_head_reach_mm(*head.head, height) + dev.reach_margin_mm :
+                                          std::numeric_limits<double>::infinity();
         const bool   hit    = std::isinf(reach) ||
                          area(intersection_ex(material, offset_ex(tip_area, float(scale_(reach))))) * SCALING_FACTOR * SCALING_FACTOR > 0.01;
+        if (hit && dev.allow_supports_in_reach) {
+            dev_notes.push_back(Slic3r::format(_u8L("Developer override: curved although its supports (or side stabilizers) reach Z %1% mm, "
+                                                    "into the curved layers (from Z %2% mm), within the print head's reach."),
+                                               mm_str(support->print_z), mm_str(band_bottom)));
+            break;
+        }
         if (hit)
             return refuse(std::isinf(reach) ?
                               Slic3r::format(_u8L("its supports (or side stabilizers) reach Z %1% mm, into the curved layers (from Z %2% mm), "
@@ -780,7 +931,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
 
     // R4: the travels in the block run level at the safe Z; it must be within the printer.
     const double base_z     = top_layer->print_z;
-    const double safe_z     = std::max(z_hi + SAFE_LIFT_MM, base_z + SAFE_LIFT_MM);
+    const double safe_z     = std::max(z_hi + dev.safe_lift_mm, base_z + dev.safe_lift_mm);
     const float  safe_delta = float(safe_z - base_z);
     if (safe_z > pcfg.printable_height.value + EPSILON)
         return refuse(Slic3r::format(_u8L("the travels over the curved surface would need Z %1% mm, above the printable height of %2% mm."),
@@ -805,6 +956,18 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     conformal->no_sort = true;
     size_t           n_paths      = 0;
     ContourZSamples *last_samples = nullptr; // the block's last path, for the exit lift (R5)
+    // P3 hard limits, checked when developer overrides are in force: every curved Z finite and above
+    // the first layer, never overridable.
+    bool   bad_sample    = false;
+    double lowest_bead_z = std::numeric_limits<double>::max();
+    // P3: the comment written before the block's first path when overrides are in force.
+    std::string block_comment;
+    if (dev.active) {
+        block_comment = ";CURVED_TOPS_DEV_OVERRIDES_START\n; " + dev.active_message() + "\n";
+        for (const std::string &s : dev.carried_list)
+            block_comment += "; - " + s + "\n";
+        block_comment += ";CURVED_TOPS_DEV_OVERRIDES_END\n";
+    }
 
     const auto add_path = [&](const Points &raw, ExtrusionRole role, const Flow &flow, int k) {
         const Points pts = resample(raw);
@@ -813,6 +976,15 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         auto samples = std::make_shared<ContourZSamples>();
         samples->curved_top   = true;
         samples->safe_z_delta = safe_delta;
+        if (dev.active) {
+            // 0 (the built-in cap) unless overridden.
+            if (dev.speed_cap_mm_s != CURVED_TOPS_MAX_SPEED_MM_S)
+                samples->speed_cap = float(dev.speed_cap_mm_s);
+            if (dev.wipe_speed_cap_mm_s != CURVED_TOPS_MAX_SPEED_MM_S)
+                samples->wipe_speed_cap = float(dev.wipe_speed_cap_mm_s);
+            if (n_paths == 0)
+                samples->block_comment = block_comment;
+        }
         samples->points       = pts;
         samples->z.reserve(pts.size());
         samples->flow.reserve(pts.size());
@@ -854,8 +1026,11 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             // The lowest curved layer at this point fills the gap down to the planar body: layer 0, or
             // (partial) a layer whose layer below does not reach this point.
             const bool lowest = k == 0 || (partial && s - (n_layers - k) * h < cut + h - EPSILON);
+            const float flow  = lowest ? float(curved_tops_gap_flow(z - planar_top_below(s), h)) : 1.f;
             samples->z.push_back(float(z - base_z));
-            samples->flow.push_back(lowest ? float(curved_tops_gap_flow(z - planar_top_below(s), h)) : 1.f);
+            samples->flow.push_back(flow);
+            bad_sample |= !std::isfinite(z) || !std::isfinite(flow);
+            lowest_bead_z = std::min(lowest_bead_z, z);
         }
         samples->build_index();
         last_samples = samples.get();
@@ -904,6 +1079,17 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     }
     if (n_paths == 0 || last_samples == nullptr)
         return refuse(_u8L("no curved path could be built on its top surface."));
+    // P3: whatever the overrides, no curved move goes below the first layer (into the bed) or to an
+    // invalid height. Not overridable.
+    if (dev.active) {
+        const double floor_bead = object.layers().front()->print_z;
+        if (bad_sample)
+            return refuse(_u8L("a curved move would get an invalid height (developer overrides cannot change this)."));
+        if (lowest_bead_z < floor_bead - EPSILON)
+            return refuse(Slic3r::format(_u8L("a curved move would reach Z %1% mm, below the first layer (Z %2% mm) (developer overrides "
+                                              "cannot change this)."),
+                                         mm_str(lowest_bead_z), mm_str(floor_bead)));
+    }
     // R5: after the block's last path the emitter retracts and lifts to the safe Z before anything
     // else (the end G-code, a following travel) can move the head across the surface.
     last_samples->exit_lift = true;
@@ -947,7 +1133,13 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                          "%6% of %7% degrees allowed; curved moves at most %8% mm/s. Print head data: %9%."),
                                     object.model_object()->name, surfaces.size(), n_layers, mm_str(rise_used),
                                     mm_str(head.allowed_rise_mm), deg_str(slope_used), deg_str(max_angle),
-                                    float_to_string_decimal_point(CURVED_TOPS_MAX_SPEED_MM_S, 0), head.source);
+                                    float_to_string_decimal_point(dev.speed_cap_mm_s, 0), head.source);
+    // P3: a developer override in force also gives the lowest curved bead and the travel height.
+    if (dev.active)
+        result.notes.push_back(Slic3r::format(_u8L("Lowest curved bead at Z %1% mm, highest curved point at Z %2% mm, travels at Z %3% mm."),
+                                              mm_str(lowest_bead_z), mm_str(z_hi), mm_str(safe_z)));
+    for (std::string &note : dev_notes)
+        result.notes.push_back(std::move(note));
     if (partial) {
         // Material beside raised the cut: said even when every curved surface lies wholly above it (the
         // flanks around it are what prints flat).
@@ -972,7 +1164,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         result.notes.push_back(Slic3r::format(_u8L("Curved tops max angle is set to %1% degrees; %2% degrees is used, the most this print head "
                                                    "allows (curved tops never goes above %3% degrees)."),
                                               deg_str(ocfg.curved_tops_max_angle.value), deg_str(max_angle),
-                                              deg_str(CURVED_TOPS_MAX_ANGLE_CEILING)));
+                                              deg_str(head.angle_ceiling_deg)));
     // D8: beyond what has been printed on this printer is allowed, but said.
     if (head.verified_rise_mm > 0. && (rise_used > head.verified_rise_mm + EPSILON || slope_used > head.verified_angle_deg + 0.05))
         result.notes.push_back(Slic3r::format(_u8L("This curved surface (rise %1% mm, slope %2% degrees) goes beyond what has been printed on "

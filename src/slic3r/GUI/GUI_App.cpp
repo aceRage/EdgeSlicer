@@ -33,6 +33,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 
 // Localization headers: include libslic3r version first so everything in this file
@@ -8585,6 +8586,16 @@ void GUI_App::update_mode()
     //BBS plater()->update_menus();
 
     plater()->canvas3D()->update_gizmos_on_off_state();
+
+    // EdgeSlicer, curved tops P3: the developer overrides act only in Developer mode (Preferences). The
+    // slicer reads the flag; Print::apply() re-plans a curved block when it changes (guard record).
+    const bool developer = app_config->get_bool("developer_mode");
+    if (developer != curved_tops_developer_mode()) {
+        set_curved_tops_developer_mode(developer);
+        BOOST_LOG_TRIVIAL(info) << "Curved tops developer overrides " << (developer ? "allowed" : "ignored") << " (Developer mode "
+                                << (developer ? "on" : "off") << ")";
+        plater()->schedule_background_process();
+    }
 }
 
 void GUI_App::update_internal_development() {
