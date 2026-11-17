@@ -2770,3 +2770,89 @@ TEST_CASE("Curved tops P4: both patterns slice and export", "[CurvedTops][Curved
     }
     CHECK_NOTHROW(Test::gcode(print));
 }
+
+// Review M2: the tolerance in force is the setting capped by the head's printed record. The X1 Carbon has no
+// nozzle contact record: strict (P3's planner rules, said in the summary) unless the developer override lifts it.
+// The Centauri Carbon records 0.61 mm: a larger setting is capped and said.
+TEST_CASE("Curved tops P4: the nozzle tolerance is capped by the print head's printed record", "[CurvedTops][CurvedTopsP4]")
+{
+    const ResourcesDirGuard resources;
+    {
+        Print print;
+        Model model;
+        slice_puck(print, model, true, { { "printer_model", "Bambu Lab X1 Carbon" }, { "curved_tops_max_angle", "5" } });
+        REQUIRE(top_block(print));
+        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+        INFO("summary: " << summary);
+        CHECK(summary.find("Nozzle contact tolerance not applied: no contact print recorded for this print head (the setting asks for 0.40 mm)") !=
+              std::string::npos);
+        // Strict: the planner works as with tolerance 0 (see "material beside within the nozzle tolerance").
+        CHECK(summary.find("Partly curved: below Z 4.80 mm") != std::string::npos);
+        CHECK_NOTHROW(Test::gcode(print));
+        CHECK(print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck).find("The nozzle passes") == std::string::npos);
+    }
+    {
+        const DevModeGuard dev(true);
+        Print print;
+        Model model;
+        slice_puck(print, model, true,
+                   { { "printer_model", "Bambu Lab X1 Carbon" }, { "curved_tops_max_angle", "5" },
+                     { "curved_tops_dev_nozzle_tolerance_unrecorded", "1" } });
+        REQUIRE(top_block(print));
+        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+        INFO("summary: " << summary);
+        CHECK(summary.find("Developer override: nozzle contact tolerance 0.40 mm applied although no nozzle contact print is recorded") !=
+              std::string::npos);
+        CHECK(summary.find("Partly curved") == std::string::npos);
+        CHECK_NOTHROW(Test::gcode(print));
+        const std::string check = print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck);
+        INFO("head check: " << check);
+        CHECK(check.find("No nozzle contact has been printed with this print head yet") != std::string::npos);
+    }
+    {
+        Print print;
+        Model model;
+        slice_puck(print, model, true, { { "curved_tops_nozzle_tolerance", "0.8" } });
+        REQUIRE(top_block(print));
+        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+        INFO("summary: " << summary);
+        CHECK(summary.find("Nozzle contact tolerance capped at 0.61 mm") != std::string::npos);
+        CHECK(summary.find("the setting asks for 0.80 mm") != std::string::npos);
+    }
+    {
+        // At or under the record: nothing said.
+        Print print;
+        Model model;
+        slice_puck(print, model, true);
+        REQUIRE(top_block(print));
+        CHECK(object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary).find("Nozzle contact tolerance") ==
+              std::string::npos);
+    }
+}
+
+// Review S2: on a long narrow loop the starts of consecutive layers and loops spread along its length instead of
+// landing on its two ends.
+TEST_CASE("Curved tops P4: loop starts spread along a long loop", "[CurvedTops][CurvedTopsP4]")
+{
+    Points loop;
+    for (double x = -20.; x < 20.; x += 0.5) loop.push_back(Point::new_scale(x, -2.));
+    for (double y = -2.; y < 2.; y += 0.5) loop.push_back(Point::new_scale(20., y));
+    for (double x = 20.; x > -20.; x -= 0.5) loop.push_back(Point::new_scale(x, 2.));
+    for (double y = 2.; y > -2.; y -= 0.5) loop.push_back(Point::new_scale(-20., y));
+    size_t middle = 0;
+    std::vector<double> xs;
+    for (int k = 0; k < 6; ++k)
+        for (int index = -1; index <= 1; ++index) {
+            const double x = unscale<double>(loop[curved_tops_seam_index(loop, Point(0, 0), k, index)].x());
+            xs.push_back(x);
+            middle += std::abs(x) < 15. ? 1 : 0;
+        }
+    std::sort(xs.begin(), xs.end());
+    INFO("starts at x from " << xs.front() << " to " << xs.back() << ", " << middle << " of 18 away from the ends");
+    CHECK(middle >= 9);
+    // And the same loop with another first point gives the same starts (a fixed anchor).
+    Points rotated = loop;
+    std::rotate(rotated.begin(), rotated.begin() + 37, rotated.end());
+    for (int k = 0; k < 3; ++k)
+        CHECK(rotated[curved_tops_seam_index(rotated, Point(0, 0), k, -1)] == loop[curved_tops_seam_index(loop, Point(0, 0), k, -1)]);
+}

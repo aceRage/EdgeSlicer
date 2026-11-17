@@ -6132,7 +6132,11 @@ void PrintConfigDef::init_fff_params()
                       "layers run below the top of the flat layers beside the curved surface, so the nozzle grazes "
                       "them; in PLA up to about 0.6 mm printed cleanly. Within this tolerance such contact is allowed "
                       "and reported; deeper, or by any other head part (sock, heater block, fan duct), the G-code is "
-                      "not exported. 0 = no nozzle contact allowed.");
+                      "not exported. 0 = no nozzle contact allowed.\n"
+                      "Capped by what has been printed with the printer's print head: never more than the deepest nozzle "
+                      "contact its head data records from a clean print (0.61 mm on the Elegoo Centauri Carbon), and not "
+                      "applied at all on a print head with no such print recorded (Bambu Lab X1 Carbon, for now). The "
+                      "slicing summary says when the value is capped or not applied.");
     def->sidetext = L("mm");
     def->min      = 0;
     def->max      = 1.0;
@@ -6238,6 +6242,10 @@ void PrintConfigDef::init_fff_params()
     dev_bool("curved_tops_dev_allow_unverified_head", L("Allow unverified or missing head data"),
              L("DEVELOPER OVERRIDE. Curve the top on a printer whose head data no curved print has checked, or that has no head "
                "data at all (then set the lowest head part above the tip; the head check cannot run and says so)."));
+    dev_bool("curved_tops_dev_nozzle_tolerance_unrecorded", L("Apply the nozzle tolerance without a printed record"),
+             L("DEVELOPER OVERRIDE. Apply the nozzle contact tolerance as set, even on a print head whose data records no "
+               "nozzle contact print, or above the depth it records. Use it to print the contact test that establishes such a "
+               "record."));
 
     def = this->add("layer_change_gcode", coString);
     def->label = L("Layer change G-code");

@@ -1201,7 +1201,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                      "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
                      "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
                      "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
-                     "curved_tops_dev_allow_unverified_head" })
+                     "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
         // Shown exactly when the overrides can act (GUI_App::update_mode() sets the slicer's gate the same way).
         toggle_line(el, has_curved_tops && GUI::wxGetApp().curved_tops_developer_lines_shown());
 

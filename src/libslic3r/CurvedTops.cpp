@@ -169,6 +169,8 @@ CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &cfg, b
     flag(cfg.curved_tops_dev_allow_variable_layer_height, set.allow_variable_layer_height, "allow variable layer height");
     flag(cfg.curved_tops_dev_allow_tall_skirt, set.allow_tall_skirt, "allow draft shield or tall skirt");
     flag(cfg.curved_tops_dev_allow_unverified_head, set.allow_unverified_head, "allow unverified or missing head data");
+    flag(cfg.curved_tops_dev_nozzle_tolerance_unrecorded, set.nozzle_tolerance_unrecorded,
+         "apply the nozzle contact tolerance without a printed record");
 
     if (list.empty() && clamped.empty())
         return builtin;
@@ -456,31 +458,41 @@ CurvedTopsCandidates curved_tops_candidate_surfaces(const indexed_triangle_set &
     return out;
 }
 
-size_t curved_tops_seam_index(const Points &loop, const Point &centre, int k, int index)
+size_t curved_tops_seam_index(const Points &loop, const Point & /* centre */, int k, int index)
 {
-    if (loop.empty())
+    const size_t n = loop.size();
+    if (n < 2)
         return 0;
-    const double a = (double(k) * 3. + double(index)) * GOLDEN_ANGLE_DEG * M_PI / 180.;
-    const Vec2d  dir(std::cos(a), std::sin(a));
-    size_t best     = 0;
-    double best_val = -std::numeric_limits<double>::max();
-    for (size_t i = 0; i < loop.size(); ++i) {
-        const double v = (loop[i] - centre).cast<double>().dot(dir);
-        if (v > best_val) {
-            best_val = v;
-            best     = i;
-        }
-    }
-    return best;
+    // A fixed anchor, so the same loop shape gives the same start whatever its first point.
+    size_t anchor = 0;
+    for (size_t i = 1; i < n; ++i)
+        if (loop[i].x() < loop[anchor].x() || (loop[i].x() == loop[anchor].x() && loop[i].y() < loop[anchor].y()))
+            anchor = i;
+    std::vector<double> at(n + 1, 0.);
+    for (size_t j = 0; j < n; ++j)
+        at[j + 1] = at[j] + (loop[(anchor + j + 1) % n] - loop[(anchor + j) % n]).cast<double>().norm();
+    const double total = at[n];
+    if (total <= 0.)
+        return anchor;
+    double f = (double(k) * 3. + double(index)) * 0.6180339887498949;
+    f -= std::floor(f);
+    const double target = f * total;
+    size_t best = 0;
+    for (size_t j = 1; j < n; ++j)
+        if (std::abs(at[j] - target) < std::abs(at[best] - target))
+            best = j;
+    return (anchor + best) % n;
 }
 
 std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
-                                                 const PrintConfig &pcfg, const PrintObjectConfig &ocfg)
+                                                 const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed)
 {
     std::vector<CurvedTopsFillPath> out;
     Surface    srf(stTop, area);
     FillParams params;
     params.density = 1.f;
+    bool         threw    = false;
+    const double area_mm2 = area.area() * SCALING_FACTOR * SCALING_FACTOR;
     if (pattern == ctpConcentric) {
         std::unique_ptr<Fill> filler(Fill::new_from_type(ipConcentric));
         filler->spacing             = solid_flow.spacing();
@@ -494,6 +506,7 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
             loops = filler->fill_surface_arachne(&srf, params);
         } catch (const std::exception &ex) {
             BOOST_LOG_TRIVIAL(warning) << "Curved tops: concentric fill failed: " << ex.what();
+            threw = true;
         }
         const Point centre = get_extents(area).center();
         int         index  = 0;
@@ -511,21 +524,79 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
                 if (p.polyline.points.size() >= 2)
                     out.push_back({ p.polyline.points, p.width, p.mm3_per_mm });
         }
+        // A hole left in the middle, too small for a loop (a dome's apex): one short line through it.
+        if (!out.empty()) {
+            Polygons strokes;
+            for (const CurvedTopsFillPath &p : out) {
+                const double spacing = solid_flow.height() > 0. ? p.mm3_per_mm / solid_flow.height() : solid_flow.spacing();
+                polygons_append(strokes, offset(Polyline(p.points), float(scale_(0.5 * spacing + 0.01))));
+            }
+            for (const ExPolygon &hole : opening_ex(diff_ex(ExPolygons{ area }, union_ex(strokes)), float(scale_(0.1)))) {
+                const double hole_mm2 = hole.area() * SCALING_FACTOR * SCALING_FACTOR;
+                if (hole_mm2 < 0.05 || hole_mm2 > 1.0)
+                    continue;
+                const BoundingBox bb   = get_extents(hole);
+                const Vec2d       size = unscale(bb.size());
+                const Vec2d       c    = unscale(bb.center());
+                const Vec2d       dir  = size.x() >= size.y() ? Vec2d(1., 0.) : Vec2d(0., 1.);
+                const double      half = 0.5 * std::max(std::max(size.x(), size.y()) - solid_flow.width(), 0.1);
+                const Vec2d       a = c - dir * half, b = c + dir * half;
+                out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
+                                solid_flow.mm3_per_mm() });
+            }
+        }
+    } else {
+        std::unique_ptr<Fill> filler(Fill::new_from_type(ipMonotonic));
+        filler->angle        = float((k % 2 == 0 ? 45. : 135.) * M_PI / 180.);
+        filler->spacing      = solid_flow.spacing();
+        filler->bounding_box = get_extents(area);
+        Polylines lines;
+        try {
+            lines = filler->fill_surface(&srf, params);
+        } catch (const std::exception &ex) {
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops: fill failed: " << ex.what();
+            threw = true;
+        }
+        for (Polyline &pl : lines)
+            if (pl.points.size() >= 2)
+                out.push_back({ std::move(pl.points), float(solid_flow.width()), solid_flow.mm3_per_mm() });
+    }
+    // Review S3: a layer must not print its wall with nothing inside.
+    if (failed != nullptr && (threw || (out.empty() && area_mm2 > 1.0)))
+        *failed = true;
+    return out;
+}
+
+CurvedTopsNozzleTolerance curved_tops_nozzle_tolerance(const PrintObjectConfig &config, const CurvedTopsHeadLimits &head,
+                                                       const CurvedTopsDevOverrides &dev)
+{
+    CurvedTopsNozzleTolerance out;
+    const double v = config.curved_tops_nozzle_tolerance.value;
+    out.asked      = std::isfinite(v) ? std::clamp(v, 0., 1.) : 0.;
+    out.record     = head.verified_nozzle_contact_mm;
+    if (out.asked <= 0.)
+        return out;
+    if (dev.active && dev.nozzle_tolerance_unrecorded) {
+        out.used = out.asked;
+        if (out.asked > out.record + 1e-9)
+            out.note = out.record > 0. ?
+                           Slic3r::format(_u8L("Developer override: nozzle contact tolerance %1% mm applied, deeper than the %2% mm "
+                                               "printed cleanly with this print head."),
+                                          mm_str(out.asked), mm_str(out.record)) :
+                           Slic3r::format(_u8L("Developer override: nozzle contact tolerance %1% mm applied although no nozzle contact "
+                                               "print is recorded for this print head."),
+                                          mm_str(out.asked));
         return out;
     }
-    std::unique_ptr<Fill> filler(Fill::new_from_type(ipMonotonic));
-    filler->angle        = float((k % 2 == 0 ? 45. : 135.) * M_PI / 180.);
-    filler->spacing      = solid_flow.spacing();
-    filler->bounding_box = get_extents(area);
-    Polylines lines;
-    try {
-        lines = filler->fill_surface(&srf, params);
-    } catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(warning) << "Curved tops: fill failed: " << ex.what();
-    }
-    for (Polyline &pl : lines)
-        if (pl.points.size() >= 2)
-            out.push_back({ std::move(pl.points), float(solid_flow.width()), solid_flow.mm3_per_mm() });
+    out.used = std::min(out.asked, out.record);
+    if (out.record <= 0.)
+        out.note = Slic3r::format(_u8L("Nozzle contact tolerance not applied: no contact print recorded for this print head (the setting asks "
+                                       "for %1% mm). The nozzle may not pass through printed material."),
+                                  mm_str(out.asked));
+    else if (out.asked > out.record + 1e-9)
+        out.note = Slic3r::format(_u8L("Nozzle contact tolerance capped at %1% mm, the deepest nozzle contact printed cleanly with this print "
+                                       "head (%2%); the setting asks for %3% mm."),
+                                  mm_str(out.record), head.verified_on, mm_str(out.asked));
     return out;
 }
 
@@ -853,8 +924,9 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     // P4: how deep the nozzle may pass through flat material beside the patch (the head check's nozzle
     // tolerance). 0 keeps P3's rules exactly: nothing beside above the band bottom. Otherwise material beside
     // may stand up to the lowest curved bead (one layer above the band bottom) plus the tolerance.
-    const double nozzle_tol    = std::isfinite(ocfg.curved_tops_nozzle_tolerance.value) ?
-                                     std::clamp(ocfg.curved_tops_nozzle_tolerance.value, 0., 1.) : 0.;
+    // Review M2: capped by the head's printed record, 0 without one (unless the developer override lifts it).
+    const CurvedTopsNozzleTolerance nozzle = curved_tops_nozzle_tolerance(ocfg, head, dev);
+    const double nozzle_tol    = nozzle.used;
     const double beside_allow  = nozzle_tol > 0. ? h + nozzle_tol : 0.;
     // Mesh frame to print frame: print Z = mesh Z - ground. A raft (developer override only, refused
     // above otherwise) lifts every object layer by object_print_z_min, which the mesh does not know.
@@ -1289,9 +1361,14 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             // Solid fill inside it, in the chosen pattern (P4).
             const ExPolygons inner = offset_ex(fp, -(wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() +
                                                      0.5 * solid_flow.scaled_spacing()));
-            for (const ExPolygon &area : inner)
-                for (const CurvedTopsFillPath &p : curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg))
+            for (const ExPolygon &area : inner) {
+                bool fill_failed = false;
+                for (const CurvedTopsFillPath &p : curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg, &fill_failed))
                     add_path(p.points, fill_role, p.width, p.mm3_per_mm, k);
+                // Review S3: never a curved layer with its wall and no fill.
+                if (fill_failed)
+                    return refuse(Slic3r::format(_u8L("the fill of curved layer %1% could not be built."), k + 1));
+            }
         }
     }
     if (n_paths == 0 || last_samples == nullptr)
@@ -1357,6 +1434,8 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                               mm_str(lowest_bead_z), mm_str(z_hi), mm_str(safe_z)));
     for (std::string &note : dev_notes)
         result.notes.push_back(std::move(note));
+    if (!nozzle.note.empty())
+        result.notes.push_back(nozzle.note);
     if (partial) {
         // Material beside raised the cut: said even when every curved surface lies wholly above it (the
         // flanks around it are what prints flat).

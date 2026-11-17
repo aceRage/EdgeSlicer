@@ -3361,9 +3361,10 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
         // its check keeps exactly its own numbers.
         if (!contoured) {
             double tol = std::numeric_limits<double>::max();
+            // Review M2: each object's tolerance in force, capped by the head's printed record as the planner had it.
             for (const PrintObject *object : curved_objects) {
-                const double t = object->config().curved_tops_nozzle_tolerance.value;
-                tol            = std::min(tol, std::isfinite(t) ? std::clamp(t, 0., 1.) : 0.);
+                const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+                tol = std::min(tol, curved_tops_nozzle_tolerance(object->config(), curved_tops_head_limits(print.config(), dev), dev).used);
             }
             if (tol > 0. && tol < std::numeric_limits<double>::max()) {
                 params.nozzle_contact_tolerance = tol + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM;
@@ -3397,7 +3398,10 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
                                    mm(report.tolerated_max_depth), report.tolerated_moves,
                                    mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
         const double verified = head->curved_tops_verified_for(printer_model) ? head->curved_tops_verified->nozzle_contact_mm : 0.;
-        if (verified > 0. && double(report.tolerated_max_depth) > verified + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM)
+        // Never silent (review M2): with no record (developer override only) or beyond it, say so.
+        if (verified <= 0.)
+            tolerated += " " + _(L("No nozzle contact has been printed with this print head yet (developer override). Watch the first print."));
+        else if (double(report.tolerated_max_depth) > verified + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM)
             tolerated += " " + Slic3r::format(_(L("That is deeper than has been printed on this printer so far (%1% mm, %2%). Watch the "
                                                   "first print.")),
                                               mm(verified), head->curved_tops_verified->on);

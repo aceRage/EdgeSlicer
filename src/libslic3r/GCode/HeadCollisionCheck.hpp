@@ -91,7 +91,8 @@ struct HeadCollisionParams
     unsigned int measure_clearance_from_layer { std::numeric_limits<unsigned int>::max() };
     // Curved tops P4: the nozzle's own contact tolerance (curved_tops_nozzle_tolerance). On layers from
     // nozzle_contact_min_layer on, an extrusion, a wipe, or a vertical travel (a descent or lift at one XY
-    // point) whose contacts are all the nozzle tip or flank, each no deeper than this, is tolerated (counted
+    // point) whose contacts are all the nozzle tip or flank, each no deeper than this, against material standing
+    // no more than this above the tip (so the cone never ploughs into a taller wall), is tolerated (counted
     // in HeadCollisionReport::tolerated_moves) instead of being a hit. A contact by any other head part (sock,
     // heater block, ducts, boxes) makes the move a hit as before, and so does any horizontal travel. 0 (the
     // default, and always for Z contouring) = off: the check is exactly what it was.

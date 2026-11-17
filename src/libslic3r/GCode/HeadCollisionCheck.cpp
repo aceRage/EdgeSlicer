@@ -132,7 +132,7 @@ const std::string NOZZLE_PART = "nozzle";
 // part_depth (curved tops P3, may be null): the deepest contact of each head part at this point, by
 // part index (HeadCollisionReport::parts order: nozzle tip, nozzle flank, then the boxes).
 Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, double tol, bool check_nozzle, double surface_tan,
-              std::vector<float> *part_depth = nullptr)
+              std::vector<float> *part_depth = nullptr, float *nozzle_top = nullptr)
 {
     Contact best;
     auto    consider = [&](float depth, const std::string &part, size_t part_idx) {
@@ -163,8 +163,12 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
                 if (surface_tan > 0. && u <= tol)
                     u = std::max(u, d * surface_tan);
                 const double excess = double(top) - (p.z() + u);
-                if (excess > tol)
+                if (excess > tol) {
                     consider(float(excess), NOZZLE_PART, part_idx);
+                    // P4: how high above the tip the touched material stands.
+                    if (nozzle_top != nullptr)
+                        *nozzle_top = std::max(*nozzle_top, float(double(top) - p.z()));
+                }
             });
         }
     }
@@ -301,9 +305,10 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
         const int    n       = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
         const bool   measure = m.layer_id >= params.measure_clearance_from_layer;
         std::fill(move_part_depth.begin(), move_part_depth.end(), 0.f);
+        float move_nozzle_top = 0.f; // P4: highest material the nozzle touches in this move, above the tip
         for (int k = 1; k <= n; ++k) {
             const double t = double(k) / double(n);
-            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan, &move_part_depth);
+            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan, &move_part_depth, &move_nozzle_top);
             if (c.depth > worst.depth)
                 worst = c;
             if (measure)
@@ -324,7 +329,10 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
                 float &dst = pi < 2 ? nozzle : other;
                 dst        = std::max(dst, move_part_depth[pi]);
             }
-            if (other <= 0.f && nozzle <= float(params.nozzle_contact_tolerance)) {
+            // Review M1: also the material touched may stand no more than the tolerance above the tip, so the cone
+            // never ploughs into the top of a taller wall (only the low stubs the planner allows are tolerated).
+            if (other <= 0.f && nozzle <= float(params.nozzle_contact_tolerance) &&
+                move_nozzle_top <= float(params.nozzle_contact_tolerance)) {
                 ++report.tolerated_moves;
                 report.tolerated_max_depth = std::max(report.tolerated_max_depth, nozzle);
                 worst.depth = 0.f;

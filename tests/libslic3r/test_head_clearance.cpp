@@ -570,3 +570,40 @@ TEST_CASE("Head clearance P4: the curved tops record may carry the deepest nozzl
     CHECK(cc1->curved_tops_verified->nozzle_contact_mm == Approx(0.61));
     CHECK(cc1->curved_tops_verified->on == "2026-11-17");
 }
+
+// Review M1: the tolerance covers the nozzle only against material standing no more than the tolerance above the
+// tip. MINIMAL_HEAD's cone: u(d) = d - 0.5 up to d = 1.5, then vertical to 2, then u = 2 + (d - 1.5) / 1.5 out to 3.
+TEST_CASE("Head collision check P4: the cone is never tolerated against taller material, nor is a box", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+    // A wall 0.85 above the tip, 1.0-1.4 from the axis: only 0.35 into the cone (within 0.4), but it stands
+    // 0.85 above the tip: a hit on the flank.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(1.2f, 1.85f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK(r.max_depth <= 0.4f);
+        CHECK(r.tolerated_moves == 0);
+        REQUIRE(r.parts.size() >= 2);
+        CHECK(r.parts[1].hit_moves == 1); // the flank
+    }
+    // High on the cone: a wall 2.7 above the tip, 2.1-2.5 out, 0.3 into the cone: a hit.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(2.3f, 3.7f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK(r.tolerated_moves == 0);
+    }
+    // Just outside the cone (3.2-3.6 out) and 0.2 into the duct (bottom 4 above the tip): a box hit, whatever the
+    // nozzle tolerance.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(3.4f, 5.2f, EMoveType::Extrude), head, nozzle_tolerant(1.0));
+        bool duct = false;
+        for (const HeadCollisionHit &h : r.hits)
+            duct |= !h.travel && h.part == "duct";
+        CHECK(duct);
+        CHECK(r.tolerated_moves == 0);
+    }
+    // The same flank wall low enough (0.35 above the tip, under the land and the cone foot): tolerated.
+    CHECK(check_head_collisions(neighbour_case(0.55f, 1.35f, EMoveType::Extrude), head, nozzle_tolerant(0.4)).tolerated_moves == 1);
+}

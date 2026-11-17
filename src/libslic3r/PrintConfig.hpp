@@ -1695,6 +1695,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                curved_tops_dev_allow_variable_layer_height))
     ((ConfigOptionBool,                curved_tops_dev_allow_tall_skirt))
     ((ConfigOptionBool,                curved_tops_dev_allow_unverified_head))
+    ((ConfigOptionBool,                curved_tops_dev_nozzle_tolerance_unrecorded))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))

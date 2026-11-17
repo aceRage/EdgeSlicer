@@ -1252,7 +1252,7 @@ static std::vector<std::string> s_Preset_print_options {
     "curved_tops_dev_safe_lift", "curved_tops_dev_contact_warning_only", "curved_tops_dev_allow_multiple_objects",
     "curved_tops_dev_allow_by_object", "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
     "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
-    "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt", "curved_tops_dev_allow_unverified_head",
+    "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt", "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded",
     "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing", "support_ironing_inset", "support_ironing_speed", "support_ironing_direction",
     "over_support_surfaces", "over_support_flow", "over_support_speed",
     "max_travel_detour_distance",

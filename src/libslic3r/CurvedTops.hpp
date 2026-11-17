@@ -92,6 +92,9 @@ struct CurvedTopsDevOverrides
     bool   allow_variable_layer_height { false };
     bool   allow_tall_skirt { false };
     bool   allow_unverified_head { false };
+    // P4: the nozzle contact tolerance applies on a head whose file records no nozzle contact print (and
+    // above the record), up to the setting.
+    bool   nozzle_tolerance_unrecorded { false };
 
     // "label value" of every override the config sets, in key order (used for the warning, the
     // G-code comment and the "ignored" note).
@@ -220,6 +223,20 @@ static constexpr double CURVED_TOPS_EDGE_SIMPLIFY_MM         = 0.05;
 // height map's float sums.
 static constexpr double CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM = 0.005;
 
+// The nozzle contact tolerance in force for an object (review M2): the setting, capped by the deepest nozzle
+// contact the print head's file records from a clean print on this printer model, and 0 (the strict check) on
+// a head with no such record. The developer override nozzle_tolerance_unrecorded lifts the cap. `note` says
+// when the setting is capped or not applied, or applied by the override (empty otherwise).
+struct CurvedTopsNozzleTolerance
+{
+    double      asked { 0. };  // the setting, clamped to 0..1
+    double      used { 0. };   // what the planner and the head check use
+    double      record { 0. }; // the head's printed record (0 = none)
+    std::string note;
+};
+CurvedTopsNozzleTolerance curved_tops_nozzle_tolerance(const PrintObjectConfig &config, const CurvedTopsHeadLimits &head,
+                                                       const CurvedTopsDevOverrides &dev);
+
 // One top-facing facet's part inside the patch (print frame: Z = mesh Z - ground).
 struct CurvedTopsFacet
 {
@@ -255,14 +272,19 @@ struct CurvedTopsFillPath
 //  - Monotonic: lines at 45 degrees (k even) or 135 (k odd), each laid next to the one before in one
 //    direction (the monotonic filler of the planar top surfaces);
 //  - Concentric: loops following the outline inward (Arachne, variable width where the loops close up),
-//    each closed loop starting at a seam that turns by the golden angle from layer to layer and loop to
-//    loop, so the starts do not line up.
-// pcfg / ocfg: for the Arachne parameters (nozzle diameter).
+//    each closed loop starting at a seam spread along its length from layer to layer and loop to loop (see
+//    curved_tops_seam_index), so the starts do not line up; a hole Arachne leaves in the middle (the apex
+//    of a dome) that is too small for a loop gets one short line through it.
+// pcfg / ocfg: for the Arachne parameters (nozzle diameter). *failed (when given) is set when the filler threw
+// or left a region of more than 1 mm2 with no path at all: the caller must not print that layer half built.
 std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
-                                                 const PrintConfig &pcfg, const PrintObjectConfig &ocfg);
+                                                 const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed = nullptr);
 
-// The point of `loop` (closed, first point not repeated) where curved layer k's loop number `index` starts:
-// the vertex farthest along the direction turned by the golden angle per layer and loop, from `centre`.
+// The point of `loop` (closed, first point not repeated) where curved layer k's loop number `index` starts. The
+// loop is measured from a fixed anchor (its vertex with the smallest X, then Y), and the start is the vertex
+// nearest the fraction frac((3k + index) * 0.618...) of its length: consecutive layers and loops are spread
+// along the whole loop, also on a long narrow shape, where a direction from the centre would land on its two
+// ends. (`centre` is kept for the callers; it no longer matters.)
 size_t curved_tops_seam_index(const Points &loop, const Point &centre, int k, int index);
 
 // True when a setting alone (not the mesh or the slice) makes apply_curved_tops() refuse this object.
