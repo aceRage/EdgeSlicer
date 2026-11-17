@@ -65,6 +65,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -2177,6 +2178,15 @@ int CLI::run(int argc, char **argv)
     ConfigOptionBool* normative_check_option = m_config.option<ConfigOptionBool>("normative_check");
     if (normative_check_option)
         normative_check = normative_check_option->value;
+
+    // EdgeSlicer, curved tops P3: the CLI has no Developer mode; --curved-tops-dev-overrides stands in
+    // for it. Off unless given, so a project's curved_tops_dev_* values are ignored by default.
+    {
+        const ConfigOptionBool *dev_option = m_config.option<ConfigOptionBool>("curved_tops_dev_overrides");
+        Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
+        if (dev_option != nullptr && dev_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+    }
 
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");
     if (uptodate_option)
@@ -6839,7 +6849,8 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",

@@ -2601,8 +2601,17 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
             if (multi_filament < 0)
                 multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
-            if (object->curved_tops_guard_inputs_used() != curved_tops_guard_inputs(*object, multi_filament))
-                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament);
+            const std::string now = curved_tops_guard_inputs(*object, multi_filament);
+            if (object->curved_tops_guard_inputs_used() != now) {
+                // P3: a change of the developer overrides (or of Developer mode) always re-plans, so the
+                // warning that lists them is never stale; without overrides both tails are empty.
+                const auto dev_tail = [](const std::string &record) {
+                    const size_t pos = record.find(";dev=");
+                    return pos == std::string::npos ? std::string() : record.substr(pos);
+                };
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament) ||
+                             dev_tail(object->curved_tops_guard_inputs_used()) != dev_tail(now);
+            }
         }
         if (regenerate)
             update_apply_status(object->invalidate_step(posPerimeters));

@@ -930,17 +930,32 @@ void PrintObject::contour_z()
                                                            "refused. Slice again."),
                                                       this->model_object()->name),
                                        this->id().id);
+        // P3: developer overrides. In force: their own warning, every slice. Carried by the project but
+        // Developer mode off: ignored, and the curved-tops message says so.
+        const CurvedTopsDevOverrides dev     = curved_tops_dev_overrides(m_config);
+        std::string                  ignored = dev.ignored_note();
+        // Out-of-range override values: clamped by curved_tops_dev_overrides(), said here.
+        if (dev.active)
+            for (const std::string &note : dev.clamp_notes)
+                ignored += (ignored.empty() ? "" : "\n") + note;
         if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                           Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
-                                                         this->model_object()->name, ct.refusal),
+                                                         this->model_object()->name, ct.refusal) +
+                                              (ignored.empty() ? std::string() : "\n" + ignored),
                                           PrintStateBase::SlicingCurvedTopsUnavailable);
         else {
             std::string msg = ct.summary;
             for (const std::string &note : ct.notes)
                 msg += "\n" + note;
+            if (!ignored.empty())
+                msg += "\n" + ignored;
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
         }
+        if (dev.active)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("%1% (object %2%)"), dev.active_message(), this->model_object()->name),
+                                          PrintStateBase::SlicingCurvedTopsDevOverrides);
     }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
@@ -1964,7 +1979,11 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_interface_nozzle_temperature"
             // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
             || opt_key == "apply_scarf_seam_on_circles"
-            || opt_key == "support_ironing_speed") {
+            || opt_key == "support_ironing_speed"
+            // EdgeSlicer, curved tops P3: the developer overrides. What they change is in the guard record
+            // (curved_tops_guard_inputs), which Print::apply() compares and which re-plans the block when it
+            // differs; with Developer mode off they are ignored and change nothing but the config block.
+            || opt_key.rfind("curved_tops_dev_", 0) == 0) {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"

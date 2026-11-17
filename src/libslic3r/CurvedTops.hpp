@@ -29,6 +29,7 @@ namespace Slic3r {
 
 class PrintConfig;
 class PrintObject;
+class PrintObjectConfig;
 class TriangleMesh;
 struct HeadClearance;
 namespace sla { class IndexedMesh; }
@@ -48,6 +49,65 @@ static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
 // Added to the head's reach when supports are checked against the curved block (design R2: nozzle
 // radius + 0.5 mm).
 static constexpr double CURVED_TOPS_REACH_MARGIN_MM     = 0.5;
+// Travels in and out of the block run this far above the highest curved point.
+static constexpr double CURVED_TOPS_SAFE_LIFT_MM        = 1.0;
+
+// P3: developer overrides (curved_tops_dev_* process keys). They exist so the owner can find the real
+// limits by test prints; they act only while the app's Developer mode is on (the GUI sets it from the
+// app config, the CLI from --curved-tops-dev-overrides). With it off every override a project or preset
+// carries is ignored, and the curved-tops message says so. Thread safe (an atomic).
+void set_curved_tops_developer_mode(bool on);
+bool curved_tops_developer_mode();
+
+// The overrides in force for one object. Default-constructed = today's limits, no override.
+struct CurvedTopsDevOverrides
+{
+    // The config sets at least one curved_tops_dev_* key off its default.
+    bool   carried { false };
+    // Carried and Developer mode is on: the values below are in force. When false they are the
+    // built-in values, whatever the config says.
+    bool   active { false };
+
+    double angle_ceiling_deg   { CURVED_TOPS_MAX_ANGLE_CEILING };
+    double head_lowest_part_mm { 0. }; // 0: from the head data
+    double clearance_margin_mm { CURVED_TOPS_CLEARANCE_MARGIN_MM };
+    double flank_margin_deg    { CURVED_TOPS_FLANK_MARGIN_DEG };
+    double land_tolerance_mm   { CURVED_TOPS_LAND_TOLERANCE_MM };
+    double reach_margin_mm     { CURVED_TOPS_REACH_MARGIN_MM };
+    double speed_cap_mm_s      { 40.0 }; // CURVED_TOPS_MAX_SPEED_MM_S (ContourZ.hpp)
+    double wipe_speed_cap_mm_s { 40.0 };
+    double safe_lift_mm        { CURVED_TOPS_SAFE_LIFT_MM };
+    bool   contact_warning_only { false };
+    bool   allow_multiple_objects { false };
+    bool   allow_by_object { false };
+    bool   allow_multi_filament { false };
+    bool   allow_supports_in_reach { false };
+    bool   allow_material_beside { false };
+    bool   allow_z_contouring { false };
+    bool   allow_raft { false };
+    bool   allow_variable_layer_height { false };
+    bool   allow_tall_skirt { false };
+    bool   allow_unverified_head { false };
+
+    // "label value" of every override the config sets, in key order (used for the warning, the
+    // G-code comment and the "ignored" note).
+    std::vector<std::string> carried_list;
+    // Values outside their documented range (clamped) or not a number (built-in used), one note each.
+    std::vector<std::string> clamp_notes;
+
+    // For the guard record: empty when nothing is carried, "ignored" when carried but not active,
+    // else every value in force.
+    std::string record() const;
+    // "Curved tops developer overrides active: ..." (empty when not active).
+    std::string active_message() const;
+    // The note for a project whose overrides were ignored (empty unless carried and not active).
+    std::string ignored_note() const;
+};
+
+// The overrides in force for an object with this config (developer_mode: the gate; the first form
+// reads curved_tops_developer_mode()).
+CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &config);
+CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &config, bool developer_mode);
 
 // What the print head allows a curved top, derived from the resolved head model. A conformal layer
 // is printed after the planar body below it, so the nozzle tip runs over a surface that rises
@@ -73,14 +133,20 @@ struct CurvedTopsHeadLimits
     // Where the numbers come from, for messages; why not usable, when not.
     std::string source;
     std::string refusal;
+    // The numbers the limits were derived with (built-in, or developer overrides).
+    double      angle_ceiling_deg { CURVED_TOPS_MAX_ANGLE_CEILING };
+    double      clearance_margin_mm { CURVED_TOPS_CLEARANCE_MARGIN_MM };
 };
 
-// The limits for a head on a printer model (head may be null: no data).
-CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model);
+// The limits for a head on a printer model (head may be null: no data). `dev` (default: none) may
+// widen them: angle ceiling, lowest head part, margins, a head nobody verified or no head data at all
+// (then the lowest head part override is required).
+CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model,
+                                             const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides());
 // Same, through resolve_head_clearance().
-CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config);
+CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides());
 
-// The user's maximum angle, limited by the head and the absolute ceiling.
+// The user's maximum angle, limited by the head and the absolute ceiling (head.angle_ceiling_deg).
 double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head);
 
 // How far from the nozzle axis (mm, in XY) any part of the head reaches below `height` above the tip:
