@@ -293,9 +293,12 @@ static std::string g_data_dir;
 void set_data_dir(const std::string &dir)
 {
     g_data_dir = dir;
-    if (!g_data_dir.empty() && !boost::filesystem::exists(g_data_dir)) {
-       boost::filesystem::create_directory(g_data_dir);
-    }
+    // error_code overloads: a throwing exists()/create_directory() aborts the AppContainer
+    // helper (exit 10) when data_dir itself is not listable. Create only when the path is
+    // confirmed missing; access-denied leaves g_data_dir set and does not throw.
+    boost::system::error_code ec;
+    if (!g_data_dir.empty() && !boost::filesystem::exists(g_data_dir, ec) && !ec)
+        boost::filesystem::create_directory(g_data_dir, ec);
 }
 
 const std::string& data_dir()
