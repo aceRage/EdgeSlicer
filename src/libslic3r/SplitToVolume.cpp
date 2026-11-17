@@ -590,6 +590,8 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
     if (opt.diameter <= 0. || opt.length <= 0. || opt.max_per_face <= 0)
         return;
     const std::vector<std::vector<int>> face_mates = mates_by_face(plan);
+    // P4: the user's edits handled on some pair so far.
+    std::vector<bool> manual_done(plan.manual_sites.size(), false);
 
     const Vec3d lo        = plan.model_bbox.min;
     const Vec3d hi        = plan.model_bbox.max;
@@ -631,20 +633,47 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
         if (islands.empty())
             continue;
 
-        struct Pick { Vec2d uv; double half; int island; };
+        struct Pick { Vec2d uv; double half; int island; bool manual{ false }; };
         bool had_room = false;
-        // The picks for one dowel size, island by island (each list in pick order).
-        auto picks_at = [&](double scale) {
-            std::vector<std::vector<Pick>> per_island(islands.size());
-            const double d  = opt.diameter * scale;
-            const double fp = site_footprint_radius(opt, d, req_half);
-            // The keep-out bands along the planes bounding this face (not along the model's own ends).
+        // The depth check: the centre and 8 points round the footprint, both ways; the half-length a
+        // dowel there may have.
+        auto half_at = [&](const Vec2d &uv, double fp) {
+            double up = inf, down = inf;
+            for (int k = 0; k <= 8; ++k) {
+                Vec3d p = Vec3d::Zero();
+                p[a]    = pl.pos;
+                p[ua]   = uv.x();
+                p[va]   = uv.y();
+                if (k > 0) {
+                    const double t = 2. * PI * double(k - 1) / 8.;
+                    p[ua] += fp * std::cos(t);
+                    p[va] += fp * std::sin(t);
+                }
+                Vec3d n = Vec3d::Zero();
+                n[a]    = 1.;
+                up      = std::min(up, depth_along(p, n));
+                down    = std::min(down, depth_along(p, -n));
+            }
+            return std::min({ req_half, up - opt.min_material - extra, down - opt.min_material - extra,
+                              room_above - opt.corner_keepout - extra, room_below - opt.corner_keepout - extra });
+        };
+        // Where a dowel centre may be: the face's cell less the keep-out bands along the planes bounding
+        // it (not along the model's own ends).
+        auto allowed_box = [&](double fp) {
             BoundingBoxf allowed(Vec2d(u0, w0), Vec2d(u1, w1));
             const double band = fp + opt.corner_keepout;
             if (cell[ua] > 0) allowed.min.x() += band;
             if (cell[ua] < plan.counts[ua] - 1) allowed.max.x() -= band;
             if (cell[va] > 0) allowed.min.y() += band;
             if (cell[va] < plan.counts[va] - 1) allowed.max.y() -= band;
+            return allowed;
+        };
+        // The picks for one dowel size, island by island (each list in pick order).
+        auto picks_at = [&](double scale) {
+            std::vector<std::vector<Pick>> per_island(islands.size());
+            const double d  = opt.diameter * scale;
+            const double fp = site_footprint_radius(opt, d, req_half);
+            const BoundingBoxf allowed = allowed_box(fp);
             if (allowed.max.x() <= allowed.min.x() || allowed.max.y() <= allowed.min.y())
                 return per_island;
             for (size_t ii = 0; ii < islands.size(); ++ii) {
@@ -652,25 +681,7 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
                 double             half  = 0.;
                 auto accept = [&](const Vec2d &uv) {
                     had_room = true;
-                    // The depth check: the centre and 8 points round the footprint, both ways.
-                    double up = inf, down = inf;
-                    for (int k = 0; k <= 8; ++k) {
-                        Vec3d p = Vec3d::Zero();
-                        p[a]    = pl.pos;
-                        p[ua]   = uv.x();
-                        p[va]   = uv.y();
-                        if (k > 0) {
-                            const double t = 2. * PI * double(k - 1) / 8.;
-                            p[ua] += fp * std::cos(t);
-                            p[va] += fp * std::sin(t);
-                        }
-                        Vec3d n = Vec3d::Zero();
-                        n[a]    = 1.;
-                        up      = std::min(up, depth_along(p, n));
-                        down    = std::min(down, depth_along(p, -n));
-                    }
-                    half = std::min({ req_half, up - opt.min_material - extra, down - opt.min_material - extra,
-                                      room_above - opt.corner_keepout - extra, room_below - opt.corner_keepout - extra });
+                    half     = half_at(uv, fp);
                     if (half < DOWEL_MIN_HALF_PER_DIAMETER * d)
                         return false;
                     picks.push_back({ uv, half, int(ii) });
@@ -720,13 +731,97 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
             w.mate = mate.id;
             plan.warnings.push_back(w);
         };
+
+        // P4: the user's edits on this pair's patches, while the plane is where it was when they were made.
+        // Removals first (the automatic pick nearest the click), then additions, checked by the same
+        // rules as the automatic picks and at the size this face uses.
+        const bool   auto_none = chosen.empty();
+        const double d_face  = opt.diameter * (auto_none ? 1. : scales[level]);
+        const double fp_face = site_footprint_radius(opt, d_face, req_half);
+        bool         removed_any = false;
+        auto on_this_plane = [&](const SplitManualSite &m) {
+            return m.axis == a && m.index == pl.index && std::abs(m.plane_pos - pl.pos) <= 1e-6;
+        };
+        auto island_of = [&](const Vec2d &uv) {
+            const Point pt(scaled<coord_t>(uv.x()), scaled<coord_t>(uv.y()));
+            for (size_t ii = 0; ii < islands.size(); ++ii)
+                if (islands[ii].contains(pt))
+                    return int(ii);
+            return -1;
+        };
+        for (size_t mi = 0; mi < plan.manual_sites.size(); ++mi) {
+            const SplitManualSite &m = plan.manual_sites[mi];
+            if (m.add || manual_done[mi] || !on_this_plane(m))
+                continue;
+            const Vec2d uv(m.pos[ua], m.pos[va]);
+            if (island_of(uv) < 0)
+                continue;
+            manual_done[mi] = true;
+            size_t best = chosen.size();
+            double best_d = std::max(fp_face, 1.) + 0.5;
+            for (size_t k = 0; k < chosen.size(); ++k)
+                if (const double dist = (chosen[k].uv - uv).norm(); dist <= best_d) {
+                    best_d = dist;
+                    best   = k;
+                }
+            if (best < chosen.size()) {
+                chosen.erase(chosen.begin() + ptrdiff_t(best));
+                removed_any = true;
+            }
+        }
+        for (size_t mi = 0; mi < plan.manual_sites.size(); ++mi) {
+            const SplitManualSite &m = plan.manual_sites[mi];
+            if (!m.add || manual_done[mi] || !on_this_plane(m))
+                continue;
+            const Vec2d uv(m.pos[ua], m.pos[va]);
+            const int   ii = island_of(uv);
+            if (ii < 0)
+                continue;
+            manual_done[mi] = true;
+            auto refuse = [&](SplitManualRefusal why) {
+                SplitWarning w{ SplitWarning::Kind::ManualSiteRefused, face.plane, -1, double(int(why)), face.id };
+                w.mate   = mate.id;
+                w.detail = int(mi);
+                plan.warnings.push_back(w);
+            };
+            const BoundingBoxf allowed = allowed_box(fp_face);
+            if (uv.x() < allowed.min.x() || uv.x() > allowed.max.x() || uv.y() < allowed.min.y() || uv.y() > allowed.max.y()) {
+                refuse(SplitManualRefusal::NearOtherPlane);
+                continue;
+            }
+            double edge = inf;
+            auto   edge_of = [&](const Polygon &poly) {
+                for (size_t k = 0; k < poly.points.size(); ++k)
+                    edge = std::min(edge, point_segment_distance(uv, unscale(poly.points[k]), unscale(poly.points[(k + 1) % poly.points.size()])));
+            };
+            edge_of(islands[size_t(ii)].contour);
+            for (const Polygon &h : islands[size_t(ii)].holes)
+                edge_of(h);
+            if (edge < opt.wall_margin + fp_face - 1e-6) {
+                refuse(SplitManualRefusal::NearEdge);
+                continue;
+            }
+            if (std::any_of(chosen.begin(), chosen.end(), [&](const Pick &p) { return (p.uv - uv).norm() < opt.min_spacing - 1e-6; })) {
+                refuse(SplitManualRefusal::NearDowel);
+                continue;
+            }
+            const double half = half_at(uv, fp_face);
+            if (half < DOWEL_MIN_HALF_PER_DIAMETER * d_face) {
+                refuse(SplitManualRefusal::TooLittleMaterial);
+                continue;
+            }
+            chosen.push_back({ uv, half, ii, true });
+        }
+
         if (chosen.empty()) {
-            warn(SplitWarning::Kind::NoDowelOnFace, had_room ? SPLIT_NO_DOWEL_TOO_THIN : SPLIT_NO_DOWEL_TOO_SMALL);
+            // A face whose dowels the user took off is not warned about: that was asked for.
+            if (!removed_any)
+                warn(SplitWarning::Kind::NoDowelOnFace, had_room ? SPLIT_NO_DOWEL_TOO_THIN : SPLIT_NO_DOWEL_TOO_SMALL);
             continue;
         }
 
-        const double d        = opt.diameter * scales[level];
-        const double fp       = site_footprint_radius(opt, d, req_half);
+        const double d        = d_face;
+        const double fp       = fp_face;
         double       shortest = inf;
         std::vector<bool> island_has(islands.size(), false);
         for (const Pick &pk : chosen) {
@@ -742,7 +837,8 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
             s.half_length      = pk.half;
             s.footprint_radius = fp;
             s.shortened        = pk.half < req_half - 1e-6;
-            s.scaled_down      = level > 0;
+            s.scaled_down      = !auto_none && level > 0;
+            s.manual           = pk.manual;
             s.name             = mate.code + "-" + std::to_string(mate.sites.size() + 1);
             shortest           = std::min(shortest, pk.half);
             island_has[size_t(pk.island)] = true;
@@ -758,11 +854,24 @@ static void place_dowels(SplitPlan &plan, const MaterialDepth &depth_along, cons
             warn(SplitWarning::Kind::IslandsWithoutDowel, double(without));
         if (chosen.size() == 1 && dowel_is_round(opt))
             warn(SplitWarning::Kind::DowelCanTurn, 0.);
-        if (level > 0)
+        if (!auto_none && level > 0)
             warn(SplitWarning::Kind::DowelScaledDown, d);
         if (shortest < req_half - 1e-6)
             warn(SplitWarning::Kind::DowelShortened, 2. * shortest);
         } // mates of the face
+    }
+
+    // P4: an added site on a plane that is still where it was, but on no pair's material.
+    for (size_t mi = 0; mi < plan.manual_sites.size(); ++mi) {
+        const SplitManualSite &m = plan.manual_sites[mi];
+        if (!m.add || manual_done[mi])
+            continue;
+        const int pidx = plan.plane_index(m.axis, m.index);
+        if (pidx < 0 || std::abs(plan.planes[size_t(pidx)].pos - m.plane_pos) > 1e-6)
+            continue;   // the plane moved: the edit no longer applies
+        SplitWarning w{ SplitWarning::Kind::ManualSiteRefused, pidx, -1, double(int(SplitManualRefusal::NotOnFace)) };
+        w.detail = int(mi);
+        plan.warnings.push_back(w);
     }
 }
 
@@ -1861,6 +1970,37 @@ static void finish_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, con
         }
     }
 
+    // P4: what each piece could stand on. A cut face is flat by construction and lies on the piece's
+    // extreme along its axis (the piece is inside its cell), so laid on it the piece stands on all of
+    // that face's material: the areas of its pairs on that side of the plane. The pose must fit.
+    {
+        std::vector<std::array<double, 6>> cut_area(plan.pieces.size(), std::array<double, 6>{ { 0., 0., 0., 0., 0., 0. } });
+        for (const SplitMate &m : plan.mates) {
+            if (m.face < 0 || size_t(m.face) >= plan.faces.size())
+                continue;
+            const int a = plan.planes[size_t(plan.faces[size_t(m.face)].plane)].axis;
+            if (m.piece_below >= 0)
+                cut_area[size_t(m.piece_below)][size_t(2 * a + 1)] += m.area;   // outward +axis
+            if (m.piece_above >= 0)
+                cut_area[size_t(m.piece_above)][size_t(2 * a)] += m.area;       // outward -axis
+        }
+        const Vec3d &U = plan.usable.size;
+        for (size_t i = 0; i < plan.pieces.size(); ++i) {
+            SplitPiece &p       = plan.pieces[i];
+            p.best_contact_area = p.contact_area;
+            const Vec3d sz      = p.size();
+            for (int a = 0; a < 3; ++a) {
+                // Laid on a face across `a`: `a` becomes the height, the other two the footprint.
+                const double h = sz[a], f0 = sz[u_axis(a)], f1 = sz[v_axis(a)];
+                const bool   fits = h <= U.z() + POS_EPS && ((f0 <= U.x() + POS_EPS && f1 <= U.y() + POS_EPS) ||
+                                                           (f1 <= U.x() + POS_EPS && f0 <= U.y() + POS_EPS));
+                if (!fits)
+                    continue;
+                p.best_contact_area = std::max({ p.best_contact_area, cut_area[i][size_t(2 * a)], cut_area[i][size_t(2 * a + 1)] });
+            }
+        }
+    }
+
     // The pieces' warnings (P1's "does not fit", P3's part checks, now per piece).
     size_t discarded = 0;
     double discarded_v = 0.;
@@ -1882,8 +2022,9 @@ static void finish_pieces(SplitPlan &plan, const indexed_triangle_set &mesh, con
             continue;
         if (p.tiny)
             warn(SplitWarning::Kind::SmallPart, p.volume);
-        else if (p.contact_area < SPLIT_MIN_CONTACT_AREA)
-            warn(SplitWarning::Kind::NoFlatFace, p.contact_area);
+        else if (p.best_contact_area < SPLIT_MIN_CONTACT_AREA)
+            // P4: only when neither its pose nor any cut face gives it a base (value: the best it has).
+            warn(SplitWarning::Kind::NoFlatFace, p.best_contact_area);
     }
     if (discarded > 0) {
         SplitWarning w{ SplitWarning::Kind::DiscardedPieces, -1, -1, double(discarded) };
@@ -2129,7 +2270,10 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
     };
 
     SplitPlan plan;
-    plan.usable = usable;
+    plan.usable           = usable;
+    plan.lay_flat         = options.lay_flat;
+    plan.instance_dowels  = options.instance_dowels;
+    plan.loose_own_plates = options.loose_own_plates;
     if (mesh.vertices.empty() || mesh.indices.empty())
         return plan;
     for (const Vec3f &v : mesh.vertices)
@@ -2466,6 +2610,7 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
     // 6. Dowel sites (P2, design 3.6), per mating pair of each face (P5).
     plan.dowel_options = options.dowels;
     plan.label_options = options.labels;
+    plan.manual_sites  = options.manual_sites;
     const bool want_dowels = options.dowels.enabled && !plan.mates.empty();
     const bool want_labels = options.labels.enabled && !plan.mates.empty();
     std::unique_ptr<AABBTreeIndirect::Tree3f> tree;
@@ -2503,6 +2648,255 @@ indexed_triangle_set split_object_mesh(const ModelObject &object, int instance)
         m.transform(inst * v->get_matrix(), true);
         its_merge(out, m.its);
     }
+    return out;
+}
+
+// ---- P4: lay a part on a cut face ---------------------------------------------------------------------
+
+double split_overhang_area(const indexed_triangle_set &mesh, const Transform3d &rotation, double threshold_deg, double *contact)
+{
+    if (contact != nullptr)
+        *contact = 0.;
+    if (mesh.indices.empty())
+        return 0.;
+    const Matrix3d     R = rotation.linear();
+    std::vector<Vec3d> pts;
+    pts.reserve(mesh.vertices.size());
+    double zmin = std::numeric_limits<double>::max();
+    for (const Vec3f &v : mesh.vertices) {
+        pts.push_back(R * v.cast<double>());
+        zmin = std::min(zmin, pts.back().z());
+    }
+    // A down-facing facet leaning more than the threshold from vertical: its normal is within
+    // (90 - threshold) degrees of straight down, nz < -sin(threshold).
+    const double limit    = -std::sin(threshold_deg * PI / 180.);
+    static constexpr double ON_BED = 1e-2;
+    double overhang = 0., bed = 0.;
+    for (const stl_triangle_vertex_indices &t : mesh.indices) {
+        const Vec3d &p0 = pts[size_t(t[0])], &p1 = pts[size_t(t[1])], &p2 = pts[size_t(t[2])];
+        const Vec3d  n   = (p1 - p0).cross(p2 - p0);
+        const double len = n.norm();
+        if (len <= 0.)
+            continue;
+        const double nz = n.z() / len;
+        if (nz >= limit - 1e-9)
+            continue;
+        const double area = 0.5 * len;
+        if (std::max({ p0.z(), p1.z(), p2.z() }) <= zmin + ON_BED) {
+            if (nz < -0.999)
+                bed += area;   // lies on the bed: what it stands on, not an overhang
+            continue;
+        }
+        overhang += area;
+    }
+    if (contact != nullptr)
+        *contact = bed;
+    return overhang;
+}
+
+SplitLayFlat split_choose_lay_flat(const indexed_triangle_set &mesh, const std::vector<Vec3d> &cut_normals, const Vec3d &usable)
+{
+    using namespace split_to_volume_detail;
+    SplitLayFlat out;
+    if (mesh.indices.empty())
+        return out;
+    struct Cand
+    {
+        Transform3d R{ Transform3d::Identity() };
+        Vec3d       normal{ Vec3d::Zero() };
+        bool        current{ false };
+        double      overhang{ 0. };
+        double      contact{ 0. };
+        bool        fits{ false };
+    };
+    const bool check_fit = usable.x() > 0. && usable.y() > 0. && usable.z() > 0.;
+    auto evaluate = [&](Cand &c) {
+        c.overhang = split_overhang_area(mesh, c.R, 45., &c.contact);
+        BoundingBoxf3 bb;
+        for (const Vec3f &v : mesh.vertices)
+            bb.merge(c.R * v.cast<double>());
+        const Vec3d s = bb.size();
+        if (!check_fit) {
+            c.fits = true;
+            return;
+        }
+        if (s.z() > usable.z() + POS_EPS)
+            return;
+        if (s.x() <= usable.x() + POS_EPS && s.y() <= usable.y() + POS_EPS)
+            c.fits = true;
+        else if (s.y() <= usable.x() + POS_EPS && s.x() <= usable.y() + POS_EPS) {
+            // A quarter turn about Z makes it fit.
+            c.fits = true;
+            c.R    = Transform3d(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitZ())) * c.R;
+        }
+    };
+
+    Cand current;
+    current.current = true;
+    evaluate(current);
+    out.overhang = current.overhang;
+    out.contact  = current.contact;
+    out.fits     = current.fits;
+
+    std::vector<Cand> cands;
+    // The pose as it is competes only when it already stands on a flat base.
+    if (current.contact >= SPLIT_MIN_CONTACT_AREA)
+        cands.push_back(current);
+    std::vector<Vec3d> seen;
+    for (const Vec3d &n0 : cut_normals) {
+        if (n0.norm() < 1e-9)
+            continue;
+        const Vec3d n = n0.normalized();
+        if (std::any_of(seen.begin(), seen.end(), [&n](const Vec3d &s) { return (s - n).norm() < 1e-6; }))
+            continue;
+        seen.push_back(n);
+        Cand c;
+        c.normal = n;
+        if ((n + Vec3d::UnitZ()).norm() < 1e-9) {
+            // Already resting on this face: that is the pose as it is.
+            if (current.contact >= SPLIT_MIN_CONTACT_AREA)
+                continue;
+            c.current = true;
+        } else
+            c.R = Transform3d(Eigen::Quaterniond().setFromTwoVectors(n, -Vec3d::UnitZ()));
+        evaluate(c);
+        cands.push_back(c);
+    }
+
+    double least = std::numeric_limits<double>::max();
+    for (const Cand &c : cands)
+        if (c.fits)
+            least = std::min(least, c.overhang);
+    if (least == std::numeric_limits<double>::max())
+        return out;   // nothing fits better: kept as it is
+    const double tie = std::max(1., 0.01 * least);
+    const Cand  *best = nullptr;
+    for (const Cand &c : cands) {
+        if (!c.fits || c.overhang > least + tie)
+            continue;
+        if (best == nullptr || c.contact > best->contact + 1e-6 || (std::abs(c.contact - best->contact) <= 1e-6 && c.current && !best->current))
+            best = &c;
+    }
+    out.overhang = best->overhang;
+    out.contact  = best->contact;
+    out.fits     = best->fits;
+    out.normal   = best->normal;
+    out.rotation = best->R;
+    out.changed  = !best->R.isApprox(Transform3d::Identity(), 1e-12);
+    return out;
+}
+
+// ---- P4: click-to-add / remove a dowel site -----------------------------------------------------------
+
+SplitPickTarget split_pick(const SplitPlan &plan, const Vec3d &origin, const Vec3d &dir0)
+{
+    using namespace split_to_volume_detail;
+    SplitPickTarget out;
+    if (dir0.norm() < 1e-12)
+        return out;
+    const Vec3d dir    = dir0.normalized();
+    double      best_t = std::numeric_limits<double>::max();
+    auto        hit    = [&](int axis, double pos, double &t, Vec3d &p) {
+        if (std::abs(dir[axis]) < 1e-9)
+            return false;
+        t = (pos - origin[axis]) / dir[axis];
+        if (t < 0.)
+            return false;
+        p       = origin + t * dir;
+        p[axis] = pos;
+        return true;
+    };
+    for (size_t i = 0; i < plan.sites.size(); ++i) {
+        const SplitSite &s = plan.sites[i];
+        if (s.plane < 0 || size_t(s.plane) >= plan.planes.size())
+            continue;
+        const int a = plan.planes[size_t(s.plane)].axis;
+        double    t;
+        Vec3d     p;
+        if (!hit(a, s.pos[a], t, p) || (p - s.pos).norm() > std::max(1., s.footprint_radius) || t >= best_t)
+            continue;
+        best_t    = t;
+        out.kind  = SplitPickTarget::Kind::Site;
+        out.site  = int(i);
+        out.plane = s.plane;
+        out.mate  = s.mate;
+        out.pos   = p;
+    }
+    if (out.kind == SplitPickTarget::Kind::Site)
+        return out;
+    for (const SplitMate &m : plan.mates) {
+        if (m.face < 0 || size_t(m.face) >= plan.faces.size())
+            continue;
+        const int         pidx = plan.faces[size_t(m.face)].plane;
+        const SplitPlane &pl   = plan.planes[size_t(pidx)];
+        double            t;
+        Vec3d             p;
+        if (!hit(pl.axis, pl.pos, t, p) || t >= best_t)
+            continue;
+        const Point pt(scaled<coord_t>(p[u_axis(pl.axis)]), scaled<coord_t>(p[v_axis(pl.axis)]));
+        if (std::none_of(m.patches.begin(), m.patches.end(), [&pt](const ExPolygon &ex) { return ex.contains(pt); }))
+            continue;
+        best_t    = t;
+        out.kind  = SplitPickTarget::Kind::Face;
+        out.plane = pidx;
+        out.mate  = m.id;
+        out.pos   = p;
+    }
+    return out;
+}
+
+// ---- P4: arranging the result in groups -----------------------------------------------------------------
+
+SplitArrangeStep split_arrange_step(const std::vector<SplitArrangeInstance> &instances, int group, const std::vector<bool> &plate_locked)
+{
+    SplitArrangeStep  out;
+    std::vector<bool> holds(plate_locked.size(), false);
+    for (size_t i = 0; i < instances.size(); ++i) {
+        const SplitArrangeInstance &in = instances[i];
+        if (in.group >= group) {
+            // This group and the later ones belong to no plate while the step runs: this group is then
+            // placed (it is printable), the later ones are skipped (they are held, below).
+            if (in.plate >= 0)
+                out.unregister.push_back(i);
+            if (in.group > group && in.printable)
+                out.hold.push_back(i);
+        } else if (in.plate >= 0 && size_t(in.plate) < holds.size())
+            holds[size_t(in.plate)] = true;   // stays registered: an earlier group, or not the chain's
+    }
+    if (group > 0)
+        for (size_t p = 0; p < plate_locked.size(); ++p)
+            if (holds[p] && !plate_locked[p])
+                out.lock_plates.push_back(int(p));
+    return out;
+}
+
+SplitArrangeReport split_arrange_report(const std::vector<SplitArrangeInstance> &instances, const std::vector<int> &placed_plate, int groups)
+{
+    SplitArrangeReport out;
+    const size_t       n = size_t(std::max(0, groups));
+    out.plates.assign(n, {});
+    out.unplaced.assign(n, {});
+    out.shares.assign(n, false);
+    for (size_t i = 0; i < instances.size() && i < placed_plate.size(); ++i) {
+        const int g = instances[i].group;
+        if (g < 0 || size_t(g) >= n)
+            continue;
+        if (placed_plate[i] < 0)
+            out.unplaced[size_t(g)].push_back(i);
+        else
+            out.plates[size_t(g)].push_back(placed_plate[i]);
+    }
+    for (std::vector<int> &p : out.plates) {
+        std::sort(p.begin(), p.end());
+        p.erase(std::unique(p.begin(), p.end()), p.end());
+    }
+    for (size_t g = 1; g < n; ++g)
+        for (size_t e = 0; e < g && !out.shares[g]; ++e)
+            for (int p : out.plates[g])
+                if (std::binary_search(out.plates[e].begin(), out.plates[e].end(), p)) {
+                    out.shares[g] = true;
+                    break;
+                }
     return out;
 }
 
@@ -2886,6 +3280,74 @@ static void split_leaf(ModelObject &leaf, int section, const SplitPlan &plan, co
     }
 }
 
+// ---- P4: identical dowels as instances of one object ----
+
+// Two loose dowels (or pins) are the same shape when their one solid has the same mesh, the same
+// rotation and scale and the same connector type; only where they stand differs.
+static bool same_dowel(const ModelObject &l, const ModelObject &r)
+{
+    if (l.volumes.size() != 1 || r.volumes.size() != 1)
+        return false;
+    const ModelVolume &a = *l.volumes.front(), &b = *r.volumes.front();
+    if (a.type() != b.type() || a.cut_info.connector_type != b.cut_info.connector_type || a.cut_info.is_connector != b.cut_info.is_connector)
+        return false;
+    if (!a.get_matrix().linear().isApprox(b.get_matrix().linear(), 1e-9))
+        return false;
+    const indexed_triangle_set &x = a.mesh().its, &y = b.mesh().its;
+    if (x.vertices.size() != y.vertices.size() || x.indices.size() != y.indices.size())
+        return false;
+    for (size_t i = 0; i < x.indices.size(); ++i)
+        if (x.indices[i] != y.indices[i])
+            return false;
+    for (size_t i = 0; i < x.vertices.size(); ++i)
+        if ((x.vertices[i] - y.vertices[i]).cwiseAbs().maxCoeff() > 1e-5f)
+            return false;
+    return true;
+}
+
+static std::string dowel_size_text(double diameter, double length)
+{
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%gx%g", std::round(diameter * 10.) / 10., std::round(length * 10.) / 10.);
+    return buf;
+}
+
+// Folds every dowel into the first one of the same shape as an instance of it, standing (and
+// assembled) exactly where it stood. The leaders are named by their size; the others are deleted from
+// `model`. Returns the leaders in the order of the dowels they were first seen as.
+static std::vector<ModelObject *> collapse_dowels(Model &model, std::vector<ModelObject *> dowels, const std::string &base, bool pin)
+{
+    std::vector<ModelObject *> leaders;
+    for (ModelObject *d : dowels) {
+        auto it = std::find_if(leaders.begin(), leaders.end(), [d](const ModelObject *l) { return same_dowel(*l, *d); });
+        if (it == leaders.end()) {
+            leaders.push_back(d);
+            continue;
+        }
+        ModelObject *leader = *it;
+        // The solid sits at its own offset in each object; that offset goes into the instance.
+        const Vec3d       shift = d->volumes.front()->get_offset() - leader->volumes.front()->get_offset();
+        const Transform3d local = Geometry::translation_transform(shift);
+        for (const ModelInstance *inst : d->instances) {
+            ModelInstance *ni = leader->add_instance(*inst);
+            ni->set_transformation(Geometry::Transformation(inst->get_matrix() * local));
+            if (inst->is_assemble_initialized())
+                ni->set_assemble_transformation(Geometry::Transformation(inst->get_assemble_transformation().get_matrix() * local));
+        }
+        model.delete_object(d);
+    }
+    for (ModelObject *l : leaders) {
+        if (l->instances.size() < 2)
+            continue;
+        // "<object>-Dowel 6x18" (diameter x length, mm, of the solid as it lies).
+        const BoundingBoxf3 bb = l->volumes.front()->mesh().transformed_bounding_box(l->volumes.front()->get_matrix());
+        const Vec3d         s  = bb.size();
+        l->name = base + (pin ? "-Pin " : "-Dowel ") + dowel_size_text(std::max(s.x(), s.y()), s.z());
+        l->invalidate_bounding_box();
+    }
+    return leaders;
+}
+
 } // namespace split_to_volume_detail
 
 SplitApplyResult split_apply(const ModelObject &object, int instance, const SplitPlan &plan, std::function<bool()> canceled,
@@ -2945,6 +3407,11 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
             copy->invalidate_bounding_box();
             dowels.push_back(copy);
         }
+        // P4: identical dowels as instances of one object.
+        if (plan.instance_dowels && dowels.size() > 1)
+            dowels = collapse_dowels(*result.model, std::move(dowels), base, pin);
+        for (const ModelObject *d : dowels)
+            result.dowel_count += d->instances.size();
     }
 
     // P5: every leaf as its pieces (a section of one piece is the leaf itself).
@@ -2988,7 +3455,7 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         const size_t n_made = made.size() + dowels.size();
         if (n_made > 1)
             linked.increase_check_sum(n_made - 1);
-        linked.increase_connectors_cnt(dowels.size());
+        linked.increase_connectors_cnt(result.dowel_count);
     }
     for (ModelObject *d : dowels) {
         if (link)
@@ -3033,6 +3500,47 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         result.parts.push_back(part);
         result.part_index.push_back(pi);
         result.piece_index.push_back(mp.piece);
+        result.part_loose.push_back(plan.is_loose_piece(mp.piece));
+
+        // P4: turned onto the cut face with the least overhang (that still fits), or kept as it is.
+        bool laid = false;
+        if (plan.lay_flat && mp.piece >= 0) {
+            const SplitPiece  &pc   = plan.pieces[size_t(mp.piece)];
+            const SplitCell   &cell = plan.parts[size_t(mp.section)].cell;
+            std::vector<Vec3d> normals;
+            for (int a = 0; a < 3; ++a) {
+                Vec3d e = Vec3d::Zero();
+                e[a]    = 1.;
+                if (cell[a] > 0 && pc.bbox.defined && pc.bbox.min[a] <= run.positions[a][size_t(cell[a]) - 1] + 0.5)
+                    normals.push_back(-e);
+                if (cell[a] < plan.counts[a] - 1 && pc.bbox.defined && pc.bbox.max[a] >= run.positions[a][size_t(cell[a])] - 0.5)
+                    normals.push_back(e);
+            }
+            indexed_triangle_set world;
+            const Transform3d    inst = part->instances.front()->get_matrix();
+            for (const ModelVolume *v : part->volumes)
+                if (v->is_model_part() && !v->mesh().empty()) {
+                    TriangleMesh m = v->mesh();
+                    m.transform(inst * v->get_matrix(), true);
+                    its_merge(world, m.its);
+                }
+            if (!normals.empty()) {
+                const SplitLayFlat lf = split_choose_lay_flat(world, normals, plan.usable.valid ? plan.usable.size : Vec3d::Zero());
+                if (lf.changed) {
+                    part->instances.front()->set_transformation(Geometry::Transformation(lf.rotation * inst));
+                    part->invalidate_bounding_box();
+                    laid = true;
+                }
+            }
+        }
+        result.part_laid_flat.push_back(laid);
+        // Labels on a face the part now stands on (recessed: a dent in its bottom).
+        if (mp.piece >= 0) {
+            const Matrix3d R = part->instances.front()->get_matrix().linear();
+            for (int li : plan.pieces[size_t(mp.piece)].labels)
+                if ((R * plan.labels[size_t(li)].normal).normalized().z() < -0.999)
+                    ++result.labels_on_bed;
+        }
 
         // D15: loose pieces stay in the part, with a warning; open edges are reported too (R2).
         indexed_triangle_set merged;
@@ -3059,8 +3567,18 @@ SplitApplyResult split_apply(const ModelObject &object, int instance, const Spli
         const double volume = std::abs(double(its_volume(merged)));
         if (volume < plan.small_piece_volume)
             warn(SplitWarning::Kind::SmallPart, volume);
-        else if (const double contact = contact_area_of(merged); contact < SPLIT_MIN_CONTACT_AREA)
-            warn(SplitWarning::Kind::NoFlatFace, contact);
+        else {
+            // P4: measured in the pose the part is left in (laid on a cut face or as it was). Left as it
+            // was, it is only warned about when no cut face would give it a base either (item 1).
+            Transform3d turn = Transform3d::Identity();
+            turn.linear()    = part->instances.front()->get_matrix().linear();
+            its_transform(merged, turn, true);
+            const double contact = contact_area_of(merged);
+            const bool   could_lay =
+                !laid && mp.piece >= 0 && plan.pieces[size_t(mp.piece)].best_contact_area >= SPLIT_MIN_CONTACT_AREA;
+            if (contact < SPLIT_MIN_CONTACT_AREA && !could_lay)
+                warn(SplitWarning::Kind::NoFlatFace, contact);
+        }
     }
     if (result.discarded > 0) {
         SplitWarning w{ SplitWarning::Kind::DiscardedPieces, -1, -1, double(result.discarded) };

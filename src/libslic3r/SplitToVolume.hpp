@@ -127,6 +127,7 @@ struct SplitSite
     double      footprint_radius{ 0. }; // the hole's radius round the axis, mm (labels keep clear of it)
     bool        shortened{ false };     // the depth check made it shorter than asked
     bool        scaled_down{ false };   // smaller than asked, to fit a small face
+    bool        manual{ false };        // P4: added by a click (SplitManualSite), not by the planner
     // "X1.2-1": the mating pair's code and the 1-based dowel number. Holes are "<name>_A" / "_B",
     // the dowel object "<object>-Dowel-<name>" ("-Pin-" for a Pin).
     std::string name;
@@ -202,6 +203,30 @@ struct SplitLabelOptions
     double          dowel_clearance{ 2. };
 };
 
+// P4: a dowel site the user added (a click on a cut face) or removed (a click on an automatic site).
+// It belongs to plane `index` of `axis` and holds only while that plane is still at `plane_pos`: when
+// the planes move the planner ignores it (and the gizmo drops it). An added site is checked by the
+// same rules as the automatic ones (inside the face clear of its edge, clear of the other planes,
+// spacing, material behind it); one that fails is not placed and SplitWarning::ManualSiteRefused
+// says why. The cap per face does not limit added sites: the user asked for them.
+struct SplitManualSite
+{
+    int    axis{ 0 };
+    int    index{ 0 };
+    double plane_pos{ 0. };
+    Vec3d  pos{ Vec3d::Zero() };   // grid frame, on the plane
+    bool   add{ true };            // false: remove the automatic site nearest `pos`
+};
+
+// SplitWarning::value of ManualSiteRefused: why an added dowel was not placed.
+enum class SplitManualRefusal : int {
+    NotOnFace       = 0,   // not on material of a cut face
+    NearEdge        = 1,   // too close to the face's outline (wall margin)
+    NearOtherPlane  = 2,   // too close to another cut plane (corner keep-out)
+    NearDowel       = 3,   // closer than the spacing to another dowel on the face
+    TooLittleMaterial = 4, // too little material behind it along the dowel
+};
+
 struct SplitOptions
 {
     // D2: 5 mm each side in X / Y (brim / skirt allowance and the arranger's own shrink), 5 mm at the top.
@@ -232,6 +257,17 @@ struct SplitOptions
     bool   discard_small{ false };
     // P5: matching labels recessed into both faces of every mating pair.
     SplitLabelOptions labels;
+    // P4: dowel sites added or removed by hand (click-to-add / remove in the preview).
+    std::vector<SplitManualSite> manual_sites;
+    // P4, what Apply does with the parts (copied into the plan; they change nothing in the planning):
+    //  - lay_flat: turn each part to rest on the cut face with the least overhang (split_choose_lay_flat()).
+    //  - instance_dowels: identical dowels become instances of one object.
+    //  - loose_own_plates: read by the job only (loose pieces arranged on plates of their own).
+    // The planner's defaults are off, so a plan made without asking for them is exactly P5's; the
+    // panel turns lay_flat and instance_dowels on.
+    bool lay_flat{ false };
+    bool instance_dowels{ false };
+    bool loose_own_plates{ false };
 };
 
 // The cost of cutting through `section` (scaled ExPolygons, as slice_mesh_ex() gives them), with
@@ -354,6 +390,8 @@ struct SplitWarning
         LabelSmaller,        // mate: which pair; value: the text height used, mm (smaller than asked, to fit)
         LabelPattern,        // mate: which pair; no room for text: the dot pattern is used
         NoLabel,             // mate: which pair; value: SPLIT_NO_LABEL_TOO_SMALL
+        // P4.
+        ManualSiteRefused,   // detail: index in SplitOptions::manual_sites; value: SplitManualRefusal; plane / face / mate where known
     };
     Kind   kind{ Kind::NoUsableVolume };
     int    plane{ -1 };
@@ -386,6 +424,10 @@ struct SplitPiece
     bool          fits{ false };
     double        volume{ 0. };    // mm3
     double        contact_area{ 0. }; // mm2 (as SplitPart::contact_area)
+    // P4: the most it can stand on: its contact area as it is, or the area of one of its cut faces
+    // (flat by construction) when it is laid on that face and still fits the usable volume (mm2).
+    // "No flat face" is warned only when this is below SPLIT_MIN_CONTACT_AREA.
+    double        best_contact_area{ 0. };
     bool          tiny{ false };   // below the small-piece volume
     bool          discarded{ false }; // left out ("Discard pieces smaller than")
     std::vector<int> mates;        // indices in SplitPlan::mates
@@ -480,8 +522,19 @@ struct SplitPlan
     // P5: for every vertex of the planned mesh, the piece it lies in (-1: on no piece). Apply uses it to
     // tell which piece each separate shell of a cut part is.
     std::vector<int>          vertex_piece;
+    // P4: what Apply does with the parts (SplitOptions::lay_flat, instance_dowels, loose_own_plates),
+    // and the hand-made dowel edits the plan was made with.
+    bool                      lay_flat{ false };
+    bool                      instance_dowels{ false };
+    bool                      loose_own_plates{ false };
+    std::vector<SplitManualSite> manual_sites;
 
     size_t      dowel_count() const { return sites.size(); }
+    // P4: a piece that broke off its section (not the section's largest piece): "_b", "_c", ...
+    bool        is_loose_piece(int piece) const
+    {
+        return piece >= 0 && size_t(piece) < pieces.size() && pieces[size_t(piece)].index > 0;
+    }
     size_t      cell_count() const { return parts.size(); }
     size_t      part_count() const;          // non-empty cells (sections)
     size_t      parts_not_fitting() const;   // sections; P5: see pieces_not_fitting()
@@ -524,6 +577,86 @@ SplitPlan split_plan_grid(const indexed_triangle_set &mesh, const SplitUsableVol
 // The object's model parts merged into one mesh in the grid frame (instance `instance` applied).
 indexed_triangle_set split_object_mesh(const ModelObject &object, int instance);
 
+// ---- P4: lay a part on a cut face -----------------------------------------------------------------
+
+// The overhang of `mesh` turned by `rotation` (mm2): the area of the down-facing facets that lean more
+// than `threshold_deg` from vertical (45: the usual overhang limit), not counting the facets lying on
+// the bed (at its lowest point). `contact` gets the area of those bed facets (mm2).
+double split_overhang_area(const indexed_triangle_set &mesh, const Transform3d &rotation, double threshold_deg = 45.,
+                           double *contact = nullptr);
+
+struct SplitLayFlat
+{
+    bool        changed{ false };       // false: the part keeps its pose
+    Transform3d rotation{ Transform3d::Identity() }; // apply before the part's own pose (about the origin)
+    Vec3d       normal{ Vec3d::Zero() }; // the chosen face's outward normal before turning (zero: kept as it is)
+    double      overhang{ 0. };        // mm2, in the chosen pose
+    double      contact{ 0. };         // mm2, in the chosen pose
+    bool        fits{ true };          // the chosen pose fits `usable`
+};
+
+// Chooses the pose of a part: resting on one of its cut faces (`cut_normals`: their outward normals,
+// in the frame of `mesh`), or as it is when it already stands on a flat base (at least
+// SPLIT_MIN_CONTACT_AREA). Least overhang wins (45 degrees); poses within 1 mm2 or 1 % of each other tie,
+// and a tie goes to the larger contact area, then to the pose as it is. A pose must fit `usable` (X / Y
+// may be swapped by a quarter turn about Z, which the rotation then includes); a pose that does not is
+// passed over for the next best. With no fitting pose the part is kept as it is. `usable` zero: no fit
+// check.
+SplitLayFlat split_choose_lay_flat(const indexed_triangle_set &mesh, const std::vector<Vec3d> &cut_normals, const Vec3d &usable);
+
+// ---- P4: click-to-add / remove a dowel site -------------------------------------------------------
+
+struct SplitPickTarget
+{
+    enum class Kind : int { None, Site, Face };
+    Kind  kind{ Kind::None };
+    int   site{ -1 };     // Site: index in SplitPlan::sites
+    int   plane{ -1 };    // Site / Face: index in SplitPlan::planes
+    int   mate{ -1 };     // Face: index in SplitPlan::mates
+    Vec3d pos{ Vec3d::Zero() }; // where the ray meets the plane (grid frame)
+};
+
+// What a click along the ray (`origin`, `dir`, grid frame) points at: the nearest dowel disc it passes
+// through, else the nearest patch of material on a cut plane (the planes lie inside the model, so the
+// ray is not stopped by the model's surface).
+SplitPickTarget split_pick(const SplitPlan &plan, const Vec3d &origin, const Vec3d &dir);
+
+// ---- P4: arranging the result in groups (main parts, loose pieces, dowels), each on plates of its own ----
+//
+// The job runs the "place loose objects" arrange once per group. That arrange places an instance only
+// when it is printable and either on no plate or not wholly on an UNLOCKED plate it is registered to;
+// an instance registered to a locked plate stays where it is. A part moved off the plates is still
+// registered to a plate (plate 1 after loading), so the group's instances must be taken off their
+// plates before the plates holding earlier groups are locked, or they never move (the 2026-11-16 bug:
+// every dowel stayed in the row it was parked in, far left of the plates).
+
+struct SplitArrangeInstance
+{
+    int  group{ -1 };       // the chain's group (0 main parts, 1 loose pieces, 2 dowels), -1: not the chain's
+    int  plate{ -1 };       // the plate it is registered to, -1: none
+    bool printable{ true };
+};
+
+struct SplitArrangeStep
+{
+    std::vector<size_t> unregister;  // instances to take off their plates: every one of this group and the later ones
+    std::vector<size_t> hold;        // instances to set not to print for this step: the later groups' printable ones
+    std::vector<int>    lock_plates; // unlocked plates to lock (from the second group on): those holding anything still registered
+};
+
+// What to do before arranging group `group`. `plate_locked` has one entry per plate.
+SplitArrangeStep split_arrange_step(const std::vector<SplitArrangeInstance> &instances, int group, const std::vector<bool> &plate_locked);
+
+struct SplitArrangeReport
+{
+    std::vector<std::vector<int>>    plates;   // per group: the plates its instances lie wholly on (sorted, unique)
+    std::vector<std::vector<size_t>> unplaced; // per group: instances wholly on no plate
+    std::vector<bool>                shares;   // per group: shares a plate with an earlier group
+};
+
+// After the last step: `placed_plate` per instance is the plate it lies wholly on, or -1.
+SplitArrangeReport split_arrange_report(const std::vector<SplitArrangeInstance> &instances, const std::vector<int> &placed_plate, int groups);
+
 // ---- apply ----------------------------------------------------------------------------------------
 
 struct SplitApplyResult
@@ -540,6 +673,15 @@ struct SplitApplyResult
     // P2: the loose dowels (or pins), one object each, owned by `model`, in SplitPlan::sites order,
     // named "<object>-Dowel-<site>" ("-Pin-"), standing where they sit in the assembled model.
     std::vector<ModelObject*> dowels;
+    // P4: dowels to print in all (instances: with SplitPlan::instance_dowels identical dowels are one
+    // object with one instance per dowel, so dowels.size() counts shapes, not dowels).
+    size_t                    dowel_count{ 0 };
+    // P4: per entry of `parts`: a loose piece (broke off its section), and whether it was turned onto
+    // a cut face (SplitPlan::lay_flat). labels_on_bed: labels on a face a part now stands on (recessed,
+    // so they print as a dent in the bottom).
+    std::vector<bool>         part_loose;
+    std::vector<bool>         part_laid_flat;
+    size_t                    labels_on_bed{ 0 };
     std::vector<SplitWarning> warnings;   // the after-Apply ones (LoosePieces, OpenEdges, SmallPart, NoFlatFace)
     bool                      canceled{ false };
 
