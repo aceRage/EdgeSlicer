@@ -18931,6 +18931,12 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingInvalidPrintSpeed) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
+                // EdgeSlicer, curved tops P3: a head contact downgraded to a warning by a developer override, or a curved
+                // top that could not be checked at all, must not look like the ordinary warnings next to it. The same
+                // message type also carries the harmless "no head contact found", which is NON_CRITICAL.
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingCurvedTopsHeadCheck &&
+                    warning.level == PrintStateBase::WarningLevel::CRITICAL)
+                    notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);
                 add_warning(warning, object_id.id);
             }
@@ -21900,6 +21906,16 @@ bool Plater::is_active_project() const
     // No Plater yet (the first one is being built at startup, or a new one is): as before the strip, this one is it.
     const Plater *shown = wxGetApp().plater();
     return shown == nullptr || shown == this;
+}
+
+void Plater::invalidate_slices_for_developer_mode()
+{
+    p->partplate_list.invalid_all_slice_result();
+    if (is_active_project()) {
+        post_slice_state_change_update();
+        schedule_background_process();
+    } else
+        p->update_while_hidden = true;
 }
 
 void Plater::on_project_hidden()

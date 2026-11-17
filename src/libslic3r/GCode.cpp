@@ -725,7 +725,7 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     wipe_speed        = std::max(toolchange_wipe_speed(gcodegen, toolchange, wipe_speed), 10.0);
     // EdgeSlicer, curved tops: the same cap as Wipe::wipe() below.
     if (this->curved_top)
-        wipe_speed = std::min(wipe_speed, CURVED_TOPS_MAX_SPEED_MM_S);
+        wipe_speed = std::min(wipe_speed, this->curved_wipe_speed_cap);
 
     // Process wipe path & calculate wipe path length
     double   wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(config.wipe_distance.get_at(extruder_id)));
@@ -758,6 +758,12 @@ void Wipe::update_path(const ExtrusionPaths &paths, bool reverse, double base_z)
     const bool contoured = std::any_of(paths.begin(), paths.end(), [](const ExtrusionPath &p) { return p.z_contoured(); });
     this->curved_top = std::any_of(paths.begin(), paths.end(),
                                    [](const ExtrusionPath &p) { return p.z_contoured() && p.z_contour->curved_top; });
+    // Curved tops P3: the wipe cap of the first curved path (all paths of a block share it).
+    for (const ExtrusionPath &p : paths)
+        if (p.z_contoured() && p.z_contour->curved_top) {
+            this->curved_wipe_speed_cap = curved_tops_wipe_speed_cap(*p.z_contour);
+            break;
+        }
     for (const ExtrusionPath& extrusion_path : paths) {
         const size_t first_new = path.points.size();
         path.append(extrusion_path.polyline);
@@ -791,7 +797,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
     // EdgeSlicer, curved tops: a wipe back along a curved line moves Z with it, so it keeps to the
     // curved paths' speed cap (design 3.2, "Wipes"). Never set for a planar or ZAA line.
     if (this->curved_top)
-        _wipe_speed = std::min(_wipe_speed, CURVED_TOPS_MAX_SPEED_MM_S);
+        _wipe_speed = std::min(_wipe_speed, this->curved_wipe_speed_cap);
 
     // SoftFever: allow 100% retract before wipe
     if (length >= 0) {
@@ -3284,10 +3290,45 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
     if (!contoured && curved_objects.empty())
         return;
 
+    // Curved tops P3: developer overrides of the curved objects. A contact is downgraded to a warning only
+    // when every curved object asks for it; the same for a missing head model.
+    bool any_dev = false, contact_warning_only = !curved_objects.empty(), unchecked_ok = !curved_objects.empty();
+    for (const PrintObject *object : curved_objects) {
+        const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+        // A block planned with other developer overrides (or another Developer mode) than are in force now is
+        // never exported: the guard record's tail says what the planner used.
+        const std::string &used     = object->curved_tops_guard_inputs_used();
+        const size_t       dev_pos  = used.find(";dev=");
+        const std::string  used_dev = dev_pos == std::string::npos ? std::string() : used.substr(dev_pos + 5);
+        if (used_dev != dev.record())
+            throw Slic3r::SlicingError(Slic3r::format(_(L("Curved tops: %1% was sliced with other developer override settings (or "
+                                                          "another Developer mode) than are in force now. Slice again.")),
+                                                      object->model_object()->name),
+                                       object->id().id);
+        any_dev |= dev.active;
+        contact_warning_only &= dev.active && dev.contact_warning_only;
+        unchecked_ok &= dev.active && dev.allow_unverified_head;
+    }
+    auto object_names = [&curved_objects]() {
+        std::string names;
+        for (const PrintObject *object : curved_objects)
+            names += (names.empty() ? "" : ", ") + object->model_object()->name;
+        return names;
+    };
+
     const std::string &printer_model = print.config().printer_model.value;
     const auto         head          = resolve_head_clearance(print.config());
     if (!head) {
         BOOST_LOG_TRIVIAL(info) << "Head clearance check: no head model for printer_model \"" << printer_model << "\", skipped";
+        if (!curved_objects.empty() && unchecked_ok) {
+            print.active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL,
+                                          Slic3r::format(_(L("Curved tops (developer override): %1% has a curved top that was NOT checked for "
+                                                             "head contacts: there is no print head data for \"%2%\". Do not print it "
+                                                             "unattended.")),
+                                                         object_names(), printer_model),
+                                          PrintStateBase::SlicingCurvedTopsHeadCheck);
+            return;
+        }
         // The planner never builds a curved block without a head; should one exist, it is unchecked.
         if (!curved_objects.empty())
             throw Slic3r::SlicingError(Slic3r::format(_(L("Curved tops: %1% has a curved top but there is no print head data for \"%2%\" "
@@ -3313,6 +3354,8 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
             if (m.type == EMoveType::Extrude && !m.prepare_stage)
                 last_layer = std::max(last_layer, m.layer_id);
         params.extrusion_surface_slope_min_layer = last_layer;
+        // P3: the nearest head box over the block's layer, measured only (the summary and the log say it).
+        params.measure_clearance_from_layer = last_layer;
     }
     const auto                t0     = std::chrono::steady_clock::now();
     const HeadCollisionReport report = check_head_collisions(result.moves, *head, params,
@@ -3320,11 +3363,61 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
     BOOST_LOG_TRIVIAL(info) << "Head clearance check (" << head->id << "): " << report.moves_checked << " moves, "
                             << report.hit_moves << " with contact, deepest " << report.max_depth << " mm, "
                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s";
-    if (report.hit_moves == 0)
-        return;
-
     auto mm = [](double v) { return float_to_string_decimal_point(v, 2); };
+    // The nearest head box over the curved block (curved prints only).
+    std::string nearest;
+    if (!curved_objects.empty() && std::isfinite(report.min_box_clearance)) {
+        nearest = Slic3r::format(_(L("Nearest head part over the curved layer: %1%, %2% mm above the printed material (tip at X %3% Y %4% Z %5%).")),
+                                 report.min_box_clearance_part, mm(report.min_box_clearance),
+                                 mm(report.min_box_clearance_position.x()), mm(report.min_box_clearance_position.y()),
+                                 mm(report.min_box_clearance_position.z()));
+        BOOST_LOG_TRIVIAL(info) << "Curved tops head check: hits " << report.hit_moves << ", deepest " << report.max_depth
+                                << " mm, min box clearance " << report.min_box_clearance << " mm (" << report.min_box_clearance_part << ")";
+    }
+    if (report.hit_moves == 0) {
+        if (any_dev)
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          _(L("Curved tops head check (developer overrides active): no head contact found.")) +
+                                              (nearest.empty() ? std::string() : " " + nearest),
+                                          PrintStateBase::SlicingCurvedTopsHeadCheck);
+        return;
+    }
+
     if (!curved_objects.empty()) {
+        if (contact_warning_only) {
+            // P3, developer override: the contact is reported, impossible to miss, and the G-code exported.
+            std::string msg = Slic3r::format(_(L("EXPECTED CONTACT - do not print unattended. Curved tops (developer override, contact is a "
+                                                 "warning only): %1% moves bring the print head into material that is already printed, "
+                                                 "up to %2% mm deep (objects: %3%; head model: %4%). The G-code WAS exported.")),
+                                             report.hit_moves, mm(report.max_depth), object_names(), head->name);
+            // Every head part that touched, with its count and deepest contact, so a box hit never hides behind
+            // the nozzle hits listed below; and whether anything other than the nozzle tip touched at all.
+            std::string by_part, other_parts;
+            for (const HeadCollisionPartStat &ps : report.parts) {
+                if (ps.hit_moves == 0)
+                    continue;
+                const std::string one = Slic3r::format(_(L("%1%: %2% moves, up to %3% mm")), ps.part, ps.hit_moves, mm(ps.max_depth));
+                by_part += (by_part.empty() ? "" : "; ") + one;
+                if (ps.part != "nozzle tip")
+                    other_parts += (other_parts.empty() ? "" : "; ") + one;
+            }
+            msg += "\n" + _(L("By head part:")) + " " + by_part + ".";
+            msg += "\n" + (other_parts.empty() ? _(L("Only the nozzle tip touched; no other head part did.")) :
+                                                 _(L("NOT ONLY THE NOZZLE TIP: other head parts touched too:")) + " " + other_parts + ".");
+            const size_t shown_dev = std::min<size_t>(report.hits.size(), 5);
+            for (size_t i = 0; i < shown_dev; ++i) {
+                const HeadCollisionHit &h = report.hits[i];
+                msg += "\n" + Slic3r::format(_(L("Layer %1%, X %2% Y %3% Z %4%: %5% during %6%, %7% mm.")), h.layer_id + 1,
+                                             mm(h.position.x()), mm(h.position.y()), mm(h.position.z()),
+                                             h.part == "nozzle" ? _(L("nozzle")) : h.part,
+                                             h.travel ? _(L("travel")) : _(L("extrusion")), mm(h.depth));
+            }
+            if (!nearest.empty())
+                msg += "\n" + nearest;
+            BOOST_LOG_TRIVIAL(warning) << msg;
+            print.active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, msg, PrintStateBase::SlicingCurvedTopsHeadCheck);
+            return;
+        }
         // D2: a contact on a curved print is an error. The planner used this same head, so a hit means
         // something its rules did not cover; exporting it would risk a crash into the part.
         std::string names;
@@ -11826,6 +11919,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
     const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
     const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
+    // Curved tops P3: the developer overrides in force, listed before the block's first path.
+    if (curved_top && !path.z_contour->block_comment.empty())
+        gcode += path.z_contour->block_comment;
     if (curved_top)
         gcode += this->curved_tops_travel_to(path.first_point(), path.role(), "move to first " + description + " point", curved_safe_z);
 
@@ -12379,7 +12475,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // slower than XY (Elegoo Centauri Carbon: 20 mm/s, 100-500 mm/s2), so the role speed would only be
     // throttled segment by segment by the firmware, i.e. stutter. Cap the path speed instead.
     if (curved_top)
-        F = std::min(F, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
+        F = std::min(F, curved_tops_speed_cap(*path.z_contour) * 60.);
 
     // Snapmaker (feedrate guard): hand the writer the provenance of this feedrate and the
     // preferred substitute, so that if F turns out to be non-positive / non-finite the guard can
@@ -12895,7 +12991,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             // EdgeSlicer, curved tops: the overhang speeds are worked out from the role speed, so the
             // curved paths' cap (see F above) applies to them too.
             if (curved_top)
-                new_speed = std::min(new_speed, CURVED_TOPS_MAX_SPEED_MM_S * 60.);
+                new_speed = std::min(new_speed, curved_tops_speed_cap(*path.z_contour) * 60.);
 
             if ((std::abs(last_set_speed - new_speed) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
                 // ORCA: Adaptive PA code segment when adjusting PA within the same feature

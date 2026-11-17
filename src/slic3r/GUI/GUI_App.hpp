@@ -858,6 +858,8 @@ public:
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
+    bool            curved_tops_developer_lines_shown();
     void            update_internal_development();
     void            show_ip_address_enter_dialog(wxString title = wxEmptyString);
     void            show_ip_address_enter_dialog_handler(wxCommandEvent &evt);
