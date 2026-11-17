@@ -617,6 +617,12 @@ struct PluginHostClient::Impl
                 }
                 const std::string body = reply["gcode"].get<std::string>();
                 out.write(body.data(), static_cast<std::streamsize>(body.size()));
+                out.close();
+#ifdef _WIN32
+                // Parent write of hosted G-code that left plugin_data. A copy/move of a
+                // helper-created file would keep a Low mandatory label; strip it.
+                win_clear_low_integrity_label(job.gcode_path);
+#endif
             }
             io.unlock();
             if (job.post_promise)
