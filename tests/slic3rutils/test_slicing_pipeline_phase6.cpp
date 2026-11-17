@@ -61,10 +61,9 @@ struct ScopedPluginManager
     ~ScopedPluginManager() { PluginManager::instance().shutdown(); }
 };
 
-const char* const STAMP_BLOCK =
-    "; EDGE_PIPELINE_STAMP begin\n"
-    "; EdgeSlicer pipeline plugin stamp v1\n"
-    "; EDGE_PIPELINE_STAMP end\n";
+const char* const STAMP_BLOCK = "; EDGE_PIPELINE_STAMP begin\n"
+                                "; EdgeSlicer pipeline plugin stamp v1\n"
+                                "; EDGE_PIPELINE_STAMP end\n";
 
 const char* const STAMP_SOURCE = R"PY(# /// script
 # requires-python = ">=3.12"
@@ -122,6 +121,7 @@ import orca
 
 ULTRANET = r'''__ULTRANET__'''
 OUTSIDE = r'''__OUTSIDE__'''
+DATADIR = r'''__DATADIR__'''
 
 class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
     def get_name(self):
@@ -140,7 +140,7 @@ class WriteProbe(orca.slicing.SlicingPipelineCapabilityBase):
             results["work_dir"] = "ok"
         except Exception as e:
             results["work_dir"] = type(e).__name__ + ":" + str(e)
-        for name, path in (("ultranet", ULTRANET), ("outside", OUTSIDE)):
+        for name, path in (("ultranet", ULTRANET), ("outside", OUTSIDE), ("datadir", DATADIR)):
             try:
                 with open(path, "w", encoding="utf-8") as out:
                     out.write("wrote:" + name)
@@ -225,7 +225,9 @@ fs::path write_plugin(const ScopedDataDir& data_dir_guard, const std::string& st
     return plugin_dir;
 }
 
-bool load_and_wait(PluginManager& manager, const std::string& plugin_key, std::string& error,
+bool load_and_wait(PluginManager&           manager,
+                   const std::string&       plugin_key,
+                   std::string&             error,
                    std::vector<std::string> capabilities_to_enable = {})
 {
     if (!approve_plugin_for_test(plugin_key, error))
@@ -234,8 +236,11 @@ bool load_and_wait(PluginManager& manager, const std::string& plugin_key, std::s
     return manager.wait_for_plugin_load(plugin_key, std::chrono::seconds(120), error);
 }
 
-void discover_and_load(PluginManager& manager, const ScopedDataDir& data_dir_guard, const std::string& stem,
-                       const std::string& source, const std::vector<std::string>& caps)
+void discover_and_load(PluginManager&                  manager,
+                       const ScopedDataDir&            data_dir_guard,
+                       const std::string&              stem,
+                       const std::string&              source,
+                       const std::vector<std::string>& caps)
 {
     write_plugin(data_dir_guard, stem, source);
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
@@ -334,9 +339,9 @@ TEST_CASE("Stamp fixture appends the exact comment block at psGCodePostProcess",
     PluginManager& manager = PluginManager::instance();
     discover_and_load(manager, data_dir_guard, "PipelineStamp", STAMP_SOURCE, {"Stamp"});
 
-    const std::string original = "G1 X10 Y10 E0.1\n; original trailer\n";
+    const std::string  original = "G1 X10 Y10 E0.1\n; original trailer\n";
     ScopedTemporaryDir gcode_dir("pipeline-stamp-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, original);
 
     DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
@@ -354,9 +359,9 @@ TEST_CASE("No pipeline plugin: post-process leaves G-code byte-identical", "[sli
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    const std::string original = "G1 X10 Y10 E0.1\n";
+    const std::string  original = "G1 X10 Y10 E0.1\n";
     ScopedTemporaryDir gcode_dir("pipeline-nop-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, original);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -383,9 +388,9 @@ TEST_CASE("An untrusted pipeline plugin fails the slice instead of running", "[s
     CHECK_FALSE(plugin_trust::evaluate(descriptor).allowed());
     CHECK_FALSE(manager.is_plugin_loaded("PipelineStamp"));
 
-    const std::string original = "G1 X10 Y10 E0.1\n";
+    const std::string  original = "G1 X10 Y10 E0.1\n";
     ScopedTemporaryDir gcode_dir("pipeline-untrusted-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, original);
 
     DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
@@ -401,8 +406,7 @@ TEST_CASE("An untrusted pipeline plugin fails the slice instead of running", "[s
     CHECK(read_file(gcode) == original);
 }
 
-TEST_CASE("An untrusted pipeline plugin fails print.process on the early-step path",
-          "[slicing_pipeline][Python][trust]")
+TEST_CASE("An untrusted pipeline plugin fails print.process on the early-step path", "[slicing_pipeline][Python][trust]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
@@ -452,8 +456,7 @@ TEST_CASE("An early-step RecoverableError fails the slice", "[slicing_pipeline][
     manager.unload_plugin("Recoverable");
 }
 
-TEST_CASE("psGCodePostProcess write root is the working-copy folder and not UltraNet plugins",
-          "[slicing_pipeline][Python][audit]")
+TEST_CASE("psGCodePostProcess write root is the working-copy folder and not UltraNet plugins", "[slicing_pipeline][Python][audit]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
@@ -469,14 +472,17 @@ TEST_CASE("psGCodePostProcess write root is the working-copy folder and not Ultr
     const fs::path ultra = fs::path(data_dir()) / "plugins" / "escape.txt";
     fs::create_directories(ultra.parent_path());
     const fs::path            outside = fs::temp_directory_path() / "edge-pipeline-outside.txt";
+    const fs::path            datadir = fs::path(data_dir()) / "pipeline-write-datadir.txt";
     boost::system::error_code ec;
     fs::remove(outside, ec);
+    fs::remove(datadir, ec);
 
     // Embed deny-targets in the plugin. After M5 the helper stages G-code under plugin_data
     // and has no grant on the export folder, so a sibling probe_targets.json next to the
     // original file is invisible to the child (Linux Landlock and unsigned macOS both host).
     std::string source = replace_all(WRITE_PROBE_SOURCE, "__ULTRANET__", ultra.string());
     source             = replace_all(std::move(source), "__OUTSIDE__", outside.string());
+    source             = replace_all(std::move(source), "__DATADIR__", datadir.string());
     discover_and_load(manager, data_dir_guard, "WriteProbe", source, {"WriteProbe"});
 
     const bool     hosted      = plugin_ipc::PluginHostClient::should_use_host();
@@ -498,6 +504,8 @@ TEST_CASE("psGCodePostProcess write root is the working-copy folder and not Ultr
         CHECK_FALSE(fs::exists(export_side));
     CHECK_FALSE(fs::exists(ultra));
     CHECK_FALSE(fs::exists(outside));
+    if (hosted)
+        CHECK_FALSE(fs::exists(datadir));
 
     std::string    observed;
     const fs::path results_file = work_dir / "probe_results.json";
@@ -515,6 +523,11 @@ TEST_CASE("psGCodePostProcess write root is the working-copy folder and not Ultr
     CHECK(observed.find("ultranet") != std::string::npos);
     CHECK(observed.find("\"ultranet\": \"ok\"") == std::string::npos);
     CHECK(observed.find("\"outside\": \"ok\"") == std::string::npos);
+    if (hosted) {
+        CHECK(observed.find("datadir") != std::string::npos);
+        CHECK(observed.find("\"datadir\": \"ok\"") == std::string::npos);
+        CHECK(observed.find("ctx.gcode_path") != std::string::npos);
+    }
 
     manager.unload_plugin("WriteProbe");
 }
@@ -543,20 +556,19 @@ TEST_CASE("A missing pipeline plugin is skipped with a warning, not a silent run
     CHECK(warning.find("skip") != std::string::npos);
 }
 
-TEST_CASE("A missing capability skip is recorded as a visible warning, not a silent skip",
-          "[slicing_pipeline][Python][missing]")
+TEST_CASE("A missing capability skip is recorded as a visible warning, not a silent skip", "[slicing_pipeline][Python][missing]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("pipeline-skip-warn");
+    ScopedDataDir  data_dir_guard("pipeline-skip-warn");
     PluginManager& manager = PluginManager::instance();
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
     manager.take_capability_skip_warnings();
 
     ScopedTemporaryDir gcode_dir("pipeline-skip-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, "G1 X10 Y10\n");
 
     DynamicPrintConfig config = pipeline_config("GhostCap", "GhostPlugin");
@@ -575,15 +587,14 @@ TEST_CASE("A missing capability skip is recorded as a visible warning, not a sil
     CHECK(named);
 }
 
-TEST_CASE("An enabled trusted pipeline plugin is loaded on demand for post-process",
-          "[slicing_pipeline][Python][autoload]")
+TEST_CASE("An enabled trusted pipeline plugin is loaded on demand for post-process", "[slicing_pipeline][Python][autoload]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("pipeline-ondemand");
-    const fs::path plugin_dir = write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
+    ScopedDataDir      data_dir_guard("pipeline-ondemand");
+    const fs::path     plugin_dir = write_plugin(data_dir_guard, "PipelineStamp", STAMP_SOURCE);
     PluginInstallState on_state;
     on_state.installed_from = "local";
     on_state.enabled        = true;
@@ -595,9 +606,9 @@ TEST_CASE("An enabled trusted pipeline plugin is loaded on demand for post-proce
     REQUIRE(approve_plugin_for_test("PipelineStamp", pin_error));
     CHECK_FALSE(manager.is_plugin_loaded("PipelineStamp"));
 
-    const std::string original = "G1 X10 Y10 E0.1\n; original trailer\n";
+    const std::string  original = "G1 X10 Y10 E0.1\n; original trailer\n";
     ScopedTemporaryDir gcode_dir("pipeline-ondemand-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, original);
 
     DynamicPrintConfig config = pipeline_config("Stamp", "PipelineStamp");
@@ -627,8 +638,7 @@ TEST_CASE("Unresolved plugin capabilities produce the #16929 save warning", "[sl
     CHECK(text.find("Save anyway") != std::string::npos);
 }
 
-TEST_CASE("A pipeline plugin failure is an ExportError that does not invalidate the plate",
-          "[slicing_pipeline][Python][retry]")
+TEST_CASE("A pipeline plugin failure is an ExportError that does not invalidate the plate", "[slicing_pipeline][Python][retry]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
@@ -639,7 +649,7 @@ TEST_CASE("A pipeline plugin failure is an ExportError that does not invalidate 
     discover_and_load(manager, data_dir_guard, "Boom", BOOM_SOURCE, {"Boom"});
 
     ScopedTemporaryDir gcode_dir("pipeline-boom-gcode");
-    const fs::path     gcode     = gcode_dir.path() / "box.gcode";
+    const fs::path     gcode = gcode_dir.path() / "box.gcode";
     write_file(gcode, "G1 X10 Y10\n");
 
     DynamicPrintConfig config = pipeline_config("Boom", "Boom");
@@ -660,9 +670,9 @@ TEST_CASE("slicing_pipeline_plugin and plugins survive a project 3MF round-trip"
     ScopedTemporaryDir tmp("pipeline-3mf");
     Slic3r::set_temporary_dir(tmp.path().string());
 
-    Model src_model;
-    ModelObject* src_object = src_model.add_object();
-    src_object->name        = "cube";
+    Model        src_model;
+    ModelObject* src_object                                = src_model.add_object();
+    src_object->name                                       = "cube";
     src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
     src_object->add_instance();
     src_object->ensure_on_bed();
@@ -686,18 +696,15 @@ TEST_CASE("slicing_pipeline_plugin and plugins survive a project 3MF round-trip"
     std::vector<Preset*>      project_presets;
     bool                      is_bbl_3mf = false;
     Semver                    file_version;
-    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf,
-                         &file_version, nullptr,
-                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
-                             LoadStrategy::Silence));
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf, &file_version,
+                         nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
     release_PlateData_list(plate_data);
 
     REQUIRE(dst_config.has("slicing_pipeline_plugin"));
-    CHECK(dst_config.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values ==
-          std::vector<std::string>{"Stamp"});
+    CHECK(dst_config.option<ConfigOptionStrings>("slicing_pipeline_plugin")->values == std::vector<std::string>{"Stamp"});
     REQUIRE(dst_config.has("plugins"));
-    CHECK(dst_config.option<ConfigOptionStrings>("plugins")->values ==
-          std::vector<std::string>{"PipelineStamp;;Stamp"});
+    CHECK(dst_config.option<ConfigOptionStrings>("plugins")->values == std::vector<std::string>{"PipelineStamp;;Stamp"});
 }
 
 TEST_CASE("Loaded pipeline plugin fills the plugins manifest on save", "[slicing_pipeline][Python][manifest]")

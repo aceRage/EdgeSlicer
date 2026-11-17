@@ -536,11 +536,24 @@ struct PluginHostClient::Impl
 
         ScopedPluginAuditContext audit(job.plugin_key, job.capability_name);
         // Post-process G-code is inlined over IPC. The helper stages a scratch copy under
-        // plugin_data; grant that folder to the parent audit (the RPC check runs here).
+        // plugin_data; grant that folder to the parent audit (the RPC check runs here) and
+        // pin writes there so a write outside plugin_data names ctx.gcode_path.
+        struct WritePin
+        {
+            bool armed = false;
+            ~WritePin()
+            {
+                if (armed)
+                    PluginAuditManager::instance().clear_write_pin();
+            }
+        } write_pin;
         if (job.kind == Job::Kind::PostProcess) {
             try {
-                PluginAuditManager::instance().add_scoped_allowed_root(
-                    boost::filesystem::path(PluginManager::instance().get_storage_dir(job.plugin_key)));
+                const auto storage = boost::filesystem::path(PluginManager::instance().get_storage_dir(job.plugin_key));
+                PluginAuditManager::instance().add_scoped_allowed_root(storage);
+                PluginAuditManager::instance().pin_writes_to(storage,
+                                                             "write outside plugin_data; hosted post-process G-code is ctx.gcode_path");
+                write_pin.armed = true;
             } catch (...) {}
         }
 

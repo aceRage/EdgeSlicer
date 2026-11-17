@@ -203,6 +203,17 @@ ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error, 
         ctx.gcode_path = work.string();
     }
 
+    struct WritePin
+    {
+        explicit WritePin(const boost::filesystem::path& gcode)
+        {
+            if (gcode.empty())
+                return;
+            PluginAuditManager::instance().pin_writes_to(gcode.parent_path(),
+                                                         "write outside plugin_data; hosted post-process G-code is ctx.gcode_path");
+        }
+        ~WritePin() { PluginAuditManager::instance().clear_write_pin(); }
+    } pin{work};
     ExecutionResult result = pipeline->execute(ctx);
     if (!work.empty()) {
         boost::nowide::ifstream in(work.string(), std::ios::binary);

@@ -89,6 +89,10 @@ missing, unsigned macOS helper, and so on) Edge **does not** silently fall back.
 - Early slicing-pipeline steps (`posSlice` … `psSkirtBrim`) stay in-process with a live `Print *`.
   They do **not** get this prompt. The Home card already says "Early slicing steps run
   unsandboxed in-process".
+- **Import is not sandboxed.** `load_enabled_plugins` (startup auto-load) and Home > Plugins
+  Enable import a *trusted* plugin inside Edge with the user's rights. The OS sandbox covers
+  helper **execute**, not import. Trust is the import-time control. See
+  `docs/HLSD/plugin-permissions.md`.
 
 Test-only env overrides, ignored in production (same gate as Phase 7's `EDGE_PLUGIN_HOST`):
 
@@ -141,7 +145,20 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 - Windows: the Job object kills every assigned process; `ACTIVE_PROCESS=1` stops them spawning.
   AppContainer profile names are a fixed-length FNV hash of `plugin_key` (no truncation
   collisions). Directory ACLs are granted at the folder with inheritance (not a recursive
-  walk), checked fail-closed, and revoked on `close_win_appcontainer`. `apply_dir_acl`
+  walk). Every **read-only** grant (helper dir, `resources_dir`, `python_home`, packages,
+  `plugin_root`, extras) first checks whether the package half of the AppContainer access
+  check already allows `FILE_GENERIC_READ|FILE_GENERIC_EXECUTE`: the DACL is walked for
+  ALLOW ACEs on this package SID or ALL APPLICATION PACKAGES (`S-1-15-2-1`), which every
+  AppContainer token includes as a group. If the package can already RX, the grant is
+  skipped with a warning (a Program Files install has no `WRITE_DAC`). Otherwise the
+  ACE is applied and spawn fail-closes if that fails. There is no path-substring
+  exemption. Each grant is journalled under `{data_dir}/plugin_host/acl_journal.json`
+  before it is applied; `PluginManager::initialize` and the next `prepare` revoke
+  anything the journal still lists (crash/kill leftover ACEs and Low labels) and then
+  delete it. `close_win_appcontainer` revokes, restores the original SACL mandatory
+  label on Edge-created work dirs, and clears the journal. Low-IL labels are applied
+  only to Edge-owned write dirs (`plugin_data`, host-log, `write_root`), not to
+  user-chosen `fs_readwrite` folders. `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating
   user. Subfolder grants do not make `data_dir` itself `GetFileAttributes`-able, so the
   parent also sets a non-inherited `FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE`
@@ -162,17 +179,22 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`). Windows omits
   `APPDATA` / `USERPROFILE` / `HOMEDRIVE` / `HOMEPATH` so CPython cannot probe the real
   user profile, but keeps `LOCALAPPDATA`: CreateProcess with AppContainer
-  `SECURITY_CAPABILITIES` fails with `ERROR_ENVVAR_NOT_FOUND` (203) without it, and
-  Windows redirects that variable to `Packages\<moniker>\AC` for the child. The helper opens
+  `SECURITY_CAPABILITIES` fails with `ERROR_ENVVAR_NOT_FOUND` (203) without it. Only
+  `SHGetKnownFolderPath(FOLDERID_LocalAppData)` is redirected inside the container; the
+  env var still carries the real user path unless the parent rewrites it to
+  `GetAppContainerFolderPath` (the Packages\<family>\AC folder) when that API succeeds.
+  The helper opens
   `--host-log <write_root|data_dir/plugin_host>/edge-plugin-host.log` (stderr, faulthandler,
   `Py_FatalError`). Uncaught exceptions, `std::terminate`, abort, and the MSVC invalid-
   parameter handler exit 10–14 instead of a silent `0xc0000409`. The parent attaches
-  `GetExitCodeProcess` plus the last ~40 log lines to closed-pipe handshake errors.
+  `GetExitCodeProcess` plus the last ~40 helper-log lines (control chars stripped, length
+  capped, each line prefixed `helper log:`) to closed-pipe handshake errors.
 - Post-process G-code is read by Edge and sent as JSON `gcode` on the existing
   length-prefixed IPC (POSIX socketpair / Windows named pipe). The helper stages a scratch
   copy under `plugin_data` / TMPDIR, Python still sees `ctx.gcode_path`, and Edge writes
   the reply back. The hosted write root is that working-copy folder, not the export
-  directory — sibling files next to the original G-code are not visible to the child.
+  directory — a write outside `plugin_data` raises `PermissionError` naming
+  `ctx.gcode_path`. Sibling files next to the original G-code are not visible to the child.
   Security-scoped bookmarks are not used: Edge is not sandboxed and has a
   different identity from the helper, so a bookmark would not resolve. File-descriptor
   passing (`SCM_RIGHTS` / `DuplicateHandle`) is not on the Channel. Payloads over 16 MiB
@@ -204,10 +226,9 @@ without a signed helper showing `kind=app-sandbox`.
   Ad-hoc `codesign --sign - --entitlements scripts/edge-plugin-host.entitlements` is hooked
   up but does not go through notarisation. `APP_SANDBOX_CONTAINER_ID` is not trusted.
 - Windows AppContainer + named-pipe DACL + Job object on a real Windows box. ACL grants
-  live until host close (not revoked at `ResumeThread`). `python_home` under Program Files
-  is a best-effort grant: a standard user has no `WRITE_DAC`, and ALL APPLICATION PACKAGES
-  can already read it. A user-owned `python_home` (dev tree next to the helper) is
-  fail-closed. The helper uses `PyConfig_InitIsolatedConfig` with explicit
+  live until host close (not revoked at `ResumeThread`). Every read-only grant is skipped
+  when the package SID or ALL APPLICATION PACKAGES already has RX (Program Files installs);
+  otherwise the grant is fail-closed. The helper uses `PyConfig_InitIsolatedConfig` with explicit
   `module_search_paths` (no registry / user-site). Exceeding the 1 GiB job process-memory
   cap is a distinct error.
 - A Linux **desktop session** D-Bus / Flatpak portal / X11 abstract-socket escape (the unit

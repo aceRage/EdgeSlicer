@@ -60,17 +60,18 @@ namespace {
 
 std::atomic<bool> g_allow_env_overrides{false};
 
-void add_grant_path(SandboxSpec& spec, const std::string& path, bool write)
+void add_grant_path(SandboxSpec& spec, const std::string& path, bool write, bool low_label = false)
 {
     if (path.empty())
         return;
     for (SandboxPath& existing : spec.extra_paths) {
         if (existing.path == path) {
-            existing.write = existing.write || write;
+            existing.write     = existing.write || write;
+            existing.low_label = existing.low_label || low_label;
             return;
         }
     }
-    spec.extra_paths.push_back({path, write});
+    spec.extra_paths.push_back({path, write, low_label});
 }
 
 void prepare_spawn_spec(SpawnedHost& out, SandboxSpec& spec)
@@ -81,7 +82,26 @@ void prepare_spawn_spec(SpawnedHost& out, SandboxSpec& spec)
         return;
     boost::system::error_code ec;
     boost::filesystem::create_directories(boost::filesystem::path(out.host_log_path).parent_path(), ec);
-    add_grant_path(spec, host_child_log_dir(spec), true);
+    add_grant_path(spec, host_child_log_dir(spec), true, true);
+}
+
+std::string sanitise_host_log_line(const std::string& line)
+{
+    constexpr std::size_t k_max = 240;
+    std::string           out   = "helper log: ";
+    std::size_t           n     = 0;
+    for (unsigned char c : line) {
+        if (n >= k_max) {
+            out += "...";
+            break;
+        }
+        if (c == '\t' || (c >= 0x20 && c != 0x7f))
+            out += static_cast<char>(c);
+        else
+            out += '?';
+        ++n;
+    }
+    return out;
 }
 
 std::string read_host_log_tail(const std::string& path, std::size_t max_lines)
@@ -102,7 +122,12 @@ std::string read_host_log_tail(const std::string& path, std::size_t max_lines)
     for (const std::string& l : lines) {
         if (!out.empty())
             out += '\n';
-        out += l;
+        out += sanitise_host_log_line(l);
+        if (out.size() > 8192) {
+            out.resize(8192);
+            out += "...";
+            break;
+        }
     }
     return out;
 }
@@ -176,29 +201,15 @@ bool win_env_entry_allowed(const wchar_t* entry)
         }
         return true;
     };
-    static const wchar_t* prefixes[] = {L"PATH=",
-                                        L"PATHEXT=",
-                                        L"SYSTEMROOT=",
-                                        L"SYSTEMDRIVE=",
-                                        L"WINDIR=",
-                                        L"COMSPEC=",
-                                        L"TEMP=",
-                                        L"TMP=",
-                                        L"USERNAME=",
-                                        L"USERDOMAIN=",
-                                        L"COMPUTERNAME=",
-                                        L"NUMBER_OF_PROCESSORS=",
-                                        L"PROCESSOR_ARCHITECTURE=",
-                                        L"PROGRAMFILES=",
-                                        L"PROGRAMFILES(X86)=",
-                                        L"PROGRAMW6432=",
-                                        L"PYTHONNOUSERSITE=",
-                                        L"ALLUSERSPROFILE=",
-                                        L"PUBLIC=",
+    static const wchar_t* prefixes[] = {L"PATH=", L"PATHEXT=", L"SYSTEMROOT=", L"SYSTEMDRIVE=", L"WINDIR=", L"COMSPEC=", L"TEMP=", L"TMP=",
+                                        L"USERNAME=", L"USERDOMAIN=", L"COMPUTERNAME=", L"NUMBER_OF_PROCESSORS=",
+                                        L"PROCESSOR_ARCHITECTURE=", L"PROGRAMFILES=", L"PROGRAMFILES(X86)=", L"PROGRAMW6432=",
+                                        L"PYTHONNOUSERSITE=", L"ALLUSERSPROFILE=", L"PUBLIC=",
                                         // CreateProcessW with SECURITY_CAPABILITIES fails with
                                         // ERROR_ENVVAR_NOT_FOUND (203) if LOCALAPPDATA is absent.
-                                        // Windows redirects it to Packages\<moniker>\AC for the
-                                        // AppContainer child, so this is not the real user folder.
+                                        // Only SHGetKnownFolderPath(FOLDERID_LocalAppData) is
+                                        // redirected inside the container; the env var still
+                                        // carries the real user path unless we rewrite it below.
                                         // APPDATA / USERPROFILE / HOMEDRIVE / HOMEPATH stay dropped.
                                         L"LOCALAPPDATA="};
     for (const wchar_t* prefix : prefixes) {
@@ -233,6 +244,20 @@ std::vector<std::wstring> scrubbed_helper_env_entries()
     }
     if (!have_nousersite)
         kept.emplace_back(L"PYTHONNOUSERSITE=1");
+    const std::wstring ac_local = win_appcontainer_localappdata_path();
+    if (!ac_local.empty()) {
+        const std::wstring prefix   = L"LOCALAPPDATA=";
+        bool               replaced = false;
+        for (std::wstring& e : kept) {
+            if (e.size() >= prefix.size() && ::_wcsnicmp(e.c_str(), prefix.c_str(), prefix.size()) == 0) {
+                e        = prefix + ac_local;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced)
+            kept.emplace_back(prefix + ac_local);
+    }
     return kept;
 }
 
@@ -1003,9 +1028,11 @@ void enrich_host_error(SpawnedHost& host, std::string& error)
     if (!captured.empty())
         extra += " stderr=" + captured;
     const std::string tail = read_host_log_tail(host.host_log_path, 40);
-    if (!tail.empty())
-        extra += " host-log:\n" + tail;
-    else if (!host.host_log_path.empty())
+    if (!tail.empty()) {
+        if (!extra.empty())
+            extra += " ";
+        extra += tail;
+    } else if (!host.host_log_path.empty())
         extra += " host-log=" + host.host_log_path + " (empty or unreadable)";
     if (!extra.empty()) {
         if (error.empty())

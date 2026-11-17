@@ -299,19 +299,27 @@ never treated as an opt-out.
   capability calls, not for importing a plugin module or running
   `register_capabilities`. Code executed during those phases has no plugin audit
   context, so its events are not attributed or restricted.
+- **The OS sandbox covers helper execute, not import.** Trusted plugins are imported
+  in-process by `PluginManager::load_enabled_plugins` (and Home > Plugins Enable) with
+  no AppContainer / Landlock / App Sandbox. Trust is the import-time control. The OS
+  sandbox applies only when `edge-plugin-host` runs a capability. An auto-load at
+  startup therefore executes plugin module code inside Edge as the user.
 - **Subprocesses leave the policy.** A process created by a granted or full-access
   plugin runs with the user's rights and is not covered by the parent's audit scope.
 - **Host APIs are not audit events.** Calls into EdgeSlicer's Python host APIs, such as
   preset updates or UI actions, execute C++ host code and follow that API's contract. The
   audit hook judges the Python-level filesystem, network, process and thread events it is
   given, not the host API's internal work.
-- **Host-owned asyncio loop construction is a loopback-only socket exception.** While
-  `ScopedEventLoopSocketPermit` is live (the host constructing the captured
-  `SelectorEventLoop` class), `socket.__new__` is permitted and `socket.bind` /
-  `socket.connect` are permitted only for `127.0.0.1` or `::1` (any port). Windows
-  asyncio emulates `socketpair` that way. Non-loopback bind/connect, filesystem writes,
-  and subprocess remain blocked. The permit does not grant `network_socket` and ends
-  when the constructor returns.
+- **Host-owned asyncio loop construction is a Windows-only loopback socket exception.**
+  While `ScopedEventLoopSocketPermit` is live (the host constructing the captured
+  `SelectorEventLoop` class), POSIX permits only `socket.__new__` (`socketpair`).
+  Windows additionally permits `socket.__new__` only for `AF_INET` / `AF_INET6`
+  `SOCK_STREAM`, `bind` only to `127.0.0.1` or `::1` with port 0, and `connect` only
+  to the exact address and port a socket bound inside this same permit received.
+  Bind to a fixed loopback port, connect to another loopback port (for example
+  Moonraker 7125), non-loopback bind/connect, filesystem writes, and subprocess remain
+  blocked. The permit does not grant `network_socket` and ends when the constructor
+  returns.
 - **Denied paths are a direct-access block.** Path laundering through a symlink,
   hardlink, subprocess, or Windows 8.3 short name is outside the model. A tree grant is
   canonicalized for matching, but the deny check itself is base-name and component based.

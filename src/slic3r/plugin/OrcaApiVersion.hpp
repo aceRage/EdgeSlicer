@@ -10,8 +10,8 @@ namespace Slic3r {
 
 // Advertised `orca` API version for this Edge build. Phase 3 is the v1 subset:
 // script capabilities plus read-only host bindings. Bump this when the public
-// surface grows (plan section 11 item 2).
-inline constexpr const char* k_orca_api_version = "1.0.0";
+// surface grows (plan section 11 item 2). See docs/plugins/api-changelog.md.
+inline constexpr const char* k_orca_api_version = "1.1.0";
 
 namespace orca_api_version_detail {
 
@@ -61,8 +61,8 @@ inline bool parse_clause(std::string clause, Cmp& op, Semver& ver, std::string& 
 {
     trim_inplace(clause);
     if (clause.empty()) {
-        error = "Plugin requires orca API version '" + original +
-                "', which this Edge build does not understand (advertises " + std::string(k_orca_api_version) + ").";
+        error = "Plugin requires orca API version '" + original + "', which this Edge build does not understand (advertises " +
+                std::string(k_orca_api_version) + ").";
         return false;
     }
 
@@ -77,8 +77,8 @@ inline bool parse_clause(std::string clause, Cmp& op, Semver& ver, std::string& 
         op = Cmp::Eq;
         clause.erase(0, 2);
     } else if (clause.compare(0, 2, "~=") == 0) {
-        error = "Plugin requires orca API version '" + original +
-                "', which this Edge build does not understand (advertises " + std::string(k_orca_api_version) + ").";
+        error = "Plugin requires orca API version '" + original + "', which this Edge build does not understand (advertises " +
+                std::string(k_orca_api_version) + ").";
         return false;
     } else if (clause.front() == '>') {
         op = Cmp::Gt;
@@ -93,23 +93,22 @@ inline bool parse_clause(std::string clause, Cmp& op, Semver& ver, std::string& 
 
     trim_inplace(clause);
     if (clause.empty()) {
-        error = "Plugin requires orca API version '" + original +
-                "', which this Edge build does not understand (advertises " + std::string(k_orca_api_version) + ").";
+        error = "Plugin requires orca API version '" + original + "', which this Edge build does not understand (advertises " +
+                std::string(k_orca_api_version) + ").";
         return false;
     }
 
     if (has_prerelease_token(clause)) {
         error = "Plugin requires orca API version '" + original +
-                "', but this Edge build does not accept pre-release API requirements (advertises " +
-                std::string(k_orca_api_version) + ").";
+                "', but this Edge build does not accept pre-release API requirements (advertises " + std::string(k_orca_api_version) + ").";
         return false;
     }
 
     const std::string padded = pad_dotted_version(clause);
     const auto        parsed = Semver::parse(padded);
     if (!parsed) {
-        error = "Plugin requires orca API version '" + original +
-                "', which this Edge build does not understand (advertises " + std::string(k_orca_api_version) + ").";
+        error = "Plugin requires orca API version '" + original + "', which this Edge build does not understand (advertises " +
+                std::string(k_orca_api_version) + ").";
         return false;
     }
     ver = *parsed;
@@ -149,24 +148,24 @@ inline bool orca_api_version_supported(const std::string& required, std::string&
 
     const auto have = Semver::parse(k_orca_api_version);
     if (!have) {
-        error = "Plugin requires orca API version '" + required +
-                "', which this Edge build does not understand (advertises " + std::string(k_orca_api_version) + ").";
+        error = "Plugin requires orca API version '" + required + "', which this Edge build does not understand (advertises " +
+                std::string(k_orca_api_version) + ").";
         return false;
     }
 
     std::string rest = required;
     while (!rest.empty()) {
-        const auto comma = rest.find(',');
+        const auto  comma  = rest.find(',');
         std::string clause = comma == std::string::npos ? rest : rest.substr(0, comma);
-        rest = comma == std::string::npos ? std::string() : rest.substr(comma + 1);
+        rest               = comma == std::string::npos ? std::string() : rest.substr(comma + 1);
 
         orca_api_version_detail::Cmp op;
         Semver                       want;
         if (!orca_api_version_detail::parse_clause(clause, op, want, error, required))
             return false;
         if (!orca_api_version_detail::apply_cmp(op, *have, want)) {
-            error = "Plugin requires orca API version " + required + ", but this Edge build advertises " +
-                    std::string(k_orca_api_version) + ".";
+            error = "Plugin requires orca API version " + required + ", but this Edge build advertises " + std::string(k_orca_api_version) +
+                    ".";
             return false;
         }
     }

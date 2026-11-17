@@ -5,7 +5,7 @@
 #include <catch2/catch.hpp>
 
 #include <libslic3r/Utils.hpp>
-#include <libslic3r/libslic3r.h>         // GCODEVIEWER_APP_KEY, SLIC3R_APP_KEY (via libslic3r_version.h)
+#include <libslic3r/libslic3r.h> // GCODEVIEWER_APP_KEY, SLIC3R_APP_KEY (via libslic3r_version.h)
 #include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginFsUtils.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
@@ -121,10 +121,7 @@ TEST_CASE("Plugin audit denies host-managed filenames anywhere", "[audit]")
         CHECK_FALSE(mgr.is_denied_filename(fs::path("edgeslicer_secret.txt")));
     }
 
-    SECTION("an empty path is not denied")
-    {
-        CHECK_FALSE(mgr.is_denied_filename(fs::path()));
-    }
+    SECTION("an empty path is not denied") { CHECK_FALSE(mgr.is_denied_filename(fs::path())); }
 }
 
 TEST_CASE("Plugin audit deny beats allowed roots", "[audit]")
@@ -140,8 +137,8 @@ TEST_CASE("Plugin audit deny beats allowed roots", "[audit]")
     // Enter a plugin context. The deny must hold even inside a globally allowed root.
     ScopedPluginAuditContext ctx("test_plugin", "");
 
-    const fs::path conf  = fs::path(data_dir()) / (SLIC3R_APP_KEY ".conf");
-    const fs::path token = fs::path(data_dir()) / ".install_state.json";
+    const fs::path conf          = fs::path(data_dir()) / (SLIC3R_APP_KEY ".conf");
+    const fs::path token         = fs::path(data_dir()) / ".install_state.json";
     const fs::path install_state = fs::path(data_dir()) / "plugins" / "example" / ".install_state.json";
 
     SECTION("a non-denied file inside the allowed root is writable (root really grants writes)")
@@ -155,6 +152,19 @@ TEST_CASE("Plugin audit deny beats allowed roots", "[audit]")
         AuditDecision decision = mgr.check_open((fs::path(data_dir()).parent_path() / "outside.txt").string(), "r");
         CHECK_FALSE(decision.allowed);
         CHECK(decision.reason == "outside allowed root");
+    }
+
+    SECTION("a write pin names ctx.gcode_path outside plugin_data")
+    {
+        const fs::path plugin_data = fs::path(data_dir()) / "orca_plugins" / "plugin_data" / "test_plugin";
+        fs::create_directories(plugin_data);
+        mgr.pin_writes_to(plugin_data, "write outside plugin_data; hosted post-process G-code is ctx.gcode_path");
+        AuditDecision inside = mgr.check_open((plugin_data / "post_process.gcode").string(), "w");
+        CHECK(inside.allowed);
+        AuditDecision outside = mgr.check_open((fs::path(data_dir()) / "elsewhere.txt").string(), "w");
+        CHECK_FALSE(outside.allowed);
+        CHECK(outside.reason.find("ctx.gcode_path") != std::string::npos);
+        mgr.clear_write_pin();
     }
 
     SECTION("writing the app config is blocked despite data_dir() being allowed")
@@ -227,7 +237,7 @@ TEST_CASE("Plugin audit deny beats a plugin's own scoped root", "[audit]")
     SECTION("a denied name stashed inside the plugin's own root is still blocked")
     {
         const std::string smuggled = (plugin_dir / (SLIC3R_APP_KEY ".conf")).string();
-        AuditDecision      decision = mgr.check_open(smuggled, "w");
+        AuditDecision     decision = mgr.check_open(smuggled, "w");
         CHECK_FALSE(decision.allowed);
         CHECK(decision.reason == "denied filename");
     }
@@ -301,10 +311,7 @@ TEST_CASE("Plugin audit denies secret/certificate/config-like paths by keyword",
         CHECK_FALSE(mgr.is_denied_path_keyword(fs::path("/users/Concert/output.txt")));
     }
 
-    SECTION("an empty path is not denied")
-    {
-        CHECK_FALSE(mgr.is_denied_path_keyword(fs::path()));
-    }
+    SECTION("an empty path is not denied") { CHECK_FALSE(mgr.is_denied_path_keyword(fs::path())); }
 }
 
 namespace {
@@ -350,9 +357,9 @@ TEST_CASE("Plugin audit keyword check keeps non-Latin path names intact", "[audi
     const SingleByteCtypeLocale ctype;
     INFO("single-byte C locale in use: " << (ctype.applied ? "yes" : "no"));
 
-    const std::string folder   = "\xD0\x9D\xD0\xBE\xD0\xB2\xD0\xB0\xD1\x8F \xD0\xBF\xD0\xB0\xD0\xBF\xD0\xBA\xD0\xB0"; // "Новая папка"
-    const std::string part     = "\xD0\xB4\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C.stl";                          // "деталь.stl"
-    const std::string settings = "\xD0\xBD\xD0\xB0\xD1\x81\xD1\x82\xD1\x80\xD0\xBE\xD0\xB9\xD0\xBA\xD0\xB8.INI";      // "настройки.INI"
+    const std::string folder = "\xD0\x9D\xD0\xBE\xD0\xB2\xD0\xB0\xD1\x8F \xD0\xBF\xD0\xB0\xD0\xBF\xD0\xBA\xD0\xB0"; // "Новая папка"
+    const std::string part     = "\xD0\xB4\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C.stl";                            // "деталь.stl"
+    const std::string settings = "\xD0\xBD\xD0\xB0\xD1\x81\xD1\x82\xD1\x80\xD0\xBE\xD0\xB9\xD0\xBA\xD0\xB8.INI"; // "настройки.INI"
 
     SECTION("a path with non-Latin names is checked without an error and allowed")
     {
@@ -373,7 +380,7 @@ TEST_CASE("Plugin audit checks denied keywords below data_dir, not in the direct
     // Flatpak keeps the app's data folder under <home>/.var/app/<app-id>/config/OrcaSlicer, so
     // data_dir() itself has a "config" component. That ancestor describes the sandbox's layout,
     // not what the folder holds, and must not hard-deny every path inside it.
-    ScopedDataDir data_dir_guard("plugin-audit-data-dir-keyword");
+    ScopedDataDir  data_dir_guard("plugin-audit-data-dir-keyword");
     const fs::path flatpak_data_dir = data_dir_guard.dir / "config" / "OrcaSlicer";
     fs::create_directories(flatpak_data_dir);
     set_data_dir(flatpak_data_dir.string());
@@ -436,20 +443,11 @@ TEST_CASE("Plugin audit is_denied_path combines the filename and keyword registr
     seed_denied_keywords();
     const PluginAuditManager& mgr = PluginAuditManager::instance();
 
-    SECTION("a filename-registry match is denied")
-    {
-        CHECK(mgr.is_denied_path(fs::path(SLIC3R_APP_KEY ".conf")));
-    }
+    SECTION("a filename-registry match is denied") { CHECK(mgr.is_denied_path(fs::path(SLIC3R_APP_KEY ".conf"))); }
 
-    SECTION("a keyword-registry match is denied")
-    {
-        CHECK(mgr.is_denied_path(fs::path("/plugin/secrets/token.txt")));
-    }
+    SECTION("a keyword-registry match is denied") { CHECK(mgr.is_denied_path(fs::path("/plugin/secrets/token.txt"))); }
 
-    SECTION("a path matching neither registry is not denied")
-    {
-        CHECK_FALSE(mgr.is_denied_path(fs::path("/plugin/output/model.gcode")));
-    }
+    SECTION("a path matching neither registry is not denied") { CHECK_FALSE(mgr.is_denied_path(fs::path("/plugin/output/model.gcode"))); }
 }
 
 TEST_CASE("Plugin audit a read-only allowed root blocks writes but not reads", "[audit]")
@@ -466,10 +464,7 @@ TEST_CASE("Plugin audit a read-only allowed root blocks writes but not reads", "
 
     const fs::path readonly_file = fs::path(resources_dir()) / "profiles" / "vendor.json";
 
-    SECTION("a read inside the read-only root is allowed")
-    {
-        CHECK(mgr.check_open(readonly_file.string(), "r").allowed);
-    }
+    SECTION("a read inside the read-only root is allowed") { CHECK(mgr.check_open(readonly_file.string(), "r").allowed); }
 
     SECTION("a write inside the read-only root is blocked")
     {
@@ -486,7 +481,7 @@ TEST_CASE("Plugin audit a read-only allowed root blocks writes but not reads", "
 
     SECTION("the bundled cert underneath the read-only root is denied even for reads")
     {
-        const fs::path cert = fs::path(resources_dir()) / "cert" / "slicer_base64.cer";
+        const fs::path cert     = fs::path(resources_dir()) / "cert" / "slicer_base64.cer";
         AuditDecision  decision = mgr.check_open(cert.string(), "r");
         CHECK_FALSE(decision.allowed);
         CHECK(decision.reason == "denied path keyword");
@@ -497,8 +492,7 @@ TEST_CASE("Plugin audit network permissions match by scheme and host", "[audit]"
 {
     SECTION("a URL is reduced to its scheme and host")
     {
-        CHECK(PluginAuditManager::normalize_network_url("https://API.Example.com:8443/v1/items?page=2#top") ==
-              "https://api.example.com");
+        CHECK(PluginAuditManager::normalize_network_url("https://API.Example.com:8443/v1/items?page=2#top") == "https://api.example.com");
         CHECK(PluginAuditManager::normalize_network_url("http://example.com") == "http://example.com");
         CHECK(PluginAuditManager::normalize_network_url("https://[2001:db8::1]:443/path") == "https://[2001:db8::1]");
     }
@@ -819,11 +813,10 @@ struct AuditHarness
         audit.clear_current_capability();
         audit.clear_audit_denial();
         audit.clear_last_violation();
-        PluginAuditManager::set_permission_prompt_for_testing(
-            [this](const std::string& event, const std::vector<std::string>& targets) {
-                prompts.push_back({PluginAuditManager::instance().current_plugin(), event, targets});
-                return approve(prompts.back());
-            });
+        PluginAuditManager::set_permission_prompt_for_testing([this](const std::string& event, const std::vector<std::string>& targets) {
+            prompts.push_back({PluginAuditManager::instance().current_plugin(), event, targets});
+            return approve(prompts.back());
+        });
     }
 
     ~AuditHarness()
@@ -897,8 +890,7 @@ struct PythonSide
             globals["server"].attr("shutdown")();
             globals["server"].attr("server_close")();
             globals["server_thread"].attr("join")();
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     std::string              str(const char* name) const { return py::str(globals[name]).cast<std::string>(); }
@@ -932,7 +924,7 @@ TEST_CASE("A saved request grant covers the request's own connection in a later 
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     harness.save_permissions(PLUGIN, http_grants({python.str("URL_A")}));
 
     python.run_as(PLUGIN, "outcome = attempt(lambda: fetch(URL_A))");
@@ -948,7 +940,7 @@ TEST_CASE("A permission prompt that throws denies the event", "[audit][Python]")
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     harness.approve = [](const Prompt&) -> bool { throw std::runtime_error("prompt failed"); };
 
     python.run_as(PLUGIN, "outcome = attempt(lambda: open(PRIVATE).close())");
@@ -964,7 +956,7 @@ TEST_CASE("A saved request grant does not cover another URL or a redirect", "[au
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     harness.save_permissions(PLUGIN, http_grants({python.str("URL_A"), python.str("URL_REDIRECT")}));
 
     python.run_as(PLUGIN, R"PY(
@@ -987,7 +979,7 @@ TEST_CASE("Code an approved operation calls back into is judged on its own", "[a
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     python.exec(R"PY(
 CALLBACK_COPY = os.path.join(OUTSIDE, "callback-copy")
 handler = netlib.ReadingHandler(PRIVATE)
@@ -1033,8 +1025,8 @@ TEST_CASE("A saved directory walk covers each directory it lists", "[audit][Pyth
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
-    PluginPermissions permissions;
+    PythonSide             python(harness);
+    PluginPermissions      permissions;
     permissions.fs_read = {python.str("TREE"), python.str("APPROVED")};
     harness.save_permissions(PLUGIN, permissions);
 
@@ -1069,7 +1061,7 @@ TEST_CASE("A freshly approved operation covers its nested events", "[audit][Pyth
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     struct Case
     {
@@ -1092,11 +1084,10 @@ TEST_CASE("A freshly approved operation covers its nested events", "[audit][Pyth
         {"tempfile.mkstemp", "os.close(tempfile.mkstemp(dir=OUTSIDE)[0])"},
         {"shutil.rmtree", "shutil.rmtree(os.path.join(OUTSIDE, 'copy'))"},
         // The host grant from connect() also authorizes targetless send() events.
-        {"http.client.connect",
-         "connection = http.client.HTTPConnection('127.0.0.1', PORT)\n"
-         "connection.request('GET', '/a')\n"
-         "connection.getresponse().read()\n"
-         "connection.close()"},
+        {"http.client.connect", "connection = http.client.HTTPConnection('127.0.0.1', PORT)\n"
+                                "connection.request('GET', '/a')\n"
+                                "connection.getresponse().read()\n"
+                                "connection.close()"},
     };
 #ifndef _WIN32
     cases.push_back({"os.fwalk", "list(os.fwalk(os.path.join(OUTSIDE, 'unpacked')))"});
@@ -1108,9 +1099,7 @@ TEST_CASE("A freshly approved operation covers its nested events", "[audit][Pyth
     for (const Case& operation : cases) {
         INFO(operation.code);
         const std::string expected = std::string(operation.prompts) + "\n";
-        harness.approve = [&expected](const Prompt& prompt) {
-            return expected.find(prompt.event + "\n") != std::string::npos;
-        };
+        harness.approve            = [&expected](const Prompt& prompt) { return expected.find(prompt.event + "\n") != std::string::npos; };
         harness.prompts.clear();
         python.run_as(PLUGIN, operation.code);
 
@@ -1132,7 +1121,7 @@ TEST_CASE("An event with no target is granted by name and remembered", "[audit][
     harness.add_plugin(PLUGIN);
     harness.approve = [](const Prompt& prompt) { return prompt.event != "socket.sendto"; };
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     python.run_as(PLUGIN, R"PY(
 socket.socket().close()
@@ -1181,7 +1170,7 @@ TEST_CASE("A saved network grant covers a network event that names no target", "
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     // The connection is opened outside the plugin, so only the send itself is judged: it names
     // no host, just the connection it writes to.
@@ -1221,7 +1210,7 @@ TEST_CASE("An event grant does not stand in for another access or a target of th
     harness.add_plugin(PLUGIN);
     harness.approve = [asked = 0](const Prompt&) mutable { return asked++ == 0; };
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     python.exec(R"PY(
 READ_FD = os.open(APPROVED, os.O_RDONLY)
 WRITE_FD = os.open(os.path.join(OUTSIDE, "scratch.txt"), os.O_WRONLY | os.O_CREAT)
@@ -1261,9 +1250,9 @@ TEST_CASE("A finalizer run when a root frame is let go is judged as the plugin w
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
-    PluginPermissions permissions = http_grants({python.str("URL_A")});
-    permissions.fs_read           = {python.str("APPROVED")};
+    PythonSide             python(harness);
+    PluginPermissions      permissions = http_grants({python.str("URL_A")});
+    permissions.fs_read                = {python.str("APPROVED")};
     harness.save_permissions(PLUGIN, permissions);
     PluginAuditManager& mgr = PluginAuditManager::instance();
 
@@ -1310,8 +1299,8 @@ TEST_CASE("A nested audit scope does not see the outer scope's running operation
     harness.add_plugin("PluginA");
     harness.add_plugin("PluginB");
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
-    PluginPermissions permissions;
+    PythonSide             python(harness);
+    PluginPermissions      permissions;
     permissions.fs_read = {python.str("TREE")};
     harness.save_permissions("PluginA", permissions);
 
@@ -1344,7 +1333,7 @@ TEST_CASE("Root frames held when a capability call ends are let go with the GIL,
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.approve = [](const Prompt& prompt) { return prompt.event == "os.walk"; };
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     (void) PythonPluginBridge::instance(); // force the embedded module registration into the binary
     python.globals["orca"] = py::module_::import("orca");
 
@@ -1411,10 +1400,10 @@ TEST_CASE("Stdlib code is recognized through a symlinked Python home", "[audit][
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     py::gil_scoped_acquire gil;
 
-    const py::dict paths   = py::module_::import("sysconfig").attr("get_paths")();
-    const fs::path stdlib  = py::str(paths["stdlib"]).cast<std::string>();
-    const fs::path purelib = py::str(paths["purelib"]).cast<std::string>();
-    const fs::path link    = harness.outside.path() / "linked-stdlib";
+    const py::dict            paths   = py::module_::import("sysconfig").attr("get_paths")();
+    const fs::path            stdlib  = py::str(paths["stdlib"]).cast<std::string>();
+    const fs::path            purelib = py::str(paths["purelib"]).cast<std::string>();
+    const fs::path            link    = harness.outside.path() / "linked-stdlib";
     boost::system::error_code ec;
     fs::create_directory_symlink(stdlib, link, ec);
     if (ec)
@@ -1436,7 +1425,7 @@ TEST_CASE("A plugin may read the CPython stdlib without a prompt, but not site-p
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     const py::dict paths   = py::module_::import("sysconfig").attr("get_paths")();
     const fs::path stdlib  = py::str(paths["stdlib"]).cast<std::string>();
@@ -1470,7 +1459,7 @@ TEST_CASE("A filesystem wildcard grant covers the folder and its descendants at 
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     python.exec(R"PY(
 DEEP_FILE = os.path.join(TREE, "one", "deep", "deeper", "f.txt")
@@ -1527,7 +1516,7 @@ TEST_CASE("A tree grant compares canonical paths on both sides", "[audit][Python
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     // A folder outside TREE, reached through a symlink planted inside it.
     const fs::path tree        = python.str("TREE");
@@ -1572,17 +1561,17 @@ TEST_CASE("A write through a dangling symlink inside a granted tree is denied", 
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     // Two links inside TREE whose targets do not exist yet, so both dangle:
     //  - "dangling" points outside the tree, the reported escape;
     //  - "dangling-inside" points at a not-yet-created file that would be inside the tree, to pin
     //    the fail-closed choice: a dangling link is rejected whatever its target.
-    const fs::path tree          = python.str("TREE");
-    const fs::path outside_file  = harness.outside.path() / "written-through-link.txt";
-    const fs::path link          = tree / "dangling";
-    const fs::path inside_target = tree / "not-created.txt";
-    const fs::path inside_link   = tree / "dangling-inside";
+    const fs::path            tree          = python.str("TREE");
+    const fs::path            outside_file  = harness.outside.path() / "written-through-link.txt";
+    const fs::path            link          = tree / "dangling";
+    const fs::path            inside_target = tree / "not-created.txt";
+    const fs::path            inside_link   = tree / "dangling-inside";
     boost::system::error_code ec;
     fs::create_symlink(outside_file, link, ec);
     if (ec)
@@ -1621,7 +1610,7 @@ TEST_CASE("A saved exact file grant covers an equivalent spelling of the same fi
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     // The granted file, a file beside it, a lookalike name, the not-yet-existing target of a
     // dangling link, and the not-yet-existing target of a write.
@@ -1707,11 +1696,10 @@ dangling_outcome = attempt(lambda: open(DANGLING, "w").close())
     CHECK(python.str("dangling_outcome") == "denied");
     CHECK_FALSE(fs::exists(outside / "not-created.txt"));
 
-    const std::string open_prompt = "open: ";
-    const std::string expected_prompts =
-        open_prompt + python.str("OTHER") + "\n" + open_prompt + python.str("ESCAPE_PATH") + "\n" +
-        open_prompt + python.str("OTHER_LINK") + "\n" + open_prompt + python.str("LOOKALIKE") + "\n" +
-        open_prompt + python.str("DANGLING") + "\n";
+    const std::string open_prompt      = "open: ";
+    const std::string expected_prompts = open_prompt + python.str("OTHER") + "\n" + open_prompt + python.str("ESCAPE_PATH") + "\n" +
+                                         open_prompt + python.str("OTHER_LINK") + "\n" + open_prompt + python.str("LOOKALIKE") + "\n" +
+                                         open_prompt + python.str("DANGLING") + "\n";
     CHECK(describe(harness.prompts) == expected_prompts);
 
 #ifdef _WIN32
@@ -1733,7 +1721,7 @@ forward_slash_outcome = attempt(lambda: open(FORWARD_SLASH_FILE).read())
 #endif
 
     // A grant saved as a link applies to the file it points at, not just to the link's spelling.
-    permissions.fs_read      = {alias.string()};
+    permissions.fs_read = {alias.string()};
     permissions.fs_readwrite.clear();
     harness.save_permissions(PLUGIN, permissions);
     harness.prompts.clear();
@@ -1769,17 +1757,16 @@ TEST_CASE("A saved exact file grant covers an equivalent spelling in a permissio
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
 
-    const fs::path file = harness.outside.path() / "requested-file.txt";
+    const fs::path    file = harness.outside.path() / "requested-file.txt";
     PluginPermissions stored;
     stored.fs_read = {file.string()};
     harness.save_permissions(PLUGIN, stored);
 
     std::vector<std::string> prompted;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&prompted](const std::string& message) {
-            prompted.push_back(message);
-            return false;
-        });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted](const std::string& message) {
+        prompted.push_back(message);
+        return false;
+    });
     PluginAuditManager& mgr = PluginAuditManager::instance();
 
     // An absolute declaration that is a different spelling of the granted path is already covered,
@@ -1796,7 +1783,7 @@ TEST_CASE("A saved exact file grant covers an equivalent spelling in a permissio
     fs::current_path(harness.outside.path(), ec);
     REQUIRE_FALSE(ec);
     PluginPermissions relative;
-    relative.fs_read = {file.filename().string()};
+    relative.fs_read            = {file.filename().string()};
     const bool relative_granted = mgr.request_permissions(PLUGIN, relative);
     fs::current_path(original_cwd, ec);
     REQUIRE_FALSE(ec);
@@ -1819,8 +1806,8 @@ TEST_CASE("A relative wildcard permission request is shown and stored as an abso
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
-    PluginAuditManager& mgr = PluginAuditManager::instance();
+    PythonSide             python(harness);
+    PluginAuditManager&    mgr = PluginAuditManager::instance();
 
     // The plugin declares the grant relative to the working directory of the request, while the
     // audit hook reports absolute targets. Resolve against the directory the request is made in.
@@ -1828,15 +1815,17 @@ TEST_CASE("A relative wildcard permission request is shown and stored as an abso
     PluginPermissions requested;
     requested.fs_readwrite = {relative_grant};
 
-    const fs::path original_cwd = fs::current_path();
+    const fs::path            original_cwd = fs::current_path();
     boost::system::error_code ec;
     fs::current_path(harness.outside.path(), ec);
     REQUIRE_FALSE(ec);
     const fs::path request_dir = fs::current_path();
 
     std::string shown;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&shown](const std::string& message) { shown = message; return true; });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&shown](const std::string& message) {
+        shown = message;
+        return true;
+    });
     const bool granted = mgr.request_permissions(PLUGIN, requested);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
     fs::current_path(original_cwd, ec);
@@ -1869,8 +1858,10 @@ TEST_CASE("A threading permission request is prompted once and saved as a boolea
     requested.threading = true;
 
     std::string shown;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&shown](const std::string& message) { shown = message; return true; });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&shown](const std::string& message) {
+        shown = message;
+        return true;
+    });
     const bool granted = mgr.request_permissions(PLUGIN, requested);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
 
@@ -1880,11 +1871,10 @@ TEST_CASE("A threading permission request is prompted once and saved as a boolea
 
     // The saved boolean grant covers a repeated declaration without asking again.
     bool prompted_again = false;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&prompted_again](const std::string&) {
-            prompted_again = true;
-            return false;
-        });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted_again](const std::string&) {
+        prompted_again = true;
+        return false;
+    });
     CHECK(mgr.request_permissions(PLUGIN, requested));
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
     CHECK_FALSE(prompted_again);
@@ -1899,7 +1889,7 @@ TEST_CASE("A permission request creates a sidecar for a discovered plugin that h
 
     // A sandbox plugin may be discovered without ever having been given a sidecar. An approval
     // must still be saved, so the next session does not ask again.
-    const fs::path sidecar = harness.data.plugins_dir() / PLUGIN / INSTALL_STATE_FILE;
+    const fs::path            sidecar = harness.data.plugins_dir() / PLUGIN / INSTALL_STATE_FILE;
     boost::system::error_code ec;
     fs::remove(sidecar, ec);
     REQUIRE_FALSE(ec);
@@ -1907,8 +1897,7 @@ TEST_CASE("A permission request creates a sidecar for a discovered plugin that h
     PluginPermissions requested;
     requested.fs_read = {"/newly/granted"};
 
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [](const std::string&) { return true; });
+    PluginAuditManager::set_permission_message_prompt_for_testing([](const std::string&) { return true; });
     const bool granted = PluginAuditManager::instance().request_permissions(PLUGIN, requested);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
 
@@ -1928,15 +1917,14 @@ TEST_CASE("A permission request does not recreate a sidecar that disappears whil
     REQUIRE(fs::exists(sidecar));
 
     bool removed = false;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&sidecar, &removed](const std::string&) {
-            boost::system::error_code ec;
-            removed = fs::remove(sidecar, ec);
-            return true;
-        });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&sidecar, &removed](const std::string&) {
+        boost::system::error_code ec;
+        removed = fs::remove(sidecar, ec);
+        return true;
+    });
 
     PluginPermissions requested;
-    requested.fs_read = {"/new/grant"};
+    requested.fs_read  = {"/new/grant"};
     const bool granted = PluginAuditManager::instance().request_permissions(PLUGIN, requested);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
 
@@ -1962,14 +1950,13 @@ TEST_CASE("A permission request leaves an unreadable install-state sidecar untou
     }
 
     bool prompted = false;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&prompted](const std::string&) {
-            prompted = true;
-            return true;
-        });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted](const std::string&) {
+        prompted = true;
+        return true;
+    });
 
     PluginPermissions requested;
-    requested.fs_read = {"/new/grant"};
+    requested.fs_read  = {"/new/grant"};
     const bool granted = PluginAuditManager::instance().request_permissions(PLUGIN, requested);
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
 
@@ -1987,10 +1974,10 @@ TEST_CASE("An approved audited operation creates a missing install-state sidecar
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     harness.approve = [](const Prompt&) { return true; };
 
-    const fs::path sidecar = harness.data.plugins_dir() / PLUGIN / INSTALL_STATE_FILE;
+    const fs::path            sidecar = harness.data.plugins_dir() / PLUGIN / INSTALL_STATE_FILE;
     boost::system::error_code ec;
     fs::remove(sidecar, ec);
     REQUIRE_FALSE(ec);
@@ -2017,7 +2004,7 @@ TEST_CASE("An approved audited operation does not replace an unreadable install-
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
     harness.approve = [](const Prompt&) { return true; };
 
     // Both the event-grant path (persist_permission) and the boolean threading path
@@ -2045,7 +2032,7 @@ TEST_CASE("Thread creation is denied without a grant and remembered after approv
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     // The audit hook's thread event has no user-supplied target; the fixed sentinel is what the
     // prompt and the persisted grant use. The helper joins the worker so no test thread outlives
@@ -2076,7 +2063,7 @@ TEST_CASE("Full access allows an audited operation without a grant", "[audit][Py
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     PluginPermissions permissions;
     permissions.full_access = true;
@@ -2096,7 +2083,7 @@ TEST_CASE("Without full access an audited operation still prompts", "[audit][Pyt
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     PluginPermissions permissions;
     permissions.full_access = false;
@@ -2116,7 +2103,7 @@ TEST_CASE("Full access does not bypass an unconditional denied path", "[audit][P
     seed_denied_names();
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     PluginPermissions permissions;
     permissions.full_access = true;
@@ -2147,14 +2134,13 @@ TEST_CASE("A full access plugin's permission declaration is not prompted", "[aud
     harness.save_permissions(PLUGIN, stored);
 
     bool prompted = false;
-    PluginAuditManager::set_permission_message_prompt_for_testing(
-        [&prompted](const std::string&) {
-            prompted = true;
-            return false;
-        });
+    PluginAuditManager::set_permission_message_prompt_for_testing([&prompted](const std::string&) {
+        prompted = true;
+        return false;
+    });
 
     PluginPermissions requested;
-    requested.fs_read = {"/new/target"};
+    requested.fs_read  = {"/new/target"};
     const bool granted = PluginAuditManager::instance().request_permissions(PLUGIN, requested);
 
     PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
@@ -2174,11 +2160,11 @@ TEST_CASE("Toggling full access preserves the other stored grants", "[audit]")
     harness.add_plugin(PLUGIN);
 
     PluginPermissions stored;
-    stored.fs_read        = {"/kept/read"};
-    stored.network_http   = {"https://kept.example"};
+    stored.fs_read      = {"/kept/read"};
+    stored.network_http = {"https://kept.example"};
     harness.save_permissions(PLUGIN, stored);
 
-    PluginManager& manager = PluginManager::instance();
+    PluginManager&           manager = PluginManager::instance();
     PluginPermissionMutation toggle;
     toggle.full_access = true;
     REQUIRE(manager.mutate_plugin_permissions(PLUGIN, toggle));
@@ -2205,13 +2191,13 @@ TEST_CASE("A permission mutation changes only the named entries and preserves th
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
 
-    const fs::path plugin_dir = harness.data.plugins_dir() / PLUGIN;
+    const fs::path     plugin_dir = harness.data.plugins_dir() / PLUGIN;
     PluginInstallState initial;
-    initial.installed_from    = "local";
-    initial.installed_version = "1.2.3";
-    initial.plugin_name       = "Audit Plugin";
-    initial.enabled           = false;
-    initial.capabilities      = {{"Echo", false}, {"Other", true}};
+    initial.installed_from           = "local";
+    initial.installed_version        = "1.2.3";
+    initial.plugin_name              = "Audit Plugin";
+    initial.enabled                  = false;
+    initial.capabilities             = {{"Echo", false}, {"Other", true}};
     initial.permissions.fs_read      = {"/kept/read", "/removed/read"};
     initial.permissions.fs_readwrite = {"/kept/write"};
     initial.permissions.network_http = {"https://kept.example"};
@@ -2275,7 +2261,7 @@ TEST_CASE("A permission mutation applies to the latest stored contents", "[audit
     initial.fs_read = {"/caller/saw"};
     harness.save_permissions(PLUGIN, initial);
 
-    PluginManager& manager = PluginManager::instance();
+    PluginManager&     manager = PluginManager::instance();
     PluginInstallState observed;
     REQUIRE(manager.get_install_state(PLUGIN, observed));
     CHECK(observed.permissions.fs_read == std::vector<std::string>{"/caller/saw"});
@@ -2340,7 +2326,7 @@ TEST_CASE("A permission mutation fails closed for a plugin it cannot update", "[
     harness.add_plugin(PLUGIN);
 
     PluginPermissionMutation mutation;
-    mutation.add = {{PluginPermissionCategory::FsRead, "/new"}};
+    mutation.add           = {{PluginPermissionCategory::FsRead, "/new"}};
     PluginManager& manager = PluginManager::instance();
 
     CHECK_FALSE(manager.mutate_plugin_permissions("", mutation));
@@ -2359,7 +2345,7 @@ TEST_CASE("A permission edit applies to the next audited operation without a rel
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     python.run_as(PLUGIN, "first_outcome = attempt(lambda: open(PRIVATE).read())");
     CHECK(python.str("first_outcome") == "denied");
@@ -2382,7 +2368,7 @@ TEST_CASE("A filesystem wildcard keeps read and write grants separate", "[audit]
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
+    PythonSide             python(harness);
 
     python.exec(R"PY(
 NESTED_FILE = os.path.join(TREE, "one", "f.txt")
@@ -2426,8 +2412,8 @@ TEST_CASE("A filesystem wildcard does not override a denied path", "[audit][Pyth
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
     harness.add_plugin(PLUGIN);
     py::gil_scoped_acquire gil;
-    PythonSide python(harness);
-    PluginAuditManager& mgr = PluginAuditManager::instance();
+    PythonSide             python(harness);
+    PluginAuditManager&    mgr = PluginAuditManager::instance();
 
     python.exec(R"PY(
 DENIED_DIR = os.path.join(OUTSIDE, "secrets")
@@ -2515,7 +2501,7 @@ TEST_CASE("Plugin audit denies UltraNet {data_dir}/plugins even inside data_dir"
 
     SECTION("a dangling symlink into UltraNet is denied")
     {
-        const fs::path link = fs::path(data_dir()) / "dangling_to_plugins.dylib";
+        const fs::path            link = fs::path(data_dir()) / "dangling_to_plugins.dylib";
         boost::system::error_code ec;
         fs::create_symlink(ultranet / "missing.dylib", link, ec);
         if (ec)
@@ -2527,9 +2513,9 @@ TEST_CASE("Plugin audit denies UltraNet {data_dir}/plugins even inside data_dir"
 
 TEST_CASE("UltraNet deny matches Unicode-normalized data_dir spellings", "[audit]")
 {
-    ScopedDataDir     data("plugin-audit-ultranet-nfc");
-    const fs::path    nfc_home = data.dir / "caf\xC3\xA9";
-    const fs::path    nfd_home = data.dir / "cafe\xCC\x81";
+    ScopedDataDir  data("plugin-audit-ultranet-nfc");
+    const fs::path nfc_home = data.dir / "caf\xC3\xA9";
+    const fs::path nfd_home = data.dir / "cafe\xCC\x81";
     fs::create_directories(nfc_home / "plugins");
     set_data_dir(nfc_home.string());
 
@@ -2615,7 +2601,7 @@ TEST_CASE("Case-variant UltraNet open and write stay denied from Python", "[audi
     py::gil_scoped_acquire gil;
     PythonSide             python(harness);
 
-    python.globals["ULTRANET_PLUGINS"] = (fs::path(data_dir()) / "Plugins" / "libbambu_networking.dylib").string();
+    python.globals["ULTRANET_PLUGINS"]       = (fs::path(data_dir()) / "Plugins" / "libbambu_networking.dylib").string();
     python.globals["ULTRANET_PLUGINS_UPPER"] = (fs::path(data_dir()) / "PLUGINS" / "libbambu_networking.dylib").string();
     python.globals["ULTRANET_PLUGINS_MIXED"] = (fs::path(data_dir()) / "pLuGiNs" / "libbambu_networking.dylib").string();
 
@@ -2638,7 +2624,7 @@ TEST_CASE("request_permissions full_access is keyword-only", "[audit][Python]")
     py::gil_scoped_acquire gil;
 
     PythonPluginBridge::instance().begin_plugin_capture("kwonly-full");
-    py::object orca = py::module_::import("orca");
+    py::object orca  = py::module_::import("orca");
     bool       threw = false;
     try {
         // 7th positional used to be full_access occupying network's slot.
