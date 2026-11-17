@@ -94,9 +94,11 @@ fs::path write_plugin(const ScopedDataDir& data_dir_guard, const std::string& st
 
 #ifdef _WIN32
 // Per-run test-only plugin keys. The `test.` prefix maps to the `EdgeSlicer.t.*`
-// AppContainer moniker so teardown cannot collide with shipping `EdgeSlicer.ph.*` profiles.
+// AppContainer moniker (when the test harness hook is on) so teardown cannot collide
+// with shipping `EdgeSlicer.ph.*` profiles.
 std::string unique_test_plugin_key(const char* stem)
 {
+    plugin_ipc::set_test_only_plugin_keys_for_testing(true);
     static std::atomic<unsigned> seq{0};
     const unsigned               n    = seq.fetch_add(1, std::memory_order_relaxed);
     const auto                   tick = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -1172,6 +1174,13 @@ TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSand
     CHECK(a.size() == long1.size());
     CHECK(a.find(L"EdgeSlicer.ph.") == 0);
     CHECK(a.size() == 14 + 16);
+    plugin_ipc::set_test_only_plugin_keys_for_testing(false);
+    CHECK(plugin_ipc::win_appcontainer_profile_name("test.alpha").find(L"EdgeSlicer.ph.") == 0);
+    plugin_ipc::set_test_only_plugin_keys_for_testing(true);
+    struct ResetTestKeys
+    {
+        ~ResetTestKeys() { plugin_ipc::set_test_only_plugin_keys_for_testing(false); }
+    } reset;
     const auto t = plugin_ipc::win_appcontainer_profile_name("test.alpha");
     CHECK(t.find(L"EdgeSlicer.t.") == 0);
     CHECK(t.size() == 13 + 16);

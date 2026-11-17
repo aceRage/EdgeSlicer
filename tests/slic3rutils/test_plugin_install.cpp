@@ -36,7 +36,7 @@ fs::path write_py_file(const fs::path& dir, const std::string& filename, const s
 {
     fs::create_directories(dir);
     const fs::path p = dir / filename;
-    std::ofstream out(p.string(), std::ios::binary);
+    std::ofstream  out(p.string(), std::ios::binary);
     out << contents;
     return p;
 }
@@ -71,7 +71,7 @@ fs::path to_extended_path(const fs::path& p)
 {
 #ifdef _WIN32
     boost::system::error_code ec;
-    fs::path abs = fs::absolute(p, ec);
+    fs::path                  abs = fs::absolute(p, ec);
     if (ec)
         abs = p;
     std::wstring w = abs.lexically_normal().wstring();
@@ -286,9 +286,41 @@ TEST_CASE("valid PEP 508 requirements are accepted for uv install", "[PluginInst
     }
 
     std::string error;
-    REQUIRE(validate_pep508_requirements(
-        {"numpy>=1.20,<2", "requests[security]>=2.8.1", "pillow ; python_version >= \"3.8\""}, error));
+    REQUIRE(validate_pep508_requirements({"numpy>=1.20,<2", "requests[security]>=2.8.1", "pillow ; python_version >= \"3.8\""}, error));
     CHECK(error.empty());
+}
+
+TEST_CASE("plugin ids starting with test. are reserved", "[PluginInstall][PluginFsUtils]")
+{
+    CHECK_FALSE(is_valid_plugin_id("test.foo"));
+    CHECK_FALSE(is_valid_plugin_id("Test.Foo"));
+    CHECK_FALSE(is_valid_plugin_id("TEST.foo"));
+    CHECK_FALSE(is_valid_plugin_id("test."));
+    CHECK(is_valid_plugin_id("test"));
+    CHECK(is_valid_plugin_id("testing.foo"));
+    CHECK(is_valid_plugin_id("alpha"));
+
+    ScopedDataDir     data_dir_guard("reserved-test-prefix");
+    const std::string pep = "# /// script\n"
+                            "# requires-python = \">=3.12\"\n"
+                            "#\n"
+                            "# [tool.orcaslicer.plugin]\n"
+                            "# name = \"Test Foo\"\n"
+                            "# type = \"script\"\n"
+                            "# ///\n"
+                            "print('ok')\n";
+    const fs::path    py  = write_py_file(data_dir_guard.dir / "src", "test.foo.py", pep);
+
+    PluginDescriptor local;
+    std::string      error;
+    REQUIRE_FALSE(plugin_loader::install_plugin(py, /*cloud_user_id=*/"", local, error));
+    CHECK_THAT(error, Catch::Matchers::Contains("valid identifier"));
+
+    PluginDescriptor cloud;
+    cloud.cloud = CloudPluginState{"Test.Foo", true, false, false, false};
+    error.clear();
+    REQUIRE_FALSE(plugin_loader::install_plugin(py, /*cloud_user_id=*/"test-user", cloud, error));
+    CHECK_THAT(error, Catch::Matchers::Contains("valid identifier"));
 }
 
 TEST_CASE("install_plugin rejects a cloud UUID containing path traversal", "[PluginInstall]")
@@ -298,14 +330,12 @@ TEST_CASE("install_plugin rejects a cloud UUID containing path traversal", "[Plu
     // Package contents are irrelevant: the UUID is validated before metadata is read.
     const fs::path py = write_py_file(data_dir_guard.dir / "src", "evil.py", "print('hi')\n");
 
-
-
     PluginDescriptor descriptor;
     // is_cloud_plugin() -> true; cloud_uuid() -> the traversal string.
     descriptor.cloud = CloudPluginState{"../../escape", true, false, false, false};
 
     std::string error;
-    const bool installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"test-user", descriptor, error);
+    const bool  installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"test-user", descriptor, error);
 
     REQUIRE_FALSE(installed);
     CHECK_THAT(error, Catch::Matchers::Contains("valid identifier"));
@@ -318,10 +348,9 @@ TEST_CASE("install_plugin rejects a side-loaded .py with no PEP 723 metadata", "
     // No `# /// script` block -> name stays empty and type stays Unknown.
     const fs::path py = write_py_file(data_dir_guard.dir / "src", "nameless.py", "print('no metadata here')\n");
 
-
     PluginDescriptor descriptor;
-    std::string error;
-    const bool installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"", descriptor, error);
+    std::string      error;
+    const bool       installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"", descriptor, error);
 
     REQUIRE_FALSE(installed);
     CHECK_THAT(error, Catch::Matchers::Contains("PEP 723"));
@@ -331,21 +360,19 @@ TEST_CASE("install_plugin accepts a side-loaded .py with complete PEP 723 metada
 {
     ScopedDataDir data_dir_guard("cor3-good");
 
-    const std::string contents =
-        "# /// script\n"
-        "# requires-python = \">=3.12\"\n"
-        "#\n"
-        "# [tool.orcaslicer.plugin]\n"
-        "# name = \"Test Plugin\"\n"
-        "# type = \"script\"\n"
-        "# ///\n"
-        "print('ok')\n";
-    const fs::path py = write_py_file(data_dir_guard.dir / "src", "good.py", contents);
-
+    const std::string contents = "# /// script\n"
+                                 "# requires-python = \">=3.12\"\n"
+                                 "#\n"
+                                 "# [tool.orcaslicer.plugin]\n"
+                                 "# name = \"Test Plugin\"\n"
+                                 "# type = \"script\"\n"
+                                 "# ///\n"
+                                 "print('ok')\n";
+    const fs::path    py       = write_py_file(data_dir_guard.dir / "src", "good.py", contents);
 
     PluginDescriptor descriptor;
-    std::string error;
-    const bool installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"", descriptor, error);
+    std::string      error;
+    const bool       installed = plugin_loader::install_plugin(py, /*cloud_user_id=*/"", descriptor, error);
 
     // Positive control: a complete side-loaded .py must still install (guards against over-rejection).
     REQUIRE(installed);
@@ -359,20 +386,20 @@ TEST_CASE("a .py plugin's PEP 723 dependencies split only at the commas between 
 {
     // Each layout holds the same two items; the first has a comma inside its quotes, as a version
     // range does, and the comments hold commas too.
-    const std::string array = GENERATE(std::string("[\"numpy>=1.20,<2\", 'pillow']\n"),
-                                       std::string("[\n#   \"numpy>=1.20,<2\",\n#   \"pillow\",\n# ]\n"),
-                                       std::string("[\n#   \"numpy>=1.20,<2\", \"pillow\",\n# ]\n"),
-                                       std::string("[\"numpy>=1.20,<2\",\n#   \"pillow\",\n# ]\n"),
-                                       std::string("[  # runtime, pinned\n"
-                                                   "#   \"numpy>=1.20,<2\",  # below 2, for now\n"
-                                                   "#   'pillow']\n"));
+    const std::string  array = GENERATE(std::string("[\"numpy>=1.20,<2\", 'pillow']\n"),
+                                        std::string("[\n#   \"numpy>=1.20,<2\",\n#   \"pillow\",\n# ]\n"),
+                                        std::string("[\n#   \"numpy>=1.20,<2\", \"pillow\",\n# ]\n"),
+                                        std::string("[\"numpy>=1.20,<2\",\n#   \"pillow\",\n# ]\n"),
+                                        std::string("[  # runtime, pinned\n"
+                                                     "#   \"numpy>=1.20,<2\",  # below 2, for now\n"
+                                                     "#   'pillow']\n"));
     ScopedTemporaryDir dir("pep723-deps");
-    const fs::path py = write_py_file(dir.path(), "deps.py",
-                                      "# /// script\n# dependencies = " + array +
-                                          "#\n# [tool.orcaslicer.plugin]\n# name = \"Deps\"\n# ///\nprint('ok')\n");
+    const fs::path     py = write_py_file(dir.path(), "deps.py",
+                                          "# /// script\n# dependencies = " + array +
+                                              "#\n# [tool.orcaslicer.plugin]\n# name = \"Deps\"\n# ///\nprint('ok')\n");
 
     PluginDescriptor descriptor;
-    std::string error;
+    std::string      error;
     REQUIRE(read_python_plugin_metadata(py, descriptor, error));
     INFO(array);
     CHECK(descriptor.dependencies == std::vector<std::string>{"numpy>=1.20,<2", "pillow"});
@@ -389,10 +416,10 @@ TEST_CASE("install-state sidecar is the source of truth for a cloud plugin's ins
     // A cloud plugin whose local manifest/PEP723 header lags the version actually fetched from
     // the cloud: the user bumped the version on the cloud without touching the local header.
     PluginDescriptor descriptor;
-    descriptor.name             = "Versioned Plugin";
-    descriptor.version          = "1.0.0"; // stale header version
+    descriptor.name              = "Versioned Plugin";
+    descriptor.version           = "1.0.0"; // stale header version
     descriptor.installed_version = "1.2.0"; // version fetched from the cloud at install time
-    descriptor.cloud            = CloudPluginState{"uuid-1", true, false, false, false};
+    descriptor.cloud             = CloudPluginState{"uuid-1", true, false, false, false};
 
     REQUIRE(write_install_state(plugin_dir, descriptor));
 
@@ -402,9 +429,9 @@ TEST_CASE("install-state sidecar is the source of truth for a cloud plugin's ins
     REQUIRE(read_install_state(plugin_dir, state));
     CHECK(state.installed_version == "1.2.0");
 
-    state.permissions.fs_read       = {"/path/to/read"};
-    state.permissions.fs_readwrite  = {"/path/to/readwrite"};
-    state.permissions.network_http  = {"https://api.example.com"};
+    state.permissions.fs_read        = {"/path/to/read"};
+    state.permissions.fs_readwrite   = {"/path/to/readwrite"};
+    state.permissions.network_http   = {"https://api.example.com"};
     state.permissions.network_socket = {"192.168.45.6:443"};
     state.permissions.process        = {"/usr/bin/curl"};
     state.permissions.threading      = true;
@@ -432,9 +459,9 @@ TEST_CASE("install-state sidecar is the source of truth for a cloud plugin's ins
 
 TEST_CASE("install-state metadata read-modify-write leaves an unreadable sidecar untouched", "[PluginInstall][PluginFsUtils]")
 {
-    ScopedDataDir data_dir_guard("unreadable-install-state");
-    const fs::path plugin_dir = data_dir_guard.dir / "plugin";
-    const std::string malformed = "{ \"permissions\": {";
+    ScopedDataDir     data_dir_guard("unreadable-install-state");
+    const fs::path    plugin_dir = data_dir_guard.dir / "plugin";
+    const std::string malformed  = "{ \"permissions\": {";
     write_raw_sidecar_text(plugin_dir, malformed);
 
     PluginInstallState state;
@@ -455,7 +482,7 @@ TEST_CASE("install-state metadata read-modify-write leaves an unreadable sidecar
 
 TEST_CASE("a non-regular install-state path is unreadable and is left untouched", "[PluginInstall][PluginFsUtils]")
 {
-    ScopedDataDir data_dir_guard("non-regular-install-state");
+    ScopedDataDir  data_dir_guard("non-regular-install-state");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
     fs::create_directories(plugin_dir / ".install_state.json");
 
@@ -502,7 +529,7 @@ TEST_CASE("a plugin load sets an unparsable install-state sidecar aside and keep
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("failed-registration-unreadable");
+    ScopedDataDir  data_dir_guard("failed-registration-unreadable");
     const fs::path plugin_dir = data_dir_guard.plugins_dir() / "Failing_Plugin";
     write_py_file(plugin_dir, "Failing_Plugin.py", FAILING_REGISTRATION_PLUGIN_SOURCE);
 
@@ -534,7 +561,7 @@ TEST_CASE("a plugin that declares permissions loads over an unparsable install-s
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("declaring-over-unparsable");
+    ScopedDataDir  data_dir_guard("declaring-over-unparsable");
     const fs::path plugin_dir = data_dir_guard.plugins_dir() / "Declaring_Plugin";
     write_py_file(plugin_dir, "Declaring_Plugin.py", DECLARING_PLUGIN_SOURCE);
 
@@ -572,7 +599,7 @@ TEST_CASE("a plugin load leaves a sidecar path that is not a file in place", "[P
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("failed-registration-non-regular");
+    ScopedDataDir  data_dir_guard("failed-registration-non-regular");
     const fs::path plugin_dir = data_dir_guard.plugins_dir() / "Failing_Plugin";
     write_py_file(plugin_dir, "Failing_Plugin.py", FAILING_REGISTRATION_PLUGIN_SOURCE);
 
@@ -591,14 +618,13 @@ TEST_CASE("a plugin load leaves a sidecar path that is not a file in place", "[P
     CHECK_FALSE(fs::exists(plugin_dir / ".install_state.json.corrupt"));
 }
 
-TEST_CASE("a failed plugin registration disables a readable install-state sidecar and keeps its grants",
-          "[PluginInstall][Python]")
+TEST_CASE("a failed plugin registration disables a readable install-state sidecar and keeps its grants", "[PluginInstall][Python]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data_dir_guard("failed-registration-readable");
+    ScopedDataDir  data_dir_guard("failed-registration-readable");
     const fs::path plugin_dir = data_dir_guard.plugins_dir() / "Failing_Plugin";
     write_py_file(plugin_dir, "Failing_Plugin.py", FAILING_REGISTRATION_PLUGIN_SOURCE);
 
@@ -632,7 +658,7 @@ TEST_CASE("a failed plugin registration disables a readable install-state sideca
 
 TEST_CASE("install-state metadata read-modify-write creates a sidecar for a plugin that has none", "[PluginInstall][PluginFsUtils]")
 {
-    ScopedDataDir data_dir_guard("missing-install-state");
+    ScopedDataDir  data_dir_guard("missing-install-state");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
     fs::create_directories(plugin_dir);
 
@@ -656,7 +682,7 @@ TEST_CASE("install-state metadata read-modify-write creates a sidecar for a plug
 
 TEST_CASE("install-state reads legacy threading values with nonempty meaning granted", "[PluginInstall]")
 {
-    ScopedDataDir data_dir_guard("threading-permission-read");
+    ScopedDataDir  data_dir_guard("threading-permission-read");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
 
     const auto read_threading = [&plugin_dir]() {
@@ -688,10 +714,9 @@ TEST_CASE("install-state reads legacy threading values with nonempty meaning gra
 
     SECTION("a nonempty array grants regardless of its contents")
     {
-        const std::vector<nlohmann::json> arrays = {
-            nlohmann::json::array({"thread"}), nlohmann::json::array({"other"}),
-            nlohmann::json::array({1}),        nlohmann::json::array({true}),
-            nlohmann::json::array({"thread", 1})};
+        const std::vector<nlohmann::json> arrays = {nlohmann::json::array({"thread"}), nlohmann::json::array({"other"}),
+                                                    nlohmann::json::array({1}), nlohmann::json::array({true}),
+                                                    nlohmann::json::array({"thread", 1})};
         for (const nlohmann::json& value : arrays) {
             write_raw_install_state(plugin_dir, {{"permissions", {{"threading", value}}}});
             CHECK(read_threading());
@@ -706,8 +731,7 @@ TEST_CASE("install-state reads legacy threading values with nonempty meaning gra
 
     SECTION("numeric, object and null values do not grant")
     {
-        const std::vector<nlohmann::json> malformed = {
-            0, 1, nlohmann::json::object({{"thread", true}}), nullptr};
+        const std::vector<nlohmann::json> malformed = {0, 1, nlohmann::json::object({{"thread", true}}), nullptr};
         for (const nlohmann::json& value : malformed) {
             write_raw_install_state(plugin_dir, {{"permissions", {{"threading", value}}}});
             CHECK_FALSE(read_threading());
@@ -717,7 +741,7 @@ TEST_CASE("install-state reads legacy threading values with nonempty meaning gra
 
 TEST_CASE("install-state writes threading as a boolean and reads it back", "[PluginInstall]")
 {
-    ScopedDataDir data_dir_guard("threading-permission-write");
+    ScopedDataDir  data_dir_guard("threading-permission-write");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
     fs::create_directories(plugin_dir);
 
@@ -725,7 +749,7 @@ TEST_CASE("install-state writes threading as a boolean and reads it back", "[Plu
     state.permissions.threading = true;
     REQUIRE(write_install_state(plugin_dir, state));
 
-    std::ifstream in((plugin_dir / ".install_state.json").string(), std::ios::binary);
+    std::ifstream        in((plugin_dir / ".install_state.json").string(), std::ios::binary);
     const nlohmann::json written = nlohmann::json::parse(in);
     REQUIRE(written["permissions"].contains("threading"));
     CHECK(written["permissions"]["threading"].is_boolean());
@@ -741,7 +765,7 @@ TEST_CASE("install-state writes threading as a boolean and reads it back", "[Plu
     REQUIRE(write_install_state(plugin_dir, state));
 
     {
-        std::ifstream false_in((plugin_dir / ".install_state.json").string(), std::ios::binary);
+        std::ifstream        false_in((plugin_dir / ".install_state.json").string(), std::ios::binary);
         const nlohmann::json written_false = nlohmann::json::parse(false_in);
         REQUIRE(written_false["permissions"].contains("threading"));
         CHECK(written_false["permissions"]["threading"].is_boolean());
@@ -752,31 +776,29 @@ TEST_CASE("install-state writes threading as a boolean and reads it back", "[Plu
     CHECK_FALSE(read_back.permissions.threading);
 }
 
-TEST_CASE("reading a legacy threading value does not rewrite the sidecar and a normal write migrates it",
-          "[PluginInstall]")
+TEST_CASE("reading a legacy threading value does not rewrite the sidecar and a normal write migrates it", "[PluginInstall]")
 {
-    ScopedDataDir data_dir_guard("threading-permission-migrate");
+    ScopedDataDir  data_dir_guard("threading-permission-migrate");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
     const fs::path sidecar    = plugin_dir / ".install_state.json";
 
     nlohmann::json capabilities = nlohmann::json::array();
     capabilities.push_back({{"Script", true}});
 
-    const nlohmann::json legacy = {
-        {"installed_from", "local"},
-        {"installed_version", "1.0.0"},
-        {"plugin_name", "Migrating Plugin"},
-        {"cloud_uuid", "uuid-legacy"},
-        {"enabled", false},
-        {"permissions",
-         {{"fs_read", nlohmann::json::array({"/allowed/read"})},
-          {"fs_readwrite", nlohmann::json::array()},
-          {"network_http", nlohmann::json::array()},
-          {"network_socket", nlohmann::json::array()},
-          {"process", nlohmann::json::array()},
-          {"threading", nlohmann::json::array({"thread"})},
-          {"events", nlohmann::json::array({"FsRead:open"})}}},
-        {"capabilities", capabilities}};
+    const nlohmann::json legacy = {{"installed_from", "local"},
+                                   {"installed_version", "1.0.0"},
+                                   {"plugin_name", "Migrating Plugin"},
+                                   {"cloud_uuid", "uuid-legacy"},
+                                   {"enabled", false},
+                                   {"permissions",
+                                    {{"fs_read", nlohmann::json::array({"/allowed/read"})},
+                                     {"fs_readwrite", nlohmann::json::array()},
+                                     {"network_http", nlohmann::json::array()},
+                                     {"network_socket", nlohmann::json::array()},
+                                     {"process", nlohmann::json::array()},
+                                     {"threading", nlohmann::json::array({"thread"})},
+                                     {"events", nlohmann::json::array({"FsRead:open"})}}},
+                                   {"capabilities", capabilities}};
     write_raw_install_state(plugin_dir, legacy);
 
     const auto read_raw = [&sidecar]() {
@@ -810,7 +832,7 @@ TEST_CASE("reading a legacy threading value does not rewrite the sidecar and a n
 
 TEST_CASE("install-state reads full access as a boolean and defaults to off", "[PluginInstall]")
 {
-    ScopedDataDir data_dir_guard("full-access-read");
+    ScopedDataDir  data_dir_guard("full-access-read");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
 
     const auto read_full_access = [&plugin_dir]() {
@@ -836,8 +858,8 @@ TEST_CASE("install-state reads full access as a boolean and defaults to off", "[
 
     SECTION("non-boolean values are off")
     {
-        const std::vector<nlohmann::json> malformed = {
-            "true", 1, 0, nlohmann::json::array({true}), nlohmann::json::object({{"enabled", true}}), nullptr};
+        const std::vector<nlohmann::json> malformed =
+            {"true", 1, 0, nlohmann::json::array({true}), nlohmann::json::object({{"enabled", true}}), nullptr};
         for (const nlohmann::json& value : malformed) {
             write_raw_install_state(plugin_dir, {{"permissions", {{"full_access", value}}}});
             CHECK_FALSE(read_full_access());
@@ -847,7 +869,7 @@ TEST_CASE("install-state reads full access as a boolean and defaults to off", "[
 
 TEST_CASE("install-state writes full access as a boolean and reads it back", "[PluginInstall]")
 {
-    ScopedDataDir data_dir_guard("full-access-write");
+    ScopedDataDir  data_dir_guard("full-access-write");
     const fs::path plugin_dir = data_dir_guard.dir / "plugin";
     fs::create_directories(plugin_dir);
 
@@ -856,7 +878,7 @@ TEST_CASE("install-state writes full access as a boolean and reads it back", "[P
     state.permissions.fs_read     = {"/allowed/read"};
     REQUIRE(write_install_state(plugin_dir, state));
 
-    std::ifstream in((plugin_dir / ".install_state.json").string(), std::ios::binary);
+    std::ifstream        in((plugin_dir / ".install_state.json").string(), std::ios::binary);
     const nlohmann::json written = nlohmann::json::parse(in);
     REQUIRE(written["permissions"].contains("full_access"));
     CHECK(written["permissions"]["full_access"].is_boolean());
@@ -873,7 +895,7 @@ TEST_CASE("install-state writes full access as a boolean and reads it back", "[P
     state.permissions.full_access = false;
     REQUIRE(write_install_state(plugin_dir, state));
     {
-        std::ifstream false_in((plugin_dir / ".install_state.json").string(), std::ios::binary);
+        std::ifstream        false_in((plugin_dir / ".install_state.json").string(), std::ios::binary);
         const nlohmann::json written_false = nlohmann::json::parse(false_in);
         REQUIRE(written_false["permissions"].contains("full_access"));
         CHECK(written_false["permissions"]["full_access"].is_boolean());
@@ -925,12 +947,11 @@ TEST_CASE("an unsubscribed cloud plugin follows its header version", "[PluginIns
     CHECK(scanned.installed_version == "1.0.0");
 }
 
-TEST_CASE("extract_zip_to_directory writes entries under a destination longer than MAX_PATH",
-          "[PluginInstall][PluginFsUtils]")
+TEST_CASE("extract_zip_to_directory writes entries under a destination longer than MAX_PATH", "[PluginInstall][PluginFsUtils]")
 {
     ScopedTemporaryDir dir("deep-extract");
 
-    const fs::path wheel = dir.path() / "deep_pkg-1.0-py3-none-any.whl";
+    const fs::path    wheel   = dir.path() / "deep_pkg-1.0-py3-none-any.whl";
     const std::string payload = "print('hello from a deep path')\n";
     {
         Zipper zipper(wheel.string(), Zipper::NO_COMPRESSION);
@@ -946,7 +967,7 @@ TEST_CASE("extract_zip_to_directory writes entries under a destination longer th
     REQUIRE(destination.string().size() > 260);
 
     std::string error;
-    const bool extracted = extract_zip_to_directory(wheel, destination, error);
+    const bool  extracted = extract_zip_to_directory(wheel, destination, error);
     INFO("extract error: " << error);
     REQUIRE(extracted);
     CHECK(error.empty());
@@ -963,8 +984,7 @@ TEST_CASE("extract_zip_to_directory writes entries under a destination longer th
     CHECK_FALSE(ec);
 }
 
-TEST_CASE("extract_zip_to_directory rejects an entry that escapes the destination",
-          "[PluginInstall][PluginFsUtils]")
+TEST_CASE("extract_zip_to_directory rejects an entry that escapes the destination", "[PluginInstall][PluginFsUtils]")
 {
     ScopedTemporaryDir dir("escape-extract");
 
@@ -984,7 +1004,7 @@ TEST_CASE("extract_zip_to_directory rejects an entry that escapes the destinatio
 
 TEST_CASE("resolve_allowed_plugin_root refuses a folder outside the allowed dirs", "[PluginInstall][PluginFsUtils]")
 {
-    ScopedDataDir data_dir_guard("reveal-scope");
+    ScopedDataDir                  data_dir_guard("reveal-scope");
     const std::vector<std::string> allowed = get_plugin_directories({});
 
     PluginDescriptor inside;
@@ -1000,7 +1020,6 @@ TEST_CASE("resolve_allowed_plugin_root refuses a folder outside the allowed dirs
     fs::create_directories(outside.plugin_root);
     fs::path    resolved_out;
     std::string err_out;
-    REQUIRE_FALSE(resolve_allowed_plugin_root(outside, allowed, "outside the allowed plugin directories",
-                                              resolved_out, err_out));
+    REQUIRE_FALSE(resolve_allowed_plugin_root(outside, allowed, "outside the allowed plugin directories", resolved_out, err_out));
     CHECK_THAT(err_out, Catch::Matchers::Contains("outside the allowed plugin directories"));
 }
