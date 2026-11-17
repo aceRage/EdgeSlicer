@@ -67,7 +67,11 @@ static Vendors::Response http_call(const Vendors::Request& req, size_t limit, in
         return out;
     }
     std::string raw_headers;
-    auto        http = Http::get(req.url);
+    // A POST (the download endpoint of some vendors) goes with an explicitly empty body: Http sends it
+    // as CURLOPT_POSTFIELDS of size 0, i.e. Content-Length: 0, not chunked and not waiting for a body.
+    auto http = req.method == "POST" ? Http::post(req.url) : Http::get(req.url);
+    if (req.method == "POST")
+        http.set_post_body(std::string());
     http.clear_headers().follow_redirects(false).timeout_connect(15).timeout_max(timeout_seconds > 0 ? timeout_seconds : limit > LIST_LIMIT ? 1800 : 120).size_limit(limit);
     for (const auto& [k, v] : req.headers)
         http.header(k, v);
@@ -416,6 +420,7 @@ void HomeVendors::send_state()
                               {"synced_at", c.cache.synced_at},
                               {"count", c.cache.items.size()},
                               {"last_error", c.cache.last_error},
+                              {"template_warning", Vendors::template_problems(c.spec)}, // a saved connector with a bad placeholder still loads
                               {"full_next", c.cache.needs_full},
                               {"quota", {{"used", c.cache.quota.used}, {"limit", c.cache.quota.limit}, {"resets", c.cache.quota.resets}}},
                               {"downloads_limited", c.spec.downloads_limited}});
@@ -548,6 +553,12 @@ void HomeVendors::save_connector(const json& spec_json)
         spec = Vendors::spec_from_json(spec_json);
     } catch (const std::exception& e) {
         m_send({{"type", "vendor_invalid"}, {"error", e.what()}});
+        return;
+    }
+    // A connector saved earlier with a placeholder the engine does not know still loads (with a warning
+    // on its card); saving it again has to fix that.
+    if (const std::string problem = Vendors::template_problems(spec); !problem.empty()) {
+        m_send({{"type", "vendor_invalid"}, {"error", problem}});
         return;
     }
     Connector* existing = spec.id.empty() ? nullptr : find(spec.id);
@@ -1183,7 +1194,8 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id, bo
         std::string error;
         std::string file_url = url;
         if (!direct) // the endpoint answers with a short-lived link to the file
-            file_url = Vendors::resolve_download(spec, secrets, Vendors::fetch(spec, secrets, list_http, url, true), error);
+            file_url = Vendors::resolve_download(spec, secrets,
+                                                 Vendors::fetch(spec, secrets, list_http, url, true, nullptr, 5, spec.download_method), error);
         bool saved = false;
         if (error.empty() && !*cancel) {
             // Straight to disk as it arrives (a model can be hundreds of MB), then into place.

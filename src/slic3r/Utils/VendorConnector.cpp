@@ -403,6 +403,16 @@ Spec spec_from_json(const json& j)
     s.download_url_path     = text_of(dl, "url_field", 200);
     s.download_direct_field = text_of(dl, "direct_field", 200);
     s.downloads_limited     = dl.is_object() && dl.value("limited", false);
+    // "GET" when absent, null or empty (connectors written before this key existed behave as before).
+    if (dl.is_object() && dl.contains("method") && !dl["method"].is_null()) {
+        if (!dl["method"].is_string())
+            throw std::runtime_error("The download method must be GET or POST.");
+        std::string method = trim(dl["method"].get<std::string>());
+        std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+        if (!method.empty() && method != "GET" && method != "POST")
+            throw std::runtime_error("The download method must be GET or POST.");
+        s.download_method = method.empty() ? std::string("GET") : method;
+    }
     if (!s.download_path.empty() && s.download_url_path.empty())
         s.download_url_path = "url";
 
@@ -449,12 +459,60 @@ json spec_to_json(const Spec& s)
             {"files", {{"path", s.subs_path}, {"fields", s.sub_fields}}},
             {"download", {{"path", s.download_path}, {"url_field", s.download_url_path}, {"direct_field", s.download_direct_field}, {"limited", s.downloads_limited}}},
             {"quota", {{"used", s.quota_used_header}, {"limit", s.quota_limit_header}, {"resets", s.quota_reset_header}}}};
-    // Only what is set, so templates without these stay as they were.
+    // Only what is set (like the csv keys), so a GET connector's file stays exactly as it was.
+    if (s.download_method == "POST")
+        out["download"]["method"] = "POST";
     if (s.csv_max_records > 0)
         out["csv"]["max_records"] = s.csv_max_records;
     if (!s.csv_rows.empty())
         out["csv"]["rows"] = s.csv_rows;
     return out;
+}
+
+// The placeholders ({...}) of a template, with what is wrong with its braces: "" or the message.
+static std::string template_names(const std::string& templ, std::vector<std::string>& names)
+{
+    size_t pos = 0;
+    while (pos < templ.size()) {
+        const size_t open = templ.find('{', pos);
+        if (open == std::string::npos)
+            break;
+        const size_t close = templ.find('}', open);
+        if (close == std::string::npos)
+            return "it has a { with no closing }";
+        const std::string name = templ.substr(open + 1, close - open - 1);
+        if (name.empty() || name.find('{') != std::string::npos)
+            return "it has an empty or unfinished {}";
+        names.push_back(name);
+        pos = close + 1;
+    }
+    return std::string();
+}
+
+std::string template_problems(const Spec& s)
+{
+    static const char* VALID = "{id} {name} {sub.id} {sub.name} {sub.variant}";
+    static const std::set<std::string> DOWNLOAD_NAMES { "id", "name", "sub.id", "sub.name", "sub.variant" };
+    std::vector<std::string> names;
+    std::string              brace = template_names(s.download_path, names);
+    if (!brace.empty())
+        return "The download path is wrong: " + brace + ". Valid placeholders: " + VALID + ".";
+    for (const std::string& n : names)
+        if (!DOWNLOAD_NAMES.count(n))
+            return "The download path uses {" + n + "}, which the connector does not know, so it would be sent empty. Valid placeholders: " +
+                   VALID + ".";
+    auto page = s.fields.find("page_url");
+    if (page != s.fields.end() && page->second.find('{') != std::string::npos) {
+        names.clear();
+        brace = template_names(page->second, names);
+        if (!brace.empty())
+            return "The page URL template is wrong: " + brace + ".";
+        for (const std::string& n : names)
+            if (starts_with(n, "sub."))
+                return "The page URL template uses {" + n + "}, but a page belongs to the model, not to one of its files. "
+                       "Use a field of the model, like {slug}.";
+    }
+    return std::string();
 }
 
 std::string make_id(const std::string& name, uint32_t random)
@@ -526,9 +584,10 @@ Request authorize(const Spec& spec, const Secrets& secrets, const std::string& u
 }
 
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
-               const std::function<bool(const char*, size_t)>& sink, int max_redirects)
+               const std::function<bool(const char*, size_t)>& sink, int max_redirects, const std::string& method)
 {
     std::string current = url;
+    std::string verb    = method == "POST" ? "POST" : "GET";
     for (int hop = 0;; ++hop) {
         Response error;
         if (!is_allowed_url(current)) {
@@ -537,6 +596,7 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
         }
         Request req = credentials && same_origin(current, spec.base_url) ? authorize(spec, secrets, current) : Request { current, {} };
         req.sink    = sink;
+        req.method  = verb;
         Response resp = http(req);
         const bool redirect = resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308;
         auto       location = resp.headers.find("location");
@@ -547,6 +607,9 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
             return error;
         }
         current = join_url(current, location->second);
+        // As a browser does: 301, 302 and 303 go on as a GET, 307 and 308 keep the method.
+        if (resp.status != 307 && resp.status != 308)
+            verb = "GET";
     }
 }
 
@@ -1072,6 +1135,8 @@ bool build_download_request(const Spec& spec, const Secrets& secrets, const Item
         return false;
     // Credentials go only to the API's own site.
     out = same_origin(url, spec.base_url) ? authorize(spec, secrets, url) : Request { url, {} };
+    // Only the endpoint is a POST; a direct link to the file is always a GET.
+    out.method = !is_direct && spec.download_method == "POST" ? "POST" : "GET";
     return true;
 }
 
@@ -1430,6 +1495,10 @@ ImportResult import_check(const std::string& raw)
         r.error = e.what();
         return r;
     }
+    // A connector from outside is checked strictly: a placeholder it does not know is refused.
+    r.error = template_problems(r.spec);
+    if (!r.error.empty())
+        return r;
     r.spec.id.clear();
     r.json = spec_to_json(r.spec);
     r.json.erase("id");
@@ -1601,7 +1670,7 @@ bool needs_full_fetch(const Spec& a, const Spec& b)
            a.size_param != b.size_param || a.page_size != b.page_size || a.has_more_path != b.has_more_path ||
            a.total_path != b.total_path || a.cursor_path != b.cursor_path || a.since_param != b.since_param ||
            a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields ||
-           a.download_path != b.download_path || a.download_url_path != b.download_url_path ||
+           a.download_path != b.download_path || a.download_method != b.download_method || a.download_url_path != b.download_url_path ||
            a.download_direct_field != b.download_direct_field;
 }
 
