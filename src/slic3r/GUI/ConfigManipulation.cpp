@@ -1193,7 +1193,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool has_curved_tops = config->opt_bool("curved_tops_enabled");
     for (auto el : {"curved_tops_layers", "curved_tops_max_angle"})
         toggle_line(el, has_curved_tops);
-    // Curved tops P3: the developer overrides (their lines show in Developer mode only, by their mode).
+    // Curved tops P3: the developer overrides (their lines are comDevelop and need Developer mode on too).
     for (auto el : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",
                      "curved_tops_dev_flank_margin", "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin",
                      "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap", "curved_tops_dev_safe_lift",
@@ -1202,7 +1202,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                      "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
                      "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
                      "curved_tops_dev_allow_unverified_head" })
-        toggle_line(el, has_curved_tops);
+        // Shown exactly when the overrides can act (GUI_App::update_mode() sets the slicer's gate the same way).
+        toggle_line(el, has_curved_tops && GUI::wxGetApp().curved_tops_developer_lines_shown());
 
     bool have_sequential_printing = (config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
     // for (auto el : { "extruder_clearance_radius", "extruder_clearance_height_to_rod", "extruder_clearance_height_to_lid" })

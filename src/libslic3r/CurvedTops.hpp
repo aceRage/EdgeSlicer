@@ -92,6 +92,8 @@ struct CurvedTopsDevOverrides
     // "label value" of every override the config sets, in key order (used for the warning, the
     // G-code comment and the "ignored" note).
     std::vector<std::string> carried_list;
+    // Values outside their documented range (clamped) or not a number (built-in used), one note each.
+    std::vector<std::string> clamp_notes;
 
     // For the guard record: empty when nothing is carried, "ignored" when carried but not active,
     // else every value in force.

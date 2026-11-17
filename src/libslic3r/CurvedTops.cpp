@@ -105,19 +105,41 @@ CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &cfg, b
     CurvedTopsDevOverrides set; // what the config asks for
     const CurvedTopsDevOverrides builtin;
     std::vector<std::string> &list = set.carried_list;
-    // A numeric override counts when it differs from its built-in value (its default).
-    const auto num = [&list](const ConfigOptionFloat &opt, double builtin_value, double &dst, const char *name, const char *unit) {
-        if (std::abs(opt.value - builtin_value) > 1e-9) {
-            dst = opt.value;
-            // Up to three decimals, trailing zeros dropped ("25", "0.15").
-            std::string v = float_to_string_decimal_point(opt.value, 3);
-            if (v.find('.') != std::string::npos) {
-                while (!v.empty() && v.back() == '0')
-                    v.pop_back();
-                if (!v.empty() && v.back() == '.')
-                    v.pop_back();
+    // A numeric override counts when it differs from its built-in value (its default). Values outside the
+    // documented range (a per-object value, a hand-edited file: the GUI fields and validate() check the
+    // range, Print::apply() does not) are clamped to it, a value that is not a number falls back to the
+    // built-in one; either is said (clamp_notes, shown with the summary).
+    std::vector<std::string> &clamped = set.clamp_notes;
+    const auto num_str = [](double value) {
+        // Up to three decimals, trailing zeros dropped ("25", "0.15").
+        std::string v = float_to_string_decimal_point(value, 3);
+        if (v.find('.') != std::string::npos) {
+            while (!v.empty() && v.back() == '0')
+                v.pop_back();
+            if (!v.empty() && v.back() == '.')
+                v.pop_back();
+        }
+        return v;
+    };
+    const auto num = [&list, &clamped, &num_str](const char *key, const ConfigOptionFloat &opt, double builtin_value, double &dst,
+                                                 const char *name, const char *unit) {
+        double value = opt.value;
+        if (!std::isfinite(value)) {
+            clamped.push_back(Slic3r::format(_u8L("Developer override %1% is not a number; the built-in %2%%3% is used."), name,
+                                             num_str(builtin_value), unit));
+            return;
+        }
+        if (const ConfigOptionDef *def = print_config_def.get(key); def != nullptr) {
+            const double v = std::clamp(value, def->min, def->max);
+            if (v != value) {
+                clamped.push_back(Slic3r::format(_u8L("Developer override %1% %2%%3% is outside %4% to %5%; %6%%3% is used."), name,
+                                                 num_str(value), unit, num_str(def->min), num_str(def->max), num_str(v)));
+                value = v;
             }
-            list.push_back(std::string(name) + " " + v + unit);
+        }
+        if (std::abs(value - builtin_value) > 1e-9) {
+            dst = value;
+            list.push_back(std::string(name) + " " + num_str(value) + unit);
         }
     };
     const auto flag = [&list](const ConfigOptionBool &opt, bool &dst, const char *name) {
@@ -126,34 +148,36 @@ CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &cfg, b
             list.push_back(name);
         }
     };
-    num(cfg.curved_tops_dev_angle_ceiling, builtin.angle_ceiling_deg, set.angle_ceiling_deg, "angle ceiling", " deg");
-    num(cfg.curved_tops_dev_head_lowest_part, builtin.head_lowest_part_mm, set.head_lowest_part_mm, "lowest head part", " mm");
-    num(cfg.curved_tops_dev_clearance_margin, builtin.clearance_margin_mm, set.clearance_margin_mm, "clearance margin", " mm");
-    num(cfg.curved_tops_dev_flank_margin, builtin.flank_margin_deg, set.flank_margin_deg, "flank margin", " deg");
-    num(cfg.curved_tops_dev_land_tolerance, builtin.land_tolerance_mm, set.land_tolerance_mm, "land tolerance", " mm");
-    num(cfg.curved_tops_dev_reach_margin, builtin.reach_margin_mm, set.reach_margin_mm, "reach margin", " mm");
-    num(cfg.curved_tops_dev_speed_cap, builtin.speed_cap_mm_s, set.speed_cap_mm_s, "curved speed cap", " mm/s");
-    num(cfg.curved_tops_dev_wipe_speed_cap, builtin.wipe_speed_cap_mm_s, set.wipe_speed_cap_mm_s, "wipe speed cap", " mm/s");
-    num(cfg.curved_tops_dev_safe_lift, builtin.safe_lift_mm, set.safe_lift_mm, "travel/exit lift", " mm");
+    num("curved_tops_dev_angle_ceiling", cfg.curved_tops_dev_angle_ceiling, builtin.angle_ceiling_deg, set.angle_ceiling_deg, "angle ceiling", " deg");
+    num("curved_tops_dev_head_lowest_part", cfg.curved_tops_dev_head_lowest_part, builtin.head_lowest_part_mm, set.head_lowest_part_mm, "lowest head part", " mm");
+    num("curved_tops_dev_clearance_margin", cfg.curved_tops_dev_clearance_margin, builtin.clearance_margin_mm, set.clearance_margin_mm, "clearance margin", " mm");
+    num("curved_tops_dev_flank_margin", cfg.curved_tops_dev_flank_margin, builtin.flank_margin_deg, set.flank_margin_deg, "flank margin", " deg");
+    num("curved_tops_dev_land_tolerance", cfg.curved_tops_dev_land_tolerance, builtin.land_tolerance_mm, set.land_tolerance_mm, "land tolerance", " mm");
+    num("curved_tops_dev_reach_margin", cfg.curved_tops_dev_reach_margin, builtin.reach_margin_mm, set.reach_margin_mm, "reach margin", " mm");
+    num("curved_tops_dev_speed_cap", cfg.curved_tops_dev_speed_cap, builtin.speed_cap_mm_s, set.speed_cap_mm_s, "curved speed cap", " mm/s");
+    num("curved_tops_dev_wipe_speed_cap", cfg.curved_tops_dev_wipe_speed_cap, builtin.wipe_speed_cap_mm_s, set.wipe_speed_cap_mm_s, "wipe speed cap", " mm/s");
+    num("curved_tops_dev_safe_lift", cfg.curved_tops_dev_safe_lift, builtin.safe_lift_mm, set.safe_lift_mm, "travel/exit lift", " mm");
     flag(cfg.curved_tops_dev_contact_warning_only, set.contact_warning_only, "head contact is a warning only");
     flag(cfg.curved_tops_dev_allow_multiple_objects, set.allow_multiple_objects, "allow several objects or copies");
     flag(cfg.curved_tops_dev_allow_by_object, set.allow_by_object, "allow by-object sequence");
     flag(cfg.curved_tops_dev_allow_multi_filament, set.allow_multi_filament, "allow several filaments or a prime tower");
     flag(cfg.curved_tops_dev_allow_supports_in_reach, set.allow_supports_in_reach, "allow supports within reach");
-    flag(cfg.curved_tops_dev_allow_material_beside, set.allow_material_beside, "allow material beside the surface");
+    flag(cfg.curved_tops_dev_allow_material_beside, set.allow_material_beside, "allow material beside the surface (the lowest curved layers pass through the walls beside the surface; expect nozzle contact)");
     flag(cfg.curved_tops_dev_allow_z_contouring, set.allow_z_contouring, "allow Z contouring");
     flag(cfg.curved_tops_dev_allow_raft, set.allow_raft, "allow raft");
     flag(cfg.curved_tops_dev_allow_variable_layer_height, set.allow_variable_layer_height, "allow variable layer height");
     flag(cfg.curved_tops_dev_allow_tall_skirt, set.allow_tall_skirt, "allow draft shield or tall skirt");
     flag(cfg.curved_tops_dev_allow_unverified_head, set.allow_unverified_head, "allow unverified or missing head data");
 
-    if (list.empty())
+    if (list.empty() && clamped.empty())
         return builtin;
     if (!developer_mode) {
         // Ignored: the built-in values, but say what was carried.
         CurvedTopsDevOverrides out;
         out.carried      = true;
         out.carried_list = std::move(list);
+        if (out.carried_list.empty())
+            out.carried_list.push_back(_u8L("an override value that is not valid"));
         return out;
     }
     set.carried = true;
@@ -167,6 +191,8 @@ std::string CurvedTopsDevOverrides::record() const
         return std::string();
     std::string out = this->active ? "active:" : "ignored:";
     for (const std::string &s : this->carried_list)
+        out += s + "|";
+    for (const std::string &s : this->clamp_notes)
         out += s + "|";
     return out;
 }

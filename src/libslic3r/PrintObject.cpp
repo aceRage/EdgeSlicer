@@ -933,7 +933,11 @@ void PrintObject::contour_z()
         // P3: developer overrides. In force: their own warning, every slice. Carried by the project but
         // Developer mode off: ignored, and the curved-tops message says so.
         const CurvedTopsDevOverrides dev     = curved_tops_dev_overrides(m_config);
-        const std::string            ignored = dev.ignored_note();
+        std::string                  ignored = dev.ignored_note();
+        // Out-of-range override values: clamped by curved_tops_dev_overrides(), said here.
+        if (dev.active)
+            for (const std::string &note : dev.clamp_notes)
+                ignored += (ignored.empty() ? "" : "\n") + note;
         if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                           Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),

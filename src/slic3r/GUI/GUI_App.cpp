@@ -8587,15 +8587,31 @@ void GUI_App::update_mode()
 
     plater()->canvas3D()->update_gizmos_on_off_state();
 
-    // EdgeSlicer, curved tops P3: the developer overrides act only in Developer mode (Preferences). The
-    // slicer reads the flag; Print::apply() re-plans a curved block when it changes (guard record).
-    const bool developer = app_config->get_bool("developer_mode");
+    // EdgeSlicer, curved tops P3: the developer overrides act only in Developer mode (Preferences), and only
+    // while the settings show Developer lines (user_mode "develop"): the same condition that shows the
+    // override lines (ConfigManipulation), so an override is never in force with its line hidden. The
+    // slicer reads the flag; Print::apply() re-plans a curved block when it changes (guard record), and
+    // every plate of every open project is invalidated so nothing planned the other way can be exported.
+    const bool developer = curved_tops_developer_lines_shown();
     if (developer != curved_tops_developer_mode()) {
         set_curved_tops_developer_mode(developer);
         BOOST_LOG_TRIVIAL(info) << "Curved tops developer overrides " << (developer ? "allowed" : "ignored") << " (Developer mode "
                                 << (developer ? "on" : "off") << ")";
-        plater()->schedule_background_process();
+        bool any = false;
+        if (mainframe != nullptr)
+            for (Plater *project : mainframe->project_platers())
+                if (project != nullptr) {
+                    project->invalidate_slices_for_developer_mode();
+                    any = true;
+                }
+        if (!any)
+            plater()->invalidate_slices_for_developer_mode();
     }
+}
+
+bool GUI_App::curved_tops_developer_lines_shown()
+{
+    return app_config->get_bool("developer_mode") && get_mode() == comDevelop;
 }
 
 void GUI_App::update_internal_development() {

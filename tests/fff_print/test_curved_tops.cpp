@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -2221,6 +2222,10 @@ TEST_CASE("Curved tops P3: a contact downgraded to a warning is still found and 
             CHECK(msg.find("low sock") != std::string::npos);
             CHECK(msg.find("The G-code WAS exported") != std::string::npos);
             CHECK(msg.find("Nearest head part over the curved layer: low sock, -") != std::string::npos);
+            // Per head part, and the sock hit is named as more than the nozzle tip.
+            CHECK(msg.find("By head part:") != std::string::npos);
+            CHECK(msg.find("NOT ONLY THE NOZZLE TIP: other head parts touched too: ") != std::string::npos);
+            CHECK(msg.find("low sock: ") != std::string::npos);
         } else {
             INFO("error: " << error);
             CHECK(error.find("The G-code was not exported") != std::string::npos);
@@ -2298,4 +2303,64 @@ TEST_CASE("Curved tops P3: Developer mode and override changes re-plan the block
         CHECK(object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsDevOverrides).find("curved speed cap 22") !=
               std::string::npos);
     }
+}
+
+// Out-of-range or invalid override values (per-object or hand-edited: Print::apply() does not check the
+// ranges) are clamped to the documented range, and said.
+TEST_CASE("Curved tops P3: out-of-range override values are clamped and said", "[CurvedTops][CurvedTopsDev]")
+{
+    PrintObjectConfig cfg;
+    cfg.curved_tops_dev_safe_lift.value        = -1.;
+    cfg.curved_tops_dev_clearance_margin.value = -0.5;
+    cfg.curved_tops_dev_speed_cap.value        = 0.;
+    cfg.curved_tops_dev_angle_ceiling.value    = std::numeric_limits<double>::quiet_NaN();
+    const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(cfg, true);
+    REQUIRE(dev.active);
+    CHECK_THAT(dev.safe_lift_mm, WithinAbs(0.2, 1e-12));
+    CHECK_THAT(dev.clearance_margin_mm, WithinAbs(0.0, 1e-12));
+    CHECK_THAT(dev.speed_cap_mm_s, WithinAbs(1.0, 1e-12));
+    CHECK_THAT(dev.angle_ceiling_deg, WithinAbs(CURVED_TOPS_MAX_ANGLE_CEILING, 1e-12));
+    REQUIRE(dev.clamp_notes.size() == 4);
+    std::string notes;
+    for (const std::string &n : dev.clamp_notes)
+        notes += n + "\n";
+    INFO("notes: " << notes);
+    CHECK(notes.find("travel/exit lift -1 mm is outside 0.2 to 20; 0.2 mm is used") != std::string::npos);
+    CHECK(notes.find("angle ceiling is not a number") != std::string::npos);
+    // The clamped values are what the summary path uses.
+    const ResourcesDirGuard resources;
+    const DevModeGuard      gate(true);
+    Print print;
+    Model model;
+    slice_puck(print, model, true, { { "curved_tops_dev_speed_cap", "0.5" } });
+    REQUIRE(top_block(print));
+    const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+    INFO("summary: " << summary);
+    CHECK(summary.find("curved moves at most 1 mm/s") != std::string::npos);
+    CHECK(summary.find("curved speed cap 0.5 mm/s is outside 1 to 500; 1 mm/s is used") != std::string::npos);
+}
+
+// A block planned with Developer mode on cannot be exported once it is off (and the other way round),
+// even without a Print::apply() in between: the export compares the guard record with the gate.
+TEST_CASE("Curved tops P3: a block planned under other override settings is never exported", "[CurvedTops][CurvedTopsDev]")
+{
+    const ResourcesDirGuard resources;
+    const bool on_first = GENERATE(true, false);
+    INFO("Developer mode at planning: " << on_first);
+    Print print;
+    Model model;
+    {
+        const DevModeGuard gate(on_first);
+        slice_puck(print, model, true, { { "curved_tops_dev_speed_cap", "25" } });
+        REQUIRE(top_block(print));
+    }
+    const DevModeGuard gate(!on_first);
+    std::string error;
+    try {
+        Test::gcode(print);
+    } catch (const Slic3r::SlicingError &ex) {
+        error = ex.what();
+    }
+    INFO("error: " << error);
+    CHECK(error.find("was sliced with other developer override settings") != std::string::npos);
 }

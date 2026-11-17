@@ -3295,6 +3295,16 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
     bool any_dev = false, contact_warning_only = !curved_objects.empty(), unchecked_ok = !curved_objects.empty();
     for (const PrintObject *object : curved_objects) {
         const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+        // A block planned with other developer overrides (or another Developer mode) than are in force now is
+        // never exported: the guard record's tail says what the planner used.
+        const std::string &used     = object->curved_tops_guard_inputs_used();
+        const size_t       dev_pos  = used.find(";dev=");
+        const std::string  used_dev = dev_pos == std::string::npos ? std::string() : used.substr(dev_pos + 5);
+        if (used_dev != dev.record())
+            throw Slic3r::SlicingError(Slic3r::format(_(L("Curved tops: %1% was sliced with other developer override settings (or "
+                                                          "another Developer mode) than are in force now. Slice again.")),
+                                                      object->model_object()->name),
+                                       object->id().id);
         any_dev |= dev.active;
         contact_warning_only &= dev.active && dev.contact_warning_only;
         unchecked_ok &= dev.active && dev.allow_unverified_head;
@@ -3380,6 +3390,20 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
                                                  "warning only): %1% moves bring the print head into material that is already printed, "
                                                  "up to %2% mm deep (objects: %3%; head model: %4%). The G-code WAS exported.")),
                                              report.hit_moves, mm(report.max_depth), object_names(), head->name);
+            // Every head part that touched, with its count and deepest contact, so a box hit never hides behind
+            // the nozzle hits listed below; and whether anything other than the nozzle tip touched at all.
+            std::string by_part, other_parts;
+            for (const HeadCollisionPartStat &ps : report.parts) {
+                if (ps.hit_moves == 0)
+                    continue;
+                const std::string one = Slic3r::format(_(L("%1%: %2% moves, up to %3% mm")), ps.part, ps.hit_moves, mm(ps.max_depth));
+                by_part += (by_part.empty() ? "" : "; ") + one;
+                if (ps.part != "nozzle tip")
+                    other_parts += (other_parts.empty() ? "" : "; ") + one;
+            }
+            msg += "\n" + _(L("By head part:")) + " " + by_part + ".";
+            msg += "\n" + (other_parts.empty() ? _(L("Only the nozzle tip touched; no other head part did.")) :
+                                                 _(L("NOT ONLY THE NOZZLE TIP: other head parts touched too:")) + " " + other_parts + ".");
             const size_t shown_dev = std::min<size_t>(report.hits.size(), 5);
             for (size_t i = 0; i < shown_dev; ++i) {
                 const HeadCollisionHit &h = report.hits[i];

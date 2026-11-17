@@ -37,6 +37,14 @@ struct HeadCollisionHit
     std::string  part;             // "nozzle" or the box name
 };
 
+// One head part's contacts over the whole check (curved tops P3).
+struct HeadCollisionPartStat
+{
+    std::string part;           // "nozzle tip" (underside within the tolerance of the tip), "nozzle flank", or a box name
+    size_t      hit_moves { 0 }; // moves where this part touches
+    float       max_depth { 0.f };
+};
+
 struct HeadCollisionReport
 {
     bool   ran { false };
@@ -45,6 +53,8 @@ struct HeadCollisionReport
     float  max_depth { 0.f };
     // The first contact of the first hit moves, in print order, at most HeadCollisionParams::max_reported.
     std::vector<HeadCollisionHit> hits;
+    // Every head part in order (nozzle tip, nozzle flank, then the boxes), with zero counts where it never touches.
+    std::vector<HeadCollisionPartStat> parts;
     // Only with HeadCollisionParams::measure_clearance_from_layer: over every move on those layers, the
     // smallest gap between a head box's bottom and the material already printed under it (negative =
     // the box is in material), which box, and the tip position. +infinity when nothing was under a box.

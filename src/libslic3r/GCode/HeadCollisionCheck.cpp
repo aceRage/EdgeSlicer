@@ -129,10 +129,15 @@ const std::string NOZZLE_PART = "nozzle";
 // where the nozzle's underside is still within tol of the tip (the tip land, and a chamfer no higher
 // than tol), material up to d * surface_tan above the tip is the sloped surface being followed - the
 // neighbouring bead of a line laid on the slope - not an obstacle. Beyond the land nothing changes.
-Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, double tol, bool check_nozzle, double surface_tan)
+// part_depth (curved tops P3, may be null): the deepest contact of each head part at this point, by
+// part index (HeadCollisionReport::parts order: nozzle tip, nozzle flank, then the boxes).
+Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, double tol, bool check_nozzle, double surface_tan,
+              std::vector<float> *part_depth = nullptr)
 {
     Contact best;
-    auto    consider = [&](float depth, const std::string &part) {
+    auto    consider = [&](float depth, const std::string &part, size_t part_idx) {
+        if (part_depth != nullptr && part_idx < part_depth->size())
+            (*part_depth)[part_idx] = std::max((*part_depth)[part_idx], depth);
         if (depth > best.depth) {
             best.depth    = depth;
             best.part     = &part;
@@ -152,12 +157,14 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
                 double u = head.nozzle_underside_at(d);
                 if (std::isinf(u))
                     return;
+                // The tip land (underside within tol of the tip) or the flank above it.
+                const size_t part_idx = u <= tol ? 0 : 1;
                 // Curved tops, extrusions only: see surface_tan above.
                 if (surface_tan > 0. && u <= tol)
                     u = std::max(u, d * surface_tan);
                 const double excess = double(top) - (p.z() + u);
                 if (excess > tol)
-                    consider(float(excess), NOZZLE_PART);
+                    consider(float(excess), NOZZLE_PART, part_idx);
             });
         }
     }
@@ -165,8 +172,9 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
     // Boxes. Nothing printed reaches the lowest box: done.
     if (head.boxes.empty() || double(map.global_max()) <= p.z() + head.lowest_box_z() + tol)
         return best;
-    for (const HeadClearanceBox &box : head.boxes) {
-        const float bottom = float(p.z() + box.min.z());
+    for (size_t box_idx = 0; box_idx < head.boxes.size(); ++box_idx) {
+        const HeadClearanceBox &box    = head.boxes[box_idx];
+        const float             bottom = float(p.z() + box.min.z());
         if (map.global_max() <= bottom + float(tol))
             continue;
         int ix0 = box.spans_x ? 0 : map.ix_floor(p.x() + box.min.x());
@@ -180,7 +188,7 @@ Contact probe(const HeightMap &map, const HeadClearance &head, const Vec3d &p, d
         float deepest = 0.f;
         map.for_cells_above(ix0, iy0, ix1, iy1, thr, [&](int, int, float top) { deepest = std::max(deepest, top - bottom); });
         if (deepest > 0.f)
-            consider(deepest, box.name);
+            consider(deepest, box.name, 2 + box_idx);
     }
     return best;
 }
@@ -253,6 +261,13 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
     const double step = 2. * cell;
 
     report.ran = true;
+    // Per head part: moves that touch with it, and the deepest contact (curved tops P3: which part touched).
+    report.parts.resize(2 + head.boxes.size());
+    report.parts[0].part = "nozzle tip";
+    report.parts[1].part = "nozzle flank";
+    for (size_t b = 0; b < head.boxes.size(); ++b)
+        report.parts[2 + b].part = head.boxes[b].name;
+    std::vector<float> move_part_depth(report.parts.size(), 0.f);
     bool  have_prev = false;
     Vec3d prev      = Vec3d::Zero();
     for (size_t i = 0; i < moves.size(); ++i) {
@@ -285,14 +300,20 @@ HeadCollisionReport check_head_collisions(const std::vector<GCodeProcessorResult
         const double len_xy  = Vec2d(cur.x() - a.x(), cur.y() - a.y()).norm();
         const int    n       = len_xy < 1e-6 ? 1 : std::max(1, int(std::ceil(len_xy / step)));
         const bool   measure = m.layer_id >= params.measure_clearance_from_layer;
+        std::fill(move_part_depth.begin(), move_part_depth.end(), 0.f);
         for (int k = 1; k <= n; ++k) {
             const double t = double(k) / double(n);
-            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan);
+            const Contact c = probe(map, head, a + (cur - a) * t, tol, check_nozzle, surface_tan, &move_part_depth);
             if (c.depth > worst.depth)
                 worst = c;
             if (measure)
                 measure_box_clearance(map, head, a + (cur - a) * t, report);
         }
+        for (size_t pi = 0; pi < move_part_depth.size(); ++pi)
+            if (move_part_depth[pi] > 0.f) {
+                ++report.parts[pi].hit_moves;
+                report.parts[pi].max_depth = std::max(report.parts[pi].max_depth, move_part_depth[pi]);
+            }
         if (worst.depth > 0.f) {
             ++report.hit_moves;
             report.max_depth = std::max(report.max_depth, worst.depth);

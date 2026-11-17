@@ -6185,7 +6185,8 @@ void PrintConfigDef::init_fff_params()
                "the head's reach."));
     dev_bool("curved_tops_dev_allow_material_beside", L("Allow material beside the surface"),
              L("DEVELOPER OVERRIDE. Material next to the curved surface no longer raises where the curved layers start or "
-               "refuses the top: the surface is curved over the whole allowed rise anyway."));
+               "refuses the top: the surface is curved over the whole allowed rise anyway. The lowest curved layers then pass "
+               "through the walls beside the surface, which are already printed to full height: expect nozzle contact."));
     dev_bool("curved_tops_dev_allow_z_contouring", L("Allow Z contouring on the same object"),
              L("DEVELOPER OVERRIDE. Curve the top even when Z contouring is on for the object."));
     dev_bool("curved_tops_dev_allow_raft", L("Allow a raft"), L("DEVELOPER OVERRIDE. Curve the top even when the object has a raft."));
