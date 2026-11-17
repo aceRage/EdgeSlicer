@@ -194,7 +194,7 @@ struct ScopedSpawnedHost
         plugin_ipc::kill_host(host);
         plugin_ipc::close_host(host);
         if (!sandbox_plugin_key.empty())
-            plugin_ipc::delete_parent_sandbox_profile(sandbox_plugin_key);
+            plugin_ipc::delete_test_created_parent_sandbox_profile(sandbox_plugin_key);
     }
 
     ScopedSpawnedHost()                                    = default;

@@ -92,6 +92,19 @@ fs::path write_plugin(const ScopedDataDir& data_dir_guard, const std::string& st
     return plugin_dir;
 }
 
+#ifdef _WIN32
+// Per-run test-only plugin keys. The `test.` prefix maps to the `EdgeSlicer.t.*`
+// AppContainer moniker so teardown cannot collide with shipping `EdgeSlicer.ph.*` profiles.
+std::string unique_test_plugin_key(const char* stem)
+{
+    static std::atomic<unsigned> seq{0};
+    const unsigned               n    = seq.fetch_add(1, std::memory_order_relaxed);
+    const auto                   tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::string("test.") + stem + "." + std::to_string(::GetCurrentProcessId()) + "." + std::to_string(n) + "." +
+           std::to_string(static_cast<long long>(tick));
+}
+#endif
+
 bool spawn_and_handshake(plugin_ipc::SpawnedHost& host, const plugin_ipc::SandboxSpec& spec, nlohmann::json& reply, std::string& error)
 {
     if (!plugin_ipc::spawn_host(host, spec, error))
@@ -1158,6 +1171,11 @@ TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSand
     CHECK(long1 != long2);
     CHECK(a.size() == long1.size());
     CHECK(a.find(L"EdgeSlicer.ph.") == 0);
+    CHECK(a.size() == 14 + 16);
+    const auto t = plugin_ipc::win_appcontainer_profile_name("test.alpha");
+    CHECK(t.find(L"EdgeSlicer.t.") == 0);
+    CHECK(t.size() == 13 + 16);
+    CHECK(t.find(L"EdgeSlicer.ph.") == std::wstring::npos);
 }
 
 namespace {
@@ -1247,7 +1265,7 @@ struct CloseSandbox
     {
         plugin_ipc::close_parent_sandbox();
         if (!plugin_key.empty())
-            plugin_ipc::delete_parent_sandbox_profile(plugin_key);
+            plugin_ipc::delete_test_created_parent_sandbox_profile(plugin_key);
     }
 };
 
@@ -1386,7 +1404,7 @@ TEST_CASE("AppContainer data_dir ACE is traverse-only and revoked on close", "[P
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "DataDir_Traverse";
+    spec.plugin_key        = unique_test_plugin_key("DataDir_Traverse");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = dir.string();
     std::string error;
@@ -1557,7 +1575,7 @@ TEST_CASE("AppContainer skips a RO grant when ALL APPLICATION PACKAGES already h
     REQUIRE(grant_all_app_packages_rx(dir.string()));
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Skip_RX";
+    spec.plugin_key        = unique_test_plugin_key("Skip_RX");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.extra_paths.push_back({dir.string(), false, false});
@@ -1586,7 +1604,7 @@ TEST_CASE("AppContainer skips a missing data_dir ACE", "[PluginSandbox][windows]
     CloseSandbox  close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Missing_DataDir";
+    spec.plugin_key        = unique_test_plugin_key("Missing_DataDir");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = (data.dir / "no_such_folder").string();
     std::string error;
@@ -1618,7 +1636,7 @@ TEST_CASE("AppContainer grants a user-owned RO directory", "[PluginSandbox][wind
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "User_RO";
+    spec.plugin_key        = unique_test_plugin_key("User_RO");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.extra_paths.push_back({dir.string(), false, false});
@@ -1668,7 +1686,7 @@ TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs only", "[Plugin
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Low_Label";
+    spec.plugin_key        = unique_test_plugin_key("Low_Label");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.write_root        = write_root.string();
@@ -1718,7 +1736,7 @@ TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[Plugi
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Journal_Sweep";
+    spec.plugin_key        = unique_test_plugin_key("Journal_Sweep");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.write_root        = dir.string();
@@ -1828,7 +1846,7 @@ TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Existing_SID";
+    spec.plugin_key        = unique_test_plugin_key("Existing_SID");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.extra_paths.push_back({dir.string(), false, false});
@@ -1872,7 +1890,7 @@ TEST_CASE("AppContainer journal stays while the host is alive and sweep drops py
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Journal_Live";
+    spec.plugin_key        = unique_test_plugin_key("Journal_Live");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.python_home       = PythonInterpreter::bundled_python_home();
@@ -1949,7 +1967,7 @@ TEST_CASE("AppContainer ACL journal DACL excludes the package SID", "[PluginSand
     CloseSandbox close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Journal_Dacl";
+    spec.plugin_key        = unique_test_plugin_key("Journal_Dacl");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.write_root        = dir.string();
@@ -2002,7 +2020,7 @@ TEST_CASE("AppContainer sweep ignores journal paths outside known roots", "[Plug
     CloseSandbox  close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Journal_Outside";
+    spec.plugin_key        = unique_test_plugin_key("Journal_Outside");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     std::string error;
@@ -2040,7 +2058,7 @@ TEST_CASE("AppContainer sweep treats a vanished grant path as already revoked", 
     CloseSandbox  close_guard;
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key        = "Journal_Vanished";
+    spec.plugin_key        = unique_test_plugin_key("Journal_Vanished");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     std::string error;
@@ -2092,7 +2110,7 @@ TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][
     ScopedSpawnedHost       spawned;
     std::string             error;
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key            = "Win_Probe";
+    spec.plugin_key            = unique_test_plugin_key("Win_Probe");
     spec.data_dir              = data.dir.string();
     spec.python_home           = PythonInterpreter::bundled_python_home();
     spawned.sandbox_plugin_key = spec.plugin_key;
@@ -2116,8 +2134,9 @@ TEST_CASE("AppContainer spawn from a fresh data dir with no python/packages", "[
     }
 
     fs::create_directories(data.plugins_dir());
-    plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec("Fresh_Packages", {});
-    spec.plugin_key              = "Fresh_Packages";
+    const std::string       key  = unique_test_plugin_key("Fresh_Packages");
+    plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec(key, {});
+    spec.plugin_key              = key;
     spec.python_home             = PythonInterpreter::bundled_python_home();
     spec.plugin_root             = data.plugins_dir().string();
     {
@@ -2159,7 +2178,7 @@ TEST_CASE("AppContainer prepare fails when no data dir is resolvable", "[PluginS
     } restore{previous};
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key = "No_DataDir";
+    spec.plugin_key = unique_test_plugin_key("No_DataDir");
     std::string error;
     const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
     INFO("prepare error: " << error);
@@ -2190,7 +2209,7 @@ TEST_CASE("AppContainer creates a missing plugin_host_acl journal dir", "[Plugin
     }
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key = "Missing_JournalDir";
+    spec.plugin_key = unique_test_plugin_key("Missing_JournalDir");
     spec.data_dir   = spec_a.path().string();
     CloseSandbox close_guard{spec.plugin_key};
     std::string  error;
@@ -2223,7 +2242,7 @@ TEST_CASE("AppContainer journal follows spec.data_dir when global data_dir chang
     } restore{previous};
 
     plugin_ipc::SandboxSpec spec;
-    spec.plugin_key = "Journal_SpecDir";
+    spec.plugin_key = unique_test_plugin_key("Journal_SpecDir");
     spec.data_dir   = spec_a.path().string();
     CloseSandbox close_guard{spec.plugin_key};
 
@@ -2262,5 +2281,48 @@ TEST_CASE("AppContainer journal follows spec.data_dir when global data_dir chang
         CHECK_FALSE(journal_file_exists(journal_b.string()));
         CHECK_FALSE(journal_file_exists((global_c.path() / "plugin_host_acl" / "acl_journal.json").string()));
     }
+}
+
+TEST_CASE("AppContainer teardown leaves a pre-existing profile in place", "[PluginSandbox][windows]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir     data("plugin-sandbox-preexisting-profile");
+    const std::string key = unique_test_plugin_key("Preexisting_K");
+
+    struct UninstallAtEnd
+    {
+        std::string key;
+        ~UninstallAtEnd() { plugin_ipc::delete_parent_sandbox_profile(key); }
+    } uninstall{key};
+
+    std::string create_error;
+    const bool  created = plugin_ipc::win_create_appcontainer_profile_for_testing(key, create_error);
+    INFO("create error: " << create_error);
+    REQUIRE(created);
+    REQUIRE(plugin_ipc::win_appcontainer_profile_exists_for_testing(key));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key  = key;
+    spec.data_dir    = data.dir.string();
+    spec.python_home = PythonInterpreter::bundled_python_home();
+    std::string error;
+    if (plugin_ipc::helper_exists()) {
+        ScopedSpawnedHost spawned;
+        spawned.sandbox_plugin_key = key;
+        CloseSandbox close_guard{key};
+        const bool   ok = plugin_ipc::spawn_host(spawned.host, spec, error);
+        INFO("spawn error: " << error);
+        REQUIRE(ok);
+    } else {
+        CloseSandbox close_guard{key};
+        const bool   ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+        INFO("prepare error: " << error);
+        REQUIRE(ok);
+    }
+
+    REQUIRE(plugin_ipc::win_appcontainer_profile_exists_for_testing(key));
 }
 #endif
