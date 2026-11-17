@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 #ifndef _WIN32
 #include <cerrno>
@@ -47,6 +48,17 @@
 #define __NR_io_uring_setup 425
 #endif
 #endif
+#endif
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <sddl.h>
 #endif
 
 using namespace Slic3r;
@@ -1129,6 +1141,173 @@ TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSand
     CHECK(long1 != long2);
     CHECK(a.size() == long1.size());
     CHECK(a.find(L"EdgeSlicer.ph.") == 0);
+}
+
+namespace {
+
+bool dacl_has_allowed_sid(PACL dacl, PSID sid)
+{
+    if (dacl == nullptr || sid == nullptr)
+        return false;
+    ACL_SIZE_INFORMATION info{};
+    if (!::GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation))
+        return false;
+    for (DWORD i = 0; i < info.AceCount; ++i) {
+        LPVOID ace = nullptr;
+        if (!::GetAce(dacl, i, &ace) || ace == nullptr)
+            continue;
+        auto* header = static_cast<ACE_HEADER*>(ace);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+        if (::EqualSid(reinterpret_cast<PSID>(&allowed->SidStart), sid))
+            return true;
+    }
+    return false;
+}
+
+struct LocalSid
+{
+    PSID sid = nullptr;
+    explicit LocalSid(LPCWSTR sddl)
+    {
+        if (!::ConvertStringSidToSidW(sddl, &sid))
+            sid = nullptr;
+    }
+    ~LocalSid()
+    {
+        if (sid)
+            ::LocalFree(sid);
+    }
+    LocalSid(const LocalSid&)            = delete;
+    LocalSid& operator=(const LocalSid&) = delete;
+};
+
+} // namespace
+
+TEST_CASE("AppContainer pipe SD grants the user, package SID, and Low IL", "[PluginSandbox][windows][pipe]")
+{
+    LocalSid package(L"S-1-15-2-1-2-3-4-5-6-7");
+    REQUIRE(package.sid != nullptr);
+
+    void*       sd_void = nullptr;
+    std::string error;
+    const bool  built = plugin_ipc::win_build_pipe_security_descriptor(package.sid, &sd_void, error);
+    INFO("pipe SD error: " << error);
+    REQUIRE(built);
+    REQUIRE(sd_void != nullptr);
+    struct LocalSd
+    {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        ~LocalSd()
+        {
+            if (sd)
+                ::LocalFree(sd);
+        }
+    };
+    LocalSd sd_owner;
+    sd_owner.sd = static_cast<PSECURITY_DESCRIPTOR>(sd_void);
+    auto* sd    = sd_owner.sd;
+
+    HANDLE token = nullptr;
+    REQUIRE(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token));
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    REQUIRE(needed > 0);
+    std::vector<BYTE> user_buf(needed);
+    REQUIRE(::GetTokenInformation(token, TokenUser, user_buf.data(), static_cast<DWORD>(user_buf.size()), &needed));
+    ::CloseHandle(token);
+    PSID user_sid = reinterpret_cast<TOKEN_USER*>(user_buf.data())->User.Sid;
+    REQUIRE(user_sid != nullptr);
+
+    LocalSid system_sid(L"S-1-5-18");
+    LocalSid admins_sid(L"S-1-5-32-544");
+    LocalSid low_sid(L"S-1-16-4096");
+    REQUIRE(system_sid.sid != nullptr);
+    REQUIRE(admins_sid.sid != nullptr);
+    REQUIRE(low_sid.sid != nullptr);
+
+    BOOL dacl_present = FALSE, dacl_defaulted = FALSE;
+    PACL dacl = nullptr;
+    REQUIRE(::GetSecurityDescriptorDacl(sd, &dacl_present, &dacl, &dacl_defaulted));
+    REQUIRE(dacl_present);
+    REQUIRE(dacl != nullptr);
+    CHECK(dacl_has_allowed_sid(dacl, package.sid));
+    CHECK(dacl_has_allowed_sid(dacl, user_sid));
+    CHECK(dacl_has_allowed_sid(dacl, system_sid.sid));
+    CHECK_FALSE(dacl_has_allowed_sid(dacl, admins_sid.sid));
+
+    BOOL sacl_present = FALSE, sacl_defaulted = FALSE;
+    PACL sacl = nullptr;
+    REQUIRE(::GetSecurityDescriptorSacl(sd, &sacl_present, &sacl, &sacl_defaulted));
+    REQUIRE(sacl_present);
+    REQUIRE(sacl != nullptr);
+    ACL_SIZE_INFORMATION sacl_info{};
+    REQUIRE(::GetAclInformation(sacl, &sacl_info, sizeof(sacl_info), AclSizeInformation));
+    bool has_low_ml = false;
+    for (DWORD i = 0; i < sacl_info.AceCount; ++i) {
+        LPVOID ace = nullptr;
+        if (!::GetAce(sacl, i, &ace) || ace == nullptr)
+            continue;
+        auto* header = static_cast<ACE_HEADER*>(ace);
+        if (header->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            continue;
+        auto* ml = static_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace);
+        if (::EqualSid(reinterpret_cast<PSID>(&ml->SidStart), low_sid.sid))
+            has_low_ml = true;
+    }
+    CHECK(has_low_ml);
+
+    wchar_t pipe_name[128];
+    swprintf(pipe_name, 128, L"\\\\.\\pipe\\edge-plugin-pipe-sd-%lu", static_cast<unsigned long>(::GetCurrentProcessId()));
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength              = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle       = FALSE;
+    HANDLE server = ::CreateNamedPipeW(pipe_name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                       PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, &sa);
+    const DWORD pipe_err = (server == INVALID_HANDLE_VALUE) ? ::GetLastError() : 0;
+    INFO("CreateNamedPipe err=" << pipe_err);
+    REQUIRE(server != INVALID_HANDLE_VALUE);
+
+    HANDLE proc_token = nullptr;
+    HANDLE low_token  = nullptr;
+    bool   opened     = false;
+    DWORD  open_err   = 0;
+    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &proc_token) &&
+        ::DuplicateTokenEx(proc_token, TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_ADJUST_DEFAULT, nullptr, SecurityImpersonation,
+                           TokenImpersonation, &low_token)) {
+        TOKEN_MANDATORY_LABEL tml{};
+        tml.Label.Attributes = SE_GROUP_INTEGRITY;
+        tml.Label.Sid        = low_sid.sid;
+        const DWORD tml_size = static_cast<DWORD>(sizeof(tml) + ::GetLengthSid(low_sid.sid));
+        if (::SetTokenInformation(low_token, TokenIntegrityLevel, &tml, tml_size) && ::ImpersonateLoggedOnUser(low_token)) {
+            HANDLE client = ::CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            open_err      = ::GetLastError();
+            opened        = client != INVALID_HANDLE_VALUE;
+            if (opened)
+                ::CloseHandle(client);
+            ::RevertToSelf();
+        } else {
+            open_err = ::GetLastError();
+        }
+    } else {
+        open_err = ::GetLastError();
+    }
+    if (low_token)
+        ::CloseHandle(low_token);
+    if (proc_token)
+        ::CloseHandle(proc_token);
+    ::CloseHandle(server);
+
+    INFO("low-IL CreateFile err=" << open_err);
+    if (opened) {
+        CHECK(opened);
+    } else if (open_err == ERROR_ACCESS_DENIED) {
+        FAIL("low-IL token was denied the pipe (user SID grant missing?)");
+    } else {
+        WARN("could not open the pipe from a restricted low-IL token, err=" << open_err);
+    }
 }
 
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")
