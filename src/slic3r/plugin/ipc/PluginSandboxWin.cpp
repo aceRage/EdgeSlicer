@@ -46,6 +46,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 
 #include <libslic3r/Utils.hpp>
 
+#include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
@@ -303,11 +304,54 @@ bool persist_acl_journal(PSID sid)
     return Slic3r::write_file_atomically(path.string(), body.dump(1, '\t') + "\n", &err);
 }
 
+bool path_has_low_integrity_label(const std::string& path);
+
+// Files a Low-IL helper creates inherit a Low mandatory label even when the parent
+// directory was not labelled (user fs_readwrite) or after the directory label is
+// restored (Edge work dirs). Bounded walk: skip symlinks, cap entries so a user
+// folder cannot stall close/sweep.
+void strip_low_labels_in_tree(const std::string& root)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+    const fs::path            path(root);
+    if (root.empty() || !fs::exists(path, ec) || ec)
+        return;
+    auto strip_one = [](const fs::path& p) {
+        if (path_has_low_integrity_label(p.string()))
+            restore_label_sddl(p.string(), {});
+    };
+    strip_one(path);
+    if (!fs::is_directory(path, ec) || ec)
+        return;
+    constexpr int k_max_entries = 4096;
+    int           n             = 0;
+    for (fs::recursive_directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+        if (++n >= k_max_entries) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL strip stopped after " << k_max_entries << " entries in " << root;
+            break;
+        }
+        boost::system::error_code st_ec;
+        const fs::file_status     st = it->symlink_status(st_ec);
+        if (st_ec)
+            continue;
+        if (fs::is_symlink(st)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        strip_one(it->path());
+    }
+}
+
 void revoke_one_grant(PSID sid, const DirGrant& grant)
 {
     apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS);
     if (grant.low_label)
         restore_label_sddl(grant.path, grant.original_label);
+    // User fs_readwrite is write && !low_label. Also walk Edge write dirs so
+    // helper-created files (edge-plugin-host.log, post_process.gcode) lose Low.
+    if (grant.write)
+        strip_low_labels_in_tree(grant.path);
 }
 
 void revoke_grants()
@@ -603,20 +647,28 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     // and the helper exits 10 before Py init. No FILE_LIST_DIRECTORY / FILE_READ_DATA.
     const std::string data_dir = spec.data_dir.empty() ? Slic3r::data_dir() : spec.data_dir;
     if (!data_dir.empty()) {
-        DirGrant grant;
-        grant.path        = data_dir;
-        grant.permissions = k_data_dir_traverse;
-        grant.inheritance = NO_INHERITANCE;
-        g_win.grants.push_back(grant);
-        if (!persist_acl_journal(sid)) {
-            error = "AppContainer ACL journal failed for " + data_dir;
-            clear_win_state();
-            return false;
-        }
-        if (!apply_dir_acl(sid, data_dir, k_data_dir_traverse, NO_INHERITANCE, SET_ACCESS)) {
-            error = "AppContainer ACL grant failed for " + data_dir;
-            clear_win_state();
-            return false;
+        boost::system::error_code ec;
+        const bool                exists = boost::filesystem::exists(data_dir, ec) && !ec;
+        if (!exists) {
+            // Helper set_data_dir treats not-found as the create case. A missing data_dir
+            // must not fail-close spawn; skip the traverse ACE with a warning.
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer data_dir ACE skipped (path missing): " << data_dir;
+        } else {
+            DirGrant grant;
+            grant.path        = data_dir;
+            grant.permissions = k_data_dir_traverse;
+            grant.inheritance = NO_INHERITANCE;
+            g_win.grants.push_back(grant);
+            if (!persist_acl_journal(sid)) {
+                error = "AppContainer ACL journal failed for " + data_dir;
+                clear_win_state();
+                return false;
+            }
+            if (!apply_dir_acl(sid, data_dir, k_data_dir_traverse, NO_INHERITANCE, SET_ACCESS)) {
+                error = "AppContainer ACL grant failed for " + data_dir;
+                clear_win_state();
+                return false;
+            }
         }
     }
     if (!spec.write_root.empty()) {
@@ -800,6 +852,12 @@ void win_abandon_grants_for_testing()
 }
 
 bool win_path_has_low_integrity_label(const std::string& path) { return path_has_low_integrity_label(path); }
+
+bool win_apply_low_integrity_label_for_testing(const std::string& path) { return label_low_integrity(path); }
+
+void win_clear_low_integrity_label(const std::string& path) { restore_label_sddl(path, {}); }
+
+std::string win_acl_journal_path_for_testing() { return acl_journal_path().string(); }
 
 std::wstring win_appcontainer_localappdata_path()
 {

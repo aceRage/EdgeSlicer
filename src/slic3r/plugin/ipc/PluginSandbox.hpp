@@ -126,6 +126,9 @@ void* parent_sandbox_security_capabilities(); // Windows STARTUPINFOEX blob; nul
 void  close_parent_sandbox();
 // Windows: revoke package-SID ACEs and restore Low-IL labels listed in the grant journal
 // left by a crash/kill, then delete the journal. No-op on POSIX and when no journal exists.
+// Call on every process start that can spawn the helper (GUI PluginManager::initialize,
+// CLI after data_dir is set, and prepare). The journal lives under the current data_dir
+// but records grant paths outside it (python_home, user fs_readwrite, test dirs).
 void sweep_stale_parent_sandbox_grants();
 
 #ifdef _WIN32
@@ -144,6 +147,10 @@ std::wstring             win_current_package_sid_string_for_testing();
 // Drop in-memory grant state without revoking or deleting the journal (crash simulation).
 void win_abandon_grants_for_testing();
 bool win_path_has_low_integrity_label(const std::string& path);
+bool win_apply_low_integrity_label_for_testing(const std::string& path);
+// Restore the default (no Low ML ACE). Used after Edge writes hosted G-code out of plugin_data.
+void        win_clear_low_integrity_label(const std::string& path);
+std::string win_acl_journal_path_for_testing();
 // Packages\<family>\AC when the current AppContainer SID is known; empty otherwise.
 std::wstring win_appcontainer_localappdata_path();
 #endif
