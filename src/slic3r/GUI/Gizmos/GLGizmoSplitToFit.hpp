@@ -27,7 +27,13 @@
 // its own object after Apply), with "Discard pieces smaller than" (off by default); and a "Labels"
 // group: the same code recessed into both faces of every mating pair, drawn on the planes before Apply.
 //
-// Entry points (D1): its own toolbar icon, a "Split to fit..." button in the Cut panel and
+// Phase 4 (polish): the plan is made on a worker thread (cancelled and made again when the panel
+// changes), with "Updating" shown meanwhile and Apply waiting for the current plan; a click on a dowel
+// disc removes it and a click on a cut face adds one (checked by the planner's own rules); "Lay parts on
+// a cut face" and "Loose parts on their own plates"; the dowels go on plates of their own and identical
+// ones are instances of one object.
+//
+// Entry points (D1): its own toolbar icon (next to Cut's), a "Split to fit..." button in the Cut panel and
 // "Split to fit the printer..." in the object's right-click menu.
 //
 // The planner (libslic3r/SplitToVolume.hpp) does all the work; this class only gathers its inputs,
@@ -40,7 +46,12 @@
 #include "libslic3r/SplitToVolume.hpp"
 
 #include <array>
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace Slic3r {
@@ -55,6 +66,7 @@ class GLGizmoSplitToFit : public GLGizmoBase
 {
 public:
     GLGizmoSplitToFit(GLCanvas3D &parent, const std::string &icon_filename, unsigned int sprite_id);
+    ~GLGizmoSplitToFit() override;
 
     void data_changed(bool is_serializing) override;
     bool on_mouse(const wxMouseEvent &mouse_event) override;
@@ -94,7 +106,19 @@ private:
     // Re-reads the model's mesh when the object or its placement changed, and the printer's volume
     // when the printer changed; marks the plan dirty when either did.
     void refresh_inputs();
-    void update_plan();
+    // P4: the plan is made off the UI thread. request_plan() asks for a plan of the current inputs
+    // (cancelling one under way, which then starts the newest when it stops); plan_finished() takes the
+    // worker's result on the UI thread; stop_planner() cancels and joins (closing, destruction).
+    void request_plan();
+    void start_plan();
+    void plan_finished(uint64_t generation);
+    void stop_planner();
+    void adopt_plan(SplitPlan &&plan);
+    // The plan shown is the plan of the current inputs (Apply needs that).
+    bool plan_current() const { return !m_plan_dirty && !m_plan_running && m_plan_adopted == m_plan_wanted; }
+    // P4: click-to-add / remove a dowel site.
+    SplitPickTarget pick_at(const Vec2d &mouse) const;
+    void            click_site(const SplitPickTarget &target);
     void rebuild_preview();
     void apply();
     void reset_options();
@@ -106,10 +130,11 @@ private:
     SplitPlan             m_plan;
     bool                  m_plan_dirty{ true };
 
-    // The mesh in the grid frame, and what it was taken from.
-    indexed_triangle_set  m_mesh;
+    // The mesh in the grid frame, and what it was taken from. P4: shared with the planner thread (a new
+    // mesh is a new object; the one a running plan reads stays alive until it is done).
+    std::shared_ptr<const indexed_triangle_set> m_mesh;
     // P5: its face neighbours, worked out once per mesh (the piece search needs them on every plan).
-    std::vector<Vec3i32>  m_mesh_neighbors;
+    std::shared_ptr<const std::vector<Vec3i32>> m_mesh_neighbors;
     ObjectID              m_mesh_object;
     Transform3d           m_mesh_trafo{ Transform3d::Identity() };
     size_t                m_mesh_volumes{ 0 };
@@ -121,6 +146,8 @@ private:
     // P2: the dowel sites, drawn on top of the model (discs on the planes, their axes as lines).
     GLModel               m_sites_fill;
     GLModel               m_sites_axes;
+    // P4: the dowel sites added by hand (another colour).
+    GLModel               m_sites_manual;
     // P5: the pieces of sections that fall apart (one colour each), and the labels' outlines.
     // Six colours and grey (discarded), filled in place: a GLModel must not be copied.
     std::array<GLModel, 7> m_piece_boxes;
@@ -141,6 +168,29 @@ private:
     // A warning clicked in the Output Log: its box, outlined in the 3D view.
     BoundingBoxf3         m_highlight;
     GLModel               m_highlight_model;
+
+    // P4: the planner thread. m_plan_wanted counts requests; the thread plans for m_plan_running_gen and
+    // leaves its result (under m_plan_mutex) for plan_finished(); m_plan_adopted is the request the shown
+    // plan answers. Only the UI thread starts, joins or reads these, except the result and the cancel flag.
+    std::thread                        m_plan_thread;
+    std::shared_ptr<std::atomic<bool>> m_plan_cancel;
+    std::mutex                         m_plan_mutex;
+    std::unique_ptr<SplitPlan>         m_plan_result;        // guarded by m_plan_mutex
+    uint64_t                           m_plan_result_gen{ 0 }; // guarded by m_plan_mutex
+    uint64_t                           m_plan_wanted{ 0 };
+    uint64_t                           m_plan_running_gen{ 0 };
+    uint64_t                           m_plan_adopted{ 0 };
+    bool                               m_plan_running{ false };
+    // Expires with the gizmo: a finished plan's callback that arrives later does nothing.
+    std::shared_ptr<int>               m_alive{ std::make_shared<int>(0) };
+
+    // P4: a click on a disc or a face, waiting for the button to come up where it went down.
+    bool            m_click_pending{ false };
+    Vec2d           m_click_start{ Vec2d::Zero() };
+    SplitPickTarget m_click_target;
+    SplitPickTarget m_hover_pick;
+    // Why the last added dowel was refused (shown in the panel), empty when it was not.
+    std::string     m_manual_note;
 };
 
 } // namespace GUI
