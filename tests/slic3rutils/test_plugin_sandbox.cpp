@@ -1876,17 +1876,16 @@ class Pkg(orca.base):
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
     std::string error;
     REQUIRE(load_and_wait(manager, "Sandbox_FsRw", error));
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_FsRw", "Echo");
+    INFO("hosted write: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "wrote");
     const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
     REQUIRE_FALSE(sid_str.empty());
     LocalSid package(sid_str.c_str());
     REQUIRE(package.sid != nullptr);
     CHECK(path_dacl_has_sid(user_rw.string(), package.sid));
     CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
-
-    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_FsRw", "Echo");
-    INFO("hosted write: " << completion.result.message << " err=" << completion.error);
-    CHECK(completion.error.empty());
-    CHECK(completion.result.message == "wrote");
     {
         boost::nowide::ifstream in(out_file.string(), std::ios::binary);
         REQUIRE(in);
