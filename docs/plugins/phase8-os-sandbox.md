@@ -198,9 +198,15 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   same process start time, so two instances sharing a `data_dir` do not
   revoke each other. Journal load-modify-write is serialized with a named
   mutex (`Local\EdgeSlicer.acl_journal.<hash>`). Parent
-  `PluginManager::initialize`, CLI after `set_data_dir`, G-code viewer
-  startup, and the next `prepare` revoke anything the journal still lists
-  except the live session. `close_win_appcontainer` revokes, restores the
+  `PluginManager::initialize` and CLI after `set_data_dir` (gcode-viewer /
+  headless share that CLI sweep) revoke anything the journal still lists
+  except the live session and sessions whose owner process is still alive.
+  A same-user rewrite of the journal is not an escalation: the file is already
+  parent-only to the interactive user, and forging grants can only name
+  paths that user can already ACL. Sweep still requires a derived
+  `EdgeSlicer.ph.*` / `EdgeSlicer.t.*` profile name (not a bare package SID).
+  Each sweep revokes at most 64 leftover sessions / 512 grants and logs if
+  it truncated. The next `prepare` continues the remainder. `close_win_appcontainer` revokes, restores the
   original SACL mandatory label on Edge-created work dirs, walks write-granted
   trees (bounded) to strip Low labels from files the Low-IL helper created
   (`edge-plugin-host.log`, `post_process.gcode`, plugin output in user

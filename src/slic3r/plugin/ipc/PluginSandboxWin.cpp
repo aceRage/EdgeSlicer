@@ -452,20 +452,6 @@ bool path_in_known_root(const std::string& path)
     return false;
 }
 
-bool path_in_session_roots(const std::string& path, const JournalSession& session)
-{
-    if (path.empty())
-        return false;
-    const boost::filesystem::path candidate(path);
-    auto under = [&](const std::string& root) { return !root.empty() && path_is_under_root(candidate, boost::filesystem::path(root)); };
-    return under(session.data_dir) || under(session.python_home) || under(session.helper_dir) || under(session.resources_dir);
-}
-
-bool session_has_recorded_roots(const JournalSession& session)
-{
-    return !session.data_dir.empty() || !session.python_home.empty() || !session.helper_dir.empty() || !session.resources_dir.empty();
-}
-
 bool path_is_acl_journal_tree(const std::string& path)
 {
     if (path.empty())
@@ -505,45 +491,19 @@ bool is_edgeslicer_profile_name(const std::wstring& name)
 
 bool sid_is_well_known_appcontainer_group(const std::string& sid) { return sid == "S-1-15-2-1" || sid == "S-1-15-2-2"; }
 
-bool sid_looks_like_appcontainer_package(PSID sid)
-{
-    if (sid == nullptr || !::IsValidSid(sid))
-        return false;
-    const SID_IDENTIFIER_AUTHORITY* auth = ::GetSidIdentifierAuthority(sid);
-    if (auth == nullptr)
-        return false;
-    static const unsigned char k_app_auth[6] = {0, 0, 0, 0, 0, 15};
-    if (std::memcmp(auth->Value, k_app_auth, 6) != 0)
-        return false;
-    const UCHAR* n = ::GetSidSubAuthorityCount(sid);
-    if (n == nullptr || *n < 8)
-        return false;
-    const DWORD* base = ::GetSidSubAuthority(sid, 0);
-    return base != nullptr && *base == SECURITY_APP_PACKAGE_BASE_RID;
-}
-
 bool session_sid_allowed(const JournalSession& session)
 {
-    if (session.package_sid.empty() || sid_is_well_known_appcontainer_group(session.package_sid))
+    if (session.package_sid.empty() || session.profile_name.empty() || sid_is_well_known_appcontainer_group(session.package_sid))
         return false;
-    if (!session.profile_name.empty()) {
-        const std::wstring name = boost::nowide::widen(session.profile_name);
-        if (!is_edgeslicer_profile_name(name) || p_DeriveSid == nullptr)
-            return false;
-        PSID derived = nullptr;
-        if (FAILED(p_DeriveSid(name.c_str(), &derived)) || derived == nullptr)
-            return false;
-        const std::wstring got = sid_to_string(derived);
-        ::FreeSid(derived);
-        return ::_wcsicmp(got.c_str(), boost::nowide::widen(session.package_sid).c_str()) == 0;
-    }
-    PSID               sid  = nullptr;
-    const std::wstring wide = boost::nowide::widen(session.package_sid);
-    if (!::ConvertStringSidToSidW(wide.c_str(), &sid) || sid == nullptr)
+    const std::wstring name = boost::nowide::widen(session.profile_name);
+    if (!is_edgeslicer_profile_name(name) || p_DeriveSid == nullptr)
         return false;
-    const bool ok = sid_looks_like_appcontainer_package(sid);
-    ::LocalFree(sid);
-    return ok;
+    PSID derived = nullptr;
+    if (FAILED(p_DeriveSid(name.c_str(), &derived)) || derived == nullptr)
+        return false;
+    const std::wstring got = sid_to_string(derived);
+    ::FreeSid(derived);
+    return ::_wcsicmp(got.c_str(), boost::nowide::widen(session.package_sid).c_str()) == 0;
 }
 
 bool set_parent_only_dacl(const std::string& path, PSID package_sid)
@@ -1221,33 +1181,24 @@ bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
 
 enum class GrantActionSource { Live, Journal };
 
-// Journal ACE revoke of a derived EdgeSlicer.ph.*/t.* SID is safe on any path recorded
-// in the parent-only journal (the sandbox cannot write it). Session python_home / helper /
-// resources / data_dir count as known roots for that session so a moved install still
-// sweeps. Copy-replace of Low-IL files stays on this process's user-rw roots.
+// Empty paths and the parent-only journal tree are never actionable. Every other
+// recorded grant path is: ACE revoke of a derived EdgeSlicer.ph.*/t.* SID is safe
+// on a path the parent journaled, including session python_home / helper /
+// resources / data_dir outside this process's current roots, extra fs_readwrite
+// paths, and legacy journals with no recorded roots. Copy-replace of Low-IL files
+// is gated separately (known user-rw roots + grant time / ADS / hard-link checks).
 bool grant_path_is_actionable(const DirGrant& grant, GrantActionSource source, const JournalSession* session = nullptr)
 {
-    if (grant.path.empty() || path_is_acl_journal_tree(grant.path))
-        return false;
-    if (source == GrantActionSource::Live)
-        return true;
-    if (path_in_known_root(grant.path))
-        return true;
-    if (session && path_in_session_roots(grant.path, *session))
-        return true;
-    // Legacy journals with no recorded roots: the grant list itself is the record.
-    if (!session || !session_has_recorded_roots(*session))
-        return true;
-    // Extra grant paths (user fs_readwrite, plugin_root) are recorded in the journal even
-    // when they sit outside the four session roots. Revoking our package-SID ACE is safe.
-    return true;
+    (void)source;
+    (void)session;
+    return !grant.path.empty() && !path_is_acl_journal_tree(grant.path);
 }
 
 bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source, const JournalSession* session = nullptr)
 {
     if (!grant_path_is_actionable(grant, source, session)) {
         if (source == GrantActionSource::Journal)
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped path outside known roots: " << grant.path;
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped empty or journal-tree path: " << grant.path;
         // Live: leave the grant. Journal: keep it so a later sweep can still revoke.
         return false;
     }
@@ -1806,6 +1757,11 @@ void sweep_win_acl_journal()
         auto                        sessions = load_journal_sessions_at(path);
         std::vector<JournalSession> leftover;
         leftover.reserve(sessions.size());
+        constexpr size_t k_max_sessions_per_sweep = 64;
+        constexpr size_t k_max_grants_per_sweep   = 512;
+        size_t           n_sessions               = 0;
+        size_t           n_grants                 = 0;
+        bool             truncated                = false;
         for (JournalSession& session : sessions) {
             if (g_win.ready && !live_sid.empty() && session.package_sid == live_sid) {
                 leftover.push_back(std::move(session));
@@ -1821,6 +1777,12 @@ void sweep_win_acl_journal()
                 BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped untrusted SID " << session.package_sid;
                 continue;
             }
+            if (n_sessions >= k_max_sessions_per_sweep) {
+                truncated = true;
+                leftover.push_back(std::move(session));
+                continue;
+            }
+            ++n_sessions;
             PSID sid = nullptr;
             if (!session.package_sid.empty()) {
                 const std::wstring wide = boost::nowide::widen(session.package_sid);
@@ -1830,8 +1792,14 @@ void sweep_win_acl_journal()
             std::vector<DirGrant> keep;
             keep.reserve(session.grants.size());
             for (const DirGrant& grant : session.grants) {
+                if (n_grants >= k_max_grants_per_sweep) {
+                    truncated = true;
+                    keep.push_back(grant);
+                    continue;
+                }
+                ++n_grants;
                 if (!grant_path_is_actionable(grant, GrantActionSource::Journal, &session)) {
-                    BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped path outside known roots: " << grant.path;
+                    BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped empty or journal-tree path: " << grant.path;
                     keep.push_back(grant);
                     continue;
                 }
@@ -1850,6 +1818,9 @@ void sweep_win_acl_journal()
                 leftover.push_back(std::move(session));
             }
         }
+        if (truncated)
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal sweep truncated after " << n_sessions << " sessions / " << n_grants
+                                       << " grants in " << path.string();
         persist_sessions_at(path, leftover);
     }
 }

@@ -2374,6 +2374,89 @@ TEST_CASE("AppContainer sweep drops ALL APPLICATION PACKAGES journal SIDs", "[Pl
     CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
 }
 
+TEST_CASE("AppContainer sweep drops journal sessions with an empty profile_name", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir data("plugin-sandbox-empty-profile");
+    CloseSandbox  close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Empty_Profile");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    plugin_ipc::close_parent_sandbox();
+
+    write_acl_journal(nlohmann::json::array({
+        {{"package_sid", boost::nowide::narrow(sid_str)},
+         {"profile_name", ""},
+         {"grants", nlohmann::json::array({
+                        {{"path", (data.dir / "plugin_host").string()},
+                         {"permissions", 1179817},
+                         {"inheritance", 3},
+                         {"write", true},
+                         {"low_label", false},
+                         {"existing", false},
+                         {"original_label", ""}},
+                    })}},
+    }));
+    REQUIRE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+}
+
+TEST_CASE("AppContainer sweep caps leftover grant revoke and keeps the remainder", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir data("plugin-sandbox-sweep-cap");
+    CloseSandbox  close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Sweep_Cap");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    const std::wstring profile = plugin_ipc::win_appcontainer_profile_name(spec.plugin_key);
+    plugin_ipc::close_parent_sandbox();
+
+    nlohmann::json grants = nlohmann::json::array();
+    for (int i = 0; i < 513; ++i) {
+        grants.push_back({{"path", (data.dir / ("missing-" + std::to_string(i))).string()},
+                          {"permissions", 1179817},
+                          {"inheritance", 3},
+                          {"write", false},
+                          {"low_label", false},
+                          {"existing", false},
+                          {"original_label", ""}});
+    }
+    write_acl_journal(nlohmann::json::array({
+        {{"package_sid", boost::nowide::narrow(sid_str)},
+         {"profile_name", boost::nowide::narrow(profile)},
+         {"data_dir", spec.data_dir},
+         {"python_home", ""},
+         {"helper_dir", ""},
+         {"resources_dir", ""},
+         {"grants", std::move(grants)}},
+    }));
+    const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
+    REQUIRE(journal_file_exists(journal));
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    REQUIRE(journal_file_exists(journal));
+    CHECK(journal_grant_path_count(journal) == 1);
+}
+
 TEST_CASE("AppContainer sweep keeps skipped journal entries and does not delete the session", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();

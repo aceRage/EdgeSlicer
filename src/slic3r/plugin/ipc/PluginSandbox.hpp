@@ -132,8 +132,9 @@ void  close_parent_sandbox();
 // the helper-writable `plugin_host` log dir, and not `%LOCALAPPDATA%` / Packages\\*\\AC).
 // The path is resolved once at grant time and stored on the session; close/revoke never
 // re-reads the global. An explicit DACL excludes the package SID and ALL APPLICATION
-// PACKAGES. Sweep accepts only derived `EdgeSlicer.ph.*` / test `EdgeSlicer.t.*`
-// package SIDs. ACE revoke and Low-label restore on a recorded grant path are
+// PACKAGES. Sweep accepts only SIDs that match a derived `EdgeSlicer.ph.*` /
+// test `EdgeSlicer.t.*` profile name stored on the session (empty profile_name
+// is rejected). ACE revoke and Low-label restore on a recorded grant path are
 // allowed for that session's python_home / helper / resources / data_dir even when
 // those paths sit outside this process's current roots (moved install, portable
 // copy, test binary vs GUI). Copy-replace of Low-IL files stays inside this

@@ -1241,6 +1241,9 @@ bool install_plugin(const boost::filesystem::path& filepath,
     // The cloud UUID is concatenated into the install path (final_dir = plugin_root / cloud_uuid).
     // It comes verbatim from the server's catalog JSON, so reject anything that could escape the
     // per-user plugin root (traversal, leading dots, separators) before touching the filesystem.
+    // CloudPluginState.uuid is the catalog UUID without a cloud: prefix (8-4-4-12 hex). A real
+    // UUID cannot start with test.; is_valid_plugin_id still reserves that prefix so a catalog
+    // id of Test.Foo cannot land in the test-harness namespace.
     if (is_cloud_install && !is_valid_plugin_id(cloud_uuid))
         return fail(GUI::format(_u8L("Cloud plugin UUID is not a valid identifier: %1%"), cloud_uuid));
 
