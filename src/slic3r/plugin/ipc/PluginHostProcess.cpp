@@ -64,6 +64,38 @@ constexpr DWORD k_status_quota_exceeded    = 0xC0000044u;
 constexpr DWORD k_status_commit_limit      = 0xC000012Du;
 constexpr DWORD k_error_not_enough_quota   = 1816u;
 constexpr DWORD k_error_commitment_limit   = 1455u;
+// PluginHostMain returns 1000 + GetLastError() when CreateFileW on the IPC pipe fails.
+constexpr DWORD k_host_pipe_open_exit_base = 1000u;
+
+std::string win32_error_text(DWORD err)
+{
+    wchar_t* buf = nullptr;
+    const DWORD n = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     nullptr, err, 0, reinterpret_cast<LPWSTR>(&buf), 0, nullptr);
+    std::string text;
+    if (n > 0 && buf != nullptr) {
+        text = boost::nowide::narrow(buf);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
+            text.pop_back();
+        ::LocalFree(buf);
+    }
+    return text;
+}
+
+std::string host_connect_failure_message(DWORD exit_code)
+{
+    std::string msg = "edge-plugin-host exited before connecting (exit code " + std::to_string(exit_code) + ")";
+    if (exit_code >= k_host_pipe_open_exit_base) {
+        const DWORD winerr = exit_code - k_host_pipe_open_exit_base;
+        msg += ": pipe open failed";
+        if (winerr == ERROR_ACCESS_DENIED)
+            msg += " (access denied)";
+        const std::string detail = win32_error_text(winerr);
+        if (!detail.empty())
+            msg += " — " + detail;
+    }
+    return msg;
+}
 
 bool win_env_entry_allowed(const wchar_t* entry)
 {
@@ -362,35 +394,48 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     // plugin_root / write_root from the running child.
 
     OVERLAPPED ov{};
-    ov.hEvent      = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (ov.hEvent == nullptr) {
+        ::TerminateProcess(pi.hProcess, 1);
+        ::CloseHandle(pi.hProcess);
+        ::CloseHandle(job);
+        ::CloseHandle(pipe);
+        close_parent_sandbox();
+        error = "CreateEvent failed";
+        return false;
+    }
+
+    auto abort_connect = [&](const std::string& msg, bool terminate_child) {
+        ::CancelIoEx(pipe, &ov);
+        ::CloseHandle(ov.hEvent);
+        if (terminate_child)
+            ::TerminateProcess(pi.hProcess, 1);
+        ::CloseHandle(pi.hProcess);
+        ::CloseHandle(job);
+        ::CloseHandle(pipe);
+        close_parent_sandbox();
+        error = msg;
+        return false;
+    };
+
     BOOL connected = ::ConnectNamedPipe(pipe, &ov);
     if (!connected) {
         const DWORD err = ::GetLastError();
         if (err == ERROR_IO_PENDING) {
-            if (::WaitForSingleObject(ov.hEvent, 15000) != WAIT_OBJECT_0) {
-                ::CancelIoEx(pipe, &ov);
-                ::CloseHandle(ov.hEvent);
-                ::TerminateProcess(pi.hProcess, 1);
-                ::CloseHandle(pi.hProcess);
-                ::CloseHandle(job);
-                ::CloseHandle(pipe);
-                close_parent_sandbox();
-                error = "ConnectNamedPipe timed out";
-                return false;
+            HANDLE wait[2] = {ov.hEvent, pi.hProcess};
+            const DWORD wr = ::WaitForMultipleObjects(2, wait, FALSE, 15000);
+            if (wr == WAIT_OBJECT_0 + 1) {
+                DWORD exit_code = 1;
+                ::GetExitCodeProcess(pi.hProcess, &exit_code);
+                return abort_connect(host_connect_failure_message(exit_code), false);
             }
+            if (wr != WAIT_OBJECT_0)
+                return abort_connect("ConnectNamedPipe timed out", true);
         } else if (err != ERROR_PIPE_CONNECTED) {
-            ::CloseHandle(ov.hEvent);
-            ::TerminateProcess(pi.hProcess, 1);
-            ::CloseHandle(pi.hProcess);
-            ::CloseHandle(job);
-            ::CloseHandle(pipe);
-            close_parent_sandbox();
-            error = "ConnectNamedPipe failed";
-            return false;
+            return abort_connect("ConnectNamedPipe failed", true);
         }
     }
-    if (ov.hEvent)
-        ::CloseHandle(ov.hEvent);
+    ::CloseHandle(ov.hEvent);
 
     ULONG client_pid = 0;
     if (!::GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid != pi.dwProcessId) {

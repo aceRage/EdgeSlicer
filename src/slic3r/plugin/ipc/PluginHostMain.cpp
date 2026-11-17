@@ -110,8 +110,12 @@ int main(int argc, char** argv)
         return 1;
     HANDLE handle = ::CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_OVERLAPPED, nullptr);
-    if (handle == INVALID_HANDLE_VALUE)
-        return 1;
+    if (handle == INVALID_HANDLE_VALUE) {
+        // Distinct from the generic 1 (missing --ipc-pipe) so the parent can map
+        // ERROR_ACCESS_DENIED (1005) vs a missing pipe without waiting 15 s.
+        const DWORD err = ::GetLastError();
+        return static_cast<int>(1000u + err);
+    }
     DWORD mode = PIPE_READMODE_BYTE;
     ::SetNamedPipeHandleState(handle, &mode, nullptr, nullptr);
     Channel channel = Channel::from_windows_handle(handle);

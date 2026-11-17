@@ -100,6 +100,26 @@ std::wstring profile_name(const std::string& plugin_key)
     return buf;
 }
 
+// Low IL (S-1-16-4096) + no-write-up. AppContainer hosts run at low integrity; a medium
+// object with only a DACL still denies GENERIC_WRITE (ERROR_ACCESS_DENIED / no-write-up).
+bool label_low_integrity(const std::string& path)
+{
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr) ||
+        sd == nullptr)
+        return false;
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL sacl    = nullptr;
+    DWORD rc     = ERROR_INVALID_PARAMETER;
+    if (::GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted) && present && sacl != nullptr) {
+        const std::wstring wide = boost::nowide::widen(path);
+        rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr,
+                                     nullptr, nullptr, sacl);
+    }
+    ::LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
 bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mode)
 {
     if (path.empty() || sid == nullptr)
@@ -230,6 +250,10 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             return false;
         }
         g_win.grants.emplace_back(path, write);
+        // Writable grants are created by this process at medium IL. Without a low label the
+        // AppContainer child cannot create files there (same no-write-up as the named pipe).
+        if (write && !label_low_integrity(path))
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer low-IL label skipped for " << path;
         return true;
     };
     // python_home is often under Program Files: a standard user has no WRITE_DAC, and
@@ -325,35 +349,32 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
 
-    EXPLICIT_ACCESSW ea[2]{};
-    ea[0].grfAccessPermissions      = GENERIC_ALL;
-    ea[0].grfAccessMode             = SET_ACCESS;
-    ea[0].grfInheritance            = NO_INHERITANCE;
-    ea[0].Trustee.TrusteeForm       = TRUSTEE_IS_SID;
-    ea[0].Trustee.TrusteeType       = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea[0].Trustee.ptstrName         = static_cast<LPWSTR>(sid);
-    SID_IDENTIFIER_AUTHORITY nt     = SECURITY_NT_AUTHORITY;
-    PSID                     admins = nullptr;
-    ::AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &admins);
-    ea[1]                   = ea[0];
-    ea[1].Trustee.ptstrName = static_cast<LPWSTR>(admins);
-    PACL acl                = nullptr;
-    ::SetEntriesInAclW(admins ? 2 : 1, ea, nullptr, &acl);
-    if (admins)
-        ::FreeSid(admins);
-    PSECURITY_DESCRIPTOR sd = ::LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
-    if (!sd || !acl || !::InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) ||
-        !::SetSecurityDescriptorDacl(sd, TRUE, acl, FALSE)) {
-        error = "AppContainer named-pipe DACL failed";
-        if (acl)
-            ::LocalFree(acl);
-        if (sd)
-            ::LocalFree(sd);
+    // Named pipe SD. DACL is the container SID + Admins only (no Everyone, no ALL APPLICATION
+    // PACKAGES). SACL is Low IL + no-write-up so the AppContainer host can CreateFile GENERIC_WRITE.
+    //
+    // Other kernel objects shared with the host:
+    //   * ConnectNamedPipe / Channel OVERLAPPED events are unnamed and parent-only.
+    //   * The Job object is unnamed; the child is assigned by handle, not by name.
+    //   * No file mappings. Writable grant directories are labelled Low above.
+    LPWSTR sid_str = nullptr;
+    if (!::ConvertSidToStringSidW(sid, &sid_str) || sid_str == nullptr) {
+        error = "ConvertSidToStringSid failed for AppContainer SID";
+        clear_win_state();
+        return false;
+    }
+    std::wstring sddl = L"D:(A;;GA;;;";
+    sddl += sid_str;
+    sddl += L")(A;;GA;;;BA)S:(ML;;NW;;;LW)";
+    ::LocalFree(sid_str);
+
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
+        error = "AppContainer named-pipe security descriptor failed";
         clear_win_state();
         return false;
     }
     g_win.pipe_sd                      = sd;
-    g_win.pipe_acl                     = acl;
+    g_win.pipe_acl                     = nullptr; // DACL/SACL live inside the self-relative SD
     g_win.pipe_sa.nLength              = sizeof(SECURITY_ATTRIBUTES);
     g_win.pipe_sa.lpSecurityDescriptor = sd;
     g_win.pipe_sa.bInheritHandle       = FALSE;
