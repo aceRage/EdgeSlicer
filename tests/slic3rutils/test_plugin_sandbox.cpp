@@ -1275,6 +1275,26 @@ TEST_CASE("AppContainer pipe SD grants the user, package SID, and Low IL", "[Plu
     ::CloseHandle(server);
 }
 
+TEST_CASE("AppContainer helper env keeps LOCALAPPDATA and drops APPDATA", "[PluginSandbox][windows][env]")
+{
+    const std::vector<std::wstring> entries = plugin_ipc::win_scrubbed_helper_env_entries_for_testing();
+    auto                            has_var = [&](const wchar_t* name) {
+        const std::wstring prefix = std::wstring(name) + L"=";
+        for (const std::wstring& e : entries) {
+            if (e.size() >= prefix.size() && ::_wcsnicmp(e.c_str(), prefix.c_str(), prefix.size()) == 0)
+                return true;
+        }
+        return false;
+    };
+    // CreateProcessW + AppContainer SECURITY_CAPABILITIES requires LOCALAPPDATA (error 203
+    // without it). Windows redirects it to Packages\<moniker>\AC; APPDATA/USERPROFILE stay out.
+    CHECK(has_var(L"LOCALAPPDATA"));
+    CHECK_FALSE(has_var(L"APPDATA"));
+    CHECK_FALSE(has_var(L"USERPROFILE"));
+    CHECK_FALSE(has_var(L"HOMEDRIVE"));
+    CHECK_FALSE(has_var(L"HOMEPATH"));
+}
+
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();

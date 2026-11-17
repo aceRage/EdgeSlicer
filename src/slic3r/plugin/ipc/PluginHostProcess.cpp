@@ -208,7 +208,7 @@ bool win_env_entry_allowed(const wchar_t* entry)
     return false;
 }
 
-std::vector<wchar_t> scrubbed_helper_env_block()
+std::vector<std::wstring> scrubbed_helper_env_entries()
 {
     std::vector<std::wstring> kept;
     bool                      have_nousersite = false;
@@ -233,7 +233,13 @@ std::vector<wchar_t> scrubbed_helper_env_block()
     }
     if (!have_nousersite)
         kept.emplace_back(L"PYTHONNOUSERSITE=1");
-    std::vector<wchar_t> block;
+    return kept;
+}
+
+std::vector<wchar_t> scrubbed_helper_env_block()
+{
+    const std::vector<std::wstring> kept = scrubbed_helper_env_entries();
+    std::vector<wchar_t>            block;
     for (const std::wstring& s : kept) {
         block.insert(block.end(), s.begin(), s.end());
         block.push_back(L'\0');
@@ -340,6 +346,10 @@ int pipe_cloexec(int p[2])
 void set_allow_helper_env_overrides_for_testing(bool allow) { g_allow_env_overrides.store(allow, std::memory_order_release); }
 
 bool helper_env_overrides_allowed() { return g_allow_env_overrides.load(std::memory_order_acquire); }
+
+#ifdef _WIN32
+std::vector<std::wstring> win_scrubbed_helper_env_entries_for_testing() { return scrubbed_helper_env_entries(); }
+#endif
 
 boost::filesystem::path helper_path()
 {

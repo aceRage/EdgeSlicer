@@ -7,6 +7,9 @@
 
 #include <cstdint>
 #include <string>
+#ifdef _WIN32
+#include <vector>
+#endif
 
 namespace Slic3r::plugin_ipc {
 
@@ -44,6 +47,10 @@ bool                    helper_exists();
 #endif
 EDGE_PLUGIN_TEST_HOOK void set_allow_helper_env_overrides_for_testing(bool allow);
 bool                       helper_env_overrides_allowed();
+#ifdef _WIN32
+// Entries that go into the AppContainer CreateProcessW env block (KEY=value).
+EDGE_PLUGIN_TEST_HOOK std::vector<std::wstring> win_scrubbed_helper_env_entries_for_testing();
+#endif
 
 // Spawn edge-plugin-host. POSIX: socketpair + fork/exec. POSIX_SPAWN_CLOEXEC_DEFAULT
 // is Apple-only (glibc has no such flag), so Linux never takes a posix_spawn path.
