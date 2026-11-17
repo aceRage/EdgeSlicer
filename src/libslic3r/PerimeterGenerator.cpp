@@ -9,6 +9,7 @@
 #include "ShortestPath.hpp"
 #include "VariableWidth.hpp"
 #include "Arachne/WallToolPaths.hpp"
+#include "FineDetail.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "ExPolygonCollection.hpp"
 #include "Geometry.hpp"
@@ -1821,7 +1822,8 @@ void PerimeterGenerator::process_classic()
                 ExPolygons offsets_with_smaller_width;
                 if (i == 0) {
                     // look for thin walls
-                    if (this->config->detect_thin_wall) {
+                    // EdgeSlicer, Fine detail D4 (a): a region with Fine detail on detects thin walls too.
+                    if (FineDetail::classic_thin_walls(*this->config)) {
                         // the minimum thickness of a single loop is:
                         // ext_width/2 + ext_spacing/2 + spacing/2 + width/2
                         offsets = offset2_ex(last,
@@ -2985,7 +2987,8 @@ void PerimeterGenerator::process_arachne()
                        apply_precise_outer_wall? -float(ext_perimeter_width - ext_perimeter_spacing )
                                                  : -float(ext_perimeter_width / 2. - ext_perimeter_spacing / 2.));
         
-        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config);
+        // EdgeSlicer, Fine detail: the region config carries the level, so a modifier can set it.
+        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config);
         // Set params is_top_or_bottom_layer for adjusting short-wall removal sensitivity.
         input_params.is_top_or_bottom_layer = (is_bottom_layer || is_topmost_layer) ? true : false;
 
@@ -3461,7 +3464,10 @@ ExPolygons PerimeterGenerator::printable_slices(const ExPolygons &slices) const
     double min_width = *std::min_element(print_config->nozzle_diameter.values.begin(),
                                          print_config->nozzle_diameter.values.end()) / 3.;
     if (object_config->wall_generator.value == PerimeterGeneratorType::Arachne) {
-        const double min_feature_size = Arachne::make_paths_params(layer_id, *object_config, *print_config).min_feature_size;
+        // EdgeSlicer, Fine detail: the region's limit, which Fine text lowers (resolves low, as above).
+        const Arachne::WallToolPathsParams params = Arachne::make_paths_params(layer_id, *object_config, *print_config, config);
+        const double min_feature_size = params.thin_feature_size > 0.f ?
+            FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size) : params.min_feature_size;
         // Spiral vase can put a classic layer under an Arachne one, so there both limits apply.
         min_width = print_config->spiral_mode ? std::min(min_width, min_feature_size) : min_feature_size;
     }

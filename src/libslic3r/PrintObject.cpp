@@ -5,6 +5,7 @@
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
+#include "FineDetail.hpp"
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
@@ -773,7 +774,7 @@ void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_s
     const double line_width = ext_flow.width();
     const double nozzle     = ext_flow.nozzle_diameter();
     const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
-    const bool   thin_walls = layerm->region().config().detect_thin_wall.value;
+    const bool   thin_walls = FineDetail::classic_thin_walls(layerm->region().config());
 
     auto mm = [](double v) { return Slic3r::format("%.2f", v); };
     std::string message;
@@ -1896,6 +1897,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_shadow_speed_ratio"
             || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
+            // EdgeSlicer, Fine detail: region keys read by the perimeter generator.
+            || opt_key == "fine_detail"
+            || opt_key == "thin_feature_line_width"
+            || opt_key == "thin_feature_min_size"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
@@ -1921,7 +1926,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_maximum_deviation"
             || opt_key == "min_feature_size"
             || opt_key == "min_length_factor"
-            || opt_key == "min_bead_width") {
+            || opt_key == "min_bead_width"
+            // EdgeSlicer, Fine detail: Cura's separate minimums.
+            || opt_key == "min_odd_wall_line_width"
+            || opt_key == "min_even_wall_line_width") {
             steps.emplace_back(posSlice);
         } else if (
                opt_key == "seam_position"
@@ -1961,6 +1969,8 @@ bool PrintObject::invalidate_state_by_config_options(
             // so nothing sliced has to be redone.
             || opt_key == "over_support_flow"
             || opt_key == "over_support_speed"
+            // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
+            || opt_key == "fine_detail_speed"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"

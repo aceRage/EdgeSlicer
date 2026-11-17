@@ -73,6 +73,7 @@
 #include "libslic3r/SupportSet.hpp"
 // "Use Bambu defaults" on the Prime tower group.
 #include "libslic3r/PrimeTowerDefaults.hpp"
+#include "libslic3r/FineDetail.hpp"
 // The row's label, also its handle: a widget-only row has no option key for get_line() (TabPrint::tower_defaults_line).
 static const char* const TOWER_DEFAULTS_ROW_LABEL = L("Bambu defaults");
 #include "GUI_Factories.hpp"
@@ -2614,6 +2615,18 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     }
 
+    // EdgeSlicer, Fine detail (D1): choosing Balanced / Fine text writes its values into the raw keys, editing a raw
+    // key under a named level makes it Custom (FineDetail::changes_for_edit). Through ConfigManipulation::apply(), so
+    // object and modifier settings (TabPrintModel::reload_config) store the written keys too.
+    if (dynamic_cast<TabPrint*>(this) != nullptr && m_config->has("fine_detail")) {
+        const DynamicPrintConfig changes = FineDetail::changes_for_edit(*m_config, opt_key);
+        if (!changes.empty()) {
+            DynamicPrintConfig new_conf = *m_config;
+            new_conf.apply(changes);
+            m_config_manipulation.apply(m_config, &new_conf);
+        }
+    }
+
     if (opt_key == "gcode_flavor" && m_type == Preset::TYPE_PRINTER) {
         if (auto printer_tab = dynamic_cast<TabPrinter*>(this))
             printer_tab->on_gcode_flavor_changed();
@@ -3553,16 +3566,36 @@ void TabPrint::build()
                                  "curved_tops_dev_allow_unverified_head" })
             optgroup->append_single_option_line(key);
 
+        // EdgeSlicer, Fine detail P1 (design B, D5): the one "Wall generator" group is split by what the settings do to
+        // the print. Keys are unchanged; the old labels stay searchable (Search.cpp).
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
+
+        optgroup = page->new_optgroup(L("Thin features"), L"param_wall_generator");
+        optgroup->append_single_option_line("fine_detail", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("thin_feature_line_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("thin_feature_min_size", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("fine_detail_speed", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("initial_layer_min_bead_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
+        if (m_type == Preset::TYPE_PRINT) {
+            // The percent values above in millimetres for the printer's nozzle (a full-width note line, as the
+            // filament price note: OG_CustomCtrl draws a labelled line from its first option).
+            Line fine_detail_note_line = Line{ "", "" };
+            fine_detail_note_line.full_width = 1;
+            fine_detail_note_line.widget = [this](wxWindow* parent) { return fine_detail_note_create_widget(parent); };
+            optgroup->append_line(fine_detail_note_line);
+        }
+
+        optgroup = page->new_optgroup(L("Wall count changes"), L"param_wall_generator");
+        optgroup->append_single_option_line("min_odd_wall_line_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_even_wall_line_width", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_filter_deviation", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_length", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_distribution_count", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("initial_layer_min_bead_width", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_maximum_resolution", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_maximum_deviation", "quality_settings_wall_generator#arachne");
 
@@ -5016,12 +5049,61 @@ void TabPrint::on_tower_defaults()
         m_active_page->update_visibility(m_mode, true);
 }
 
+wxSizer* TabPrint::fine_detail_note_create_widget(wxWindow* parent)
+{
+    auto* vsizer = new wxBoxSizer(wxVERTICAL);
+    m_fine_detail_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    m_fine_detail_note->SetFont(wxGetApp().normal_font());
+    vsizer->Add(m_fine_detail_note, 0, wxEXPAND);
+    update_fine_detail_note();
+    return vsizer;
+}
+
+// EdgeSlicer, Fine detail P1: the Thin features percent values in millimetres for the printer's smallest nozzle, and the
+// width each prints as at the process layer height (what the preview's Line width view shows).
+void TabPrint::update_fine_detail_note()
+{
+    if (m_fine_detail_note == nullptr || m_config == nullptr || m_preset_bundle == nullptr)
+        return;
+    PrintConfig printer;
+    printer.apply(m_preset_bundle->printers.get_edited_preset().config, true);
+    const double nozzle = min_physical_nozzle_diameter(printer);
+    const FineDetail::Millimetres mm = FineDetail::millimetres(*m_config, nozzle);
+    const bool arachne = m_config->has("wall_generator") &&
+                         m_config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
+    auto f2   = [](double v) { return wxString::Format("%.2f", v); };
+    auto line = [&mm](double spacing) { return FineDetail::line_width(spacing, mm.layer_height); };
+
+    wxString text = wxString::Format(_L("On this printer (%s mm nozzle, %s mm layers):"), f2(mm.nozzle), f2(mm.layer_height));
+    if (arachne) {
+        text += "\n" + wxString::Format(_L("Skip features thinner than: %s mm."), f2(mm.skip_thinner_than));
+        text += "\n" + wxString::Format(_L("Thinnest line: %s mm, printed as a %s mm line."), f2(mm.thinnest_line), f2(line(mm.thinnest_line)));
+        text += "\n" + wxString::Format(_L("Thinnest line, first layer: %s mm."), f2(mm.thinnest_line_first_layer));
+        if (mm.fine_detail_line > 0.)
+            text += "\n" + wxString::Format(_L("Fine detail: thin features down to a %s mm line, skipped under %s mm."),
+                                            f2(line(mm.fine_detail_line)), f2(mm.fine_detail_skip));
+        text += "\n" + wxString::Format(_L("Odd / even wall minimums: %s / %s mm."), f2(mm.odd_minimum), f2(mm.even_minimum));
+    } else if (mm.fine_detail_line > 0.) {
+        text += "\n" + _L("Classic walls: Fine detail prints thin parts as one line of their own width, from a third of the nozzle.");
+    } else {
+        text += "\n" + _L("Classic walls: these settings are for Arachne; turn on Fine detail or Detect thin wall to print thin parts.");
+    }
+    if (m_fine_detail_note->GetLabel() == text)
+        return;
+    m_fine_detail_note->SetLabel(text);
+    m_fine_detail_note->Wrap(em_unit(m_fine_detail_note) * 45);
+    if (wxWindow* parent = m_fine_detail_note->GetParent())
+        parent->Layout();
+}
+
 void TabPrint::update_description_lines()
 {
     Tab::update_description_lines();
 
     if (m_preset_bundle->printers.get_selected_preset().printer_technology() == ptSLA)
         return;
+
+    update_fine_detail_note();
 
     if (m_active_page && m_active_page->title() == "Layers and perimeters" &&
         m_recommended_thin_wall_thickness_description_line && m_top_bottom_shell_thickness_explanation)
@@ -5207,6 +5289,7 @@ void TabPrint::clear_pages()
 
     m_recommended_thin_wall_thickness_description_line = nullptr;
     m_top_bottom_shell_thickness_explanation = nullptr;
+    m_fine_detail_note = nullptr;
 
     // Ultra (support sets): the page owns these windows, so drop the pointers with it. The three
     // icon buttons registered themselves in Tab::m_scaled_buttons for the DPI / dark-mode passes,

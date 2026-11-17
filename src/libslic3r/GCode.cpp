@@ -12293,6 +12293,17 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             }
         }
     }
+    // EdgeSlicer, Fine detail (P2): a wall line narrower than the Thinnest line (min_bead_width), which only Fine detail
+    // makes on Arachne and only its thin-wall detection makes on Classic, prints no faster than fine_detail_speed.
+    // A 0.22 mm line from a 0.4 nozzle at the outer wall speed is the fragile case. Off never enters.
+    if (m_config.fine_detail.value != FineDetailLevel::Off && m_config.fine_detail_speed.value > 0. && is_perimeter(path.role())) {
+        const double thinnest_line = m_config.min_bead_width.value * 0.01 * min_physical_nozzle_diameter(m_config) +
+                                     double(path.height) * (1. - 0.25 * PI);
+        if (double(path.width) < thinnest_line - EPSILON && speed > m_config.fine_detail_speed.value) {
+            speed         = m_config.fine_detail_speed.value;
+            speed_setting = "fine_detail_speed";
+        }
+    }
     // Override skirt speed if set
     if (path.role() == erSkirt) {
         const double skirt_speed = m_config.skirt_speed.value; // a plain float option: same value get_abs_value("skirt_speed") returned

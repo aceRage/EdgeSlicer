@@ -1,5 +1,6 @@
 #include "Layer.hpp"
 #include "ClipperUtils.hpp"
+#include "FineDetail.hpp"
 #include "Print.hpp"
 #include "Fill/Fill.hpp"
 #include "ShortestPath.hpp"
@@ -251,6 +252,9 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.opt_serialize("inner_wall_line_width") == other_config.opt_serialize("inner_wall_line_width")
 		&& config.opt_serialize("outer_wall_line_width") == other_config.opt_serialize("outer_wall_line_width")
 		&& config.detect_thin_wall                  == other_config.detect_thin_wall
+        // EdgeSlicer, Fine detail: a modifier with its own level must get its own perimeter run, and its thin lines
+        // their own speed cap.
+        && FineDetail::same_walls(config, other_config)
 		&& config.infill_wall_overlap              == other_config.infill_wall_overlap
         && config.top_bottom_infill_wall_overlap              == other_config.top_bottom_infill_wall_overlap
         // Orca: these flags directly change the effective wall count produced by the perimeter

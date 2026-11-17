@@ -824,6 +824,14 @@ static t_config_enum_values s_keys_map_PerimeterGeneratorType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
 
+static t_config_enum_values s_keys_map_FineDetailLevel{
+    { "off",       int(FineDetailLevel::Off) },
+    { "balanced",  int(FineDetailLevel::Balanced) },
+    { "fine_text", int(FineDetailLevel::FineText) },
+    { "custom",    int(FineDetailLevel::Custom) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FineDetailLevel)
+
 static t_config_enum_values s_keys_map_ToolChangeOrderingType {
     { "default", int(ToolChangeOrderingType::Default) },
     { "cyclic",  int(ToolChangeOrderingType::Cyclic) }
@@ -1441,7 +1449,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("gap_fill_target", coEnum);
     def->label = L("Apply gap fill");
     def->category = L("Strength");
-    def->tooltip = L("Enables gap fill for the selected solid surfaces. The minimum gap length that will be filled can be controlled "
+    // EdgeSlicer (Fine detail P1): first say what it does not reach.
+    def->tooltip = L("Fills narrow leftovers inside solid infill. It does not act on Arachne walls (they change width "
+                     "instead) or on curved tops.\n\n"
+                     "Enables gap fill for the selected solid surfaces. The minimum gap length that will be filled can be controlled "
                      "from the filter out tiny gaps option below.\n\n"
                      "Options:\n"
                      "1. Everywhere: Applies gap fill to top, bottom and internal solid surfaces for maximum strength\n"
@@ -9394,10 +9405,78 @@ void PrintConfigDef::init_fff_params()
     def = this->add("detect_thin_wall", coBool);
     def->label = L("Detect thin wall");
     def->category = L("Strength");
-    def->tooltip = L("Detect thin wall which can't contain two line width. And use single line to print. "
-                     "Maybe printed not very well, because it's not closed loop.");
+    // EdgeSlicer (Fine detail P1): say what it does and which generator it belongs to.
+    def->tooltip = L("Classic wall generator only. Parts thinner than two lines are printed as one line of their own width, "
+                     "down to a third of the nozzle, instead of being left out. Such a line is open, with its own start and end. "
+                     "Fine detail turns this on by itself.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, P2). Region keys: global, per object and
+    // per modifier. Off (the default and what every older project and preset loads as) is the walls as before.
+    def = this->add("fine_detail", coEnum);
+    def->label = L("Fine detail");
+    def->category = L("Quality");
+    def->tooltip = L("Lets features narrower than a wall, such as thin text strokes, print with a thinner line instead of "
+                     "being widened to the Thinnest line. Walls of a normal thickness are printed exactly as with Off.\n"
+                     "Off: as before.\n"
+                     "Balanced: thin features may go down to 60% of the nozzle (a 0.28 mm line on a 0.4 nozzle).\n"
+                     "Fine text: down to 45% of the nozzle (a 0.22 mm line on a 0.4 nozzle), and features down to 15% of "
+                     "the nozzle are printed instead of skipped.\n"
+                     "Custom: use the two values below.\n"
+                     "A line is never made narrower than the layer is tall, so for the finest text lower the layer height. "
+                     "The first layer keeps its own Thinnest line, first layer. "
+                     "With the Classic wall generator any level other than Off turns on Detect thin wall. "
+                     "Thin lines print no faster than Fine detail speed.");
+    def->enum_keys_map = &ConfigOptionEnum<FineDetailLevel>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("balanced");
+    def->enum_values.push_back("fine_text");
+    def->enum_values.push_back("custom");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Balanced"));
+    def->enum_labels.push_back(L("Fine text"));
+    def->enum_labels.push_back(L("Custom"));
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
+
+    def = this->add("thin_feature_line_width", coPercent);
+    def->label = L("Thinnest line for thin features");
+    def->category = L("Quality");
+    def->tooltip = L("Used while Fine detail is on. The narrowest line a feature thinner than a wall is printed with; "
+                     "a feature between this and the Thinnest line is printed at its own width. It does not change "
+                     "when a wall splits into two lines. Values above the Thinnest line act as the Thinnest line, and the "
+                     "line is never narrower than the layer is tall. "
+                     "Choosing Balanced or Fine text writes its value here; changing it sets Fine detail to Custom. "
+                     "Percent of the nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 10;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionPercent(60));
+
+    def = this->add("thin_feature_min_size", coPercent);
+    def->label = L("Skip thin features thinner than");
+    def->category = L("Quality");
+    def->tooltip = L("Used while Fine detail is on. Features thinner than this are not printed. 0 means the same as "
+                     "Skip features thinner than; a larger value than that acts as that. "
+                     "Choosing Balanced or Fine text writes its value here; changing it sets Fine detail to Custom. "
+                     "Percent of the nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("fine_detail_speed", coFloat);
+    def->label = L("Fine detail speed");
+    def->category = L("Quality");
+    def->tooltip = L("Used while Fine detail is on. Wall lines narrower than the Thinnest line print no faster than this. "
+                     "A line narrower than the nozzle needs a slower speed to come out clean. 0 leaves their speed alone.");
+    def->sidetext = L("mm/s");
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloat(50.));
 
     def = this->add("change_filament_gcode", coString);
     def->label = L("Change filament G-code");
@@ -10463,39 +10542,37 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
 
+    // EdgeSlicer (Fine detail P1, D5): the Arachne keys below keep their keys and get labels and tooltips that say
+    // what the print looks like. The old labels stay searchable (Search.cpp, search_alias_labels()).
     def = this->add("wall_transition_length", coPercent);
-    def->label = L("Wall transition length");
+    def->label = L("Wall count change length");
     def->category = L("Quality");
-    def->tooltip = L("When transitioning between different numbers of walls as the part becomes "
-        "thinner, a certain amount of space is allotted to split or join the wall segments. "
-        "It's expressed as a percentage over nozzle diameter.");
+    def->tooltip = L("Arachne only. Where a part gets thinner and loses a wall, the change is spread over this length. "
+        "Longer is smoother but leaves the lines off their ideal width for longer. "
+        "Percent of the nozzle diameter.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 0;
     def->set_default_value(new ConfigOptionPercent(100));
 
     def = this->add("wall_transition_filter_deviation", coPercent);
-    def->label = L("Wall transitioning filter margin");
+    def->label = L("Allowed width drift before changing wall count");
     def->category = L("Quality");
-    def->tooltip = L("Prevent transitioning back and forth between one extra wall and one less. This "
-        "margin extends the range of extrusion widths which follow to [Minimum wall width "
-        "- margin, 2 * Minimum wall width + margin]. Increasing this margin "
-        "reduces the number of transitions, which reduces the number of extrusion "
-        "starts/stops and travel time. However, large extrusion width variation can lead to "
-        "under- or overextrusion problems. "
-        "It's expressed as a percentage over nozzle diameter.");
+    def->tooltip = L("Arachne only. How far a line may be squeezed or stretched to avoid adding a wall and dropping it "
+        "again a moment later. Higher: fewer starts and stops and less travel, but a less even line width, which can "
+        "under- or over-extrude. "
+        "Percent of the nozzle diameter.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 0;
     def->set_default_value(new ConfigOptionPercent(25));
 
     def = this->add("wall_transition_angle", coFloat);
-    def->label = L("Wall transitioning threshold angle");
+    def->label = L("No centre line in corners sharper than");
     def->category = L("Quality");
-    def->tooltip = L("When to create transitions between even and odd numbers of walls. A wedge shape with"
-        " an angle greater than this setting will not have transitions and no walls will be "
-        "printed in the center to fill the remaining space. Reducing this setting reduces "
-        "the number and length of these center walls, but may leave gaps or overextrude.");
+    def->tooltip = L("Arachne only. In a wedge or corner that opens faster than this angle no extra centre line is added. "
+        "Lower: fewer short centre lines, but small unfilled tips in sharp corners. "
+        "Higher: sharper corners are filled, with more short lines.");
     def->sidetext = "°";	// degrees, don't need translation
     def->mode = comAdvanced;
     def->min = 1.;
@@ -10503,34 +10580,37 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(10.));
 
     def = this->add("wall_distribution_count", coInt);
-    def->label = L("Wall distribution count");
+    def->label = L("Walls that absorb width changes");
     def->category = L("Quality");
-    def->tooltip = L("The number of walls, counted from the center, over which the variation needs to be "
-        "spread. Lower values mean that the outer walls don't change in width.");
+    def->tooltip = L("Arachne only. When a wall does not fit a whole number of lines, this many lines, counted from the "
+        "middle, are made wider or narrower. 1 keeps all the outer lines at their set width.");
     def->mode = comAdvanced;
     def->min = 1;
     def->set_default_value(new ConfigOptionInt(1));
 
     def = this->add("min_feature_size", coPercent);
-    def->label = L("Minimum feature size");
+    def->label = L("Skip features thinner than");
     def->category = L("Quality");
-    def->tooltip = L("Minimum thickness of thin features. Model features that are thinner than this value will not be printed, "
-                     "while features thicker than than this value will be widened to the minimum wall width. "
-                     "It's expressed as a percentage over nozzle diameter.");
+    def->tooltip = L("Arachne only. Parts of the model thinner than this are not printed at all. Anything thicker gets at "
+                     "least one line. Lower it to keep hair-thin details; they are printed wider than they are (see "
+                     "Thinnest line). The outer wall's inset (more with Precise wall) is taken off a feature before this "
+                     "is compared. "
+                     "Percent of the nozzle diameter.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 0;
     def->set_default_value(new ConfigOptionPercent(25));
 
     def = this->add("min_length_factor", coFloat);
-    def->label = L("Minimum wall length");
+    def->label = L("Drop centre lines shorter than");
     def->category = L("Quality");
-    def->tooltip = L("Adjust this value to prevent short, unclosed walls from being printed, which could increase print time. "
-    "Higher values remove more and longer walls.\n\n"
-    "NOTE: Bottom and top surfaces will not be affected by this value to prevent visual gaps on the outside of the model. "
+    def->tooltip = L("Arachne only. Open centre lines shorter than this many times their own width are not printed, which "
+    "saves short starts and stops. Higher values remove more and longer lines.\n\n"
+    "NOTE: Bottom and top surfaces always use 0.5 to prevent visual gaps on the outside of the model. "
     "Adjust 'One wall threshold' in the Advanced settings below to adjust the sensitivity of what is considered a top-surface. "
     "'One wall threshold' is only visible if this setting is set above the default value of 0.5, or if single-wall top surfaces is enabled.");
-    def->sidetext = "mm";	// milimeters, don't need translation
+    // EdgeSlicer: a factor of the line's own width (WallToolPaths::removeSmallLines), not millimetres.
+    def->sidetext = "x";
     def->mode = comAdvanced;
     def->min = 0.0;
     def->max = 25.0;
@@ -10560,26 +10640,55 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.025f));
 
     def = this->add("initial_layer_min_bead_width", coPercent);
-    def->label = L("First layer minimum wall width");
+    def->label = L("Thinnest line, first layer");
     def->category = L("Quality");
-    def->tooltip = L("The minimum wall width that should be used for the first layer is recommended to be set "
-                     "to the same size as the nozzle. This adjustment is expected to enhance adhesion.");
+    def->tooltip = L("Arachne only. Same as Thinnest line, for the first layer only, where it does all of that setting's "
+                     "jobs (Fine detail and the odd / even minimums do not apply on the first layer). Wider lines stick "
+                     "to the bed better; the nozzle diameter is a good value. "
+                     "Percent of the nozzle diameter.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 0;
     def->set_default_value(new ConfigOptionPercent(85));
 
     def = this->add("min_bead_width", coPercent);
-    def->label = L("Minimum wall width");
+    def->label = L("Thinnest line");
     def->category = L("Quality");
-    def->tooltip = L("Width of the wall that will replace thin features (according to the Minimum feature size) "
-        "of the model. If the Minimum wall width is thinner than the thickness of the feature,"
-        " the wall will become as thick as the feature itself. "
-        "It's expressed as a percentage over nozzle diameter.");
+    def->tooltip = L("Arachne only. The narrowest line the slicer prints. A detail thinner than this is printed this wide, "
+        "so very fine text comes out bolder than drawn. Unless the odd / even minimums below are set, it also decides "
+        "when a thin wall is printed as one wide line or two narrow ones: at 85% a wall up to about 1.6 line widths is "
+        "one line, at 45% it becomes two from about 1.0. For thin text without changing the walls use Fine detail instead. "
+        "Percent of the nozzle diameter.");
     def->sidetext = "%";
     def->mode = comAdvanced;
     def->min = 0;
     def->set_default_value(new ConfigOptionPercent(85));
+
+    def = this->add("min_odd_wall_line_width", coPercent);
+    def->label = L("Minimum odd wall line width");
+    def->category = L("Quality");
+    def->tooltip = L("Arachne only. Decides when a wall printed with one line (or an odd number of lines) becomes two: "
+        "the single line splits once two lines would each be at least this wide. Lower splits thinner walls into two "
+        "narrow lines; higher keeps one wide line longer. 0 means the same as Thinnest line, as before. "
+        "Percent of the nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("min_even_wall_line_width", coPercent);
+    def->label = L("Minimum even wall line width");
+    def->category = L("Quality");
+    def->tooltip = L("Arachne only. Decides when a centre line is added between two (or an even number of) wall lines: "
+        "once the gap between them is at least this wide. Lower adds thin centre lines sooner; higher widens the two "
+        "lines instead. 0 means the same as Thinnest line, as before. "
+        "Percent of the nozzle diameter.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionPercent(0));
 
     // Declare retract values for filament profile, overriding the printer's extruder profile.
     for (const char *opt_key : {

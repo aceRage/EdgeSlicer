@@ -638,6 +638,11 @@ private:
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;
 
+	// EdgeSlicer, Fine detail P1: "= x mm on this nozzle" for the percent keys of the Thin features group.
+	wxStaticText*	m_fine_detail_note = nullptr;
+	wxSizer*		fine_detail_note_create_widget(wxWindow* parent);
+	void			update_fine_detail_note();
+
 	// Ultra (support sets): the "Support set" row at the top of the Support page. A support set
 	// is not a preset - Apply copies its values into the edited process settings through
 	// Tab::load_config(), so the preset shows as modified exactly like a hand edit.
