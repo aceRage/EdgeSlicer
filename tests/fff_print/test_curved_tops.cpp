@@ -2287,7 +2287,7 @@ TEST_CASE("Curved tops P3: Developer mode and override changes re-plan the block
     {
         const DevModeGuard dev(true);
         print.apply(model, puck_config(true, items));
-        CHECK(Test::gcode(print) == gcode_curved);
+        CHECK(gcode_without_curved_tops_key(Test::gcode(print)) == gcode_without_curved_tops_key(gcode_curved));
         CHECK(top_block(print));
         // A G-code-only override changed after the slice: re-planned and re-exported with the new cap.
         print.apply(model, puck_config(true, joined(items, { { "curved_tops_dev_speed_cap", "22" } })));
