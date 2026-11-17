@@ -11,7 +11,7 @@
 
 namespace Slic3r {
 struct PluginPermissions;
-class PluginDescriptor;
+struct PluginDescriptor;
 } // namespace Slic3r
 
 namespace Slic3r::plugin_ipc {
