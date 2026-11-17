@@ -951,6 +951,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         ExtrusionRole m_extrusion_role;
         unsigned char m_extruder_id;
         unsigned char m_last_extruder_id;
+        // False until the G-code selects its first filament. m_extruder_id starts at 0 only as a placeholder
+        // (BambuStudio / OrcaSlicer start at -1): the first selection is a load, not a change away from filament 0.
+        bool m_filament_selected;
         std::vector<int> m_output_tool_filaments; // Per-nozzle process P4: see set_output_tool_filaments()
         ExtruderColors m_extruder_colors;
         ExtruderTemps m_extruder_temps;
