@@ -144,6 +144,8 @@ std::string format_python_error(PyObject* ptype, PyObject* pvalue, PyObject* ptr
             const char* s = PyUnicode_AsUTF8(type_name);
             if (s) result += s;
             Py_DECREF(type_name);
+        } else {
+            PyErr_Clear();
         }
     }
 
@@ -154,6 +156,16 @@ std::string format_python_error(PyObject* ptype, PyObject* pvalue, PyObject* ptr
             const char* cstr = PyUnicode_AsUTF8(s);
             if (cstr) result += cstr;
             Py_DECREF(s);
+        } else {
+            PyErr_Clear();
+            PyObject* repr = PyObject_Repr(pvalue);
+            if (repr) {
+                const char* cstr = PyUnicode_AsUTF8(repr);
+                if (cstr) result += cstr;
+                Py_DECREF(repr);
+            } else {
+                PyErr_Clear();
+            }
         }
     }
 
@@ -174,7 +186,21 @@ std::string format_python_error(PyObject* ptype, PyObject* pvalue, PyObject* ptr
         }
     }
 
+    if (result.empty())
+        result = "unknown Python exception";
     return result;
+}
+
+std::string consume_import_error()
+{
+    PyObject *ptype = nullptr, *pvalue = nullptr, *ptraceback = nullptr;
+    PyErr_Fetch(&ptype, &pvalue, &ptraceback);
+    PyErr_NormalizeException(&ptype, &pvalue, &ptraceback);
+    std::string detail = format_python_error(ptype, pvalue, ptraceback);
+    Py_XDECREF(ptype);
+    Py_XDECREF(pvalue);
+    Py_XDECREF(ptraceback);
+    return detail;
 }
 
 #ifdef _WIN32
@@ -1359,16 +1385,13 @@ PyObject* PythonInterpreter::load_module_from_file(const std::string&       file
 
     // Import the module
     PyObject* module = PyImport_ImportModule(module_name.c_str());
-    record_plugin_modules_locked(module_name, plugin_paths ? *plugin_paths : std::vector<std::string>{}, plugin_modules);
     if (!module) {
-        PyObject *ptype, *pvalue, *ptraceback;
-        PyErr_Fetch(&ptype, &pvalue, &ptraceback);
-        error = "Failed to import module: " + format_python_error(ptype, pvalue, ptraceback);
-        Py_XDECREF(ptype);
-        Py_XDECREF(pvalue);
-        Py_XDECREF(ptraceback);
+        // Fetch before record_plugin_modules_locked: that helper PyErr_Clears on a failed
+        // dict walk, which would leave "Failed to import module: " with no exception text.
+        error = "Failed to import module: " + consume_import_error();
         return nullptr;
     }
+    record_plugin_modules_locked(module_name, plugin_paths ? *plugin_paths : std::vector<std::string>{}, plugin_modules);
 
     return module;
 }
@@ -1407,16 +1430,11 @@ PyObject* PythonInterpreter::load_module_from_directory(const std::string& dir_p
     remove_module_tree_locked(pkg_name);
 
     PyObject* module = PyImport_ImportModule(pkg_name.c_str());
-    record_plugin_modules_locked(pkg_name, plugin_paths ? *plugin_paths : std::vector<std::string>{}, plugin_modules);
     if (!module) {
-        PyObject *ptype, *pvalue, *ptraceback;
-        PyErr_Fetch(&ptype, &pvalue, &ptraceback);
-        error = "Failed to import module: " + format_python_error(ptype, pvalue, ptraceback);
-        Py_XDECREF(ptype);
-        Py_XDECREF(pvalue);
-        Py_XDECREF(ptraceback);
+        error = "Failed to import module: " + consume_import_error();
         return nullptr;
     }
+    record_plugin_modules_locked(pkg_name, plugin_paths ? *plugin_paths : std::vector<std::string>{}, plugin_modules);
 
     return module;
 }
