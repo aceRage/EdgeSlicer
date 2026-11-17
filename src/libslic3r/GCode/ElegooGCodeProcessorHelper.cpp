@@ -156,9 +156,10 @@ void GCodeProcessor::process_elegoo_M6211(const GCodeReader::GCodeLine& line)
 
     const float m6211_time = ElegooM6211::estimate_M6211_time(line, m_printer_model, length, new_extruder_temp, m_start_position[X], m_start_position[Y]);
 
-    // Upstream starts with no filament selected; ours starts on filament 0. "Nothing loaded" is the
-    // M6211 of the start G-code: no tool change and no M6211 purge (which every M6211 books below) yet.
-    const bool nothing_loaded     = m_result.print_statistics.total_filamentchanges == 0 && m_used_filaments.flush_per_filament.empty();
+    // Upstream starts with no filament selected; ours starts on the placeholder filament 0 with
+    // m_filament_selected false. "Nothing loaded" is the M6211 of the start G-code: no filament selected yet
+    // (a first selection is no longer counted as a filament change, so the change count cannot tell).
+    const bool nothing_loaded     = !m_filament_selected;
     const int  curr_filament_id   = static_cast<int>(m_extruder_id);
     const bool is_first_extrusion = nothing_loaded || filament_id == curr_filament_id;
 
@@ -176,6 +177,7 @@ void GCodeProcessor::process_elegoo_M6211(const GCodeReader::GCodeLine& line)
         // Loading the first filament (upstream books it as the initial load).
         simulate_st_synchronize(m6211_time);
     }
+    m_filament_selected = true; // the M6211 has loaded filament_id
 
     // Purge statistics: the purge first pushes out what is left of the previous filament in the nozzle.
     const float filament_diameter = static_cast<size_t>(filament_id) < m_result.filament_diameters.size() ?
