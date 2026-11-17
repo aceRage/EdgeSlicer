@@ -133,11 +133,15 @@ void  close_parent_sandbox();
 // The path is resolved once at grant time and stored on the session; close/revoke never
 // re-reads the global. An explicit DACL excludes the package SID and ALL APPLICATION
 // PACKAGES. Sweep accepts only derived `EdgeSlicer.ph.*` / test `EdgeSlicer.t.*`
-// package SIDs and paths under known roots (current data_dir, remembered spec
-// data_dirs, plugin dirs, python_home, helper, resources, temp). Copy-replace of
-// Low-IL files is limited to write grants inside those roots. The journal exists
-// from before the first ACE until after the last
-// ACE is removed; leftover package-SID ACEs are recorded even when RX is already present.
+// package SIDs. ACE revoke and Low-label restore on a recorded grant path are
+// allowed for that session's python_home / helper / resources / data_dir even when
+// those paths sit outside this process's current roots (moved install, portable
+// copy, test binary vs GUI). Copy-replace of Low-IL files stays inside this
+// process's known user-rw roots (current data_dir, remembered spec data_dirs,
+// plugin dirs, python_home, helper, resources, temp). A session is rewritten
+// with only the remainder and kept if any grant was skipped or failed; the
+// journal is deleted only after every grant in every session is removed.
+// Leftover package-SID ACEs are recorded even when RX is already present.
 // ALL APPLICATION PACKAGES RX (Program Files) is not journaled. A missing journal
 // directory is created; spawn fails only when no data dir is resolvable.
 void sweep_stale_parent_sandbox_grants();

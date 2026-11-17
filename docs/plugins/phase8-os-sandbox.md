@@ -172,12 +172,17 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `%LOCALAPPDATA%` / `Packages/*/AC` copy — `SHGetKnownFolderPath` inside the
   helper would resolve to the container folder. Sweep accepts only SIDs that
   match a derived `EdgeSlicer.ph.*` / test `EdgeSlicer.t.*` profile (never
-  `S-1-15-2-1`) and paths
-  under known roots (current `data_dir`, remembered spec data dirs, plugin
-  dirs, `python_home`, helper, `resources_dir`, temp). Copy-replace of Low-IL
-  files from a journal session stays inside that session's write grants
-  under those roots. A leftover helper-writable
-  `{data_dir}/plugin_host/acl_journal.json` is deleted unread. Permanent
+  `S-1-15-2-1`). ACE revoke and Low-label restore on a recorded grant path
+  are allowed for that session's `python_home`, helper dir, `resources_dir`,
+  and `data_dir` even when they sit outside this process's current roots
+  (update, portable copy, test binary vs GUI). Copy-replace of Low-IL files
+  from a journal session stays inside that session's write grants under this
+  process's known user-rw roots (current `data_dir`, remembered spec data
+  dirs, plugin dirs, `python_home`, helper, `resources_dir`, temp). A session
+  whose grants were skipped or failed is rewritten with the remainder and
+  kept; the journal is deleted only after every grant is removed. A leftover
+  helper-writable `{data_dir}/plugin_host/acl_journal.json` is deleted unread.
+  Permanent
   uninstall of that exact plugin key calls `DeleteAppContainerProfile`
   (`close_host` and test teardown never delete a pre-existing profile).
   Test-only plugin keys (`test.…`) use the `EdgeSlicer.t.*` moniker only when
@@ -186,8 +191,8 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   (case-insensitive) are rejected by `is_valid_plugin_id` / install.
   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
   already removed so a vanished temp dir cannot pin the journal forever. The
-  journal is a list of sessions (package SID + profile name + grants) and is
-  deleted only after every ACE in a session is removed. Parent
+  journal is a list of sessions (package SID + profile name + session roots +
+  grants) and is deleted only after every ACE in every session is removed. Parent
   `PluginManager::initialize`, CLI after `set_data_dir`, G-code viewer
   startup, and the next `prepare` revoke anything the journal still lists
   except the live session. `close_win_appcontainer` revokes, restores the
@@ -199,8 +204,9 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   tree) the strip **logs** the `SetNamedSecurityInfo` error and copy-replaces
   the file as the user (create new Medium-IL file, copy contents,
   delete/replace — `ReplaceFile` is not used because it copies the Low label).
-  A successful copy-replace is logged. Hosted G-code that Edge writes out of
-  `plugin_data` is stripped of a Low label after the write. Low-IL labels are
+  A successful copy-replace is logged at warning. Hosted G-code that Edge
+  writes out of `plugin_data` is stripped of a Low label after the write.
+  Low-IL labels are
   applied only to Edge-owned write dirs (`plugin_data`, host-log, `write_root`),
   not to user-chosen `fs_readwrite` folders. `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating

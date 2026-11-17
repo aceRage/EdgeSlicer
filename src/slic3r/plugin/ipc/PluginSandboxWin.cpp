@@ -52,9 +52,11 @@ void* win_pipe_security_attributes() { return nullptr; }
 #define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
 #endif
 
+#include "PluginHostProcess.hpp"
 #include "PluginIpcProtocol.hpp"
 
 #include <libslic3r/Utils.hpp>
+#include <slic3r/plugin/PythonInterpreter.hpp>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -261,6 +263,10 @@ struct JournalSession
 {
     std::string           package_sid;
     std::string           profile_name;
+    std::string           data_dir;
+    std::string           python_home;
+    std::string           helper_dir;
+    std::string           resources_dir;
     std::vector<DirGrant> grants;
 };
 
@@ -277,6 +283,10 @@ struct WinState
     std::vector<DirGrant>        grants;
     std::wstring                 profile_name;
     boost::filesystem::path      journal_path; // pinned at grant time; never re-read from global data_dir()
+    std::string                  session_data_dir;
+    std::string                  session_python_home;
+    std::string                  session_helper_dir;
+    std::string                  session_resources_dir;
     bool                         ready = false;
 };
 
@@ -432,6 +442,20 @@ bool path_in_known_root(const std::string& path)
             return true;
     }
     return false;
+}
+
+bool path_in_session_roots(const std::string& path, const JournalSession& session)
+{
+    if (path.empty())
+        return false;
+    const boost::filesystem::path candidate(path);
+    auto under = [&](const std::string& root) { return !root.empty() && path_is_under_root(candidate, boost::filesystem::path(root)); };
+    return under(session.data_dir) || under(session.python_home) || under(session.helper_dir) || under(session.resources_dir);
+}
+
+bool session_has_recorded_roots(const JournalSession& session)
+{
+    return !session.data_dir.empty() || !session.python_home.empty() || !session.helper_dir.empty() || !session.resources_dir.empty();
 }
 
 bool path_is_acl_journal_tree(const std::string& path)
@@ -674,7 +698,7 @@ bool copy_replace_file_as_user(const std::string& path)
         return false;
     }
     g_low_label_used_copy_replace = true;
-    BOOST_LOG_TRIVIAL(info) << "AppContainer Low-IL copy-replace succeeded for " << path;
+    BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace succeeded for " << path;
     return true;
 }
 
@@ -713,14 +737,14 @@ bool set_label_sddl(const std::string& path, const std::wstring& sddl)
     return true;
 }
 
-bool restore_label_sddl(const std::string& path, const std::wstring& sddl)
+bool restore_label_sddl(const std::string& path, const std::wstring& sddl, bool allow_copy_replace = true)
 {
     const bool labelled = path_has_low_integrity_label(path);
     if (sddl.empty() && !labelled)
         return true;
     if (set_label_sddl(path, sddl) && (sddl.empty() ? !path_has_low_integrity_label(path) : true))
         return true;
-    if (sddl.empty() && labelled && copy_replace_file_as_user(path) && !path_has_low_integrity_label(path))
+    if (allow_copy_replace && sddl.empty() && labelled && copy_replace_file_as_user(path) && !path_has_low_integrity_label(path))
         return true;
     BOOST_LOG_TRIVIAL(error) << "AppContainer Low-IL label still present on " << path;
     return !path_has_low_integrity_label(path) && sddl.empty();
@@ -745,7 +769,9 @@ nlohmann::json grants_to_json(const std::vector<DirGrant>& grants)
 
 nlohmann::json session_to_json(const JournalSession& session)
 {
-    return {{"package_sid", session.package_sid}, {"profile_name", session.profile_name}, {"grants", grants_to_json(session.grants)}};
+    return {{"package_sid", session.package_sid},      {"profile_name", session.profile_name}, {"data_dir", session.data_dir},
+            {"python_home", session.python_home},      {"helper_dir", session.helper_dir},     {"resources_dir", session.resources_dir},
+            {"grants", grants_to_json(session.grants)}};
 }
 
 DirGrant grant_from_json(const nlohmann::json& item)
@@ -764,8 +790,12 @@ DirGrant grant_from_json(const nlohmann::json& item)
 JournalSession session_from_json_object(const nlohmann::json& json)
 {
     JournalSession session;
-    session.package_sid  = json.value("package_sid", std::string());
-    session.profile_name = json.value("profile_name", std::string());
+    session.package_sid   = json.value("package_sid", std::string());
+    session.profile_name  = json.value("profile_name", std::string());
+    session.data_dir      = json.value("data_dir", std::string());
+    session.python_home   = json.value("python_home", std::string());
+    session.helper_dir    = json.value("helper_dir", std::string());
+    session.resources_dir = json.value("resources_dir", std::string());
     if (json.contains("grants") && json["grants"].is_array()) {
         for (const auto& item : json["grants"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
@@ -795,6 +825,14 @@ void merge_session(std::vector<JournalSession>& sessions, JournalSession incomin
             if (!found)
                 existing.grants.push_back(std::move(g));
         }
+        if (existing.data_dir.empty())
+            existing.data_dir = incoming.data_dir;
+        if (existing.python_home.empty())
+            existing.python_home = incoming.python_home;
+        if (existing.helper_dir.empty())
+            existing.helper_dir = incoming.helper_dir;
+        if (existing.resources_dir.empty())
+            existing.resources_dir = incoming.resources_dir;
         return;
     }
     sessions.push_back(std::move(incoming));
@@ -898,11 +936,15 @@ bool persist_acl_journal(PSID sid)
     if (g_win.journal_path.empty())
         return false;
     JournalSession current;
-    current.package_sid  = boost::nowide::narrow(sid_to_string(sid));
-    current.profile_name = boost::nowide::narrow(g_win.profile_name);
-    current.grants       = g_win.grants;
-    auto all             = load_journal_sessions_at(g_win.journal_path);
-    bool replaced        = false;
+    current.package_sid   = boost::nowide::narrow(sid_to_string(sid));
+    current.profile_name  = boost::nowide::narrow(g_win.profile_name);
+    current.data_dir      = g_win.session_data_dir;
+    current.python_home   = g_win.session_python_home;
+    current.helper_dir    = g_win.session_helper_dir;
+    current.resources_dir = g_win.session_resources_dir;
+    current.grants        = g_win.grants;
+    auto all              = load_journal_sessions_at(g_win.journal_path);
+    bool replaced         = false;
     for (JournalSession& session : all) {
         if (session.package_sid == current.package_sid) {
             session  = current;
@@ -973,37 +1015,55 @@ bool strip_low_labels_in_tree(const std::string& root)
 
 enum class GrantActionSource { Live, Journal };
 
-bool grant_path_is_actionable(const DirGrant& grant, GrantActionSource source)
+// Journal ACE revoke of a derived EdgeSlicer.ph.*/t.* SID is safe on any path recorded
+// in the parent-only journal (the sandbox cannot write it). Session python_home / helper /
+// resources / data_dir count as known roots for that session so a moved install still
+// sweeps. Copy-replace of Low-IL files stays on this process's user-rw roots.
+bool grant_path_is_actionable(const DirGrant& grant, GrantActionSource source, const JournalSession* session = nullptr)
 {
     if (grant.path.empty() || path_is_acl_journal_tree(grant.path))
         return false;
     if (source == GrantActionSource::Live)
         return true;
-    return path_in_known_root(grant.path);
+    if (path_in_known_root(grant.path))
+        return true;
+    if (session && path_in_session_roots(grant.path, *session))
+        return true;
+    // Legacy journals with no recorded roots: the grant list itself is the record.
+    if (!session || !session_has_recorded_roots(*session))
+        return true;
+    // Extra grant paths (user fs_readwrite, plugin_root) are recorded in the journal even
+    // when they sit outside the four session roots. Revoking our package-SID ACE is safe.
+    return true;
 }
 
-bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source)
+bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source, const JournalSession* session = nullptr)
 {
-    if (!grant_path_is_actionable(grant, source)) {
+    if (!grant_path_is_actionable(grant, source, session)) {
         if (source == GrantActionSource::Journal)
             BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped path outside known roots: " << grant.path;
-        return source == GrantActionSource::Journal;
+        // Live: leave the grant. Journal: keep it so a later sweep can still revoke.
+        return false;
     }
     bool ok = true;
     if (sid != nullptr && !apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS))
         ok = false;
-    const bool allow_copy_replace = grant.write && (source == GrantActionSource::Live || path_in_known_root(grant.path));
+    // Copy-replace rewrites file bytes; only user-rw roots of this process, not a
+    // recorded python_home / helper / resources tree that may now be an install dir.
+    const bool allow_copy_replace = source == GrantActionSource::Live || path_in_known_root(grant.path);
     if (grant.low_label) {
-        if (allow_copy_replace || source == GrantActionSource::Live) {
-            if (!restore_label_sddl(grant.path, grant.original_label))
-                ok = false;
-        }
+        // LABEL_SECURITY_INFORMATION on the recorded grant path itself is allowed even
+        // when that path is outside this process's current roots (moved python_home).
+        if (!restore_label_sddl(grant.path, grant.original_label, allow_copy_replace))
+            ok = false;
     }
     // User fs_readwrite is write && !low_label. Also walk Edge write dirs so
     // helper-created files (edge-plugin-host.log, post_process.gcode) lose Low.
-    // Journal-sourced copy-replace stays inside known roots / write grants.
+    // Journal-sourced copy-replace stays inside known user-rw roots / write grants.
     if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path))
         ok = false;
+    else if (grant.write && source == GrantActionSource::Journal && !allow_copy_replace)
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped copy-replace outside known user-rw roots: " << grant.path;
     return ok;
 }
 
@@ -1055,6 +1115,10 @@ void release_win_handles()
     g_win.pipe_sa = {};
     g_win.profile_name.clear();
     g_win.journal_path.clear();
+    g_win.session_data_dir.clear();
+    g_win.session_python_home.clear();
+    g_win.session_helper_dir.clear();
+    g_win.session_resources_dir.clear();
     g_win.ready = false;
 }
 
@@ -1287,6 +1351,10 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
     remember_journal_data_dir(journal_root);
+    g_win.session_data_dir      = journal_root;
+    g_win.session_python_home   = !spec.python_home.empty() ? spec.python_home : PythonInterpreter::bundled_python_home();
+    g_win.session_helper_dir    = helper_path().parent_path().string();
+    g_win.session_resources_dir = Slic3r::resources_dir();
 
     const std::wstring name = profile_name(spec.plugin_key);
     PSID               sid  = nullptr;
@@ -1535,29 +1603,25 @@ void sweep_win_acl_journal()
                 if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
                     sid = nullptr;
             }
-            bool                  ok = true;
             std::vector<DirGrant> keep;
             keep.reserve(session.grants.size());
             for (const DirGrant& grant : session.grants) {
-                if (!grant_path_is_actionable(grant, GrantActionSource::Journal)) {
-                    BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped path outside known roots: " << grant.path;
+                if (!grant_path_is_actionable(grant, GrantActionSource::Journal, &session)) {
+                    BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped path outside known roots: " << grant.path;
+                    keep.push_back(grant);
                     continue;
                 }
                 if (sid) {
-                    if (!revoke_one_grant(sid, grant, GrantActionSource::Journal)) {
-                        ok = false;
+                    if (!revoke_one_grant(sid, grant, GrantActionSource::Journal, &session))
                         keep.push_back(grant);
-                    }
                 } else if (grant.low_label && grant.write) {
-                    if (!restore_label_sddl(grant.path, grant.original_label)) {
-                        ok = false;
+                    if (!restore_label_sddl(grant.path, grant.original_label, path_in_known_root(grant.path)))
                         keep.push_back(grant);
-                    }
                 }
             }
             if (sid)
                 ::LocalFree(sid);
-            if (!ok) {
+            if (!keep.empty()) {
                 session.grants = std::move(keep);
                 leftover.push_back(std::move(session));
             }

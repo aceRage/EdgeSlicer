@@ -18,8 +18,10 @@ void  delete_win_test_created_appcontainer_profile(const std::string& plugin_key
 void* win_security_capabilities();
 void* win_pipe_security_attributes();
 #ifdef _WIN32
-// Parent-known roots the ACL journal sweep may touch. Helper-writable paths are not included
-// as extra roots; data_dir / python_home / helper / resources / temp are.
+// Parent-known roots the ACL journal sweep may copy-replace under. Helper-writable
+// paths are not included as extra roots; data_dir / python_home / helper / resources /
+// temp are. Journal sessions also record their own python_home / helper / resources /
+// data_dir so ACE revoke still runs after those folders move.
 std::vector<std::string> parent_sandbox_known_roots();
 #endif
 
