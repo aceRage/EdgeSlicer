@@ -445,10 +445,14 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     std::vector<wchar_t> env_block = scrubbed_helper_env_block();
     const BOOL           ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, env_block.data(), nullptr, si, &pi);
     if (!ok) {
+        const DWORD err = ::GetLastError();
         ::CloseHandle(job);
         ::CloseHandle(pipe);
         close_parent_sandbox();
-        error = "CreateProcess failed for edge-plugin-host";
+        error                    = "CreateProcess failed for edge-plugin-host (error " + std::to_string(err) + ")";
+        const std::string detail = win32_error_text(err);
+        if (!detail.empty())
+            error += " — " + detail;
         return false;
     }
     if (!::AssignProcessToJobObject(job, pi.hProcess)) {
