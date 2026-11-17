@@ -1832,6 +1832,61 @@ TEST_CASE("AppContainer copy-replaces a Low-IL file when WRITE_OWNER is missing"
     }
 }
 
+TEST_CASE("AppContainer copy-replace keeps the original when MoveFileEx fails", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-low-move-fail-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+
+    const fs::path    file = dir / "plugin_out.txt";
+    const std::string body = "must-not-lose-this";
+    {
+        boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << body;
+    }
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(file.string()));
+    REQUIRE(plugin_ipc::win_path_has_low_integrity_label(file.string()));
+    REQUIRE(restrict_dacl_to_modify(file.string()));
+
+    const std::wstring wide = boost::nowide::widen(file.string());
+    // No FILE_SHARE_DELETE: MoveFileEx(REPLACE_EXISTING) cannot replace the original.
+    HANDLE held = ::CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+    plugin_ipc::win_clear_low_integrity_label(file.string());
+    ::CloseHandle(held);
+
+    CHECK_FALSE(plugin_ipc::win_low_label_used_copy_replace_for_testing());
+    {
+        boost::system::error_code exists_ec;
+        REQUIRE(fs::exists(file, exists_ec));
+        REQUIRE_FALSE(exists_ec);
+        REQUIRE(fs::is_regular_file(file, exists_ec));
+    }
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(file.string()));
+    {
+        boost::nowide::ifstream in(file.string(), std::ios::binary);
+        REQUIRE(in);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == body);
+    }
+}
+
 TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove it", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();

@@ -659,42 +659,54 @@ bool is_regular_nonsymlink(const std::string& path)
 }
 
 // Modify allows delete/replace. WRITE_OWNER (needed by LABEL_SECURITY_INFORMATION) does not.
-// Copy contents into a new Medium-IL file created by this process, then replace the original.
-// Do not use CopyFile/ReplaceFile: those copy the Low mandatory label with the security descriptor.
+// Copy bytes into a new Medium-IL file in the same directory, then MoveFileEx replace.
+// Never delete the original first: if the move fails (AV / indexer holding the temp),
+// the original stays and only the temp is removed. Do not use CopyFile/ReplaceFile:
+// those copy the Low mandatory label with the security descriptor.
 bool copy_replace_file_as_user(const std::string& path)
 {
     namespace fs = boost::filesystem;
     if (path_is_acl_journal_tree(path) || !is_regular_nonsymlink(path))
         return false;
-    const fs::path src(path);
-    const fs::path tmp = src.parent_path() / (src.filename().string() + ".edge-ml-" + std::to_string(::GetCurrentProcessId()) + ".tmp");
-    boost::system::error_code ec;
-    if (fs::exists(tmp, ec)) {
-        fs::remove(tmp, ec);
-        ec.clear();
-    }
-    {
-        boost::nowide::ifstream in(path, std::ios::binary);
-        if (!in)
-            return false;
-        boost::nowide::ofstream out(tmp.string(), std::ios::binary | std::ios::trunc);
-        if (!out)
-            return false;
-        out << in.rdbuf();
-        out.close();
-        if (!out)
-            return false;
-    }
-    fs::remove(src, ec);
-    if (ec) {
-        log_win32_failure("Low-IL copy-replace delete", path, static_cast<DWORD>(ec.value()));
-        fs::remove(tmp, ec);
+    const std::wstring srcw = boost::nowide::widen(path);
+    HANDLE             src  = ::CreateFileW(srcw.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (src == INVALID_HANDLE_VALUE)
+        return false;
+    const fs::path     tmp  = fs::path(path).parent_path() /
+        (fs::path(path).filename().string() + ".edge-ml-" + std::to_string(::GetCurrentProcessId()) + "-" +
+         std::to_string(::GetTickCount64()) + ".tmp");
+    const std::wstring tmpw = boost::nowide::widen(tmp.string());
+    HANDLE             dst  = ::CreateFileW(tmpw.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (dst == INVALID_HANDLE_VALUE) {
+        ::CloseHandle(src);
         return false;
     }
-    fs::rename(tmp, src, ec);
-    if (ec) {
-        log_win32_failure("Low-IL copy-replace rename", path, static_cast<DWORD>(ec.value()));
-        fs::remove(tmp, ec);
+    std::vector<char> buf(64 * 1024);
+    DWORD             nread    = 0;
+    bool              copied   = true;
+    for (;;) {
+        if (!::ReadFile(src, buf.data(), static_cast<DWORD>(buf.size()), &nread, nullptr)) {
+            copied = false;
+            break;
+        }
+        if (nread == 0)
+            break;
+        DWORD nwritten = 0;
+        if (!::WriteFile(dst, buf.data(), nread, &nwritten, nullptr) || nwritten != nread) {
+            copied = false;
+            break;
+        }
+    }
+    ::CloseHandle(src);
+    ::CloseHandle(dst);
+    if (!copied) {
+        ::DeleteFileW(tmpw.c_str());
+        return false;
+    }
+    if (!::MoveFileExW(tmpw.c_str(), srcw.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        log_win32_failure("Low-IL copy-replace move", path, ::GetLastError());
+        ::DeleteFileW(tmpw.c_str());
         return false;
     }
     g_low_label_used_copy_replace = true;
