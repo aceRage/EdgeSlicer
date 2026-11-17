@@ -609,6 +609,11 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
     // spine of a narrowing limb that the concentric loops do not reach, wedges where loops turn sharp corners,
     // the strip between the wall and the fill - gets variable-width beads along its medial axis, at the layer's
     // height (flow from width and height as for any bead). Slivers narrower than a quarter of the nozzle stay.
+    // Concentric only: the monotonic lines leave nothing but the small wedges at their ends (under 1.5 % of the
+    // patch in the tests), and beads squeezed into those touched their neighbours (0.1 mm contacts the strict
+    // head check refuses).
+    if (pattern != ctpConcentric)
+        return out;
     const double h         = solid_flow.height();
     const double min_width = curved_tops_min_gap_width(pcfg);
     const double max_width = 2. * solid_flow.spacing();

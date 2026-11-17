@@ -282,7 +282,7 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
                                                  const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed = nullptr);
 
 // Every path of curved layer k over the patch part `fp`: the wall loop (seams spread along it), the fill of the
-// region inside it in the pattern (curved_tops_fill), then gap fill: variable-width beads along the medial axis
+// region inside it in the pattern (curved_tops_fill), then (Concentric only) gap fill: variable-width beads along the medial axis
 // of whatever the two leave open that is at least curved_tops_min_gap_width() wide (the spine of a narrowing
 // limb, wedges at sharp loop corners, the strip between wall and fill), and one short line through a compact
 // hole with no axis (a dome's apex). *failed as for curved_tops_fill.
