@@ -629,12 +629,13 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                         slope_used = std::max(slope_used, f.slope_deg);
                         break;
                     }
+        // slice_mesh_ex() takes its heights in ascending order: m = n - k layers above the cut.
         std::vector<float> zs;
-        for (int k = 0; k < n_layers; ++k)
-            zs.push_back(float(cut + (n_layers - k) * h + ground - 0.5 * EPSILON));
+        for (int m = 1; m <= n_layers; ++m)
+            zs.push_back(float(cut + m * h + ground - 0.5 * EPSILON));
         const std::vector<ExPolygons> above_cut = slice_mesh_ex(its, zs);
         for (int k = 0; k < n_layers; ++k)
-            layer_area.push_back(intersection_ex(footprint, above_cut[k]));
+            layer_area.push_back(intersection_ex(footprint, above_cut[size_t(n_layers - k - 1)]));
         if (layer_area.back().empty())
             return refuse(Slic3r::format(_u8L("no part of its curved top surface lies a layer above Z %1% mm, the lowest a curved layer may "
                                               "start for the print head."),
@@ -718,11 +719,33 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         samples->z.reserve(pts.size());
         samples->flow.reserve(pts.size());
         const double below_surface = (n_layers - 1 - k) * h;
-        for (const Point &p : pts) {
-            double s = surface(unscale<double>(p.x()), unscale<double>(p.y()));
+        std::vector<double> heights;
+        heights.reserve(pts.size());
+        for (const Point &p : pts)
+            heights.push_back(surface(unscale<double>(p.x()), unscale<double>(p.y())));
+        if (partial) {
+            // The ray slipped off the edge: hold the height of the nearest sample along the path that
+            // hit (the block may mix surfaces of different heights, so no single rim height fits).
+            double last = std::numeric_limits<double>::quiet_NaN();
+            for (double &s : heights) {
+                if (std::isfinite(s))
+                    last = s;
+                else
+                    s = last;
+            }
+            last = std::numeric_limits<double>::quiet_NaN();
+            for (auto it = heights.rbegin(); it != heights.rend(); ++it) {
+                if (std::isfinite(*it))
+                    last = *it;
+                else
+                    *it = last;
+            }
+        }
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double s = heights[i];
             if (!std::isfinite(s))
-                // The ray slipped off the edge: hold the surface's rim height (partial: this layer's own
-                // rim, one layer above the cut).
+                // The ray slipped off the edge: hold the surface's rim height (partial, no sample of
+                // the path hit at all: this layer's own rim, one layer above the cut).
                 s = partial ? cut + (n_layers - k) * h : z_lo;
             double z = s - below_surface;
             // Partial curving: a curved bead is never lower than one layer above the cut, the top of
