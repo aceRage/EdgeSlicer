@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -1428,6 +1429,54 @@ bool granted_paths_contain(const std::string& path)
     return std::find(granted.begin(), granted.end(), path) != granted.end();
 }
 
+bool restrict_dacl_to_modify(const std::string& path)
+{
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    std::vector<BYTE> buf(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    ::CloseHandle(token);
+    PSID user = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+    // Explorer "Modify": read/write/execute/delete, not WRITE_DAC / WRITE_OWNER.
+    constexpr DWORD k_modify = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_EA | FILE_WRITE_EA | FILE_EXECUTE |
+                               FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | READ_CONTROL | SYNCHRONIZE;
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = k_modify;
+    ea.grfAccessMode        = SET_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_USER;
+    ea.Trustee.ptstrName    = static_cast<LPWSTR>(user);
+    PACL neu                = nullptr;
+    if (::SetEntriesInAclW(1, &ea, nullptr, &neu) != ERROR_SUCCESS)
+        return false;
+    const std::wstring wide = boost::nowide::widen(path);
+    const DWORD        rc   = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT,
+                                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, neu,
+                                                      nullptr);
+    ::LocalFree(neu);
+    return rc == ERROR_SUCCESS;
+}
+
+bool journal_file_exists(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    const bool                present = fs::exists(path, ec) && !ec;
+    return present;
+}
+
 TEST_CASE("AppContainer skips a RO grant when ALL APPLICATION PACKAGES already has RX", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();
@@ -1664,6 +1713,168 @@ TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[Plugi
         boost::system::error_code jec;
         CHECK_FALSE(fs::exists(journal, jec));
     }
+}
+
+TEST_CASE("AppContainer copy-replaces a Low-IL file when WRITE_OWNER is missing", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-low-nowriteowner-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+
+    const fs::path    file = dir / "plugin_out.txt";
+    const std::string body = "low-il-payload";
+    {
+        boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << body;
+    }
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(file.string()));
+    REQUIRE(plugin_ipc::win_path_has_low_integrity_label(file.string()));
+    REQUIRE(restrict_dacl_to_modify(file.string()));
+
+    plugin_ipc::win_clear_low_integrity_label(file.string());
+    CHECK(plugin_ipc::win_low_label_used_copy_replace_for_testing());
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(file.string()));
+    {
+        boost::nowide::ifstream in(file.string(), std::ios::binary);
+        REQUIRE(in);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == body);
+    }
+}
+
+TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove it", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-existing-sid");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-existing-sid-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Existing_SID";
+    spec.data_dir   = data.dir.string();
+    spec.extra_paths.push_back({dir.string(), false, false});
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    REQUIRE(path_dacl_has_sid(dir.string(), package.sid));
+    REQUIRE(granted_paths_contain(dir.string()));
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    REQUIRE(path_dacl_has_sid(dir.string(), package.sid));
+    // Simulate the journal vanishing while ACEs remain (early delete / different data_dir).
+    {
+        boost::system::error_code jec;
+        fs::remove(plugin_ipc::win_acl_journal_path_for_testing(), jec);
+        const std::string stable = plugin_ipc::win_stable_acl_journal_path_for_testing();
+        if (!stable.empty())
+            fs::remove(stable, jec);
+    }
+
+    error.clear();
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    CHECK(granted_paths_contain(dir.string()));
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+    REQUIRE(journal_file_exists(plugin_ipc::win_acl_journal_path_for_testing()));
+
+    plugin_ipc::close_parent_sandbox();
+    CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
+}
+
+TEST_CASE("AppContainer journal stays while the host is alive and sweep drops python_home ACEs", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedDataDir data("plugin-sandbox-live-journal");
+    fs::create_directories(data.plugins_dir());
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key  = "Journal_Live";
+    spec.data_dir    = data.dir.string();
+    spec.python_home = PythonInterpreter::bundled_python_home();
+    spec.plugin_root = data.plugins_dir().string();
+    REQUIRE_FALSE(spec.python_home.empty());
+
+    ScopedSpawnedHost spawned;
+    std::string       error;
+    const bool        ok = plugin_ipc::spawn_host(spawned.host, spec, error);
+    INFO("spawn error: " << error);
+    REQUIRE(ok);
+    REQUIRE(spawned.host.pid > 0);
+
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    const std::string helper_dir = plugin_ipc::helper_path().parent_path().string();
+    CHECK(path_dacl_has_sid(spec.python_home, package.sid));
+    CHECK(path_dacl_has_sid(helper_dir, package.sid));
+
+    const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
+    REQUIRE(journal_file_exists(journal));
+    const std::string stable = plugin_ipc::win_stable_acl_journal_path_for_testing();
+    if (!stable.empty())
+        CHECK(journal_file_exists(stable));
+
+    // Crash with the helper still running: drop in-memory grants, keep journal + ACEs.
+    plugin_ipc::win_abandon_grants_for_testing();
+    REQUIRE(spawned.host.pid > 0);
+    REQUIRE(journal_file_exists(journal));
+    CHECK(path_dacl_has_sid(spec.python_home, package.sid));
+    CHECK(path_dacl_has_sid(helper_dir, package.sid));
+
+    // Reap the helper so it releases edge-plugin-host.log before the Low-label walk.
+    plugin_ipc::kill_host(spawned.host);
+    if (spawned.host.process)
+        ::WaitForSingleObject(static_cast<HANDLE>(spawned.host.process), 5000);
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(path_dacl_has_sid(spec.python_home, package.sid));
+    CHECK_FALSE(path_dacl_has_sid(helper_dir, package.sid));
+    CHECK_FALSE(journal_file_exists(journal));
 }
 
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")

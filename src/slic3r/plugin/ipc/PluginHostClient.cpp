@@ -620,7 +620,8 @@ struct PluginHostClient::Impl
                 out.close();
 #ifdef _WIN32
                 // Parent write of hosted G-code that left plugin_data. A copy/move of a
-                // helper-created file would keep a Low mandatory label; strip it.
+                // helper-created file would keep a Low mandatory label; strip it (copy-replace
+                // when WRITE_OWNER is missing).
                 win_clear_low_integrity_label(job.gcode_path);
 #endif
             }

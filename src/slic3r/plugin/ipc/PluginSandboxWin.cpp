@@ -39,6 +39,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <aclapi.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <userenv.h>
 #ifndef PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
 #define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
@@ -54,6 +55,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <boost/system/error_code.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -61,6 +63,10 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef SLIC3R_APP_KEY
+#define SLIC3R_APP_KEY "EdgeSlicer"
+#endif
 
 namespace Slic3r::plugin_ipc {
 namespace {
@@ -114,11 +120,33 @@ std::wstring profile_name(const std::string& plugin_key)
 
 // Low IL (S-1-16-4096) + no-write-up. AppContainer hosts run at low integrity; a medium
 // object with only a DACL still denies GENERIC_WRITE (ERROR_ACCESS_DENIED / no-write-up).
+std::string win32_error_text(DWORD err)
+{
+    wchar_t*    buf = nullptr;
+    const DWORD n   = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                                       err, 0, reinterpret_cast<LPWSTR>(&buf), 0, nullptr);
+    std::string text;
+    if (n > 0 && buf != nullptr) {
+        text = boost::nowide::narrow(buf);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
+            text.pop_back();
+        ::LocalFree(buf);
+    }
+    return text;
+}
+
+void log_win32_failure(const char* what, const std::string& path, DWORD rc)
+{
+    BOOST_LOG_TRIVIAL(error) << "AppContainer " << what << " failed for " << path << " (" << rc << " " << win32_error_text(rc) << ")";
+}
+
 bool label_low_integrity(const std::string& path)
 {
     PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr) || sd == nullptr)
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "AppContainer low-IL SDDL convert failed for " << path;
         return false;
+    }
     BOOL  present = FALSE, defaulted = FALSE;
     PACL  sacl = nullptr;
     DWORD rc   = ERROR_INVALID_PARAMETER;
@@ -128,6 +156,8 @@ bool label_low_integrity(const std::string& path)
                                      nullptr, sacl);
     }
     ::LocalFree(sd);
+    if (rc != ERROR_SUCCESS)
+        log_win32_failure("low-IL label", path, rc);
     return rc == ERROR_SUCCESS;
 }
 
@@ -162,10 +192,15 @@ bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD i
     PACL                 prev = nullptr;
     PACL                 neu  = nullptr;
     PSECURITY_DESCRIPTOR sd   = nullptr;
-    if (::GetNamedSecurityInfoW(wide.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &prev, nullptr, &sd) !=
-        ERROR_SUCCESS)
-        sd = nullptr;
-    if (::SetEntriesInAclW(1, &ea, prev, &neu) != ERROR_SUCCESS) {
+    const DWORD get_rc = ::GetNamedSecurityInfoW(wide.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &prev, nullptr,
+                                                 &sd);
+    if (get_rc != ERROR_SUCCESS) {
+        log_win32_failure(mode == REVOKE_ACCESS ? "ACL read (revoke)" : "ACL read (grant)", path, get_rc);
+        return false;
+    }
+    const DWORD acl_rc = ::SetEntriesInAclW(1, &ea, prev, &neu);
+    if (acl_rc != ERROR_SUCCESS) {
+        log_win32_failure(mode == REVOKE_ACCESS ? "ACL SetEntries (revoke)" : "ACL SetEntries (grant)", path, acl_rc);
         if (sd)
             ::LocalFree(sd);
         return false;
@@ -175,6 +210,8 @@ bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD i
     ::LocalFree(neu);
     if (sd)
         ::LocalFree(sd);
+    if (rc != ERROR_SUCCESS)
+        log_win32_failure(mode == REVOKE_ACCESS ? "ACL revoke" : "ACL grant", path, rc);
     return rc == ERROR_SUCCESS;
 }
 
@@ -185,7 +222,14 @@ struct DirGrant
     DWORD        inheritance = 0;
     bool         write       = false;
     bool         low_label   = false;
-    std::wstring original_label; // LABEL_SECURITY_INFORMATION SDDL; empty = no ML ACE
+    bool         existing    = false; // package-SID ACE already present; journaled so sweep can drop it
+    std::wstring original_label;      // LABEL_SECURITY_INFORMATION SDDL; empty = no ML ACE
+};
+
+struct JournalSession
+{
+    std::string           package_sid;
+    std::vector<DirGrant> grants;
 };
 
 struct WinState
@@ -203,13 +247,36 @@ struct WinState
 };
 
 WinState g_win;
+bool     g_low_label_used_copy_replace = false;
 
-boost::filesystem::path acl_journal_path()
+boost::filesystem::path data_dir_acl_journal_path()
 {
     const std::string dir = Slic3r::data_dir();
     if (dir.empty())
         return {};
     return boost::filesystem::path(dir) / "plugin_host" / "acl_journal.json";
+}
+
+boost::filesystem::path stable_acl_journal_path()
+{
+    PWSTR local = nullptr;
+    if (FAILED(::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) || local == nullptr)
+        return {};
+    boost::filesystem::path path = boost::filesystem::path(local) / SLIC3R_APP_KEY / "plugin_host" / "acl_journal.json";
+    ::CoTaskMemFree(local);
+    return path;
+}
+
+std::vector<boost::filesystem::path> acl_journal_paths()
+{
+    std::vector<boost::filesystem::path> out;
+    const auto                           data   = data_dir_acl_journal_path();
+    const auto                           stable = stable_acl_journal_path();
+    if (!data.empty())
+        out.push_back(data);
+    if (!stable.empty() && stable != data)
+        out.push_back(stable);
+    return out;
 }
 
 std::wstring sid_to_string(PSID sid)
@@ -245,90 +312,303 @@ std::wstring capture_label_sddl(const std::string& path)
     return out;
 }
 
-bool restore_label_sddl(const std::string& path, const std::wstring& sddl)
+bool path_has_low_integrity_label(const std::string& path);
+
+bool is_regular_nonsymlink(const std::string& path)
+{
+    boost::system::error_code ec;
+    const auto                st = boost::filesystem::symlink_status(path, ec);
+    return !ec && boost::filesystem::is_regular_file(st);
+}
+
+// Modify allows delete/replace. WRITE_OWNER (needed by LABEL_SECURITY_INFORMATION) does not.
+// Copy contents into a new Medium-IL file created by this process, then replace the original.
+// Do not use CopyFile/ReplaceFile: those copy the Low mandatory label with the security descriptor.
+bool copy_replace_file_as_user(const std::string& path)
+{
+    namespace fs = boost::filesystem;
+    if (!is_regular_nonsymlink(path))
+        return false;
+    const fs::path src(path);
+    const fs::path tmp = src.parent_path() / (src.filename().string() + ".edge-ml-" + std::to_string(::GetCurrentProcessId()) + ".tmp");
+    boost::system::error_code ec;
+    if (fs::exists(tmp, ec)) {
+        fs::remove(tmp, ec);
+        ec.clear();
+    }
+    {
+        boost::nowide::ifstream in(path, std::ios::binary);
+        if (!in)
+            return false;
+        boost::nowide::ofstream out(tmp.string(), std::ios::binary | std::ios::trunc);
+        if (!out)
+            return false;
+        out << in.rdbuf();
+        out.close();
+        if (!out)
+            return false;
+    }
+    fs::remove(src, ec);
+    if (ec) {
+        log_win32_failure("Low-IL copy-replace delete", path, static_cast<DWORD>(ec.value()));
+        fs::remove(tmp, ec);
+        return false;
+    }
+    fs::rename(tmp, src, ec);
+    if (ec) {
+        log_win32_failure("Low-IL copy-replace rename", path, static_cast<DWORD>(ec.value()));
+        fs::remove(tmp, ec);
+        return false;
+    }
+    g_low_label_used_copy_replace = true;
+    return true;
+}
+
+bool set_label_sddl(const std::string& path, const std::wstring& sddl)
 {
     const std::wstring wide = boost::nowide::widen(path);
+    DWORD              rc   = ERROR_INVALID_PARAMETER;
     if (sddl.empty()) {
-        // No original ML ACE: restore the default (no label / Medium) by writing an empty SACL.
         BYTE  buf[sizeof(ACL) + 16]{};
         auto* acl = reinterpret_cast<PACL>(buf);
-        if (!::InitializeAcl(acl, sizeof(buf), ACL_REVISION))
+        if (!::InitializeAcl(acl, sizeof(buf), ACL_REVISION)) {
+            log_win32_failure("Low-IL InitializeAcl", path, ::GetLastError());
             return false;
-        return ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
-                                       nullptr, acl) == ERROR_SUCCESS;
-    }
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr)
-        return false;
-    BOOL  present = FALSE, defaulted = FALSE;
-    PACL  sacl = nullptr;
-    DWORD rc   = ERROR_INVALID_PARAMETER;
-    if (::GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted))
+        }
         rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
-                                     nullptr, present ? sacl : nullptr);
-    ::LocalFree(sd);
+                                     nullptr, acl);
+    } else {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
+            BOOST_LOG_TRIVIAL(error) << "AppContainer Low-IL SDDL convert failed for " << path;
+            return false;
+        }
+        BOOL present = FALSE, defaulted = FALSE;
+        PACL sacl = nullptr;
+        if (::GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted))
+            rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
+                                         nullptr, present ? sacl : nullptr);
+        ::LocalFree(sd);
+    }
+    if (rc != ERROR_SUCCESS)
+        log_win32_failure("Low-IL label restore", path, rc);
     return rc == ERROR_SUCCESS;
 }
 
-void delete_acl_journal()
+bool restore_label_sddl(const std::string& path, const std::wstring& sddl)
 {
-    const auto path = acl_journal_path();
-    if (path.empty())
-        return;
-    boost::system::error_code ec;
-    boost::filesystem::remove(path, ec);
+    const bool labelled = path_has_low_integrity_label(path);
+    if (sddl.empty() && !labelled)
+        return true;
+    if (set_label_sddl(path, sddl) && (sddl.empty() ? !path_has_low_integrity_label(path) : true))
+        return true;
+    if (sddl.empty() && labelled && copy_replace_file_as_user(path) && !path_has_low_integrity_label(path))
+        return true;
+    BOOST_LOG_TRIVIAL(error) << "AppContainer Low-IL label still present on " << path;
+    return !path_has_low_integrity_label(path) && sddl.empty();
 }
 
-bool persist_acl_journal(PSID sid)
+nlohmann::json grants_to_json(const std::vector<DirGrant>& grants)
 {
-    const auto path = acl_journal_path();
-    if (path.empty())
-        return true;
-    boost::system::error_code ec;
-    boost::filesystem::create_directories(path.parent_path(), ec);
-    if (ec)
-        return false;
-    nlohmann::json grants = nlohmann::json::array();
-    for (const DirGrant& g : g_win.grants) {
-        grants.push_back({
+    nlohmann::json arr = nlohmann::json::array();
+    for (const DirGrant& g : grants) {
+        arr.push_back({
             {"path", g.path},
             {"permissions", g.permissions},
             {"inheritance", g.inheritance},
             {"write", g.write},
             {"low_label", g.low_label},
+            {"existing", g.existing},
             {"original_label", boost::nowide::narrow(g.original_label)},
         });
     }
-    nlohmann::json body = {{"package_sid", boost::nowide::narrow(sid_to_string(sid))}, {"grants", std::move(grants)}};
+    return arr;
+}
+
+DirGrant grant_from_json(const nlohmann::json& item)
+{
+    DirGrant grant;
+    grant.path           = item.value("path", std::string());
+    grant.permissions    = static_cast<DWORD>(item.value("permissions", 0u));
+    grant.inheritance    = static_cast<DWORD>(item.value("inheritance", 0u));
+    grant.write          = item.value("write", false);
+    grant.low_label      = item.value("low_label", false);
+    grant.existing       = item.value("existing", false);
+    grant.original_label = boost::nowide::widen(item.value("original_label", std::string()));
+    return grant;
+}
+
+JournalSession session_from_json_object(const nlohmann::json& json)
+{
+    JournalSession session;
+    session.package_sid = json.value("package_sid", std::string());
+    if (json.contains("grants") && json["grants"].is_array()) {
+        for (const auto& item : json["grants"]) {
+            if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
+                continue;
+            session.grants.push_back(grant_from_json(item));
+        }
+    }
+    return session;
+}
+
+void merge_session(std::vector<JournalSession>& sessions, JournalSession incoming)
+{
+    if (incoming.package_sid.empty() && incoming.grants.empty())
+        return;
+    for (JournalSession& existing : sessions) {
+        if (existing.package_sid != incoming.package_sid)
+            continue;
+        for (DirGrant& g : incoming.grants) {
+            bool found = false;
+            for (DirGrant& e : existing.grants) {
+                if (e.path == g.path) {
+                    e     = g;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                existing.grants.push_back(std::move(g));
+        }
+        return;
+    }
+    sessions.push_back(std::move(incoming));
+}
+
+std::vector<JournalSession> read_journal_file(const boost::filesystem::path& path)
+{
+    std::vector<JournalSession> out;
+    boost::system::error_code   ec;
+    if (path.empty() || !boost::filesystem::exists(path, ec) || ec)
+        return out;
+    boost::nowide::ifstream in(path.string());
+    if (!in) {
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal unreadable: " << path.string();
+        return out;
+    }
+    const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const auto json = nlohmann::json::parse(body, nullptr, false);
+    if (json.is_discarded() || !json.is_object()) {
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal invalid: " << path.string();
+        return out;
+    }
+    if (json.contains("sessions") && json["sessions"].is_array()) {
+        for (const auto& item : json["sessions"]) {
+            if (item.is_object())
+                merge_session(out, session_from_json_object(item));
+        }
+        return out;
+    }
+    merge_session(out, session_from_json_object(json));
+    return out;
+}
+
+std::vector<JournalSession> load_all_sessions()
+{
+    std::vector<JournalSession> all;
+    for (const auto& path : acl_journal_paths()) {
+        for (JournalSession& session : read_journal_file(path))
+            merge_session(all, std::move(session));
+    }
+    return all;
+}
+
+bool write_journal_file(const boost::filesystem::path& path, const std::vector<JournalSession>& sessions)
+{
+    if (path.empty())
+        return true;
+    boost::system::error_code ec;
+    if (sessions.empty()) {
+        boost::filesystem::remove(path, ec);
+        return true;
+    }
+    boost::filesystem::create_directories(path.parent_path(), ec);
+    if (ec)
+        return false;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const JournalSession& session : sessions)
+        arr.push_back({{"package_sid", session.package_sid}, {"grants", grants_to_json(session.grants)}});
+    nlohmann::json body = {{"sessions", std::move(arr)}};
     std::string    err;
     return Slic3r::write_file_atomically(path.string(), body.dump(1, '\t') + "\n", &err);
 }
 
-bool path_has_low_integrity_label(const std::string& path);
+bool persist_sessions(const std::vector<JournalSession>& sessions)
+{
+    const auto paths = acl_journal_paths();
+    if (paths.empty())
+        return false;
+    const auto data    = data_dir_acl_journal_path();
+    bool       data_ok = true;
+    bool       any_ok  = false;
+    for (const auto& path : paths) {
+        if (write_journal_file(path, sessions)) {
+            any_ok = true;
+            continue;
+        }
+        if (!data.empty() && path == data)
+            data_ok = false;
+        else
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL stable journal write failed: " << path.string();
+    }
+    return data.empty() ? any_ok : data_ok;
+}
+
+bool persist_acl_journal(PSID sid)
+{
+    JournalSession current;
+    current.package_sid = boost::nowide::narrow(sid_to_string(sid));
+    current.grants      = g_win.grants;
+    auto all            = load_all_sessions();
+    bool replaced       = false;
+    for (JournalSession& session : all) {
+        if (session.package_sid == current.package_sid) {
+            session  = current;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced)
+        all.push_back(std::move(current));
+    return persist_sessions(all);
+}
+
+bool remove_session_from_journals(const std::string& package_sid)
+{
+    auto all = load_all_sessions();
+    all.erase(std::remove_if(all.begin(), all.end(), [&](const JournalSession& session) { return session.package_sid == package_sid; }),
+              all.end());
+    return persist_sessions(all);
+}
 
 // Files a Low-IL helper creates inherit a Low mandatory label even when the parent
 // directory was not labelled (user fs_readwrite) or after the directory label is
 // restored (Edge work dirs). Bounded walk: skip symlinks, cap entries so a user
-// folder cannot stall close/sweep.
-void strip_low_labels_in_tree(const std::string& root)
+// folder cannot stall close/sweep. WRITE_OWNER is required to edit a mandatory
+// label; when it is missing (Modify-only folders), copy-replace the file as the user.
+bool strip_low_labels_in_tree(const std::string& root)
 {
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
     const fs::path            path(root);
     if (root.empty() || !fs::exists(path, ec) || ec)
-        return;
-    auto strip_one = [](const fs::path& p) {
-        if (path_has_low_integrity_label(p.string()))
-            restore_label_sddl(p.string(), {});
+        return true;
+    bool ok        = true;
+    auto strip_one = [&](const fs::path& p) {
+        if (path_has_low_integrity_label(p.string()) && !restore_label_sddl(p.string(), {}))
+            ok = false;
     };
     strip_one(path);
     if (!fs::is_directory(path, ec) || ec)
-        return;
+        return ok;
     constexpr int k_max_entries = 4096;
     int           n             = 0;
     for (fs::recursive_directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
         if (++n >= k_max_entries) {
             BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL strip stopped after " << k_max_entries << " entries in " << root;
+            ok = false;
             break;
         }
         boost::system::error_code st_ec;
@@ -341,27 +621,42 @@ void strip_low_labels_in_tree(const std::string& root)
         }
         strip_one(it->path());
     }
+    return ok;
 }
 
-void revoke_one_grant(PSID sid, const DirGrant& grant)
+bool revoke_one_grant(PSID sid, const DirGrant& grant)
 {
-    apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS);
-    if (grant.low_label)
-        restore_label_sddl(grant.path, grant.original_label);
+    bool ok = true;
+    if (sid != nullptr && !apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS))
+        ok = false;
+    if (grant.low_label && !restore_label_sddl(grant.path, grant.original_label))
+        ok = false;
     // User fs_readwrite is write && !low_label. Also walk Edge write dirs so
     // helper-created files (edge-plugin-host.log, post_process.gcode) lose Low.
-    if (grant.write)
-        strip_low_labels_in_tree(grant.path);
+    if (grant.write && !strip_low_labels_in_tree(grant.path))
+        ok = false;
+    return ok;
 }
 
 void revoke_grants()
 {
-    if (g_win.sid) {
-        for (const auto& grant : g_win.grants)
-            revoke_one_grant(g_win.sid, grant);
+    // No SID: crash-simulation / already released. Leave journals for sweep.
+    if (!g_win.sid) {
+        g_win.grants.clear();
+        return;
     }
-    g_win.grants.clear();
-    delete_acl_journal();
+    const std::string     sid_utf8 = boost::nowide::narrow(sid_to_string(g_win.sid));
+    std::vector<DirGrant> leftover;
+    leftover.reserve(g_win.grants.size());
+    for (const auto& grant : g_win.grants) {
+        if (!revoke_one_grant(g_win.sid, grant))
+            leftover.push_back(grant);
+    }
+    g_win.grants = leftover;
+    if (leftover.empty())
+        remove_session_from_journals(sid_utf8);
+    else if (!persist_acl_journal(g_win.sid))
+        BOOST_LOG_TRIVIAL(error) << "AppContainer ACL journal kept leftover grants but could not rewrite the file";
 }
 
 void release_win_handles()
@@ -405,7 +700,9 @@ void clear_win_state()
 // (including inherited ACEs; skip INHERIT_ONLY) for ALLOW of FILE_GENERIC_READ|
 // FILE_GENERIC_EXECUTE after MapGenericMask on this package SID or S-1-15-2-1. That is
 // the package half of AccessCheck without synthesizing a token (SeCreateTokenPrivilege).
-bool package_already_has_rx(const std::string& path, PSID package_sid)
+enum class PackageRxKind { None, AllApplicationPackages, ThisPackage };
+
+PackageRxKind package_rx_kind(const std::string& path, PSID package_sid)
 {
     PSID any_sid = nullptr;
     if (!::ConvertStringSidToSidW(L"S-1-15-2-1", &any_sid) || any_sid == nullptr)
@@ -416,7 +713,8 @@ bool package_already_has_rx(const std::string& path, PSID package_sid)
     PSECURITY_DESCRIPTOR sd   = nullptr;
     const DWORD rc = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
                                              &dacl, nullptr, &sd);
-    bool        allowed = false;
+    bool        this_ok = false;
+    bool        any_ok  = false;
     if (rc == ERROR_SUCCESS && dacl != nullptr) {
         ACL_SIZE_INFORMATION info{};
         if (::GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation)) {
@@ -433,18 +731,25 @@ bool package_already_has_rx(const std::string& path, PSID package_sid)
                     continue;
                 auto*      allowed_ace = static_cast<ACCESS_ALLOWED_ACE*>(ace);
                 PSID       ace_sid     = reinterpret_cast<PSID>(&allowed_ace->SidStart);
-                const bool ours        = (package_sid != nullptr && ::EqualSid(ace_sid, package_sid)) ||
-                                  (any_sid != nullptr && ::EqualSid(ace_sid, any_sid));
-                if (!ours)
+                const bool is_this     = package_sid != nullptr && ::EqualSid(ace_sid, package_sid);
+                const bool is_any      = any_sid != nullptr && ::EqualSid(ace_sid, any_sid);
+                if (!is_this && !is_any)
                     continue;
                 ACCESS_MASK mask = allowed_ace->Mask;
                 ::MapGenericMask(&mask, &mapping);
                 if (header->AceType == ACCESS_DENIED_ACE_TYPE && (mask & need) != 0) {
-                    allowed = false;
+                    if (is_this)
+                        this_ok = false;
+                    if (is_any)
+                        any_ok = false;
                     break;
                 }
-                if (header->AceType == ACCESS_ALLOWED_ACE_TYPE && (mask & need) == need)
-                    allowed = true;
+                if (header->AceType == ACCESS_ALLOWED_ACE_TYPE && (mask & need) == need) {
+                    if (is_this)
+                        this_ok = true;
+                    if (is_any)
+                        any_ok = true;
+                }
             }
         }
     }
@@ -452,7 +757,11 @@ bool package_already_has_rx(const std::string& path, PSID package_sid)
         ::LocalFree(sd);
     if (any_sid)
         ::LocalFree(any_sid);
-    return allowed;
+    if (this_ok)
+        return PackageRxKind::ThisPackage;
+    if (any_ok)
+        return PackageRxKind::AllApplicationPackages;
+    return PackageRxKind::None;
 }
 
 bool path_has_low_integrity_label(const std::string& path)
@@ -585,8 +894,10 @@ bool probe_win_sandbox(SandboxProbe& probe)
 bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
 {
     resolve_apis();
-    sweep_win_acl_journal();
+    // Drop this process's live grants first, then sweep leftover sessions (other SIDs,
+    // previous data_dirs) from both journal files. Sweep other SIDs even if we were ready.
     clear_win_state();
+    sweep_win_acl_journal();
     if (!g_apis_ok) {
         error = "AppContainer APIs are not available; refusing to start the plugin host unsandboxed";
         return false;
@@ -603,16 +914,43 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
     g_win.sid = sid;
+    // Journal exists before the first ACE is applied.
+    if (!persist_acl_journal(sid)) {
+        error = "AppContainer ACL journal failed";
+        clear_win_state();
+        return false;
+    }
 
     auto grant_or_fail = [&](const std::string& path, bool write, bool apply_low) {
         if (path.empty())
             return true;
         const DWORD perms = write ? k_acl_rw : k_acl_ro;
         // Every read-only grant (helper dir, resources_dir, python_home, packages, plugin_root,
-        // extras): skip if the package half of the AppContainer check already allows RX.
-        if (!write && package_already_has_rx(path, sid)) {
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped (package already has RX): " << path;
-            return true;
+        // extras): skip applying when the package half of the AppContainer check already allows RX.
+        // ALL APPLICATION PACKAGES (Program Files) is left alone. A leftover ACE for *this*
+        // package SID is journaled so close/sweep can still remove it.
+        if (!write) {
+            const PackageRxKind rx = package_rx_kind(path, sid);
+            if (rx == PackageRxKind::AllApplicationPackages) {
+                BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped (ALL APPLICATION PACKAGES already has RX): " << path;
+                return true;
+            }
+            if (rx == PackageRxKind::ThisPackage) {
+                BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped (package SID ACE already present; journaled): " << path;
+                DirGrant grant;
+                grant.path        = path;
+                grant.permissions = perms;
+                grant.inheritance = k_acl_inherit;
+                grant.write       = false;
+                grant.existing    = true;
+                g_win.grants.push_back(grant);
+                if (!persist_acl_journal(sid)) {
+                    error = "AppContainer ACL journal failed for " + path;
+                    g_win.grants.pop_back();
+                    return false;
+                }
+                return true;
+            }
         }
         DirGrant grant;
         grant.path        = path;
@@ -784,54 +1122,37 @@ void close_win_appcontainer() { clear_win_state(); }
 
 void sweep_win_acl_journal()
 {
-    if (g_win.ready)
-        return;
-    const auto path = acl_journal_path();
-    if (path.empty())
-        return;
-    boost::system::error_code ec;
-    if (!boost::filesystem::exists(path, ec) || ec)
-        return;
-    boost::nowide::ifstream in(path.string());
-    if (!in) {
-        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal unreadable: " << path.string();
-        return;
-    }
-    const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    in.close();
-    const auto json = nlohmann::json::parse(body, nullptr, false);
-    if (json.is_discarded() || !json.is_object()) {
-        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal invalid; deleting " << path.string();
-        delete_acl_journal();
-        return;
-    }
-    const std::string sid_utf8 = json.value("package_sid", std::string());
-    PSID              sid      = nullptr;
-    if (!sid_utf8.empty()) {
-        const std::wstring wide = boost::nowide::widen(sid_utf8);
-        if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
-            sid = nullptr;
-    }
-    if (json.contains("grants") && json["grants"].is_array()) {
-        for (const auto& item : json["grants"]) {
-            if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
-                continue;
-            DirGrant grant;
-            grant.path           = item["path"].get<std::string>();
-            grant.permissions    = static_cast<DWORD>(item.value("permissions", 0u));
-            grant.inheritance    = static_cast<DWORD>(item.value("inheritance", 0u));
-            grant.write          = item.value("write", false);
-            grant.low_label      = item.value("low_label", false);
-            grant.original_label = boost::nowide::widen(item.value("original_label", std::string()));
-            if (sid)
-                revoke_one_grant(sid, grant);
-            else if (grant.low_label)
-                restore_label_sddl(grant.path, grant.original_label);
+    auto                        sessions = load_all_sessions();
+    const std::string           live_sid = boost::nowide::narrow(sid_to_string(g_win.sid));
+    std::vector<JournalSession> leftover;
+    leftover.reserve(sessions.size());
+    for (JournalSession& session : sessions) {
+        if (g_win.ready && !live_sid.empty() && session.package_sid == live_sid) {
+            leftover.push_back(std::move(session));
+            continue;
         }
+        PSID sid = nullptr;
+        if (!session.package_sid.empty()) {
+            const std::wstring wide = boost::nowide::widen(session.package_sid);
+            if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
+                sid = nullptr;
+        }
+        bool ok = true;
+        for (const DirGrant& grant : session.grants) {
+            if (sid) {
+                if (!revoke_one_grant(sid, grant))
+                    ok = false;
+            } else if (grant.low_label) {
+                if (!restore_label_sddl(grant.path, grant.original_label))
+                    ok = false;
+            }
+        }
+        if (sid)
+            ::LocalFree(sid);
+        if (!ok)
+            leftover.push_back(std::move(session));
     }
-    if (sid)
-        ::LocalFree(sid);
-    delete_acl_journal();
+    persist_sessions(leftover);
 }
 
 std::vector<std::string> win_granted_paths_for_testing()
@@ -855,9 +1176,17 @@ bool win_path_has_low_integrity_label(const std::string& path) { return path_has
 
 bool win_apply_low_integrity_label_for_testing(const std::string& path) { return label_low_integrity(path); }
 
-void win_clear_low_integrity_label(const std::string& path) { restore_label_sddl(path, {}); }
+void win_clear_low_integrity_label(const std::string& path)
+{
+    g_low_label_used_copy_replace = false;
+    restore_label_sddl(path, {});
+}
 
-std::string win_acl_journal_path_for_testing() { return acl_journal_path().string(); }
+std::string win_acl_journal_path_for_testing() { return data_dir_acl_journal_path().string(); }
+
+std::string win_stable_acl_journal_path_for_testing() { return stable_acl_journal_path().string(); }
+
+bool win_low_label_used_copy_replace_for_testing() { return g_low_label_used_copy_replace; }
 
 std::wstring win_appcontainer_localappdata_path()
 {
