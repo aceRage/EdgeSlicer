@@ -170,6 +170,8 @@ bool PluginManager::initialize(bool install_hooks)
 
     // Windows: leftover package-SID ACEs / Low labels from a crash. CLI and G-code
     // viewer also call this after data_dir is set; prepare sweeps again before spawn.
+    // Sweep reads the data_dir journal and the stable LocalAppData journal so grants
+    // on python_home / helper / resources are not lost when data_dir changes.
     plugin_ipc::sweep_stale_parent_sandbox_grants();
 
     return true;

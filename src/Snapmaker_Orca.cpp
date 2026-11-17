@@ -7982,7 +7982,8 @@ bool CLI::setup(int argc, char **argv)
     set_data_dir(m_config.opt_string("datadir"));
 #ifdef EDGE_PYTHON_PLUGINS
     // CLI / headless slice never reaches GUI PluginManager::initialize. Sweep leftover
-    // AppContainer ACEs now that data_dir is known (journal lives under it).
+    // AppContainer ACEs now that data_dir is known (data_dir journal plus the stable
+    // LocalAppData journal that covers python_home / helper / resources).
     plugin_ipc::sweep_stale_parent_sandbox_grants();
 #endif
 
