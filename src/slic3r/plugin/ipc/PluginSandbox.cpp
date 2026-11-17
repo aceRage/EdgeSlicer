@@ -235,6 +235,23 @@ std::string expected_sandbox_kind()
 #endif
 }
 
+std::string host_child_log_dir(const SandboxSpec& spec)
+{
+    if (!spec.write_root.empty())
+        return spec.write_root;
+    if (!Slic3r::data_dir().empty())
+        return (boost::filesystem::path(Slic3r::data_dir()) / "plugin_host").string();
+    return {};
+}
+
+std::string host_child_log_path(const SandboxSpec& spec)
+{
+    const std::string dir = host_child_log_dir(spec);
+    if (dir.empty())
+        return {};
+    return (boost::filesystem::path(dir) / "edge-plugin-host.log").string();
+}
+
 SandboxSpec make_sandbox_spec(const std::string& plugin_key, const std::string& write_root)
 {
     PluginDescriptor  descriptor;
@@ -269,6 +286,11 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     // Windows SetNamedSecurityInfoW has a real object; Linux add_req still needs the path.
     if (!spec.write_root.empty())
         ensure_grant_directory(spec.write_root);
+
+    // Helper crash log. AppContainer must be able to create this file during CPython init.
+    const std::string log_dir = host_child_log_dir(spec);
+    if (ensure_grant_directory(log_dir))
+        add_unique_path(spec.extra_paths, log_dir, true);
 
     const boost::filesystem::path helper_dir = helper_path().parent_path();
     if (path_exists(helper_dir.string()))

@@ -9,10 +9,13 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdlib.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,7 +51,7 @@
 // POSIX: environ is not in the C++ standard library headers. Declare it at file
 // scope so it is not Slic3r::plugin_ipc::environ. macOS has no such symbol;
 // use *_NSGetEnviron() instead.
-extern char **environ;
+extern char** environ;
 #endif
 #endif
 
@@ -57,21 +60,84 @@ namespace {
 
 std::atomic<bool> g_allow_env_overrides{false};
 
+void add_grant_path(SandboxSpec& spec, const std::string& path, bool write)
+{
+    if (path.empty())
+        return;
+    for (SandboxPath& existing : spec.extra_paths) {
+        if (existing.path == path) {
+            existing.write = existing.write || write;
+            return;
+        }
+    }
+    spec.extra_paths.push_back({path, write});
+}
+
+void prepare_spawn_spec(SpawnedHost& out, SandboxSpec& spec)
+{
+    add_grant_path(spec, helper_path().parent_path().string(), false);
+    out.host_log_path = host_child_log_path(spec);
+    if (out.host_log_path.empty())
+        return;
+    boost::system::error_code ec;
+    boost::filesystem::create_directories(boost::filesystem::path(out.host_log_path).parent_path(), ec);
+    add_grant_path(spec, host_child_log_dir(spec), true);
+}
+
+std::string read_host_log_tail(const std::string& path, std::size_t max_lines)
+{
+    if (path.empty() || max_lines == 0)
+        return {};
+    boost::nowide::ifstream in(path);
+    if (!in)
+        return {};
+    std::deque<std::string> lines;
+    std::string             line;
+    while (std::getline(in, line)) {
+        lines.push_back(std::move(line));
+        if (lines.size() > max_lines)
+            lines.pop_front();
+    }
+    std::string out;
+    for (const std::string& l : lines) {
+        if (!out.empty())
+            out += '\n';
+        out += l;
+    }
+    return out;
+}
+
+std::string host_exit_code_name(int code)
+{
+    switch (code) {
+    case 2: return "handshake";
+    case 3: return "protocol";
+    case 4: return "python-init";
+    case 5: return "sandbox-spec";
+    case 10: return "uncaught-std::exception";
+    case 11: return "uncaught-unknown";
+    case 12: return "std::terminate";
+    case 13: return "invalid-parameter";
+    case 14: return "abort";
+    default: return {};
+    }
+}
+
 #ifdef _WIN32
 // NTSTATUS / Win32 codes seen when JOB_OBJECT_LIMIT_PROCESS_MEMORY kills the child.
-constexpr DWORD k_status_no_memory         = 0xC0000017u;
-constexpr DWORD k_status_quota_exceeded    = 0xC0000044u;
-constexpr DWORD k_status_commit_limit      = 0xC000012Du;
-constexpr DWORD k_error_not_enough_quota   = 1816u;
-constexpr DWORD k_error_commitment_limit   = 1455u;
+constexpr DWORD k_status_no_memory       = 0xC0000017u;
+constexpr DWORD k_status_quota_exceeded  = 0xC0000044u;
+constexpr DWORD k_status_commit_limit    = 0xC000012Du;
+constexpr DWORD k_error_not_enough_quota = 1816u;
+constexpr DWORD k_error_commitment_limit = 1455u;
 // PluginHostMain returns 1000 + GetLastError() when CreateFileW on the IPC pipe fails.
 constexpr DWORD k_host_pipe_open_exit_base = 1000u;
 
 std::string win32_error_text(DWORD err)
 {
-    wchar_t* buf = nullptr;
-    const DWORD n = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                                     nullptr, err, 0, reinterpret_cast<LPWSTR>(&buf), 0, nullptr);
+    wchar_t*    buf = nullptr;
+    const DWORD n   = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                                       err, 0, reinterpret_cast<LPWSTR>(&buf), 0, nullptr);
     std::string text;
     if (n > 0 && buf != nullptr) {
         text = boost::nowide::narrow(buf);
@@ -118,12 +184,9 @@ bool win_env_entry_allowed(const wchar_t* entry)
                                         L"COMSPEC=",
                                         L"TEMP=",
                                         L"TMP=",
-                                        L"USERPROFILE=",
                                         L"USERNAME=",
                                         L"USERDOMAIN=",
                                         L"COMPUTERNAME=",
-                                        L"HOMEDRIVE=",
-                                        L"HOMEPATH=",
                                         L"NUMBER_OF_PROCESSORS=",
                                         L"PROCESSOR_ARCHITECTURE=",
                                         L"PROGRAMFILES=",
@@ -131,9 +194,7 @@ bool win_env_entry_allowed(const wchar_t* entry)
                                         L"PROGRAMW6432=",
                                         L"PYTHONNOUSERSITE=",
                                         L"ALLUSERSPROFILE=",
-                                        L"PUBLIC=",
-                                        L"APPDATA=",
-                                        L"LOCALAPPDATA="};
+                                        L"PUBLIC="};
     for (const wchar_t* prefix : prefixes) {
         if (starts(entry, prefix))
             return true;
@@ -310,8 +371,11 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 
+    SandboxSpec granted = spec;
+    prepare_spawn_spec(out, granted);
+
     const bool sandbox_on = !sandbox_env_disable_requested() && !sandbox_env_force_unavailable();
-    if (sandbox_on && !prepare_parent_sandbox(spec, error))
+    if (sandbox_on && !prepare_parent_sandbox(granted, error))
         return false;
 
     wchar_t     pipe_name[128];
@@ -354,7 +418,9 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         return false;
     }
 
-    const std::wstring   cmd = quote_arg(helper.wstring()) + L" --ipc-pipe " + quote_arg(pipe_name);
+    std::wstring cmd = quote_arg(helper.wstring()) + L" --ipc-pipe " + quote_arg(pipe_name);
+    if (!out.host_log_path.empty())
+        cmd += L" --host-log " + quote_arg(boost::nowide::widen(out.host_log_path));
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(L'\0');
 
@@ -371,7 +437,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         si->cb = sizeof(STARTUPINFOW);
     }
     std::vector<wchar_t> env_block = scrubbed_helper_env_block();
-    const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, env_block.data(), nullptr, si, &pi);
+    const BOOL           ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, flags, env_block.data(), nullptr, si, &pi);
     if (!ok) {
         ::CloseHandle(job);
         ::CloseHandle(pipe);
@@ -424,8 +490,8 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     if (!connected) {
         const DWORD err = ::GetLastError();
         if (err == ERROR_IO_PENDING) {
-            HANDLE wait[2] = {ov.hEvent, pi.hProcess};
-            const DWORD wr = ::WaitForMultipleObjects(2, wait, FALSE, 15000);
+            HANDLE      wait[2] = {ov.hEvent, pi.hProcess};
+            const DWORD wr      = ::WaitForMultipleObjects(2, wait, FALSE, 15000);
             if (wr == WAIT_OBJECT_0 + 1) {
                 DWORD exit_code = 1;
                 ::GetExitCodeProcess(pi.hProcess, &exit_code);
@@ -581,19 +647,30 @@ bool spawn_host_fork(SpawnedHost&                   out,
                      int                            errp[2],
                      int                            stderrp[2],
                      long                           maxfd,
+                     const std::string&             host_log_path,
                      std::string&                   error)
 {
     // argv and env live in the parent so the child does not allocate after fork.
-    const std::string        helper_str = helper.string();
-    char                     fd_arg[]   = "3";
-    char                     wd_arg[]   = "4";
-    char*                    argv[]     = {const_cast<char*>(helper_str.c_str()),
-                                           const_cast<char*>("--ipc-fd"),
-                                           fd_arg,
-                                           const_cast<char*>("--parent-watchdog-fd"),
-                                           wd_arg,
-                                           nullptr};
-    std::vector<std::string> env_keep   = scrubbed_helper_env();
+    const std::string        helper_str   = helper.string();
+    char                     fd_arg[]     = "3";
+    char                     wd_arg[]     = "4";
+    const char               log_flag[]   = "--host-log";
+    char*                    argv_nolog[] = {const_cast<char*>(helper_str.c_str()),
+                                             const_cast<char*>("--ipc-fd"),
+                                             fd_arg,
+                                             const_cast<char*>("--parent-watchdog-fd"),
+                                             wd_arg,
+                                             nullptr};
+    char*                    argv_log[]   = {const_cast<char*>(helper_str.c_str()),
+                                             const_cast<char*>("--ipc-fd"),
+                                             fd_arg,
+                                             const_cast<char*>("--parent-watchdog-fd"),
+                                             wd_arg,
+                                             const_cast<char*>(log_flag),
+                                             const_cast<char*>(host_log_path.c_str()),
+                                             nullptr};
+    char**                   argv         = host_log_path.empty() ? argv_nolog : argv_log;
+    std::vector<std::string> env_keep     = scrubbed_helper_env();
     std::vector<char*>       envp;
     envp.reserve(env_keep.size() + 1);
     for (std::string& s : env_keep)
@@ -712,7 +789,6 @@ bool spawn_host(SpawnedHost& out, std::string& error) { return spawn_host(out, S
 
 bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
 {
-    (void) spec;
     close_host(out);
     const boost::filesystem::path helper = helper_path();
     if (!helper_exists()) {
@@ -724,6 +800,9 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         // Nested bwrap is never used; Landlock+seccomp inside Flatpak is the path.
     }
 #endif
+
+    SandboxSpec granted = spec;
+    prepare_spawn_spec(out, granted);
 
     int sv[2] = {-1, -1};
     if (socketpair_cloexec(sv) != 0) {
@@ -767,7 +846,7 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     if (maxfd < 0 || maxfd > 4096)
         maxfd = 4096;
 
-    if (!spawn_host_fork(out, helper, sv, watchdog, errp, stderrp, maxfd, error)) {
+    if (!spawn_host_fork(out, helper, sv, watchdog, errp, stderrp, maxfd, out.host_log_path, error)) {
         close_fd(sv[0]);
         close_fd(sv[1]);
         close_fd(watchdog[0]);
@@ -851,14 +930,69 @@ std::string host_exit_summary(const SpawnedHost& host)
     if (!host.wait_reaped)
         return "not reaped";
 #ifdef _WIN32
-    return "exit-code " + std::to_string(host.last_wait_status);
+    std::string       msg  = "exit-code " + std::to_string(host.last_wait_status);
+    const std::string name = host_exit_code_name(host.last_wait_status);
+    if (!name.empty())
+        msg += " (" + name + ")";
+    return msg;
 #else
-    if (WIFEXITED(host.last_wait_status))
-        return "exited " + std::to_string(WEXITSTATUS(host.last_wait_status));
+    if (WIFEXITED(host.last_wait_status)) {
+        const int         code = WEXITSTATUS(host.last_wait_status);
+        std::string       msg  = "exited " + std::to_string(code);
+        const std::string name = host_exit_code_name(code);
+        if (!name.empty())
+            msg += " (" + name + ")";
+        return msg;
+    }
     if (WIFSIGNALED(host.last_wait_status))
         return "signal " + std::to_string(WTERMSIG(host.last_wait_status));
     return "wait-status " + std::to_string(host.last_wait_status);
 #endif
+}
+
+void enrich_host_error(SpawnedHost& host, std::string& error)
+{
+#ifdef _WIN32
+    if (host.process != nullptr) {
+        ::WaitForSingleObject(static_cast<HANDLE>(host.process), 2000);
+        DWORD code = 0;
+        if (::GetExitCodeProcess(static_cast<HANDLE>(host.process), &code) && code != STILL_ACTIVE) {
+            host.last_wait_status = static_cast<int>(code);
+            host.wait_reaped      = true;
+        }
+    }
+#else
+    if (host.pid > 0 && !host.wait_reaped) {
+        int   status = 0;
+        pid_t w      = 0;
+        for (int i = 0; i < 50; ++i) {
+            w = ::waitpid(static_cast<pid_t>(host.pid), &status, WNOHANG);
+            if (w != 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (w > 0) {
+            host.last_wait_status = status;
+            host.wait_reaped      = true;
+        }
+    }
+#endif
+    std::string extra;
+    extra += host_exit_summary(host);
+    const std::string captured = drain_host_stderr(host);
+    if (!captured.empty())
+        extra += " stderr=" + captured;
+    const std::string tail = read_host_log_tail(host.host_log_path, 40);
+    if (!tail.empty())
+        extra += " host-log:\n" + tail;
+    else if (!host.host_log_path.empty())
+        extra += " host-log=" + host.host_log_path + " (empty or unreadable)";
+    if (!extra.empty()) {
+        if (error.empty())
+            error = extra;
+        else
+            error += " (" + extra + ")";
+    }
 }
 
 bool host_exceeded_job_memory_limit(const SpawnedHost& host)

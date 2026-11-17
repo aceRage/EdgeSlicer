@@ -16,15 +16,31 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "slic3r/plugin/EdgePythonInclude.hpp"
 #include <pybind11/gil.h>
@@ -32,6 +48,7 @@
 namespace Slic3r::plugin_ipc {
 namespace {
 
+FILE*                       g_diag_log = nullptr;
 Channel*                    g_channel  = nullptr;
 std::recursive_mutex*       g_io_mutex = nullptr;
 std::atomic<std::uint64_t>* g_next_id  = nullptr;
@@ -175,8 +192,8 @@ ExecutionResult run_post_process(const nlohmann::json& msg, std::string& error, 
         }
         boost::system::error_code ec;
         boost::filesystem::create_directories(work.parent_path(), ec);
-        const std::string         body = msg["gcode"].get<std::string>();
-        boost::nowide::ofstream   out(work.string(), std::ios::binary | std::ios::trunc);
+        const std::string       body = msg["gcode"].get<std::string>();
+        boost::nowide::ofstream out(work.string(), std::ios::binary | std::ios::trunc);
         if (!out) {
             error = "failed to stage G-code in plugin host scratch";
             return ExecutionResult::failure(PluginResult::FatalError, error);
@@ -243,6 +260,30 @@ AuditDecision rpc_audit_check(const std::string&              event_name,
     }
 }
 
+void set_child_diag_log_path(const std::string& path)
+{
+    if (path.empty())
+        return;
+    FILE* f = boost::nowide::fopen(path.c_str(), "a");
+    if (f == nullptr)
+        return;
+    setvbuf(f, nullptr, _IONBF, 0);
+#ifdef _WIN32
+    if (_dup2(_fileno(f), _fileno(stderr)) == 0)
+        ::SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(f))));
+#else
+    (void) ::dup2(::fileno(f), STDERR_FILENO);
+#endif
+    g_diag_log = f;
+}
+
+void child_diag(const std::string& msg)
+{
+    // After set_child_diag_log_path, stderr is the log file (and CPython fatal/faulthandler).
+    std::fprintf(stderr, "edge-plugin-host: %s\n", msg.c_str());
+    std::fflush(stderr);
+}
+
 int run_child(Channel& channel)
 {
     g_channel = &channel;
@@ -251,24 +292,31 @@ int run_child(Channel& channel)
     g_io_mutex = &io_mutex;
     g_next_id  = &next_id;
 
+    child_diag("run_child: waiting for hello");
     std::string    error;
     nlohmann::json hello;
     if (!channel.read_json(hello, k_handshake_timeout_ms, error)) {
+        child_diag("handshake read failed: " + error);
         BOOST_LOG_TRIVIAL(error) << "edge-plugin-host handshake read failed: " << error;
-        return 2;
+        return k_host_exit_handshake;
     }
     if (hello.value("type", std::string()) != k_type_hello) {
+        child_diag("expected hello, got " + hello.value("type", std::string()));
         BOOST_LOG_TRIVIAL(error) << "edge-plugin-host expected hello";
-        return 2;
+        return k_host_exit_handshake;
     }
     int remote = hello.value("protocol_version", 0);
     if (!handshake_versions_compatible(remote, error)) {
+        child_diag("protocol mismatch: " + error);
         nlohmann::json err = {{"type", k_type_error}, {"message", error}};
         (void) channel.write_json(err, k_handshake_timeout_ms, error);
-        return 3;
+        return k_host_exit_protocol;
     }
-    if (hello.contains("data_dir") && hello["data_dir"].is_string())
-        Slic3r::set_data_dir(hello["data_dir"].get<std::string>());
+    if (hello.contains("data_dir") && hello["data_dir"].is_string()) {
+        const std::string dir = hello["data_dir"].get<std::string>();
+        child_diag("set_data_dir " + dir);
+        Slic3r::set_data_dir(dir);
+    }
     if (hello.contains("resources_dir") && hello["resources_dir"].is_string())
         Slic3r::set_resources_dir(hello["resources_dir"].get<std::string>());
 
@@ -276,27 +324,35 @@ int run_child(Channel& channel)
     if (hello.contains("sandbox") && hello["sandbox"].is_object()) {
         std::string spec_error;
         if (!sandbox_spec_from_json(hello["sandbox"], spec, spec_error)) {
+            child_diag("sandbox spec: " + spec_error);
             nlohmann::json err = {{"type", k_type_error}, {"message", spec_error}};
             (void) channel.write_json(err, k_handshake_timeout_ms, error);
-            return 5;
+            return k_host_exit_spec;
         }
     }
     if (spec.python_home.empty())
         spec.python_home = PythonInterpreter::bundled_python_home();
     if (spec.plugin_root.empty() && !Slic3r::data_dir().empty())
         spec.plugin_root = (boost::filesystem::path(Slic3r::data_dir()) / "orca_plugins").string();
+    child_diag("python_home " + spec.python_home);
+    child_diag("plugin_root " + spec.plugin_root);
 
+    child_diag("Py init start");
     if (!PluginManager::instance().initialize(/*install_hooks=*/false)) {
-        nlohmann::json err = {{"type", k_type_error},
-                              {"message", "failed to initialize plugin manager: " + PythonInterpreter::instance().last_error()}};
+        const std::string py_err = PythonInterpreter::instance().last_error();
+        child_diag("Py init failed: " + py_err);
+        nlohmann::json err = {{"type", k_type_error}, {"message", "failed to initialize plugin manager: " + py_err}};
         (void) channel.write_json(err, k_handshake_timeout_ms, error);
-        return 4;
+        return k_host_exit_python;
     }
+    child_diag("Py init end");
 
     // After CPython starts so encodings/libpython already opened, before load/execute so a
     // plugin import cannot observe the unsandboxed filesystem. Landlock is inherited.
+    // Windows AppContainer is parent-applied at CreateProcess; this call is then a no-op report.
     SandboxReport report;
     std::string   sandbox_error;
+    child_diag("apply_os_sandbox start");
 #ifdef __APPLE__
     if (spec.dev_seatbelt_probe) {
         // Always reply. A failed or restrictive probe used to die/block inside
@@ -308,9 +364,12 @@ int run_child(Channel& channel)
 #endif
     {
         const bool sandboxed = apply_os_sandbox(spec, report, sandbox_error);
-        if (!sandboxed)
+        if (!sandboxed) {
+            child_diag("apply_os_sandbox failed: " + sandbox_error);
             BOOST_LOG_TRIVIAL(error) << "edge-plugin-host OS sandbox not applied: " << sandbox_error;
+        }
     }
+    child_diag("apply_os_sandbox end kind=" + report.kind + " applied=" + (report.applied ? "1" : "0"));
 
     nlohmann::json hello_ok = {{"type", k_type_hello_ok},
                                {"protocol_version", k_protocol_version},

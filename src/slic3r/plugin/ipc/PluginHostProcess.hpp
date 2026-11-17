@@ -24,6 +24,9 @@ struct SpawnedHost
 #endif
     int  last_wait_status = 0;
     bool wait_reaped      = false;
+    // Parent-chosen path passed as --host-log. Survives close_host so the caller can
+    // still attach the tail after a crash.
+    std::string host_log_path;
 
     bool valid() const { return channel.valid() && pid > 0; }
 };
@@ -72,5 +75,8 @@ std::string drain_host_stderr(SpawnedHost& host);
 std::string host_exit_summary(const SpawnedHost& host);
 // True when the child was killed for exceeding JOB_OBJECT_LIMIT_PROCESS_MEMORY (1 GiB).
 bool host_exceeded_job_memory_limit(const SpawnedHost& host);
+// On closed-pipe / early-exit, wait briefly, record GetExitCodeProcess / waitpid, and
+// append the exit code plus the last ~40 lines of host_log_path (and POSIX stderr).
+void enrich_host_error(SpawnedHost& host, std::string& error);
 
 } // namespace Slic3r::plugin_ipc

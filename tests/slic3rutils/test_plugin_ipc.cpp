@@ -712,7 +712,10 @@ TEST_CASE("plugin host spawn plus handshake is not blocked on the exec-error pip
     };
     REQUIRE(spawned.host.channel.write_json(hello, plugin_ipc::k_handshake_timeout_ms, error));
     nlohmann::json reply;
-    REQUIRE(spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error));
+    if (!spawned.host.channel.read_json(reply, plugin_ipc::k_handshake_timeout_ms, error)) {
+        plugin_ipc::enrich_host_error(spawned.host, error);
+        FAIL(error);
+    }
     CHECK(reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 #ifdef __SANITIZE_ADDRESS__

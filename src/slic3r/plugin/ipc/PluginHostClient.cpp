@@ -260,11 +260,13 @@ struct PluginHostClient::Impl
             {"resources_dir", resources_dir}, {"sandbox", sandbox_spec_to_json(spec)},
         };
         if (!host.channel.write_json(hello, k_handshake_timeout_ms, error)) {
+            enrich_host_error(host, error);
             reset_child_locked();
             return false;
         }
         nlohmann::json reply;
         if (!host.channel.read_json(reply, k_handshake_timeout_ms, error)) {
+            enrich_host_error(host, error);
             reset_child_locked();
             return false;
         }
@@ -278,7 +280,7 @@ struct PluginHostClient::Impl
             reset_child_locked();
             return false;
         }
-        sandbox_report      = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
+        sandbox_report = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
         if (sandbox_report.degraded)
             BOOST_LOG_TRIVIAL(warning) << "plugin host OS sandbox is degraded: " << sandbox_report.detail;
         const bool shipping = sandbox_report.applied && sandbox_kind_is_shipping(sandbox_report.kind);
@@ -559,6 +561,8 @@ struct PluginHostClient::Impl
         if (!ok) {
             if (host_exceeded_job_memory_limit(host))
                 error = "plugin host exceeded the 1 GiB job memory limit";
+            else
+                enrich_host_error(host, error);
             reset_child_locked();
             if (cancelled &&
                 (error == "closed pipe" || error.find("timed out") != std::string::npos || error.find("cancelled") != std::string::npos))
@@ -743,17 +747,13 @@ ExecutionResult PluginHostClient::execute_post_process(const std::string&       
     job->capability_name = capability_name;
     job->timeout_ms      = execute_timeout_ms(true, ctx.gcode_path);
     job->gcode_path      = ctx.gcode_path;
-    job->post_promise = std::make_shared<std::promise<std::pair<ExecutionResult, std::string>>>();
-    job->request_id   = i.next_id.fetch_add(1, std::memory_order_relaxed);
-    job->msg          = {
-        {"type", k_type_execute},
-        {"id", job->request_id},
-        {"kind", k_kind_post_process},
-        {"capability_name", capability_name},
-        {"timeout_ms", job->timeout_ms},
-        {"host", ctx.host},
-        {"output_name", ctx.output_name},
-        {"config", config_snapshot(ctx.full_config)},
+    job->post_promise    = std::make_shared<std::promise<std::pair<ExecutionResult, std::string>>>();
+    job->request_id      = i.next_id.fetch_add(1, std::memory_order_relaxed);
+    job->msg             = {
+        {"type", k_type_execute},           {"id", job->request_id},
+        {"kind", k_kind_post_process},      {"capability_name", capability_name},
+        {"timeout_ms", job->timeout_ms},    {"host", ctx.host},
+        {"output_name", ctx.output_name},   {"config", config_snapshot(ctx.full_config)},
         {"orca_version", ctx.orca_version},
     };
     if (!ctx.gcode_path.empty()) {

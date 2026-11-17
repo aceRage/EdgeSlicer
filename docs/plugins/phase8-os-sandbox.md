@@ -154,7 +154,13 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   exec env is an allow-list (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` /
   `APP_SANDBOX_CONTAINER_ID` / `PYTHONPATH`). `LD_LIBRARY_PATH`, `APPDIR`, and `APPIMAGE`
   are passed through so an AppImage-started helper still finds bundled libs. Windows
-  `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`).
+  `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`). Windows also
+  omits `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` / `HOMEDRIVE` / `HOMEPATH` so CPython
+  inside AppContainer cannot probe the real user profile. The helper opens
+  `--host-log <write_root|data_dir/plugin_host>/edge-plugin-host.log` (stderr, faulthandler,
+  `Py_FatalError`). Uncaught exceptions, `std::terminate`, abort, and the MSVC invalid-
+  parameter handler exit 10–14 instead of a silent `0xc0000409`. The parent attaches
+  `GetExitCodeProcess` plus the last ~40 log lines to closed-pipe handshake errors.
 - Post-process G-code is read by Edge and sent as JSON `gcode` on the existing
   length-prefixed IPC (POSIX socketpair / Windows named pipe). The helper stages a scratch
   copy under `plugin_data` / TMPDIR, Python still sees `ctx.gcode_path`, and Edge writes
@@ -193,7 +199,10 @@ without a signed helper showing `kind=app-sandbox`.
 - Windows AppContainer + named-pipe DACL + Job object on a real Windows box. ACL grants
   live until host close (not revoked at `ResumeThread`). `python_home` under Program Files
   is a best-effort grant: a standard user has no `WRITE_DAC`, and ALL APPLICATION PACKAGES
-  can already read it. Exceeding the 1 GiB job process-memory cap is a distinct error.
+  can already read it. A user-owned `python_home` (dev tree next to the helper) is
+  fail-closed. The helper uses `PyConfig_InitIsolatedConfig` with explicit
+  `module_search_paths` (no registry / user-site). Exceeding the 1 GiB job process-memory
+  cap is a distinct error.
 - A Linux **desktop session** D-Bus / Flatpak portal / X11 abstract-socket escape (the unit
   test uses a forked fixture plus `dbus-daemon --session` when that binary exists).
 - The Don't-run / Run anyway GUI prompt (tests use the prompt seam).

@@ -2,9 +2,12 @@
 #include "PluginIpcChannel.hpp"
 #include "PluginIpcProtocol.hpp"
 
+#include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <thread>
 #ifndef _WIN32
@@ -20,8 +23,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#endif
 #else
-#include <csignal>
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -37,6 +42,70 @@ int parse_fd_arg(int argc, char** argv, const char* flag)
             return std::atoi(argv[i + 1]);
     }
     return -1;
+}
+
+std::string parse_string_arg(int argc, char** argv, const char* flag)
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::strcmp(argv[i], flag) == 0)
+            return argv[i + 1] ? argv[i + 1] : "";
+    }
+    return {};
+}
+
+void on_terminate()
+{
+    using namespace Slic3r::plugin_ipc;
+    child_diag("std::terminate");
+    if (auto ep = std::current_exception()) {
+        try {
+            std::rethrow_exception(ep);
+        } catch (const std::exception& ex) {
+            child_diag(std::string("terminate exception: ") + ex.what());
+        } catch (...) {
+            child_diag("terminate unknown exception");
+        }
+    }
+    std::_Exit(k_host_exit_terminate);
+}
+
+void on_sigabrt(int)
+{
+    using namespace Slic3r::plugin_ipc;
+    child_diag("abort / SIGABRT");
+    std::_Exit(k_host_exit_abort);
+}
+
+#ifdef _WIN32
+void __cdecl on_invalid_parameter(const wchar_t* expression, const wchar_t* function, const wchar_t* file, unsigned int line, uintptr_t)
+{
+    using namespace Slic3r::plugin_ipc;
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "invalid parameter in %ls %ls:%u expr=%ls", function ? function : L"?", file ? file : L"?", line,
+                  expression ? expression : L"?");
+    child_diag(buf);
+    std::_Exit(k_host_exit_invalid_param);
+}
+#endif
+
+void install_crash_handlers()
+{
+    std::set_terminate(on_terminate);
+    std::signal(SIGABRT, on_sigabrt);
+#ifdef _WIN32
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    // Do not Watson / fail-fast on abort: write the log and _Exit(14) from SIGABRT.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _set_error_mode(_OUT_TO_STDERR);
+#ifdef _MSC_VER
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+#endif
+#endif
 }
 
 #ifdef _WIN32
@@ -90,6 +159,11 @@ int main(int argc, char** argv)
         }
     }
     set_in_child_process();
+    const std::string host_log = parse_string_arg(argc, argv, "--host-log");
+    if (!host_log.empty())
+        set_child_diag_log_path(host_log);
+    install_crash_handlers();
+    child_diag("main: crash handlers installed");
     install_parent_death();
 
 #ifndef _WIN32
@@ -108,8 +182,7 @@ int main(int argc, char** argv)
     const std::wstring pipe = parse_pipe_arg(argc, argv);
     if (pipe.empty())
         return 1;
-    HANDLE handle = ::CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_OVERLAPPED, nullptr);
+    HANDLE handle = ::CreateFileW(pipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         // Distinct from the generic 1 (missing --ipc-pipe) so the parent can map
         // ERROR_ACCESS_DENIED (1005) vs a missing pipe without waiting 15 s.
@@ -126,7 +199,17 @@ int main(int argc, char** argv)
     set_cloexec_fd(ipc_fd);
     Channel channel = Channel::from_posix_fd(ipc_fd);
 #endif
-    const int rc = run_child(channel);
+    child_diag("main: ipc connected");
+    int rc = 1;
+    try {
+        rc = run_child(channel);
+    } catch (const std::exception& ex) {
+        child_diag(std::string("uncaught std::exception: ") + ex.what());
+        rc = k_host_exit_uncaught_std;
+    } catch (...) {
+        child_diag("uncaught unknown exception");
+        rc = k_host_exit_uncaught_unknown;
+    }
     // Skip C++ static destructors (Boost.Log TLS) — they abort with "Failed to set TLS value"
     // after the parent has already torn the process down.
     std::_Exit(rc);
