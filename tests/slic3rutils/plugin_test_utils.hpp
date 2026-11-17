@@ -187,11 +187,14 @@ struct ScopedResourcesDir
 struct ScopedSpawnedHost
 {
     plugin_ipc::SpawnedHost host;
+    std::string             sandbox_plugin_key;
 
     ~ScopedSpawnedHost()
     {
         plugin_ipc::kill_host(host);
         plugin_ipc::close_host(host);
+        if (!sandbox_plugin_key.empty())
+            plugin_ipc::delete_parent_sandbox_profile(sandbox_plugin_key);
     }
 
     ScopedSpawnedHost()                                    = default;
