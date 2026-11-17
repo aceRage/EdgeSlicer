@@ -2063,7 +2063,7 @@ TEST_CASE("AppContainer sweep treats a vanished grant path as already revoked", 
     const fs::path vanished = fs::temp_directory_path() / fs::unique_path("orca-vanished-%%%%-%%%%");
     {
         boost::system::error_code ec;
-        REQUIRE_FALSE(fs::exists(vanished, ec) && !ec);
+        REQUIRE_FALSE((fs::exists(vanished, ec) && !ec));
     }
     nlohmann::json grants = nlohmann::json::array();
     for (int i = 0; i < 20; ++i) {
