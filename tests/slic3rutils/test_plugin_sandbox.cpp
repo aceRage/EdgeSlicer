@@ -1887,6 +1887,230 @@ TEST_CASE("AppContainer copy-replace keeps the original when MoveFileEx fails", 
     }
 }
 
+#ifdef _WIN32
+bool write_zone_identifier(const std::string& path)
+{
+    const std::wstring wide = boost::nowide::widen(path) + L":Zone.Identifier";
+    HANDLE             h    = ::CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    const char payload[] = "[ZoneTransfer]\r\nZoneId=3\r\n";
+    DWORD      written   = 0;
+    const BOOL ok        = ::WriteFile(h, payload, static_cast<DWORD>(sizeof(payload) - 1), &written, nullptr);
+    ::CloseHandle(h);
+    return ok && written == sizeof(payload) - 1;
+}
+
+bool zone_identifier_present(const std::string& path)
+{
+    const std::wstring wide = boost::nowide::widen(path) + L":Zone.Identifier";
+    HANDLE             h    = ::CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    char  buf[64]{};
+    DWORD n = 0;
+    ::ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+    ::CloseHandle(h);
+    const std::string got(buf, buf + n);
+    return got.find("ZoneId=3") != std::string::npos;
+}
+
+bool file_times(const std::string& path, FILETIME& created, FILETIME& accessed, FILETIME& written)
+{
+    const std::wstring wide = boost::nowide::widen(path);
+    HANDLE h = ::CreateFileW(wide.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    const BOOL ok = ::GetFileTime(h, &created, &accessed, &written);
+    ::CloseHandle(h);
+    return ok != 0;
+}
+
+std::string read_file_bytes(const std::string& path)
+{
+    boost::nowide::ifstream in(path, std::ios::binary);
+    if (!in)
+        return {};
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+#endif
+
+TEST_CASE("AppContainer copy-replace preserves timestamps and attributes", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-low-times-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+
+    const fs::path    file = dir / "plugin_out.txt";
+    const std::string body = "keep-times";
+    {
+        boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << body;
+    }
+    FILETIME created{}, accessed{}, written{};
+    created.dwLowDateTime   = 0x12345678;
+    created.dwHighDateTime  = 0x01d00000;
+    accessed.dwLowDateTime  = 0x22345678;
+    accessed.dwHighDateTime = 0x01d00000;
+    written.dwLowDateTime   = 0x32345678;
+    written.dwHighDateTime  = 0x01d00000;
+    {
+        const std::wstring wide = boost::nowide::widen(file.string());
+        HANDLE             h    = ::CreateFileW(wide.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        REQUIRE(::SetFileTime(h, &created, &accessed, &written));
+        ::CloseHandle(h);
+    }
+    REQUIRE(::SetFileAttributesW(boost::nowide::widen(file.string()).c_str(), FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(file.string()));
+    REQUIRE(restrict_dacl_to_modify(file.string()));
+
+    plugin_ipc::win_clear_low_integrity_label(file.string());
+    CHECK(plugin_ipc::win_low_label_used_copy_replace_for_testing());
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(file.string()));
+    CHECK(read_file_bytes(file.string()) == body);
+    FILETIME got_c{}, got_a{}, got_w{};
+    REQUIRE(file_times(file.string(), got_c, got_a, got_w));
+    CHECK(got_c.dwLowDateTime == created.dwLowDateTime);
+    CHECK(got_c.dwHighDateTime == created.dwHighDateTime);
+    CHECK(got_w.dwLowDateTime == written.dwLowDateTime);
+    CHECK(got_w.dwHighDateTime == written.dwHighDateTime);
+    CHECK((::GetFileAttributesW(boost::nowide::widen(file.string()).c_str()) & FILE_ATTRIBUTE_HIDDEN) != 0);
+}
+
+TEST_CASE("AppContainer copy-replace skips hard links and alternate data streams", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-low-ads-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+
+    const fs::path    ads_file = dir / "motw.txt";
+    const std::string ads_body = "has-motw";
+    {
+        boost::nowide::ofstream out(ads_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << ads_body;
+    }
+    REQUIRE(write_zone_identifier(ads_file.string()));
+    REQUIRE(zone_identifier_present(ads_file.string()));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(ads_file.string()));
+    REQUIRE(restrict_dacl_to_modify(ads_file.string()));
+    plugin_ipc::win_clear_low_integrity_label(ads_file.string());
+    CHECK_FALSE(plugin_ipc::win_low_label_used_copy_replace_for_testing());
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(ads_file.string()));
+    CHECK(read_file_bytes(ads_file.string()) == ads_body);
+    CHECK(zone_identifier_present(ads_file.string()));
+
+    const fs::path    linked = dir / "linked.txt";
+    const fs::path    alias  = dir / "linked-alias.txt";
+    const std::string link_body = "two-names";
+    {
+        boost::nowide::ofstream out(linked.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << link_body;
+    }
+    REQUIRE(::CreateHardLinkW(boost::nowide::widen(alias.string()).c_str(), boost::nowide::widen(linked.string()).c_str(), nullptr));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(linked.string()));
+    REQUIRE(restrict_dacl_to_modify(linked.string()));
+    plugin_ipc::win_clear_low_integrity_label(linked.string());
+    CHECK_FALSE(plugin_ipc::win_low_label_used_copy_replace_for_testing());
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(linked.string()));
+    CHECK(read_file_bytes(linked.string()) == link_body);
+    CHECK(read_file_bytes(alias.string()) == link_body);
+}
+
+TEST_CASE("AppContainer Low-IL tree strip copy-replaces only helper-created files", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-grant-time-strip");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-grant-time-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+    CloseSandbox close_guard;
+
+    const fs::path    pre_file = user_rw / "pre-grant.txt";
+    const std::string pre_body = "user-file";
+    {
+        boost::nowide::ofstream out(pre_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << pre_body;
+    }
+    REQUIRE(write_zone_identifier(pre_file.string()));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(pre_file.string()));
+    REQUIRE(restrict_dacl_to_modify(pre_file.string()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Grant_Time");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.extra_paths.push_back({user_rw.string(), true, false});
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+
+    const fs::path    post_file = user_rw / "post-grant.txt";
+    const std::string post_body = "helper-out";
+    {
+        boost::nowide::ofstream out(post_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << post_body;
+    }
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(post_file.string()));
+    REQUIRE(restrict_dacl_to_modify(post_file.string()));
+
+    plugin_ipc::close_parent_sandbox();
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(pre_file.string()));
+    CHECK(read_file_bytes(pre_file.string()) == pre_body);
+    CHECK(zone_identifier_present(pre_file.string()));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(post_file.string()));
+    CHECK(read_file_bytes(post_file.string()) == post_body);
+}
+
 TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove it", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();

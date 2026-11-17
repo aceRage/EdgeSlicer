@@ -138,7 +138,10 @@ void  close_parent_sandbox();
 // those paths sit outside this process's current roots (moved install, portable
 // copy, test binary vs GUI). Copy-replace of Low-IL files stays inside this
 // process's known user-rw roots (current data_dir, remembered spec data_dirs,
-// plugin dirs, python_home, helper, resources, temp). A session is rewritten
+// plugin dirs, python_home, helper, resources, temp) and only rewrites files
+// created at/after the session grant time that are Low-labelled, singly linked,
+// and have no extra ADS (MoveFileEx replace; original kept if the move fails).
+// A session is rewritten
 // with only the remainder and kept if any grant was skipped or failed; the
 // journal is deleted only after every grant in every session is removed.
 // Leftover package-SID ACEs are recorded even when RX is already present.

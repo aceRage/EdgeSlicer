@@ -71,6 +71,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <iterator>
 #include <string>
@@ -267,6 +268,7 @@ struct JournalSession
     std::string           python_home;
     std::string           helper_dir;
     std::string           resources_dir;
+    std::uint64_t         granted_at = 0; // FILETIME 100ns since 1601, stamped at prepare
     std::vector<DirGrant> grants;
 };
 
@@ -287,7 +289,8 @@ struct WinState
     std::string                  session_python_home;
     std::string                  session_helper_dir;
     std::string                  session_resources_dir;
-    bool                         ready = false;
+    std::uint64_t                granted_at = 0;
+    bool                         ready      = false;
 };
 
 std::vector<std::string>        g_known_journal_data_dirs;
@@ -658,33 +661,109 @@ bool is_regular_nonsymlink(const std::string& path)
     return !ec && boost::filesystem::is_regular_file(st);
 }
 
+std::uint64_t filetime_to_u64(const FILETIME& ft)
+{
+    ULARGE_INTEGER u;
+    u.LowPart  = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return u.QuadPart;
+}
+
+std::uint64_t now_filetime_u64()
+{
+    FILETIME ft{};
+    ::GetSystemTimeAsFileTime(&ft);
+    return filetime_to_u64(ft);
+}
+
+bool query_file_info(const std::wstring& wide, BY_HANDLE_FILE_INFORMATION& info)
+{
+    HANDLE h = ::CreateFileW(wide.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    const BOOL ok = ::GetFileInformationByHandle(h, &info);
+    ::CloseHandle(h);
+    return ok != 0;
+}
+
+// Extra named streams besides the default ::$DATA (Zone.Identifier / MOTW, etc.).
+// Unknown / unsupported volume: treat as extra so we do not rewrite the file.
+bool file_has_extra_data_streams(const std::wstring& wide)
+{
+    WIN32_FIND_STREAM_DATA data{};
+    HANDLE                 find = ::FindFirstStreamW(wide.c_str(), FindStreamInfoStandard, &data, 0);
+    if (find == INVALID_HANDLE_VALUE) {
+        const DWORD err = ::GetLastError();
+        return err != ERROR_HANDLE_EOF && err != ERROR_INVALID_PARAMETER && err != ERROR_NOT_SUPPORTED && err != ERROR_INVALID_FUNCTION;
+    }
+    bool extra = false;
+    do {
+        if (::wcscmp(data.cStreamName, L"::$DATA") != 0) {
+            extra = true;
+            break;
+        }
+    } while (::FindNextStreamW(find, &data));
+    ::FindClose(find);
+    return extra;
+}
+
+bool file_eligible_for_low_copy_replace(const std::string& path, std::uint64_t granted_at)
+{
+    if (!is_regular_nonsymlink(path) || granted_at == 0)
+        return false;
+    const std::wstring            wide = boost::nowide::widen(path);
+    BY_HANDLE_FILE_INFORMATION    info{};
+    if (!query_file_info(wide, info))
+        return false;
+    if (info.nNumberOfLinks > 1)
+        return false;
+    if (filetime_to_u64(info.ftCreationTime) < granted_at)
+        return false;
+    if (file_has_extra_data_streams(wide))
+        return false;
+    return true;
+}
+
 // Modify allows delete/replace. WRITE_OWNER (needed by LABEL_SECURITY_INFORMATION) does not.
 // Copy bytes into a new Medium-IL file in the same directory, then MoveFileEx replace.
-// Never delete the original first: if the move fails (AV / indexer holding the temp),
+// Never delete the original first: if the move fails (AV or the indexer holding the temp),
 // the original stays and only the temp is removed. Do not use CopyFile/ReplaceFile:
-// those copy the Low mandatory label with the security descriptor.
+// those copy the Low mandatory label with the security descriptor. Refuse hard links
+// and extra ADS so MOTW / extra streams / sibling names are not destroyed.
 bool copy_replace_file_as_user(const std::string& path)
 {
     namespace fs = boost::filesystem;
     if (path_is_acl_journal_tree(path) || !is_regular_nonsymlink(path))
         return false;
-    const std::wstring srcw = boost::nowide::widen(path);
-    HANDLE             src  = ::CreateFileW(srcw.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                            FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::wstring         srcw = boost::nowide::widen(path);
+    BY_HANDLE_FILE_INFORMATION info{};
+    HANDLE src = ::CreateFileW(srcw.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (src == INVALID_HANDLE_VALUE)
         return false;
+    if (!::GetFileInformationByHandle(src, &info)) {
+        ::CloseHandle(src);
+        return false;
+    }
+    if (info.nNumberOfLinks > 1 || file_has_extra_data_streams(srcw)) {
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped (hard link or ADS) for " << path;
+        ::CloseHandle(src);
+        return false;
+    }
     const fs::path     tmp  = fs::path(path).parent_path() /
         (fs::path(path).filename().string() + ".edge-ml-" + std::to_string(::GetCurrentProcessId()) + "-" +
          std::to_string(::GetTickCount64()) + ".tmp");
     const std::wstring tmpw = boost::nowide::widen(tmp.string());
-    HANDLE             dst  = ::CreateFileW(tmpw.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE             dst  = ::CreateFileW(tmpw.c_str(), GENERIC_WRITE | FILE_WRITE_ATTRIBUTES, 0, nullptr, CREATE_NEW,
+                                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (dst == INVALID_HANDLE_VALUE) {
         ::CloseHandle(src);
         return false;
     }
     std::vector<char> buf(64 * 1024);
-    DWORD             nread    = 0;
-    bool              copied   = true;
+    DWORD             nread  = 0;
+    bool              copied = true;
     for (;;) {
         if (!::ReadFile(src, buf.data(), static_cast<DWORD>(buf.size()), &nread, nullptr)) {
             copied = false;
@@ -698,12 +777,14 @@ bool copy_replace_file_as_user(const std::string& path)
             break;
         }
     }
+    ::SetFileTime(dst, &info.ftCreationTime, &info.ftLastAccessTime, &info.ftLastWriteTime);
     ::CloseHandle(src);
     ::CloseHandle(dst);
     if (!copied) {
         ::DeleteFileW(tmpw.c_str());
         return false;
     }
+    ::SetFileAttributesW(tmpw.c_str(), info.dwFileAttributes & ~(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
     if (!::MoveFileExW(tmpw.c_str(), srcw.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         log_win32_failure("Low-IL copy-replace move", path, ::GetLastError());
         ::DeleteFileW(tmpw.c_str());
@@ -781,8 +862,13 @@ nlohmann::json grants_to_json(const std::vector<DirGrant>& grants)
 
 nlohmann::json session_to_json(const JournalSession& session)
 {
-    return {{"package_sid", session.package_sid},      {"profile_name", session.profile_name}, {"data_dir", session.data_dir},
-            {"python_home", session.python_home},      {"helper_dir", session.helper_dir},     {"resources_dir", session.resources_dir},
+    return {{"package_sid", session.package_sid},
+            {"profile_name", session.profile_name},
+            {"data_dir", session.data_dir},
+            {"python_home", session.python_home},
+            {"helper_dir", session.helper_dir},
+            {"resources_dir", session.resources_dir},
+            {"granted_at", session.granted_at},
             {"grants", grants_to_json(session.grants)}};
 }
 
@@ -808,6 +894,7 @@ JournalSession session_from_json_object(const nlohmann::json& json)
     session.python_home   = json.value("python_home", std::string());
     session.helper_dir    = json.value("helper_dir", std::string());
     session.resources_dir = json.value("resources_dir", std::string());
+    session.granted_at    = json.value("granted_at", static_cast<std::uint64_t>(0));
     if (json.contains("grants") && json["grants"].is_array()) {
         for (const auto& item : json["grants"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
@@ -845,6 +932,8 @@ void merge_session(std::vector<JournalSession>& sessions, JournalSession incomin
             existing.helper_dir = incoming.helper_dir;
         if (existing.resources_dir.empty())
             existing.resources_dir = incoming.resources_dir;
+        if (existing.granted_at == 0)
+            existing.granted_at = incoming.granted_at;
         return;
     }
     sessions.push_back(std::move(incoming));
@@ -954,6 +1043,7 @@ bool persist_acl_journal(PSID sid)
     current.python_home   = g_win.session_python_home;
     current.helper_dir    = g_win.session_helper_dir;
     current.resources_dir = g_win.session_resources_dir;
+    current.granted_at    = g_win.granted_at;
     current.grants        = g_win.grants;
     auto all              = load_journal_sessions_at(g_win.journal_path);
     bool replaced         = false;
@@ -985,8 +1075,11 @@ bool remove_session_from_journals(const std::string& package_sid)
 // directory was not labelled (user fs_readwrite) or after the directory label is
 // restored (Edge work dirs). Bounded walk: skip symlinks, cap entries so a user
 // folder cannot stall close/sweep. WRITE_OWNER is required to edit a mandatory
-// label; when it is missing (Modify-only folders), copy-replace the file as the user.
-bool strip_low_labels_in_tree(const std::string& root)
+// label; when it is missing (Modify-only folders), copy-replace only files created
+// at/after this session's grant time that are Low-labelled, have one link, and
+// have no extra ADS. Pre-grant / hard-linked / ADS files are left labelled
+// (policy skip, not a grant failure) so MOTW and sibling names survive.
+bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
 {
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
@@ -998,7 +1091,17 @@ bool strip_low_labels_in_tree(const std::string& root)
         const std::string s = p.string();
         if (path_is_acl_journal_tree(s))
             return;
-        if (path_has_low_integrity_label(s) && !restore_label_sddl(s, {}))
+        if (!path_has_low_integrity_label(s))
+            return;
+        if (set_label_sddl(s, {}) && !path_has_low_integrity_label(s))
+            return;
+        if (!path_has_low_integrity_label(s))
+            return;
+        if (!file_eligible_for_low_copy_replace(s, granted_at)) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped (pre-grant, hard link, or ADS) for " << s;
+            return;
+        }
+        if (!copy_replace_file_as_user(s) || path_has_low_integrity_label(s))
             ok = false;
     };
     strip_one(path);
@@ -1072,7 +1175,8 @@ bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source,
     // User fs_readwrite is write && !low_label. Also walk Edge write dirs so
     // helper-created files (edge-plugin-host.log, post_process.gcode) lose Low.
     // Journal-sourced copy-replace stays inside known user-rw roots / write grants.
-    if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path))
+    const std::uint64_t granted_at = session ? session->granted_at : g_win.granted_at;
+    if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path, granted_at))
         ok = false;
     else if (grant.write && source == GrantActionSource::Journal && !allow_copy_replace)
         BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped copy-replace outside known user-rw roots: " << grant.path;
@@ -1131,7 +1235,8 @@ void release_win_handles()
     g_win.session_python_home.clear();
     g_win.session_helper_dir.clear();
     g_win.session_resources_dir.clear();
-    g_win.ready = false;
+    g_win.granted_at = 0;
+    g_win.ready      = false;
 }
 
 void clear_win_state()
@@ -1367,6 +1472,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     g_win.session_python_home   = !spec.python_home.empty() ? spec.python_home : PythonInterpreter::bundled_python_home();
     g_win.session_helper_dir    = helper_path().parent_path().string();
     g_win.session_resources_dir = Slic3r::resources_dir();
+    g_win.granted_at            = now_filetime_u64();
 
     const std::wstring name = profile_name(spec.plugin_key);
     PSID               sid  = nullptr;

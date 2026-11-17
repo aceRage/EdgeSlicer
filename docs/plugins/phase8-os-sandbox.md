@@ -202,8 +202,14 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `fs_readwrite`), and clears the journal. Changing a mandatory label needs
   `WRITE_OWNER`; when that is missing (Modify-only folders such as a `C:\Dev`
   tree) the strip **logs** the `SetNamedSecurityInfo` error and copy-replaces
-  the file as the user (create new Medium-IL file, copy contents,
-  delete/replace — `ReplaceFile` is not used because it copies the Low label).
+  only files created at/after the session grant time that are Low-labelled,
+  have a single hard link, and have no alternate data streams (MOTW /
+  Zone.Identifier). Pre-grant, hard-linked, or ADS files are left labelled.
+  Copy-replace creates a Medium-IL temp with `CREATE_NEW` in the same
+  directory, copies bytes (preserving timestamps and attributes), then
+  `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`. It never deletes the
+  original first; if the move fails the original is kept and only the temp
+  is removed. `ReplaceFile` is not used because it copies the Low label.
   A successful copy-replace is logged at warning. Hosted G-code that Edge
   writes out of `plugin_data` is stripped of a Low label after the write.
   Low-IL labels are
