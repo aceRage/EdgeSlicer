@@ -1275,6 +1275,42 @@ std::string python_path(PyObject* object)
     return result;
 }
 
+// Host-owned asyncio loop construction (SelectorEventLoop) uses a TCP socketpair
+// emulation on Windows: bind+connect to 127.0.0.1. POSIX uses socketpair → socket.__new__
+// only. Permit those events solely while ScopedEventLoopSocketPermit is live, and solely
+// for loopback (127.0.0.1 / ::1, any port). Non-loopback bind/connect still go through
+// the full socket audit. This is a security-relevant relaxation: it does not grant
+// network, and it does not survive the permit's destructor.
+bool event_loop_permit_allows(const std::string& event_name, PyObject* args)
+{
+    if (event_name == "socket.__new__")
+        return true;
+    if (event_name != "socket.bind" && event_name != "socket.connect")
+        return false;
+    PyObject* address = tuple_item(args, 1);
+    if (address == nullptr || address == Py_None)
+        return false;
+    if (!PyTuple_Check(address) && !PyList_Check(address))
+        return false;
+    const Py_ssize_t n = PySequence_Size(address);
+    if (n < 1) {
+        if (n < 0)
+            PyErr_Clear();
+        return false;
+    }
+    PyObject* host_obj = PySequence_GetItem(address, 0);
+    if (host_obj == nullptr) {
+        PyErr_Clear();
+        return false;
+    }
+    std::string host;
+    const bool  ok = python_text(host_obj, host);
+    Py_DECREF(host_obj);
+    if (!ok)
+        return false;
+    return host == "127.0.0.1" || host == "::1";
+}
+
 std::string python_str(PyObject* object)
 {
     if (!object)
@@ -2495,10 +2531,10 @@ int PluginAuditManager::audit_hook(const char* event, PyObject* args, void* user
         return 0;
     }
 
-    // Host-owned asyncio loop construction needs the selector self-pipe (socketpair →
-    // socket.__new__). Keep the plugin's scope; only this event is permitted, and only while
-    // ScopedEventLoopSocketPermit is live.
-    if (ScopedEventLoopSocketPermit::active() && event_name == "socket.__new__")
+    // Host-owned asyncio loop construction. POSIX: socketpair → socket.__new__. Windows:
+    // SelectorEventLoop emulates that with bind+connect on 127.0.0.1. Permit those events
+    // only while ScopedEventLoopSocketPermit is live, and bind/connect only for loopback.
+    if (ScopedEventLoopSocketPermit::active() && PluginAuditDetail::event_loop_permit_allows(event_name, args))
         return 0;
 
     // the open function can take in different flags that determine if it is a read or readwrite.

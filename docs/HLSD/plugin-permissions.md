@@ -305,6 +305,13 @@ never treated as an opt-out.
   preset updates or UI actions, execute C++ host code and follow that API's contract. The
   audit hook judges the Python-level filesystem, network, process and thread events it is
   given, not the host API's internal work.
+- **Host-owned asyncio loop construction is a loopback-only socket exception.** While
+  `ScopedEventLoopSocketPermit` is live (the host constructing the captured
+  `SelectorEventLoop` class), `socket.__new__` is permitted and `socket.bind` /
+  `socket.connect` are permitted only for `127.0.0.1` or `::1` (any port). Windows
+  asyncio emulates `socketpair` that way. Non-loopback bind/connect, filesystem writes,
+  and subprocess remain blocked. The permit does not grant `network_socket` and ends
+  when the constructor returns.
 - **Denied paths are a direct-access block.** Path laundering through a symlink,
   hardlink, subprocess, or Windows 8.3 short name is outside the model. A tree grant is
   canonicalized for matching, but the deny check itself is base-name and component based.

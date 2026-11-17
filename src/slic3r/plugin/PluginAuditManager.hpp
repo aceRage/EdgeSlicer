@@ -283,8 +283,10 @@ private:
 // Each scope owns the root frames recorded inside it and lets them go, as its own plugin, before
 // restoring the outer context. That needs the GIL whenever a frame is still held, so construct
 // the scope after the GIL guard, to be destroyed before it.
-// While constructing a host-owned asyncio loop, permit only socket.__new__ (the loop's
-// self-pipe socketpair). The plugin's audit scope stays in place; this does not bypass it.
+// While constructing a host-owned asyncio loop, permit socket.__new__ (POSIX self-pipe)
+// and loopback-only socket.bind / socket.connect (Windows TCP socketpair emulation:
+// 127.0.0.1 or ::1, any port). Non-loopback bind/connect, writes, and subprocess stay
+// audited. The plugin's audit scope stays in place; this does not bypass it.
 class ScopedEventLoopSocketPermit
 {
 public:

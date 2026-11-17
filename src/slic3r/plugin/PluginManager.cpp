@@ -2549,7 +2549,8 @@ void ScriptAsyncRuntime::Impl::run_invocation(const std::shared_ptr<Run>& run)
                         {
                             // Keep the plugin's audit scope. Construct the loop from the class
                             // captured at interpreter init (so a patched new_event_loop / policy
-                            // does not run) and permit only socket.__new__ for the self-pipe.
+                            // does not run). Permit socket.__new__ and loopback bind/connect
+                            // (Windows SelectorEventLoop's TCP socketpair emulation).
                             PyObject* loop_cls = PythonInterpreter::instance().event_loop_class();
                             if (loop_cls == nullptr)
                                 throw std::runtime_error("asyncio event loop class was not captured at interpreter init");

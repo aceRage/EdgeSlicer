@@ -587,7 +587,7 @@ TEST_CASE("Unload abandons a sleeping script after the wait bound", "[PluginScri
     }
 }
 
-TEST_CASE("Event-loop socket permit does not unblock writes, subprocess, connect or bind", "[PluginScripts][Python]")
+TEST_CASE("Event-loop socket permit allows loopback bind/connect only", "[PluginScripts][Python]")
 {
     ScopedPluginManager plugin_system;
     if (!plugin_system.initialized)
@@ -601,12 +601,16 @@ TEST_CASE("Event-loop socket permit does not unblock writes, subprocess, connect
 import socket
 wrote = False
 spawned = False
-connected = False
-bound = False
+loopback_bound = False
+loopback_connect_audit = False
+remote_bound = False
+remote_connected = False
 write_err = ''
 spawn_err = ''
-connect_err = ''
-bind_err = ''
+loopback_bind_err = ''
+loopback_connect_err = ''
+remote_bind_err = ''
+remote_connect_err = ''
 try:
     open('/tmp/edgeslicer-permit-should-not-write', 'w').write('x')
     wrote = True
@@ -620,28 +624,49 @@ except Exception as e:
     spawn_err = type(e).__name__
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.1)
-    s.connect(('127.0.0.1', 1))
-    connected = True
+    s.bind(('127.0.0.1', 0))
+    loopback_bound = True
     s.close()
 except Exception as e:
-    connect_err = type(e).__name__
+    loopback_bind_err = type(e).__name__
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    bound = True
+    s.settimeout(0.1)
+    s.connect(('127.0.0.1', 1))
+    loopback_connect_audit = True
+    s.close()
+except PermissionError as e:
+    loopback_connect_err = type(e).__name__
+except OSError as e:
+    loopback_connect_audit = True
+    loopback_connect_err = type(e).__name__
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('0.0.0.0', 0))
+    remote_bound = True
     s.close()
 except Exception as e:
-    bind_err = type(e).__name__
+    remote_bind_err = type(e).__name__
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.1)
+    s.connect(('8.8.8.8', 1))
+    remote_connected = True
+    s.close()
+except Exception as e:
+    remote_connect_err = type(e).__name__
 )PY",
              py::globals(), locals);
 
     CHECK_FALSE(locals["wrote"].cast<bool>());
     CHECK_FALSE(locals["spawned"].cast<bool>());
-    CHECK_FALSE(locals["connected"].cast<bool>());
-    CHECK_FALSE(locals["bound"].cast<bool>());
+    CHECK(locals["loopback_bound"].cast<bool>());
+    CHECK(locals["loopback_connect_audit"].cast<bool>());
+    CHECK_FALSE(locals["remote_bound"].cast<bool>());
+    CHECK_FALSE(locals["remote_connected"].cast<bool>());
     CHECK(locals["write_err"].cast<std::string>() == "PermissionError");
     CHECK(locals["spawn_err"].cast<std::string>() == "PermissionError");
-    CHECK(locals["connect_err"].cast<std::string>() == "PermissionError");
-    CHECK(locals["bind_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["loopback_bind_err"].cast<std::string>().empty());
+    CHECK(locals["remote_bind_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["remote_connect_err"].cast<std::string>() == "PermissionError");
 }
