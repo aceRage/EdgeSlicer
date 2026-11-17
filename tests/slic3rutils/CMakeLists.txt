@@ -209,12 +209,19 @@ if (EDGE_PYTHON_PLUGINS)
     elseif (UNIX AND NOT WIN32)
         set_property(TARGET ${_TEST_NAME}_tests APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
     endif ()
-    add_dependencies(${_TEST_NAME}_tests edge-plugin-host)
+    add_executable(fake-plugin-host fake_plugin_host.cpp)
+    add_dependencies(${_TEST_NAME}_tests edge-plugin-host fake-plugin-host)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
         COMMENT "Copying edge-plugin-host for plugin tests"
+        VERBATIM)
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:fake-plugin-host>"
+            "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:fake-plugin-host>"
+        COMMENT "Copying fake-plugin-host for spawn fail-fast tests"
         VERBATIM)
     add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"

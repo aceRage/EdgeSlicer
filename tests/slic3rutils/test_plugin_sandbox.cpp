@@ -1091,6 +1091,34 @@ TEST_CASE("make_sandbox_spec creates the shared python packages dir", "[PluginSa
 }
 
 #ifdef _WIN32
+TEST_CASE("spawn fails fast when the helper exits before connecting", "[PluginSandbox][windows][spawn]")
+{
+    const fs::path fake = plugin_ipc::helper_path().parent_path() / "fake-plugin-host.exe";
+    {
+        boost::system::error_code ec;
+        if (!fs::exists(fake, ec) || ec)
+            SKIP("fake-plugin-host is not next to the test binary");
+    }
+
+    plugin_ipc::set_allow_helper_env_overrides_for_testing(true);
+    ScopedEnvVar host_env("EDGE_PLUGIN_HOST", fake.string());
+    ScopedEnvVar sandbox_off(plugin_ipc::k_env_sandbox_disable, "0");
+
+    ScopedSpawnedHost spawned;
+    std::string       error;
+    const auto        t0 = std::chrono::steady_clock::now();
+    const bool        ok = plugin_ipc::spawn_host(spawned.host, error);
+    const auto        ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    plugin_ipc::set_allow_helper_env_overrides_for_testing(false);
+
+    INFO("spawn error: " << error);
+    INFO("elapsed ms: " << ms);
+    CHECK_FALSE(ok);
+    CHECK(ms < 3000);
+    CHECK(error.find("exited before connecting") != std::string::npos);
+    CHECK(error.find("exit code 42") != std::string::npos);
+}
+
 TEST_CASE("AppContainer profile names are a fixed-length FNV hash", "[PluginSandbox][windows]")
 {
     const auto a     = plugin_ipc::win_appcontainer_profile_name("alpha");
