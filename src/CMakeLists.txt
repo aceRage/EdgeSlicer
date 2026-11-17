@@ -386,7 +386,8 @@ if (EDGE_PYTHON_PLUGINS)
     set(_edge_python_bin_dir "$<TARGET_FILE_DIR:Snapmaker_Orca>")
     add_dependencies(Snapmaker_Orca edge-plugin-host)
     # Helper-rebuild copy lives on edge-plugin-host POST_BUILD in src/slic3r/CMakeLists.txt
-    # (CMake only allows that command in the directory that created the target).
+    # (CMake only allows that command in the directory that created the target). The helper
+    # copies via a generate-time script so TARGET_FILE_DIR:Snapmaker_Orca does not cycle.
     add_custom_command(TARGET Snapmaker_Orca POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"

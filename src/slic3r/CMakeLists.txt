@@ -1573,22 +1573,27 @@ if (EDGE_PYTHON_PLUGINS)
         target_link_libraries(edge-plugin-host Setupapi.lib userenv.lib)
     endif ()
     # Copy next to the app whenever this helper rebuilds. POST_BUILD must live here;
-    # CMake rejects attaching it from src/CMakeLists.txt. Snapmaker_Orca is created
-    # later; TARGET_FILE_DIR is evaluated at generate time. make_directory so a
-    # helper-first build still has the app output dir.
+    # CMake rejects attaching it from src/CMakeLists.txt. Do not put
+    # $<TARGET_FILE_DIR:Snapmaker_Orca> in this custom command: that genex adds a
+    # target dependency and cycles with add_dependencies(Snapmaker_Orca edge-plugin-host).
+    # Evaluate the destination at generate time into a per-config script instead.
+    set(_copy_helper_script "${CMAKE_CURRENT_BINARY_DIR}/copy_edge_plugin_host-$<CONFIG>.cmake")
+    set(_copy_helper_content "
+execute_process(COMMAND \"${CMAKE_COMMAND}\" -E make_directory \"$<TARGET_FILE_DIR:Snapmaker_Orca>\")
+execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy_if_different
+  \"$<TARGET_FILE:edge-plugin-host>\"
+  \"$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>\")
+")
+    if (APPLE)
+        string(APPEND _copy_helper_content "
+execute_process(COMMAND sh -c \"codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true\")
+")
+    endif ()
+    file(GENERATE OUTPUT "${_copy_helper_script}" CONTENT "${_copy_helper_content}")
     add_custom_command(TARGET edge-plugin-host POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Snapmaker_Orca>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:edge-plugin-host>"
-            "$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMAND ${CMAKE_COMMAND} -P "${_copy_helper_script}"
         COMMENT "Copying edge-plugin-host next to EdgeSlicer"
         VERBATIM)
-    if (APPLE)
-        add_custom_command(TARGET edge-plugin-host POST_BUILD
-            COMMAND sh -c "codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
-            COMMENT "Signing edge-plugin-host with App Sandbox entitlements"
-            VERBATIM)
-    endif ()
 endif ()
 
 if (MSVC)
