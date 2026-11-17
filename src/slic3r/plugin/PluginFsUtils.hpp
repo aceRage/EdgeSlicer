@@ -41,15 +41,16 @@ struct PluginPermissions
     bool full_access = false;
 };
 
-struct PluginInstallState {
-    std::string installed_from;      // "local" | "cloud"
+struct PluginInstallState
+{
+    std::string installed_from; // "local" | "cloud"
     std::string installed_version;
     std::string plugin_name;
-    std::string cloud_uuid;          // empty for local
+    std::string cloud_uuid; // empty for local
 
     PluginPermissions permissions;
 
-    bool enabled = false;
+    bool                                      enabled = false;
     std::vector<std::pair<std::string, bool>> capabilities; // name -> enabled, ordered
 };
 
@@ -61,18 +62,15 @@ std::string get_orca_plugins_dir();
 
 boost::filesystem::path resolve_plugin_root_from_descriptor(const PluginDescriptor& descriptor);
 
-bool is_plugin_root_allowed(const boost::filesystem::path& candidate_root,
-                            const std::vector<std::string>& allowed_dirs);
+bool is_plugin_root_allowed(const boost::filesystem::path& candidate_root, const std::vector<std::string>& allowed_dirs);
 
-bool resolve_allowed_plugin_root(const PluginDescriptor& descriptor,
+bool resolve_allowed_plugin_root(const PluginDescriptor&         descriptor,
                                  const std::vector<std::string>& allowed_dirs,
-                                 const std::string& out_of_scope_error,
-                                 boost::filesystem::path& resolved_root,
-                                 std::string& error);
+                                 const std::string&              out_of_scope_error,
+                                 boost::filesystem::path&        resolved_root,
+                                 std::string&                    error);
 
-bool delete_plugin_root(const boost::filesystem::path& resolved_root,
-                        const std::string& plugin_id,
-                        std::string& error);
+bool delete_plugin_root(const boost::filesystem::path& resolved_root, const std::string& plugin_id, std::string& error);
 
 // The directories plugins are discovered from: {data_dir}/orca_plugins, plus the per-user cloud
 // directory when cloud_user_id is non-empty.
@@ -92,6 +90,8 @@ std::vector<PluginDescriptor> discover_plugin_packages(const std::vector<std::st
 
 bool is_ignored_plugin_directory(const boost::filesystem::path& path);
 bool is_safe_relative_path(const boost::filesystem::path& path);
+// Filesystem-safe plugin id: [A-Za-z0-9_.-], no leading '.', no '..', no '__' prefix.
+// The `test.` prefix (case-insensitive) is reserved for the test harness and is rejected.
 bool is_valid_plugin_id(const std::string& id);
 bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boost::filesystem::path& destination, std::string& error);
 
@@ -117,9 +117,7 @@ boost::filesystem::path find_installed_plugin_entry(const boost::filesystem::pat
 
 // Validated non-recursive .png/.jpg/.jpeg/.bmp files directly inside `dir`, every one contained in
 // `plugin_root`. Empty with `error` set on failure.
-std::vector<std::string> collect_resource_texture_files(const std::string& dir,
-                                                        const std::string& plugin_root,
-                                                        std::string& error);
+std::vector<std::string> collect_resource_texture_files(const std::string& dir, const std::string& plugin_root, std::string& error);
 
 // Process-wide mutex serializing every in-process read and read-modify-write of a plugin's
 // .install_state.json sidecar. Hold it across the read and the matching write so two writers
@@ -144,7 +142,9 @@ bool write_install_state(const boost::filesystem::path& plugin_dir, const Plugin
 // overload reads the sidecar itself, so callers must hold install_state_mutex(). An existing
 // sidecar that cannot be read is never replaced: the write fails and leaves it untouched. A
 // missing sidecar is a new plugin, so the metadata is seeded and written.
-bool write_install_state(const boost::filesystem::path& plugin_dir, const PluginDescriptor& entry, bool enabled,
+bool write_install_state(const boost::filesystem::path&                   plugin_dir,
+                         const PluginDescriptor&                          entry,
+                         bool                                             enabled,
                          const std::vector<std::pair<std::string, bool>>& capabilities);
 // Convenience overload: write(dir, entry, /*enabled=*/true, /*capabilities=*/{}).
 bool write_install_state(const boost::filesystem::path& plugin_dir, const PluginDescriptor& entry);
@@ -171,8 +171,9 @@ enum class InstallStateReadStatus {
 // cannot be examined, opened or read in full. Reading such a file again cannot recover it, so a
 // plugin load sets it aside (see plugin_loader::load); every other caller treats it as Unreadable.
 // Caller must hold install_state_mutex(); see the note on read_install_state below.
-InstallStateReadStatus read_install_state_status(const boost::filesystem::path& plugin_dir, PluginInstallState& out,
-                                                 bool* malformed = nullptr);
+InstallStateReadStatus read_install_state_status(const boost::filesystem::path& plugin_dir,
+                                                 PluginInstallState&            out,
+                                                 bool*                          malformed = nullptr);
 
 // Reads install state back into the descriptor; plugin_key is always derived. Returns whether the
 // sidecar was present and valid.

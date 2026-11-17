@@ -148,6 +148,9 @@ void delete_parent_sandbox_profile(const std::string& plugin_key);
 // Test-only: DeleteAppContainerProfile iff this process's CreateAppContainerProfile
 // succeeded (not ERROR_ALREADY_EXISTS). No-op on POSIX and for pre-existing profiles.
 void delete_test_created_parent_sandbox_profile(const std::string& plugin_key);
+// Test harness: honour `test.` plugin keys as EdgeSlicer.t.* AppContainer monikers.
+// Production never enables this; without it, `test.*` hashes to EdgeSlicer.ph.* like any other key.
+void set_test_only_plugin_keys_for_testing(bool enable);
 
 #ifdef _WIN32
 // Named-pipe SECURITY_ATTRIBUTES that lets the AppContainer SID connect. nullptr when unused.

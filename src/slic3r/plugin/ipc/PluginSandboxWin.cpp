@@ -24,6 +24,7 @@ void  close_win_appcontainer() {}
 void  sweep_win_acl_journal() {}
 void  delete_win_appcontainer_profile(const std::string&) {}
 void  delete_win_test_created_appcontainer_profile(const std::string&) {}
+void  set_test_only_plugin_keys_for_testing(bool) {}
 void* win_security_capabilities() { return nullptr; }
 void* win_pipe_security_attributes() { return nullptr; }
 
@@ -41,6 +42,8 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <aclapi.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <shlobj.h>
+#include <knownfolders.h>
 #include <userenv.h>
 #ifndef SECURITY_APP_PACKAGE_BASE_RID
 #define SECURITY_APP_PACKAGE_BASE_RID (0x00000002L)
@@ -62,6 +65,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -88,6 +92,7 @@ DeleteAppContainerProfile_fn                 p_DeleteProfile = nullptr;
 GetAppContainerFolderPath_fn                 p_GetAcFolder   = nullptr;
 bool                                         g_resolved      = false;
 bool                                         g_apis_ok       = false;
+std::atomic<bool>                            g_test_only_plugin_keys{false}; // test harness: honour test. → EdgeSlicer.t.*
 
 void resolve_apis()
 {
@@ -109,13 +114,20 @@ void resolve_apis()
     g_apis_ok = p_CreateProfile && p_DeriveSid;
 }
 
-bool plugin_key_is_test_only(const std::string& plugin_key) { return plugin_key.size() >= 5 && plugin_key.compare(0, 5, "test.") == 0; }
+bool plugin_key_is_test_only(const std::string& plugin_key)
+{
+    // Production never sets this; a real plugin keyed test.* hashes to EdgeSlicer.ph.*.
+    if (!g_test_only_plugin_keys.load(std::memory_order_acquire))
+        return false;
+    return plugin_key.size() >= 5 && plugin_key.compare(0, 5, "test.") == 0;
+}
 
 std::wstring profile_name(const std::string& plugin_key)
 {
     // Fixed-length name so two long keys cannot truncate to the same profile.
-    // Test-only keys (`test.…`) use a distinct moniker prefix so they cannot collide
-    // with a shipping `EdgeSlicer.ph.*` profile even if the FNV hashes match.
+    // Test-only keys (`test.…`, only when the test harness enables the hook) use a
+    // distinct moniker prefix so they cannot collide with a shipping `EdgeSlicer.ph.*`
+    // profile even if the FNV hashes match.
     std::uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : plugin_key) {
         hash ^= static_cast<std::uint64_t>(c);
@@ -1610,6 +1622,8 @@ void delete_win_test_created_appcontainer_profile(const std::string& plugin_key)
     delete_win_appcontainer_profile(plugin_key);
 }
 
+void set_test_only_plugin_keys_for_testing(bool enable) { g_test_only_plugin_keys.store(enable, std::memory_order_release); }
+
 bool win_create_appcontainer_profile_for_testing(const std::string& plugin_key, std::string& error)
 {
     resolve_apis();
@@ -1630,16 +1644,39 @@ bool win_create_appcontainer_profile_for_testing(const std::string& plugin_key, 
 
 bool win_appcontainer_profile_exists_for_testing(const std::string& plugin_key)
 {
+    // Do not read the LOCALAPPDATA env var: REAPER (and other harnesses) redirect it, while
+    // AppContainer profiles still live under the real known-folder LocalAppData.
     resolve_apis();
     if (plugin_key.empty())
         return false;
-    const std::wstring name            = profile_name(plugin_key);
-    wchar_t            local[MAX_PATH] = {};
-    const DWORD        n               = ::GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH)
+    const std::wstring name = profile_name(plugin_key);
+    namespace fs            = boost::filesystem;
+    auto folder_exists      = [](const fs::path& path) {
+        boost::system::error_code ec;
+        return fs::exists(path, ec) && !ec;
+    };
+
+    if (p_DeriveSid && p_GetAcFolder) {
+        PSID sid = nullptr;
+        if (SUCCEEDED(p_DeriveSid(name.c_str(), &sid)) && sid != nullptr) {
+            const std::wstring sid_str = sid_to_string(sid);
+            ::FreeSid(sid);
+            PWSTR ac_path = nullptr;
+            if (!sid_str.empty() && SUCCEEDED(p_GetAcFolder(sid_str.c_str(), &ac_path)) && ac_path != nullptr) {
+                const bool exists = folder_exists(ac_path);
+                ::CoTaskMemFree(ac_path);
+                return exists;
+            }
+        } else if (sid != nullptr) {
+            ::FreeSid(sid);
+        }
+    }
+
+    PWSTR local = nullptr;
+    if (FAILED(::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) || local == nullptr)
         return false;
-    namespace fs                       = boost::filesystem;
-    const fs::path            packages = fs::path(local) / L"Packages";
+    const fs::path packages = fs::path(local) / L"Packages";
+    ::CoTaskMemFree(local);
     boost::system::error_code ec;
     if (!fs::is_directory(packages, ec) || ec)
         return false;

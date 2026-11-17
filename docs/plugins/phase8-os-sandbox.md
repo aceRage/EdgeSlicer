@@ -180,8 +180,10 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `{data_dir}/plugin_host/acl_journal.json` is deleted unread. Permanent
   uninstall of that exact plugin key calls `DeleteAppContainerProfile`
   (`close_host` and test teardown never delete a pre-existing profile).
-  Test-only plugin keys (`test.…`) use the `EdgeSlicer.t.*` moniker so they
-  cannot collide with shipping `EdgeSlicer.ph.*` profiles.
+  Test-only plugin keys (`test.…`) use the `EdgeSlicer.t.*` moniker only when
+  the test harness enables `set_test_only_plugin_keys_for_testing`; production
+  hashes `test.*` to `EdgeSlicer.ph.*`. Real plugin ids starting with `test.`
+  (case-insensitive) are rejected by `is_valid_plugin_id` / install.
   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
   already removed so a vanished temp dir cannot pin the journal forever. The
   journal is a list of sessions (package SID + profile name + grants) and is

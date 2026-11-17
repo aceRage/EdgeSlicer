@@ -87,7 +87,7 @@ boost::filesystem::path resolve_plugin_root_from_descriptor(const PluginDescript
 bool is_plugin_root_allowed(const boost::filesystem::path& candidate_root, const std::vector<std::string>& allowed_dirs)
 {
     boost::system::error_code ec;
-    boost::filesystem::path resolved_root = boost::filesystem::weakly_canonical(candidate_root, ec);
+    boost::filesystem::path   resolved_root = boost::filesystem::weakly_canonical(candidate_root, ec);
     if (ec) {
         ec.clear();
         resolved_root = boost::filesystem::absolute(candidate_root, ec);
@@ -97,19 +97,18 @@ bool is_plugin_root_allowed(const boost::filesystem::path& candidate_root, const
         return false;
 
     for (const auto& allowed_dir : allowed_dirs) {
-        if (is_inside_allowed_root(boost::filesystem::path(resolved_root.string()),
-                                   boost::filesystem::path(allowed_dir)))
+        if (is_inside_allowed_root(boost::filesystem::path(resolved_root.string()), boost::filesystem::path(allowed_dir)))
             return true;
     }
 
     return false;
 }
 
-bool resolve_allowed_plugin_root(const PluginDescriptor& descriptor,
+bool resolve_allowed_plugin_root(const PluginDescriptor&         descriptor,
                                  const std::vector<std::string>& allowed_dirs,
-                                 const std::string& out_of_scope_error,
-                                 boost::filesystem::path& resolved_root,
-                                 std::string& error)
+                                 const std::string&              out_of_scope_error,
+                                 boost::filesystem::path&        resolved_root,
+                                 std::string&                    error)
 {
     namespace fs = boost::filesystem;
 
@@ -147,13 +146,13 @@ bool delete_plugin_root(const boost::filesystem::path& resolved_root, const std:
     // {data_dir}/plugins, which is UltraNet's directory and is not owned by this runtime.
     auto weakly = [](const fs::path& p) {
         boost::system::error_code canon_ec;
-        fs::path c = fs::weakly_canonical(p, canon_ec);
+        fs::path                  c = fs::weakly_canonical(p, canon_ec);
         return canon_ec ? fs::absolute(p) : c;
     };
-    const fs::path root           = weakly(resolved_root);
-    const fs::path data           = weakly(fs::path(data_dir()));
-    const fs::path orca_plugins   = weakly(fs::path(data_dir()) / "orca_plugins");
-    const fs::path ultranet_dir   = weakly(fs::path(data_dir()) / "plugins");
+    const fs::path root         = weakly(resolved_root);
+    const fs::path data         = weakly(fs::path(data_dir()));
+    const fs::path orca_plugins = weakly(fs::path(data_dir()) / "orca_plugins");
+    const fs::path ultranet_dir = weakly(fs::path(data_dir()) / "plugins");
     if (root == data || root == orca_plugins || root == ultranet_dir) {
         error = "Refusing to delete plugin parent directory: " + resolved_root.string();
         BOOST_LOG_TRIVIAL(error) << error;
@@ -174,7 +173,6 @@ bool delete_plugin_root(const boost::filesystem::path& resolved_root, const std:
     BOOST_LOG_TRIVIAL(info) << "Deleted plugin: " << plugin_id << " from " << resolved_root.string();
     return true;
 }
-
 
 // ── Discovery ───────────────────────────────────────────────────────────────────────────────
 
@@ -241,8 +239,8 @@ void scan_plugin_directory(const std::string& dir_path, std::vector<PluginDescri
                 }
                 assign_discovered_plugin_key(descriptor, entry_path);
                 out.push_back(std::move(descriptor));
-                BOOST_LOG_TRIVIAL(warning) << (is_wheel ? "Invalid wheel plugin: " : "Invalid .py plugin: ")
-                                           << plugin_dir.string() << " - " << out.back().error;
+                BOOST_LOG_TRIVIAL(warning) << (is_wheel ? "Invalid wheel plugin: " : "Invalid .py plugin: ") << plugin_dir.string() << " - "
+                                           << out.back().error;
                 continue;
             }
 
@@ -270,7 +268,6 @@ void scan_plugin_directory(const std::string& dir_path, std::vector<PluginDescri
     }
 }
 
-
 } // namespace
 
 std::vector<std::string> get_plugin_directories(const std::string& cloud_user_id)
@@ -284,8 +281,7 @@ std::vector<std::string> get_plugin_directories(const std::string& cloud_user_id
         // Never create or scan {data_dir}/plugins (UltraNet). Python packages live in orca_plugins.
         const fs::path data = fs::path(data_dir());
         if (path.filename() == "plugins" && path.parent_path() == data) {
-            BOOST_LOG_TRIVIAL(error) << "Refusing to create UltraNet plugins directory from Python plugin code: "
-                                     << path.string();
+            BOOST_LOG_TRIVIAL(error) << "Refusing to create UltraNet plugins directory from Python plugin code: " << path.string();
             return;
         }
         if (fs::exists(path) && fs::is_directory(path)) {
@@ -374,7 +370,7 @@ std::string zip_entry_name(mz_zip_archive& archive, const mz_zip_archive_file_st
     if (stat.m_is_utf8)
         return stat.m_filename;
 
-    std::string extra(1024, 0);
+    std::string  extra(1024, 0);
     const size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
     return decode_zip_entry_extra_path(extra.substr(0, n), stat.m_filename);
 }
@@ -390,7 +386,7 @@ std::string normalize_zip_entry_name(std::string entry_name)
 struct ZipReaderGuard
 {
     mz_zip_archive archive;
-    bool opened = false;
+    bool           opened = false;
 
     ZipReaderGuard() { mz_zip_zero_struct(&archive); }
 
@@ -409,6 +405,11 @@ bool is_valid_plugin_id(const std::string& id)
         return false;
     if (id == "." || id == ".." || id[0] == '.' || id.rfind("__", 0) == 0)
         return false;
+    // `test.` is reserved for the sandbox test harness (EdgeSlicer.t.* monikers).
+    if (id.size() >= 5 && id[4] == '.' && std::tolower(static_cast<unsigned char>(id[0])) == 't' &&
+        std::tolower(static_cast<unsigned char>(id[1])) == 'e' && std::tolower(static_cast<unsigned char>(id[2])) == 's' &&
+        std::tolower(static_cast<unsigned char>(id[3])) == 't')
+        return false;
 
     for (unsigned char ch : id) {
         if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.')
@@ -422,9 +423,14 @@ bool is_valid_plugin_id(const std::string& id)
 namespace {
 
 // RAII helper to free heap-allocated memory from miniz.
-struct MzHeapFree {
+struct MzHeapFree
+{
     void* ptr = nullptr;
-    ~MzHeapFree() { if (ptr) std::free(ptr); }
+    ~MzHeapFree()
+    {
+        if (ptr)
+            std::free(ptr);
+    }
 };
 
 // Read a text file from within a zip archive into a string.
@@ -432,7 +438,7 @@ struct MzHeapFree {
 bool read_zip_text_file(mz_zip_archive& archive, const char* filename, std::string& out, std::string& error)
 {
     size_t size = 0;
-    void* data = mz_zip_reader_extract_file_to_heap(&archive, filename, &size, 0);
+    void*  data = mz_zip_reader_extract_file_to_heap(&archive, filename, &size, 0);
     if (!data) {
         error = std::string("Wheel does not contain ") + filename;
         return false;
@@ -482,8 +488,8 @@ bool read_toml_array_items(const std::string& line, std::vector<std::string>& it
         } else {
             // An unquoted item isn't TOML, but is kept as the requirement it names.
             const size_t end = std::min(line.find_first_of(" \t,]#", i), line.size());
-            item = line.substr(i, end - i);
-            i = end;
+            item             = line.substr(i, end - i);
+            i                = end;
         }
         if (!item.empty())
             items.push_back(item);
@@ -505,16 +511,16 @@ bool read_toml_array_items(const std::string& line, std::vector<std::string>& it
 //   version = "1.0.0"
 //
 // Returns false only on parse errors; missing block is not an error.
-bool parse_pep723_toml(const std::string& toml_content,
+bool parse_pep723_toml(const std::string&        toml_content,
                        std::vector<std::string>& out_deps,
-                       std::string& out_requires_python,
-                       std::string& out_name,
-                       std::string& out_description,
-                       std::string& out_author,
-                       std::string& out_version,
-                       std::string& out_orca_api,
-                       std::string& out_type,
-                       std::string& error)
+                       std::string&              out_requires_python,
+                       std::string&              out_name,
+                       std::string&              out_description,
+                       std::string&              out_author,
+                       std::string&              out_version,
+                       std::string&              out_orca_api,
+                       std::string&              out_type,
+                       std::string&              error)
 {
     out_deps.clear();
     out_requires_python.clear();
@@ -528,7 +534,7 @@ bool parse_pep723_toml(const std::string& toml_content,
     TomlSection section = TomlSection::Root;
 
     std::istringstream stream(toml_content);
-    std::string line;
+    std::string        line;
 
     while (std::getline(stream, line)) {
         // Trim leading/trailing whitespace.
@@ -594,15 +600,18 @@ bool parse_pep723_toml(const std::string& toml_content,
                     section = TomlSection::InDepsArray;
             }
         } else if (section == TomlSection::OrcaPlugin) {
-            if (key == "name")         out_name = unquote_toml_string(val);
-            else if (key == "description")  out_description = unquote_toml_string(val);
-            else if (key == "author")       out_author = unquote_toml_string(val);
-            else if (key == "version")      out_version = unquote_toml_string(val);
+            if (key == "name")
+                out_name = unquote_toml_string(val);
+            else if (key == "description")
+                out_description = unquote_toml_string(val);
+            else if (key == "author")
+                out_author = unquote_toml_string(val);
+            else if (key == "version")
+                out_version = unquote_toml_string(val);
             else if (key == "requires-orca-api" || key == "min_orca_api") {
                 if (out_orca_api.empty())
                     out_orca_api = unquote_toml_string(val);
-            }
-            else if (key == "type")
+            } else if (key == "type")
                 out_type = unquote_toml_string(val);
         }
     }
@@ -632,28 +641,27 @@ std::string normalize_package_name(const std::string& name)
 
 // Parse METADATA (RFC 822 style) into a flat multimap.
 // https://packaging.python.org/en/latest/specifications/core-metadata/
-void parse_metadata_rfc822(const std::string& content,
-                           std::string& out_name,
-                           std::string& out_version,
-                           std::string& out_summary,
-                           std::string& out_author,
-                           std::string& out_requires_python,
-                           std::string& out_import_name,
+void parse_metadata_rfc822(const std::string&        content,
+                           std::string&              out_name,
+                           std::string&              out_version,
+                           std::string&              out_summary,
+                           std::string&              out_author,
+                           std::string&              out_requires_python,
+                           std::string&              out_import_name,
                            std::vector<std::string>& out_requires_dist,
-                           std::string& out_orca_api,
-                           std::string& error)
+                           std::string&              out_orca_api,
+                           std::string&              error)
 {
     std::istringstream stream(content);
-    std::string line;
-    std::string current_header;
-    std::string current_value;
+    std::string        line;
+    std::string        current_header;
+    std::string        current_value;
 
     auto flush = [&]() {
         if (current_header.empty())
             return;
         std::string lower = current_header;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
 
         if (lower == "name")
             out_name = current_value;
@@ -701,7 +709,7 @@ void parse_metadata_rfc822(const std::string& content,
         if (colon == std::string::npos)
             continue;
 
-        current_header = line.substr(0, colon);
+        current_header   = line.substr(0, colon);
         size_t val_start = colon + 1;
         while (val_start < line.size() && (line[val_start] == ' ' || line[val_start] == '\t'))
             ++val_start;
@@ -743,7 +751,7 @@ boost::filesystem::path zip_io_path(const boost::filesystem::path& p)
 #ifdef _WIN32
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
-    fs::path abs = fs::absolute(p, ec);
+    fs::path                  abs = fs::absolute(p, ec);
     if (ec)
         abs = p;
     std::wstring w = abs.lexically_normal().wstring();
@@ -778,8 +786,8 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
     reader.opened = true;
 
     std::unordered_set<std::string> extracted_entries;
-    const mz_uint num_entries = mz_zip_reader_get_num_files(&reader.archive);
-    mz_zip_archive_file_stat stat;
+    const mz_uint                   num_entries = mz_zip_reader_get_num_files(&reader.archive);
+    mz_zip_archive_file_stat        stat;
     for (mz_uint i = 0; i < num_entries; ++i) {
         if (!mz_zip_reader_file_stat(&reader.archive, i, &stat)) {
             error = "Failed to read plugin zip entry metadata: " + MZ_Archive::get_errorstr(mz_zip_get_last_error(&reader.archive));
@@ -918,8 +926,7 @@ bool read_install_state(const boost::filesystem::path& plugin_dir, PluginDescrip
     return true;
 }
 
-InstallStateReadStatus read_install_state_status(const boost::filesystem::path& plugin_dir, PluginInstallState& out,
-                                                 bool* malformed)
+InstallStateReadStatus read_install_state_status(const boost::filesystem::path& plugin_dir, PluginInstallState& out, bool* malformed)
 {
     namespace fs                = boost::filesystem;
     const fs::path sidecar_path = plugin_dir / ".install_state.json";
@@ -976,8 +983,8 @@ InstallStateReadStatus read_install_state_status(const boost::filesystem::path& 
             parsed.cloud_uuid = state["cloud_uuid"].get<std::string>();
 
         if (state.contains("permissions") && state["permissions"].is_object()) {
-            const auto& permissions = state["permissions"];
-            auto read_string_list = [&permissions](const char* key, std::vector<std::string>& out) {
+            const auto& permissions      = state["permissions"];
+            auto        read_string_list = [&permissions](const char* key, std::vector<std::string>& out) {
                 if (!permissions.contains(key) || !permissions[key].is_array())
                     return;
                 for (const auto& entry : permissions[key])
@@ -1061,9 +1068,8 @@ bool replace_install_state_file(const boost::filesystem::path& target, const std
     namespace fs = boost::filesystem;
 
     static std::atomic<unsigned> counter{0};
-    const fs::path tmp_path = target.parent_path() /
-        (target.filename().string() + "." + std::to_string(get_current_pid()) + "." +
-         std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tmp");
+    const fs::path tmp_path = target.parent_path() / (target.filename().string() + "." + std::to_string(get_current_pid()) + "." +
+                                                      std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tmp");
 
     const auto fail = [&tmp_path, &error](const std::string& reason) {
         boost::system::error_code remove_ec;
@@ -1091,7 +1097,7 @@ bool replace_install_state_file(const boost::filesystem::path& target, const std
     // Keep the replaced file's mode where the platform has one. Best effort, matching the previous
     // writer; a failure here does not turn a successful replace into a failed one.
     boost::system::error_code perm_ec;
-    const fs::file_status   target_status = fs::status(target, perm_ec);
+    const fs::file_status     target_status = fs::status(target, perm_ec);
     if (!perm_ec && fs::exists(target_status))
         fs::permissions(tmp_path, target_status.permissions(), perm_ec);
 #endif
@@ -1107,11 +1113,10 @@ bool replace_install_state_file(const boost::filesystem::path& target, const std
         if (::MoveFileExW(wide_tmp.c_str(), wide_target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             break;
         const DWORD last_error = ::GetLastError();
-        const bool transient = last_error == ERROR_SHARING_VIOLATION || last_error == ERROR_LOCK_VIOLATION ||
+        const bool  transient  = last_error == ERROR_SHARING_VIOLATION || last_error == ERROR_LOCK_VIOLATION ||
                                last_error == ERROR_ACCESS_DENIED;
         if (!transient || attempt + 1 == max_attempts)
-            return fail("MoveFileExW failed with error " +
-                        std::to_string(static_cast<unsigned long>(last_error)));
+            return fail("MoveFileExW failed with error " + std::to_string(static_cast<unsigned long>(last_error)));
         ::Sleep(10);
     }
 #else
@@ -1182,7 +1187,9 @@ bool write_install_state(const boost::filesystem::path& plugin_dir, const Plugin
     return true;
 }
 
-bool write_install_state(const boost::filesystem::path& plugin_dir, const PluginDescriptor& entry, bool enabled,
+bool write_install_state(const boost::filesystem::path&                   plugin_dir,
+                         const PluginDescriptor&                          entry,
+                         bool                                             enabled,
                          const std::vector<std::pair<std::string, bool>>& capabilities)
 {
     PluginInstallState state;
@@ -1231,7 +1238,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
     //   # <toml content>
     //   # ///
     std::string pep723_content;
-    bool in_block = false;
+    bool        in_block = false;
     std::string line;
 
     while (std::getline(f, line)) {
@@ -1265,16 +1272,8 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
         std::string pep723_error;
         std::string requires_python;
         std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api, pep_type;
-        if (!parse_pep723_toml(pep723_content,
-                               descriptor.dependencies,
-                               requires_python,
-                               pep_name,
-                               pep_desc,
-                               pep_author,
-                               pep_version,
-                               pep_orca_api,
-                               pep_type,
-                               pep723_error)) {
+        if (!parse_pep723_toml(pep723_content, descriptor.dependencies, requires_python, pep_name, pep_desc, pep_author, pep_version,
+                               pep_orca_api, pep_type, pep723_error)) {
             error = "Failed to parse PEP 723 metadata: " + pep723_error;
             return false;
         }
@@ -1284,11 +1283,16 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
         // Populate identity fields from the PEP 723 [tool.orcaslicer.plugin] section.
         // Cloud metadata overrides these when available; they serve as the local
         // source of truth for side-loaded .py plugins and as fallback values.
-        if (!pep_name.empty())            descriptor.name       = sanitize_plugin_name(pep_name);
-        if (!pep_desc.empty())            descriptor.description = pep_desc;
-        if (!pep_author.empty())          descriptor.author     = pep_author;
-        if (!pep_version.empty())         descriptor.version    = pep_version;
-        if (!pep_orca_api.empty())        descriptor.required_orca_api = pep_orca_api;
+        if (!pep_name.empty())
+            descriptor.name = sanitize_plugin_name(pep_name);
+        if (!pep_desc.empty())
+            descriptor.description = pep_desc;
+        if (!pep_author.empty())
+            descriptor.author = pep_author;
+        if (!pep_version.empty())
+            descriptor.version = pep_version;
+        if (!pep_orca_api.empty())
+            descriptor.required_orca_api = pep_orca_api;
         if (!pep_type.empty() && descriptor.display_types.empty())
             descriptor.display_types.push_back(pep_type);
     }
@@ -1321,8 +1325,8 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
     // explicit directory entries.  normalize_zip_entry_name strips trailing
     // slashes, so we match ".dist-info" as the last path component of a
     // directory entry, and ".dist-info/" embedded in a file path.
-    const mz_uint num_entries = mz_zip_reader_get_num_files(&reader.archive);
-    std::string dist_info_dir;
+    const mz_uint            num_entries = mz_zip_reader_get_num_files(&reader.archive);
+    std::string              dist_info_dir;
     mz_zip_archive_file_stat stat;
 
     for (mz_uint i = 0; i < num_entries; ++i) {
@@ -1363,16 +1367,16 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
 
     // Read METADATA.
     const std::string metadata_path = dist_info_dir + "METADATA";
-    std::string meta_content;
+    std::string       meta_content;
     if (!read_zip_text_file(reader.archive, metadata_path.c_str(), meta_content, error))
         return false;
 
-    std::string meta_name, meta_version, meta_summary, meta_author, meta_requires_python, meta_import_name;
+    std::string              meta_name, meta_version, meta_summary, meta_author, meta_requires_python, meta_import_name;
     std::vector<std::string> requires_dist;
-    std::string meta_orca_api;
-    std::string meta_error;
-    parse_metadata_rfc822(meta_content, meta_name, meta_version, meta_summary, meta_author,
-                          meta_requires_python, meta_import_name, requires_dist, meta_orca_api, meta_error);
+    std::string              meta_orca_api;
+    std::string              meta_error;
+    parse_metadata_rfc822(meta_content, meta_name, meta_version, meta_summary, meta_author, meta_requires_python, meta_import_name,
+                          requires_dist, meta_orca_api, meta_error);
 
     if (meta_name.empty()) {
         error = "Wheel METADATA missing required Name field";
@@ -1385,7 +1389,7 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
 
     // Read WHEEL (verify existence and Wheel-Version).
     const std::string wheel_path = dist_info_dir + "WHEEL";
-    std::string wheel_content;
+    std::string       wheel_content;
     if (!read_zip_text_file(reader.archive, wheel_path.c_str(), wheel_content, error))
         return false;
     // Verify there's at least a Wheel-Version header line.
@@ -1397,23 +1401,25 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
     // Parse and validate wheel platform tags.
     {
         std::vector<std::string> wheel_tags;
-        std::istringstream wstream(wheel_content);
-        std::string wline;
+        std::istringstream       wstream(wheel_content);
+        std::string              wline;
         while (std::getline(wstream, wline)) {
             while (!wline.empty() && (wline.back() == '\r' || wline.back() == '\n'))
                 wline.pop_back();
             if (wline.rfind("Tag:", 0) == 0) {
                 std::string tag = wline.substr(4);
-                size_t s = 0, e = tag.size();
-                while (s < e && (tag[s] == ' ' || tag[s] == '\t')) ++s;
-                while (e > s && (tag[e - 1] == ' ' || tag[e - 1] == '\t')) --e;
+                size_t      s = 0, e = tag.size();
+                while (s < e && (tag[s] == ' ' || tag[s] == '\t'))
+                    ++s;
+                while (e > s && (tag[e - 1] == ' ' || tag[e - 1] == '\t'))
+                    --e;
                 wheel_tags.push_back(tag.substr(s, e - s));
             }
         }
 
         if (!wheel_tags.empty()) {
-            bool compatible = false;
-            const std::string abi_tag = PythonInterpreter::python_abi_tag();
+            bool              compatible = false;
+            const std::string abi_tag    = PythonInterpreter::python_abi_tag();
             for (const auto& tag : wheel_tags) {
                 // Pure Python wheel: py3-none-any or cp312-none-any
                 if (tag.find("-none-any") != std::string::npos) {
@@ -1438,7 +1444,8 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
             if (!compatible) {
                 error = "Wheel is incompatible with this platform. Tags: ";
                 for (size_t i = 0; i < wheel_tags.size(); ++i) {
-                    if (i > 0) error += ", ";
+                    if (i > 0)
+                        error += ", ";
                     error += wheel_tags[i];
                 }
                 error += "; expected ABI: " + abi_tag;
@@ -1449,7 +1456,7 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
 
     // Read RECORD (verify existence).
     const std::string record_path = dist_info_dir + "RECORD";
-    std::string record_content;
+    std::string       record_content;
     if (!read_zip_text_file(reader.archive, record_path.c_str(), record_content, error))
         return false;
     if (record_content.empty()) {
@@ -1458,13 +1465,13 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
     }
 
     // Parse top_level.txt if present.
-    std::string top_level;
+    std::string       top_level;
     const std::string top_level_path = dist_info_dir + "top_level.txt";
-    std::string top_level_content;
+    std::string       top_level_content;
     if (read_zip_text_file(reader.archive, top_level_path.c_str(), top_level_content, error)) {
         // top_level.txt contains one package name per line.
-        std::istringstream tl_stream(top_level_content);
-        std::string tl_line;
+        std::istringstream       tl_stream(top_level_content);
+        std::string              tl_line;
         std::vector<std::string> top_levels;
         while (std::getline(tl_stream, tl_line)) {
             while (!tl_line.empty() && (tl_line.back() == '\r' || tl_line.back() == '\n'))
@@ -1498,10 +1505,10 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
 
     // Populate local identity fallbacks from wheel metadata.
     // Cloud metadata will override these when available.
-    descriptor.name       = sanitize_plugin_name(meta_name);
-    descriptor.version    = meta_version;
+    descriptor.name        = sanitize_plugin_name(meta_name);
+    descriptor.version     = meta_version;
     descriptor.description = meta_summary;
-    descriptor.author     = meta_author;
+    descriptor.author      = meta_author;
     if (!meta_orca_api.empty())
         descriptor.required_orca_api = meta_orca_api;
 
@@ -1530,16 +1537,16 @@ boost::filesystem::path find_installed_plugin_entry(const boost::filesystem::pat
         if (ext == ".py") {
             if (!py_entry.empty()) {
                 // TRN %1% and %2% are file names.
-                error = GUI::format(_u8L("Plugin directory contains multiple .py files: %1% and %2%"),
-                                    py_entry.filename().string(), it->path().filename().string());
+                error = GUI::format(_u8L("Plugin directory contains multiple .py files: %1% and %2%"), py_entry.filename().string(),
+                                    it->path().filename().string());
                 return {};
             }
             py_entry = it->path();
         } else if (ext == ".whl") {
             if (!whl_entry.empty()) {
                 // TRN %1% and %2% are file names.
-                error = GUI::format(_u8L("Plugin directory contains multiple .whl files: %1% and %2%"),
-                                    whl_entry.filename().string(), it->path().filename().string());
+                error = GUI::format(_u8L("Plugin directory contains multiple .whl files: %1% and %2%"), whl_entry.filename().string(),
+                                    it->path().filename().string());
                 return {};
             }
             whl_entry = it->path();
@@ -1561,9 +1568,7 @@ boost::filesystem::path find_installed_plugin_entry(const boost::filesystem::pat
     return {};
 }
 
-std::vector<std::string> collect_resource_texture_files(const std::string& dir,
-                                                        const std::string& plugin_root,
-                                                        std::string& error)
+std::vector<std::string> collect_resource_texture_files(const std::string& dir, const std::string& plugin_root, std::string& error)
 {
     namespace fs = boost::filesystem;
 
@@ -1583,7 +1588,7 @@ std::vector<std::string> collect_resource_texture_files(const std::string& dir,
     }
 
     boost::system::error_code ec;
-    const fs::path resolved_dir = fs::weakly_canonical(fs::path(dir), ec);
+    const fs::path            resolved_dir = fs::weakly_canonical(fs::path(dir), ec);
     if (ec) {
         error = _u8L("Resource texture directory could not be resolved");
         return files;

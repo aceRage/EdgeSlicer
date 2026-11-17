@@ -61,7 +61,7 @@ boost::filesystem::path canonical_or_absolute(const boost::filesystem::path& pat
     namespace fs = boost::filesystem;
 
     boost::system::error_code ec;
-    fs::path resolved = fs::weakly_canonical(path, ec);
+    fs::path                  resolved = fs::weakly_canonical(path, ec);
     if (!ec && !resolved.empty())
         return resolved;
 
@@ -80,22 +80,19 @@ std::string plugin_package_extension(const boost::filesystem::path& path)
     return ext;
 }
 
-boost::filesystem::path local_plugin_root()
-{
-    return boost::filesystem::path(data_dir()) / "orca_plugins";
-}
+boost::filesystem::path local_plugin_root() { return boost::filesystem::path(data_dir()) / "orca_plugins"; }
 
-boost::filesystem::path local_plugin_install_dir(const boost::filesystem::path& source_path,
-                                                const PluginDescriptor&        plugin_descriptor)
+boost::filesystem::path local_plugin_install_dir(const boost::filesystem::path& source_path, const PluginDescriptor& plugin_descriptor)
 {
     // Wheels: install dir follows the package name (plugin_key), not the versioned
     // filename. Orca #17100: a wheel stem includes the version and would collide
     // across upgrades if used as the key or folder.
     const std::string ext = plugin_package_extension(source_path);
     if (ext == ".whl") {
-        const std::string key = !plugin_descriptor.plugin_key.empty() ? plugin_descriptor.plugin_key :
-                                (!plugin_descriptor.name.empty() ? make_local_plugin_key(plugin_descriptor.name) :
-                                                                   make_local_plugin_key(source_path.stem().string()));
+        const std::string key = !plugin_descriptor.plugin_key.empty() ?
+                                    plugin_descriptor.plugin_key :
+                                    (!plugin_descriptor.name.empty() ? make_local_plugin_key(plugin_descriptor.name) :
+                                                                       make_local_plugin_key(source_path.stem().string()));
         return local_plugin_root() / filesystem_safe_escape(key);
     }
     return local_plugin_root() / filesystem_safe_escape(source_path.filename().string());
@@ -110,9 +107,7 @@ void assign_local_plugin_key(PluginDescriptor& plugin_descriptor, const boost::f
         plugin_descriptor.plugin_key = make_local_plugin_key(entry_file.stem().string());
 }
 
-bool read_local_plugin_package_metadata(const boost::filesystem::path& source_path,
-                                        PluginDescriptor&              plugin_descriptor,
-                                        std::string&                   error)
+bool read_local_plugin_package_metadata(const boost::filesystem::path& source_path, PluginDescriptor& plugin_descriptor, std::string& error)
 {
     error.clear();
 
@@ -171,9 +166,7 @@ void teardown_capabilities(std::vector<std::shared_ptr<PluginCapabilityInterface
 }
 
 // Add every .whl sitting next to the plugin entry file to sys.path, extracting it first.
-bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
-                                         std::vector<std::string>& plugin_paths,
-                                         std::string&              error)
+bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor, std::vector<std::string>& plugin_paths, std::string& error)
 {
     namespace fs = boost::filesystem;
 
@@ -194,7 +187,7 @@ bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
         try {
             extract_root = fs::path(PluginManager::instance().get_storage_dir(descriptor.plugin_key)) / "__whl_extracted__";
         } catch (...) {}
-        const fs::path dep_dir = extract_root / it->path().stem().string();
+        const fs::path            dep_dir = extract_root / it->path().stem().string();
         boost::system::error_code ec;
         fs::remove_all(dep_dir, ec);
         std::string extract_error;
@@ -215,7 +208,7 @@ bool add_wheel_dependencies_to_sys_path(const PluginDescriptor& descriptor,
     return true;
 }
 
-PyObject* import_plugin_module(const PluginDescriptor& descriptor,
+PyObject* import_plugin_module(const PluginDescriptor&   descriptor,
                                std::vector<std::string>& plugin_paths,
                                std::vector<std::string>& plugin_modules,
                                std::string&              error)
@@ -230,12 +223,11 @@ PyObject* import_plugin_module(const PluginDescriptor& descriptor,
         try {
             extract_root = PluginManager::instance().get_storage_dir(descriptor.plugin_key);
         } catch (...) {}
-        return interpreter.load_module_from_whl(
-            descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules, extract_root);
+        return interpreter.load_module_from_whl(descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules,
+                                                extract_root);
     }
 
-    return interpreter.load_module_from_directory(
-        descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules);
+    return interpreter.load_module_from_directory(descriptor.entry_path, descriptor.entry_package, error, &plugin_paths, &plugin_modules);
 }
 
 std::string plugin_module_name(const PluginDescriptor& descriptor)
@@ -324,9 +316,7 @@ bool parse_version_cmp(const std::string& s, size_t& i)
 
 bool parse_version(const std::string& s, size_t& i)
 {
-    auto is_ver_char = [](char c) {
-        return is_letter_or_digit(c) || c == '-' || c == '_' || c == '.' || c == '*' || c == '+' || c == '!';
-    };
+    auto is_ver_char = [](char c) { return is_letter_or_digit(c) || c == '-' || c == '_' || c == '.' || c == '*' || c == '+' || c == '!'; };
     if (i >= s.size() || !is_ver_char(s[i]))
         return false;
     while (i < s.size() && is_ver_char(s[i]))
@@ -647,8 +637,7 @@ bool has_archive_suffix(const std::string& token)
 {
     std::string lower = token;
     boost::algorithm::to_lower(lower);
-    static const char* const suffixes[] = {
-        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".whl", ".zip", ".egg", ".tar"};
+    static const char* const suffixes[] = {".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".whl", ".zip", ".egg", ".tar"};
     for (const char* suffix : suffixes) {
         const size_t n = std::strlen(suffix);
         if (lower.size() >= n && lower.compare(lower.size() - n, n, suffix) == 0)
@@ -678,8 +667,8 @@ std::vector<std::string> uv_install_args(const std::string&              python_
                                          const std::string&              target_dir,
                                          const std::vector<std::string>& pkgs)
 {
-    std::vector<std::string> args = {"pip", "install", "--python", python_executable,
-                                     "--no-python-downloads", "--target", target_dir, "--"};
+    std::vector<std::string> args = {"pip",      "install",  "--python", python_executable, "--no-python-downloads",
+                                     "--target", target_dir, "--"};
     args.insert(args.end(), pkgs.begin(), pkgs.end());
     return args;
 }
@@ -788,8 +777,7 @@ bool load(const PluginDescriptor&                          descriptor,
     if (registration_failed != nullptr)
         *registration_failed = false;
 
-    BOOST_LOG_TRIVIAL(info) << "[plugin_loader::load] START plugin=" << descriptor.plugin_key
-                            << " thread=" << std::this_thread::get_id();
+    BOOST_LOG_TRIVIAL(info) << "[plugin_loader::load] START plugin=" << descriptor.plugin_key << " thread=" << std::this_thread::get_id();
 
     PythonInterpreter& interpreter = PythonInterpreter::instance();
     if (!interpreter.is_initialized()) {
@@ -827,17 +815,15 @@ bool load(const PluginDescriptor&                          descriptor,
     // Anything else at the sidecar path (a link, a directory, a file that cannot be opened or read
     // in full) is left alone, so its writers keep refusing.
     if (!descriptor.plugin_root.empty()) {
-        std::lock_guard<std::mutex> state_lock(install_state_mutex());
+        std::lock_guard<std::mutex>   state_lock(install_state_mutex());
         const boost::filesystem::path plugin_root(descriptor.plugin_root);
         PluginInstallState            unused_state;
         bool                          malformed = false;
-        if (read_install_state_status(plugin_root, unused_state, &malformed) == InstallStateReadStatus::Unreadable &&
-            malformed) {
+        if (read_install_state_status(plugin_root, unused_state, &malformed) == InstallStateReadStatus::Unreadable && malformed) {
             const std::string sidecar = (plugin_root / INSTALL_STATE_FILE).string();
             const std::string backup  = sidecar + ".corrupt";
             if (const std::error_code ec = rename_file(sidecar, backup))
-                BOOST_LOG_TRIVIAL(warning) << "[plugin_loader::load] Cannot set aside unparsable " << sidecar << ": "
-                                           << ec.message();
+                BOOST_LOG_TRIVIAL(warning) << "[plugin_loader::load] Cannot set aside unparsable " << sidecar << ": " << ec.message();
             else
                 BOOST_LOG_TRIVIAL(warning) << "[plugin_loader::load] Install state of " << descriptor.plugin_key
                                            << " could not be parsed; moved it to " << backup << " and starting fresh";
@@ -849,8 +835,8 @@ bool load(const PluginDescriptor&                          descriptor,
     plugin.module_name = plugin_module_name(descriptor);
 
     const boost::filesystem::path import_root = !descriptor.plugin_root.empty() ?
-        boost::filesystem::path(descriptor.plugin_root) :
-        boost::filesystem::path(descriptor.entry_path).parent_path();
+                                                    boost::filesystem::path(descriptor.plugin_root) :
+                                                    boost::filesystem::path(descriptor.entry_path).parent_path();
     discard_stale_plugin_import_artifacts(import_root);
 
     if (!skip_deps) {
@@ -907,7 +893,7 @@ bool load(const PluginDescriptor&                          descriptor,
     // The user's per-capability enable choices live in the sidecar — the only durable record, since
     // a capability has no state (and no existence) while the package is not loaded.
     PluginInstallState install_state;
-    bool have_install_state = false;
+    bool               have_install_state = false;
     {
         std::lock_guard<std::mutex> state_lock(install_state_mutex());
         have_install_state = !descriptor.plugin_root.empty() &&
@@ -939,9 +925,8 @@ bool load(const PluginDescriptor&                          descriptor,
                     // An empty request restores the sidecar state (or enables capabilities by
                     // default). An explicit request overrides the sidecar for that capability;
                     // all other capabilities retain their persisted state.
-                    const bool explicitly_requested =
-                        std::find(capabilities_to_enable.begin(), capabilities_to_enable.end(), found.name) !=
-                        capabilities_to_enable.end();
+                    const bool explicitly_requested = std::find(capabilities_to_enable.begin(), capabilities_to_enable.end(), found.name) !=
+                                                      capabilities_to_enable.end();
                     bool enabled = capabilities_to_enable.empty() || explicitly_requested;
                     if (have_install_state && !explicitly_requested) {
                         for (const auto& [cap_name, cap_enabled] : install_state.capabilities) {
@@ -954,8 +939,8 @@ bool load(const PluginDescriptor&                          descriptor,
 
                     if (!seen_capabilities[type].insert(found.name).second) {
                         // TRN %1% is the capability name, %2% the capability type (e.g. Script).
-                        materialization_error = GUI::format(_u8L("Plugin declares duplicate capability '%1%' for type %2%"),
-                                                            found.name, PluginConfig::capability_type_label(type));
+                        materialization_error = GUI::format(_u8L("Plugin declares duplicate capability '%1%' for type %2%"), found.name,
+                                                            PluginConfig::capability_type_label(type));
                         break;
                     }
 
@@ -1033,8 +1018,7 @@ bool load(const PluginDescriptor&                          descriptor,
 
     out = std::move(plugin);
 
-    BOOST_LOG_TRIVIAL(info) << "[plugin_loader::load] SUCCESS plugin=" << descriptor.plugin_key
-                            << " thread=" << std::this_thread::get_id();
+    BOOST_LOG_TRIVIAL(info) << "[plugin_loader::load] SUCCESS plugin=" << descriptor.plugin_key << " thread=" << std::this_thread::get_id();
     return true;
 }
 
@@ -1070,8 +1054,7 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
 
     const std::vector<std::string> args = uv_install_args(python_executable, target_dir, pkgs);
 
-    BOOST_LOG_TRIVIAL(info) << "Installing Python packages via uv for " << python_executable << ": "
-                            << boost::algorithm::join(pkgs, ", ");
+    BOOST_LOG_TRIVIAL(info) << "Installing Python packages via uv for " << python_executable << ": " << boost::algorithm::join(pkgs, ", ");
 
     struct UvCwd
     {
@@ -1107,17 +1090,17 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
     try {
         namespace process = boost::process;
 
-        process::ipstream     std_err;
-        process::environment  uv_env = uv_child_environment();
-        process::child        child(uv_path, process::args(args), uv_env, process::start_dir(uv_cwd.p),
+        process::ipstream    std_err;
+        process::environment uv_env = uv_child_environment();
+        process::child       child(uv_path, process::args(args), uv_env, process::start_dir(uv_cwd.p),
 #ifdef _WIN32
-                                // uv.exe (and the python.exe it spawns) are console-subsystem programs.
-                                // OrcaSlicer is a GUI app with no console of its own, so without this flag
-                                // Windows allocates a fresh console window for the child that flashes on
-                                // screen during startup plugin loading. Matches ProcessRunner/MediaPlayCtrl.
-                                process::windows::create_no_window,
+                             // uv.exe (and the python.exe it spawns) are console-subsystem programs.
+                             // OrcaSlicer is a GUI app with no console of its own, so without this flag
+                             // Windows allocates a fresh console window for the child that flashes on
+                             // screen during startup plugin loading. Matches ProcessRunner/MediaPlayCtrl.
+                             process::windows::create_no_window,
 #endif
-                                process::std_err > std_err);
+                             process::std_err > std_err);
 
         std::string err_output;
         std::thread stderr_reader([&std_err, &err_output]() {
@@ -1209,7 +1192,7 @@ bool inspect_local_plugin_package(const boost::filesystem::path& filepath,
         return fail(metadata_error);
 
     assign_local_plugin_key(plugin_descriptor, source_path);
-    const fs::path final_dir = local_plugin_install_dir(source_path, plugin_descriptor);
+    const fs::path final_dir      = local_plugin_install_dir(source_path, plugin_descriptor);
     plugin_descriptor.plugin_root = final_dir.string();
 
     ec.clear();
@@ -1262,7 +1245,7 @@ bool install_plugin(const boost::filesystem::path& filepath,
         return fail(GUI::format(_u8L("Cloud plugin UUID is not a valid identifier: %1%"), cloud_uuid));
 
     const fs::path plugin_root = is_cloud_install && !cloud_user_id.empty() ? fs::path(get_cloud_plugin_dir(cloud_user_id)) :
-                                                                             local_plugin_root();
+                                                                              local_plugin_root();
     fs::create_directories(plugin_root, ec);
     if (ec)
         // TRN %1% is a folder path, %2% the system error message.
@@ -1300,8 +1283,10 @@ bool install_plugin(const boost::filesystem::path& filepath,
     else
         assign_local_plugin_key(plugin_descriptor, source_path);
 
-    const fs::path final_dir = is_cloud_install ? plugin_root / cloud_uuid :
-                                                 local_plugin_install_dir(source_path, plugin_descriptor);
+    if (!is_valid_plugin_id(plugin_descriptor.plugin_key))
+        return fail(GUI::format(_u8L("Plugin id is not a valid identifier: %1%"), plugin_descriptor.plugin_key));
+
+    const fs::path final_dir = is_cloud_install ? plugin_root / cloud_uuid : local_plugin_install_dir(source_path, plugin_descriptor);
     const fs::path dest_file = final_dir / source_path.filename();
 
     // Backup existing installation if present.
