@@ -2845,6 +2845,61 @@ SplitPickTarget split_pick(const SplitPlan &plan, const Vec3d &origin, const Vec
     return out;
 }
 
+// ---- P4: arranging the result in groups -----------------------------------------------------------------
+
+SplitArrangeStep split_arrange_step(const std::vector<SplitArrangeInstance> &instances, int group, const std::vector<bool> &plate_locked)
+{
+    SplitArrangeStep  out;
+    std::vector<bool> holds(plate_locked.size(), false);
+    for (size_t i = 0; i < instances.size(); ++i) {
+        const SplitArrangeInstance &in = instances[i];
+        if (in.group >= group) {
+            // This group and the later ones belong to no plate while the step runs: this group is then
+            // placed (it is printable), the later ones are skipped (they are held, below).
+            if (in.plate >= 0)
+                out.unregister.push_back(i);
+            if (in.group > group && in.printable)
+                out.hold.push_back(i);
+        } else if (in.plate >= 0 && size_t(in.plate) < holds.size())
+            holds[size_t(in.plate)] = true;   // stays registered: an earlier group, or not the chain's
+    }
+    if (group > 0)
+        for (size_t p = 0; p < plate_locked.size(); ++p)
+            if (holds[p] && !plate_locked[p])
+                out.lock_plates.push_back(int(p));
+    return out;
+}
+
+SplitArrangeReport split_arrange_report(const std::vector<SplitArrangeInstance> &instances, const std::vector<int> &placed_plate, int groups)
+{
+    SplitArrangeReport out;
+    const size_t       n = size_t(std::max(0, groups));
+    out.plates.assign(n, {});
+    out.unplaced.assign(n, {});
+    out.shares.assign(n, false);
+    for (size_t i = 0; i < instances.size() && i < placed_plate.size(); ++i) {
+        const int g = instances[i].group;
+        if (g < 0 || size_t(g) >= n)
+            continue;
+        if (placed_plate[i] < 0)
+            out.unplaced[size_t(g)].push_back(i);
+        else
+            out.plates[size_t(g)].push_back(placed_plate[i]);
+    }
+    for (std::vector<int> &p : out.plates) {
+        std::sort(p.begin(), p.end());
+        p.erase(std::unique(p.begin(), p.end()), p.end());
+    }
+    for (size_t g = 1; g < n; ++g)
+        for (size_t e = 0; e < g && !out.shares[g]; ++e)
+            for (int p : out.plates[g])
+                if (std::binary_search(out.plates[e].begin(), out.plates[e].end(), p)) {
+                    out.shares[g] = true;
+                    break;
+                }
+    return out;
+}
+
 // ---- apply ------------------------------------------------------------------------------------------
 
 SplitApplyResult::SplitApplyResult() : model(std::make_unique<Model>()) {}

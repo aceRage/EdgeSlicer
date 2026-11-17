@@ -621,6 +621,42 @@ struct SplitPickTarget
 // ray is not stopped by the model's surface).
 SplitPickTarget split_pick(const SplitPlan &plan, const Vec3d &origin, const Vec3d &dir);
 
+// ---- P4: arranging the result in groups (main parts, loose pieces, dowels), each on plates of its own ----
+//
+// The job runs the "place loose objects" arrange once per group. That arrange places an instance only
+// when it is printable and either on no plate or not wholly on an UNLOCKED plate it is registered to;
+// an instance registered to a locked plate stays where it is. A part moved off the plates is still
+// registered to a plate (plate 1 after loading), so the group's instances must be taken off their
+// plates before the plates holding earlier groups are locked, or they never move (the 2026-11-16 bug:
+// every dowel stayed in the row it was parked in, far left of the plates).
+
+struct SplitArrangeInstance
+{
+    int  group{ -1 };       // the chain's group (0 main parts, 1 loose pieces, 2 dowels), -1: not the chain's
+    int  plate{ -1 };       // the plate it is registered to, -1: none
+    bool printable{ true };
+};
+
+struct SplitArrangeStep
+{
+    std::vector<size_t> unregister;  // instances to take off their plates: every one of this group and the later ones
+    std::vector<size_t> hold;        // instances to set not to print for this step: the later groups' printable ones
+    std::vector<int>    lock_plates; // unlocked plates to lock (from the second group on): those holding anything still registered
+};
+
+// What to do before arranging group `group`. `plate_locked` has one entry per plate.
+SplitArrangeStep split_arrange_step(const std::vector<SplitArrangeInstance> &instances, int group, const std::vector<bool> &plate_locked);
+
+struct SplitArrangeReport
+{
+    std::vector<std::vector<int>>    plates;   // per group: the plates its instances lie wholly on (sorted, unique)
+    std::vector<std::vector<size_t>> unplaced; // per group: instances wholly on no plate
+    std::vector<bool>                shares;   // per group: shares a plate with an earlier group
+};
+
+// After the last step: `placed_plate` per instance is the plate it lies wholly on, or -1.
+SplitArrangeReport split_arrange_report(const std::vector<SplitArrangeInstance> &instances, const std::vector<int> &placed_plate, int groups);
+
 // ---- apply ----------------------------------------------------------------------------------------
 
 struct SplitApplyResult

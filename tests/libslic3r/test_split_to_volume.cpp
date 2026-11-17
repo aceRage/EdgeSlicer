@@ -2287,3 +2287,76 @@ TEST_CASE("Split to Fit P4: loose pieces are marked for plates of their own", "[
     const SplitApplyResult res = split_apply(*mo, 0, plan);
     REQUIRE(res.part_loose == std::vector<bool>{ false, false, true });
 }
+
+TEST_CASE("Split to Fit P4: grouped arrange steps put each group on plates of its own", "[SplitToVolume]")
+{
+    // The owner's case (2026-11-16): 17 parts already on plates 0-12, and 81 dowels parked off the
+    // plates but still registered to plate 0 (where loading put them). The dowel step must take every
+    // dowel off its plate before plate 0 is locked: a dowel registered to a locked plate is never moved.
+    std::vector<SplitArrangeInstance> in;
+    for (int i = 0; i < 17; ++i)
+        in.push_back({ 0, std::min(i, 12), true });
+    for (int i = 0; i < 81; ++i)
+        in.push_back({ 2, 0, true });
+    in.push_back({ -1, 3, true });   // something of the user's on plate 3
+    std::vector<bool> locked(13, false);
+    locked[5] = true;                // a plate the user locked
+
+    // Step 0 (main parts): every part of the chain leaves its plate, the dowels wait (not printable),
+    // nothing is locked.
+    const SplitArrangeStep s0 = split_arrange_step(in, 0, locked);
+    REQUIRE(s0.unregister.size() == 17 + 81);
+    REQUIRE(s0.hold.size() == 81);
+    for (size_t k : s0.hold)
+        REQUIRE(in[k].group == 2);
+    REQUIRE(s0.lock_plates.empty());
+
+    // Step 2 (dowels): only the dowels leave their plates, none is held, and every plate still holding
+    // something (the parts' plates and the user's plate 3) is locked, but not the user's own lock again.
+    const SplitArrangeStep s2 = split_arrange_step(in, 2, locked);
+    REQUIRE(s2.unregister.size() == 81);
+    REQUIRE(s2.hold.empty());
+    std::vector<int> expect;
+    for (int p = 0; p < 13; ++p)
+        if (p != 5)
+            expect.push_back(p);
+    REQUIRE(s2.lock_plates == expect);
+    // After the step is applied, no dowel is registered to a plate, so none can be held back by a lock.
+    std::vector<SplitArrangeInstance> after = in;
+    for (size_t k : s2.unregister)
+        after[k].plate = -1;
+    for (const SplitArrangeInstance &a : after)
+        if (a.group == 2)
+            REQUIRE(a.plate < 0);
+
+    // With loose parts on plates of their own: step 1 moves only the loose parts, holds the dowels and
+    // locks the parts' plates; the dowels' step then locks the loose parts' plates too.
+    std::vector<SplitArrangeInstance> lp = { { 0, 0, true }, { 0, 1, true }, { 1, 0, true }, { 1, 0, true }, { 2, 0, true } };
+    const std::vector<bool>           l2(3, false);
+    const SplitArrangeStep            s1 = split_arrange_step(lp, 1, l2);
+    REQUIRE(s1.unregister == std::vector<size_t>{ 2, 3, 4 });
+    REQUIRE(s1.hold == std::vector<size_t>{ 4 });
+    REQUIRE(s1.lock_plates == std::vector<int>{ 0, 1 });
+    lp[2].plate = 2;
+    lp[3].plate = 2;
+    const SplitArrangeStep d = split_arrange_step(lp, 2, l2);
+    REQUIRE(d.unregister == std::vector<size_t>{ 4 });
+    REQUIRE(d.lock_plates == std::vector<int>{ 0, 1, 2 });
+}
+
+TEST_CASE("Split to Fit P4: the grouped arrange report names unplaced items and shared plates", "[SplitToVolume]")
+{
+    const std::vector<SplitArrangeInstance> in = { { 0, 0, true }, { 0, 1, true }, { 2, 2, true }, { 2, 2, true }, { 2, -1, true }, { -1, 0, true } };
+    const SplitArrangeReport ok = split_arrange_report(in, { 0, 1, 2, 2, 2, 0 }, 3);
+    REQUIRE(ok.plates[0] == std::vector<int>{ 0, 1 });
+    REQUIRE(ok.plates[1].empty());
+    REQUIRE(ok.plates[2] == std::vector<int>{ 2 });
+    REQUIRE(ok.unplaced[2].empty());
+    REQUIRE(ok.shares == std::vector<bool>{ false, false, false });
+
+    // A dowel left beside the plates is reported; one put on a parts plate makes the group "shared".
+    const SplitArrangeReport bad = split_arrange_report(in, { 0, 1, 2, 1, -1, 0 }, 3);
+    REQUIRE(bad.unplaced[2] == std::vector<size_t>{ 4 });
+    REQUIRE(bad.plates[2] == std::vector<int>{ 1, 2 });
+    REQUIRE(bad.shares[2]);
+}

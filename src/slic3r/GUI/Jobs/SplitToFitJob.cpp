@@ -16,6 +16,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
+#include <set>
 
 namespace Slic3r { namespace GUI {
 
@@ -144,14 +145,15 @@ void SplitToFitJob::finalize(bool canceled, std::exception_ptr &eptr)
 
     // D12: arrange the new parts (and only what is off the plates) over as many plates as needed.
     // P4 (items 2, 3): the dowels, and the loose pieces when asked, on plates of their own.
-    std::shared_ptr<SplitArrangeChain> chain = std::make_shared<SplitArrangeChain>(m_plater, std::move(groups));
+    std::shared_ptr<SplitArrangeChain> chain = std::make_shared<SplitArrangeChain>(
+        m_plater, std::move(groups), m_plan.dowel_options.type == SplitConnectorType::Pin ? _u8L("pins") : _u8L("dowels"));
     wxGetApp().CallAfter([chain]() { chain->run_step(); });
 }
 
 // ---- P4: arranging groups on plates of their own ----------------------------------------------------------
 
-SplitArrangeChain::SplitArrangeChain(Plater *plater, std::vector<std::vector<ObjectID>> groups)
-    : m_plater(plater), m_groups(std::move(groups))
+SplitArrangeChain::SplitArrangeChain(Plater *plater, std::vector<std::vector<ObjectID>> groups, std::string dowel_word)
+    : m_plater(plater), m_groups(std::move(groups)), m_dowel_word(std::move(dowel_word))
 {}
 
 ModelObject *SplitArrangeChain::find(const ObjectID &id) const
@@ -176,6 +178,31 @@ void SplitArrangeChain::release()
     m_locked.clear();
 }
 
+// Every instance of the model with its group (-1: not the chain's) and the plate it is registered to.
+std::vector<SplitArrangeInstance> SplitArrangeChain::instances(std::vector<std::pair<int, int>> *where) const
+{
+    std::vector<SplitArrangeInstance> out;
+    Model                            &model  = m_plater->model();
+    PartPlateList                    &plates = m_plater->get_partplate_list();
+    for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+        const ModelObject *o     = model.objects[oi];
+        int                group = -1;
+        for (size_t g = 0; g < m_groups.size() && group < 0; ++g)
+            if (std::find(m_groups[g].begin(), m_groups[g].end(), o->id()) != m_groups[g].end())
+                group = int(g);
+        for (size_t i = 0; i < o->instances.size(); ++i) {
+            SplitArrangeInstance in;
+            in.group     = group;
+            in.plate     = plates.find_instance(int(oi), int(i));
+            in.printable = o->instances[i]->printable;
+            out.push_back(in);
+            if (where != nullptr)
+                where->emplace_back(int(oi), int(i));
+        }
+    }
+    return out;
+}
+
 void SplitArrangeChain::run_step()
 {
     release();
@@ -183,28 +210,35 @@ void SplitArrangeChain::run_step()
     while (m_step < m_groups.size() &&
            std::none_of(m_groups[m_step].begin(), m_groups[m_step].end(), [this](const ObjectID &id) { return find(id) != nullptr; }))
         ++m_step;
-    if (m_step >= m_groups.size())
+    if (m_step >= m_groups.size()) {
+        report();
         return;
+    }
 
-    // The groups still to come wait off the plates: a loose object set not to print stays where it is.
-    for (size_t g = m_step + 1; g < m_groups.size(); ++g)
-        for (const ObjectID &id : m_groups[g])
-            if (ModelObject *o = find(id); o != nullptr)
-                for (size_t i = 0; i < o->instances.size(); ++i)
-                    if (o->instances[i]->printable) {
-                        o->instances[i]->printable = false;
-                        m_held.emplace_back(id, i);
-                    }
-    // A later group goes on plates of its own: a locked plate takes nothing new.
-    if (m_step > 0) {
-        PartPlateList &plates = m_plater->get_partplate_list();
-        for (int i = 0; i < plates.get_plate_count(); ++i) {
-            PartPlate *plate = plates.get_plate(i);
-            if (plate != nullptr && !plate->is_locked() && !plate->empty()) {
-                plate->lock(true);
-                m_locked.push_back(i);
-            }
-        }
+    // What to do is worked out by split_arrange_step() (libslic3r, tested). In short: this group and the
+    // later ones are taken off the plates they are registered to (a part moved off the plates is still
+    // registered to plate 1, and an instance registered to a locked plate is never moved: that kept every
+    // dowel in its parking row); the later groups are set not to print, so they wait; and from the second
+    // group on, every plate still holding something is locked, so this group gets plates of its own.
+    std::vector<std::pair<int, int>>        where;
+    const std::vector<SplitArrangeInstance> all    = instances(&where);
+    PartPlateList                          &plates = m_plater->get_partplate_list();
+    std::vector<bool>                       locked;
+    for (int i = 0; i < plates.get_plate_count(); ++i)
+        locked.push_back(plates.get_plate(i)->is_locked());
+    const SplitArrangeStep step = split_arrange_step(all, int(m_step), locked);
+    for (size_t k : step.unregister)
+        if (PartPlate *plate = plates.get_plate(all[k].plate); plate != nullptr)
+            plate->remove_instance(where[k].first, where[k].second);
+    Model &model = m_plater->model();
+    for (size_t k : step.hold) {
+        ModelObject *o = model.objects[size_t(where[k].first)];
+        o->instances[size_t(where[k].second)]->printable = false;
+        m_held.emplace_back(o->id(), size_t(where[k].second));
+    }
+    for (int p : step.lock_plates) {
+        plates.get_plate(p)->lock(true);
+        m_locked.push_back(p);
     }
 
     Worker &w = m_plater->get_ui_job_worker();
@@ -216,11 +250,74 @@ void SplitArrangeChain::run_step()
             if (canceled) {
                 self->release();
                 self->m_plater->update();
+                self->report();
                 return;
             }
             ++self->m_step;
             wxGetApp().CallAfter([self]() { self->run_step(); });
         });
+}
+
+void SplitArrangeChain::report()
+{
+    // Where every group ended up, and anything left off the plates, so nothing is lost silently.
+    std::vector<std::pair<int, int>>        where;
+    const std::vector<SplitArrangeInstance> all    = instances(&where);
+    PartPlateList                          &plates = m_plater->get_partplate_list();
+    std::vector<int>                        placed(all.size(), -1);
+    for (size_t k = 0; k < all.size(); ++k)
+        if (all[k].plate >= 0)
+            if (PartPlate *plate = plates.get_plate(all[k].plate);
+                plate != nullptr && plate->contain_instance_totally(where[k].first, where[k].second))
+                placed[k] = all[k].plate;
+    const SplitArrangeReport rep = split_arrange_report(all, placed, int(m_groups.size()));
+
+    auto range = [](const std::vector<int> &ps) {
+        std::string out;
+        for (size_t i = 0; i < ps.size();) {
+            size_t j = i;
+            while (j + 1 < ps.size() && ps[j + 1] == ps[j] + 1)
+                ++j;
+            if (!out.empty())
+                out += ", ";
+            out += std::to_string(ps[i] + 1);
+            if (j > i)
+                out += "-" + std::to_string(ps[j] + 1);
+            i = j + 1;
+        }
+        return out;
+    };
+    const std::string     names[3] = { _u8L("parts"), _u8L("loose parts"), m_dowel_word };
+    std::string           text;
+    bool                  problem = false;
+    std::set<std::string> lost;
+    for (size_t g = 0; g < rep.plates.size() && g < 3; ++g) {
+        if (!rep.plates[g].empty()) {
+            text += (text.empty() ? "" : "; ") + names[g] + ": " +
+                    (boost::format(rep.plates[g].size() == 1 ? _u8L("plate %1%") : _u8L("plates %1%")) % range(rep.plates[g])).str();
+            if (g > 0 && rep.shares[g]) {
+                text += " " + _u8L("(shared with the groups before)");
+                problem = true;
+            }
+        }
+        for (size_t k : rep.unplaced[g])
+            lost.insert(m_plater->model().objects[size_t(where[k].first)]->name);
+    }
+    std::string msg = _u8L("Split to Fit arranged the result.");
+    if (!text.empty())
+        msg += " " + text + ".";
+    if (!lost.empty()) {
+        problem = true;
+        std::string list;
+        for (const std::string &n : lost)
+            list += (list.empty() ? "" : ", ") + n;
+        msg += "\n" + (boost::format(_u8L("Not on any plate (left beside the plates): %1%. Place them by hand or arrange again.")) % list).str();
+    }
+    NotificationManager *notes = wxGetApp().notification_manager();
+    if (problem)
+        notes->push_plater_warning_notification(msg);
+    else
+        notes->push_notification(msg);
 }
 
 }} // namespace Slic3r::GUI

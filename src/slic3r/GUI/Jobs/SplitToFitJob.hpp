@@ -49,19 +49,25 @@ private:
 class SplitArrangeChain : public std::enable_shared_from_this<SplitArrangeChain>
 {
 public:
-    SplitArrangeChain(Plater *plater, std::vector<std::vector<ObjectID>> groups);
+    // `dowel_word`: what group 2 is called in the final notification ("dowels" / "pins").
+    SplitArrangeChain(Plater *plater, std::vector<std::vector<ObjectID>> groups, std::string dowel_word);
     // UI thread: arranges the next group with anything in it, then queues the step after it.
     void run_step();
 
 private:
     ModelObject *find(const ObjectID &id) const;
     void         release();
+    // Every instance of the model as split_arrange_step() sees it; `where` gets (object, instance).
+    std::vector<SplitArrangeInstance> instances(std::vector<std::pair<int, int>> *where) const;
+    // After the last step (or a cancel): which plates each group is on, and what is on no plate.
+    void report();
 
     Plater                                  *m_plater{ nullptr };
     std::vector<std::vector<ObjectID>>       m_groups;
     size_t                                   m_step{ 0 };
     std::vector<std::pair<ObjectID, size_t>> m_held;    // instances set not to print (object, instance)
     std::vector<int>                         m_locked;  // plates locked by this chain
+    std::string                              m_dowel_word;
 };
 
 }} // namespace Slic3r::GUI
