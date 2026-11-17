@@ -1276,9 +1276,9 @@ EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, 
     };
 
     const Response resp = fetch(spec, secrets, wrapped, url, true, sink, 5, spec.download_method);
+    if (st.headers.empty()) // an error answer or a body that was returned whole: no on_head call, but the headers are here
+        st.headers = resp.headers;
     if (st.mode == Undecided && resp.status >= 200 && resp.status < 300 && !resp.body.empty()) { // an HttpFn that returns the body
-        if (st.headers.empty())
-            st.headers = resp.headers;
         st.status = resp.status;
         sink(resp.body.data(), resp.body.size());
     }
