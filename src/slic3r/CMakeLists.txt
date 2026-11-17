@@ -1572,6 +1572,23 @@ if (EDGE_PYTHON_PLUGINS)
     if (MSVC)
         target_link_libraries(edge-plugin-host Setupapi.lib userenv.lib)
     endif ()
+    # Copy next to the app whenever this helper rebuilds. POST_BUILD must live here;
+    # CMake rejects attaching it from src/CMakeLists.txt. Snapmaker_Orca is created
+    # later; TARGET_FILE_DIR is evaluated at generate time. make_directory so a
+    # helper-first build still has the app output dir.
+    add_custom_command(TARGET edge-plugin-host POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Snapmaker_Orca>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:edge-plugin-host>"
+            "$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        COMMENT "Copying edge-plugin-host next to EdgeSlicer"
+        VERBATIM)
+    if (APPLE)
+        add_custom_command(TARGET edge-plugin-host POST_BUILD
+            COMMAND sh -c "codesign --force --sign - --entitlements '${CMAKE_SOURCE_DIR}/scripts/edge-plugin-host.entitlements' '$<TARGET_FILE_DIR:Snapmaker_Orca>/$<TARGET_FILE_NAME:edge-plugin-host>' 2>/dev/null || true"
+            COMMENT "Signing edge-plugin-host with App Sandbox entitlements"
+            VERBATIM)
+    endif ()
 endif ()
 
 if (MSVC)

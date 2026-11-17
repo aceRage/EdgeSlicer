@@ -211,15 +211,17 @@ if (EDGE_PYTHON_PLUGINS)
     endif ()
     add_executable(fake-plugin-host fake_plugin_host.cpp)
     add_dependencies(${_TEST_NAME}_tests edge-plugin-host fake-plugin-host)
-    # Copy whenever the helper rebuilds. The tests POST_BUILD below does not run when
-    # only edge-plugin-host changes.
-    add_custom_command(TARGET edge-plugin-host POST_BUILD
+    # edge-plugin-host is defined in src/slic3r/; CMake forbids POST_BUILD from here.
+    # This target still copies when the tests (or an explicit ninja of this name) build.
+    add_custom_target(copy-edge-plugin-host-for-tests
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:edge-plugin-host>"
             "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/$<TARGET_FILE_NAME:edge-plugin-host>"
+        DEPENDS edge-plugin-host
         COMMENT "Copying edge-plugin-host for plugin tests"
         VERBATIM)
+    add_dependencies(${_TEST_NAME}_tests copy-edge-plugin-host-for-tests)
     add_custom_command(TARGET fake-plugin-host POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
