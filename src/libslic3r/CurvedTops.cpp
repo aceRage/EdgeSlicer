@@ -524,27 +524,6 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
                 if (p.polyline.points.size() >= 2)
                     out.push_back({ p.polyline.points, p.width, p.mm3_per_mm });
         }
-        // A hole left in the middle, too small for a loop (a dome's apex): one short line through it.
-        if (!out.empty()) {
-            Polygons strokes;
-            for (const CurvedTopsFillPath &p : out) {
-                const double spacing = solid_flow.height() > 0. ? p.mm3_per_mm / solid_flow.height() : solid_flow.spacing();
-                polygons_append(strokes, offset(Polyline(p.points), float(scale_(0.5 * spacing + 0.01))));
-            }
-            for (const ExPolygon &hole : opening_ex(diff_ex(ExPolygons{ area }, union_ex(strokes)), float(scale_(0.1)))) {
-                const double hole_mm2 = hole.area() * SCALING_FACTOR * SCALING_FACTOR;
-                if (hole_mm2 < 0.05 || hole_mm2 > 1.0)
-                    continue;
-                const BoundingBox bb   = get_extents(hole);
-                const Vec2d       size = unscale(bb.size());
-                const Vec2d       c    = unscale(bb.center());
-                const Vec2d       dir  = size.x() >= size.y() ? Vec2d(1., 0.) : Vec2d(0., 1.);
-                const double      half = 0.5 * std::max(std::max(size.x(), size.y()) - solid_flow.width(), 0.1);
-                const Vec2d       a = c - dir * half, b = c + dir * half;
-                out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
-                                solid_flow.mm3_per_mm() });
-            }
-        }
     } else {
         std::unique_ptr<Fill> filler(Fill::new_from_type(ipMonotonic));
         filler->angle        = float((k % 2 == 0 ? 45. : 135.) * M_PI / 180.);
@@ -564,6 +543,103 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
     // Review S3: a layer must not print its wall with nothing inside.
     if (failed != nullptr && (threw || (out.empty() && area_mm2 > 1.0)))
         *failed = true;
+    return out;
+}
+
+namespace {
+
+// The strip a path covers: its centre line grown by half its spacing (from its flow at the layer height).
+Polygons path_footprint(const CurvedTopsFillPath &p, double height)
+{
+    const double spacing = height > 0. ? p.mm3_per_mm / height : double(p.width);
+    return offset(Polyline(p.points), float(scale_(0.5 * spacing + 0.005)));
+}
+
+// What of `area` the paths leave open, without the slivers narrower than min_width.
+ExPolygons uncovered_by(const ExPolygon &area, const std::vector<CurvedTopsFillPath> &paths, double height, double min_width)
+{
+    Polygons strokes;
+    for (const CurvedTopsFillPath &p : paths)
+        if (p.points.size() >= 2)
+            polygons_append(strokes, path_footprint(p, height));
+    return opening_ex(diff_ex(ExPolygons{ area }, union_ex(strokes)), float(scale_(0.5 * min_width)));
+}
+
+} // namespace
+
+double curved_tops_min_gap_width(const PrintConfig &pcfg)
+{
+    return 0.25 * min_physical_nozzle_diameter(pcfg);
+}
+
+double curved_tops_uncovered_mm2(const ExPolygon &fp, const std::vector<CurvedTopsFillPath> &paths, double height, double min_width)
+{
+    return area(uncovered_by(fp, paths, height, min_width)) * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
+                                                        const Flow &solid_flow, int k, const PrintConfig &pcfg,
+                                                        const PrintObjectConfig &ocfg, bool *failed)
+{
+    std::vector<CurvedTopsFillPath> out;
+    // One wall loop along the outline, each loop starting at a seam spread along its length per layer.
+    const Point centre  = get_extents(fp).center();
+    int         loop_no = 0;
+    const auto  wall    = [&](const Polygon &polygon) {
+        Points pts = polygon.points;
+        if (pts.size() >= 3)
+            std::rotate(pts.begin(), pts.begin() + ptrdiff_t(curved_tops_seam_index(pts, centre, k, -1 - loop_no)), pts.end());
+        ++loop_no;
+        pts.push_back(pts.front());
+        CurvedTopsFillPath p{ std::move(pts), float(wall_flow.width()), wall_flow.mm3_per_mm() };
+        p.wall = true;
+        out.push_back(std::move(p));
+    };
+    for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
+        wall(loop.contour);
+        for (const Polygon &hole : loop.holes)
+            wall(hole);
+    }
+    // The fill inside it.
+    const ExPolygons inner = offset_ex(fp, -(wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() + 0.5 * solid_flow.scaled_spacing()));
+    for (const ExPolygon &area : inner)
+        append(out, curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg, failed));
+
+    // Gap fill (owner, 2026-11-17): whatever the wall and the fill leave open and a bead can still cover - the
+    // spine of a narrowing limb that the concentric loops do not reach, wedges where loops turn sharp corners,
+    // the strip between the wall and the fill - gets variable-width beads along its medial axis, at the layer's
+    // height (flow from width and height as for any bead). Slivers narrower than a quarter of the nozzle stay.
+    const double h         = solid_flow.height();
+    const double min_width = curved_tops_min_gap_width(pcfg);
+    const double max_width = 2. * solid_flow.spacing();
+    ThickPolylines gaps;
+    for (ExPolygon &gap : uncovered_by(fp, out, h, min_width)) {
+        const size_t before = gaps.size();
+        gap.douglas_peucker(scale_(0.0125));
+        gap.medial_axis(scale_(min_width), scale_(max_width), &gaps);
+        if (gaps.size() == before) {
+            // A compact hole with no axis (a dome's apex inside the innermost ring): one short line through it.
+            const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
+            if (gap_mm2 < 0.05 || gap_mm2 > 1.0)
+                continue;
+            const BoundingBox bb   = get_extents(gap);
+            const Vec2d       size = unscale(bb.size());
+            const Vec2d       c    = unscale(bb.center());
+            const Vec2d       dir  = size.x() >= size.y() ? Vec2d(1., 0.) : Vec2d(0., 1.);
+            const double      half = 0.5 * std::max(std::max(size.x(), size.y()) - solid_flow.width(), 0.1);
+            const Vec2d       a = c - dir * half, b = c + dir * half;
+            out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
+                            solid_flow.mm3_per_mm() });
+        }
+    }
+    for (const ThickPolyline &tp : gaps) {
+        if (tp.length() < scale_(0.2))
+            continue;
+        const ExtrusionMultiPath mp = thick_polyline_to_multi_path(tp, erGapFill, solid_flow, scaled<float>(0.05), float(SCALED_EPSILON));
+        for (const ExtrusionPath &p : mp.paths)
+            if (p.polyline.points.size() >= 2)
+                out.push_back({ p.polyline.points, p.width, p.mm3_per_mm });
+    }
     return out;
 }
 
@@ -1341,34 +1417,14 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     for (int k = 0; k < n_layers; ++k) {
         const ExtrusionRole fill_role = k == n_layers - 1 ? erTopSolidInfill : erSolidInfill;
         for (const ExPolygon &fp : partial ? layer_area[k] : footprint) {
-            // One wall loop along the surface's outline. P4: each loop starts at a seam that turns from layer
-            // to layer (curved_tops_seam_index), so the starts of the curved layers do not stack.
-            const Point centre = get_extents(fp).center();
-            int         loop_no = 0;
-            const auto  wall = [&](const Polygon &polygon) {
-                Points pts = polygon.points;
-                if (pts.size() >= 3)
-                    std::rotate(pts.begin(), pts.begin() + ptrdiff_t(curved_tops_seam_index(pts, centre, k, -1 - loop_no)), pts.end());
-                ++loop_no;
-                pts.push_back(pts.front());
-                add_path(pts, erExternalPerimeter, float(wall_flow.width()), wall_flow.mm3_per_mm(), k);
-            };
-            for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
-                wall(loop.contour);
-                for (const Polygon &hole : loop.holes)
-                    wall(hole);
-            }
-            // Solid fill inside it, in the chosen pattern (P4).
-            const ExPolygons inner = offset_ex(fp, -(wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() +
-                                                     0.5 * solid_flow.scaled_spacing()));
-            for (const ExPolygon &area : inner) {
-                bool fill_failed = false;
-                for (const CurvedTopsFillPath &p : curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg, &fill_failed))
-                    add_path(p.points, fill_role, p.width, p.mm3_per_mm, k);
-                // Review S3: never a curved layer with its wall and no fill.
-                if (fill_failed)
-                    return refuse(Slic3r::format(_u8L("the fill of curved layer %1% could not be built."), k + 1));
-            }
+            // One wall loop along the surface's outline and the fill inside it in the chosen pattern, with the
+            // gaps between them filled (P4, curved_tops_layer_paths()).
+            bool layer_failed = false;
+            for (const CurvedTopsFillPath &p : curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg, &layer_failed))
+                add_path(p.points, p.wall ? erExternalPerimeter : fill_role, p.width, p.mm3_per_mm, k);
+            // Review S3: never a curved layer with its wall and no fill.
+            if (layer_failed)
+                return refuse(Slic3r::format(_u8L("the fill of curved layer %1% could not be built."), k + 1));
         }
     }
     if (n_paths == 0 || last_samples == nullptr)

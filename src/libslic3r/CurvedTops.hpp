@@ -265,6 +265,7 @@ struct CurvedTopsFillPath
     Points points;
     float  width { 0.f };
     double mm3_per_mm { 0. };
+    bool   wall { false }; // the layer's wall loop (curved_tops_layer_paths)
 };
 
 // The fill of curved layer k (0 = lowest) inside `area` (the region inside the wall loop, as the planar
@@ -279,6 +280,20 @@ struct CurvedTopsFillPath
 // or left a region of more than 1 mm2 with no path at all: the caller must not print that layer half built.
 std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
                                                  const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed = nullptr);
+
+// Every path of curved layer k over the patch part `fp`: the wall loop (seams spread along it), the fill of the
+// region inside it in the pattern (curved_tops_fill), then gap fill: variable-width beads along the medial axis
+// of whatever the two leave open that is at least curved_tops_min_gap_width() wide (the spine of a narrowing
+// limb, wedges at sharp loop corners, the strip between wall and fill), and one short line through a compact
+// hole with no axis (a dome's apex). *failed as for curved_tops_fill.
+std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
+                                                        const Flow &solid_flow, int k, const PrintConfig &pcfg,
+                                                        const PrintObjectConfig &ocfg, bool *failed = nullptr);
+// Narrowest gap a bead is laid in: a quarter of the nozzle diameter.
+double curved_tops_min_gap_width(const PrintConfig &pcfg);
+// The area (mm2) of `fp` the paths leave open, slivers narrower than min_width not counted (each path covers its
+// centre line grown by half its spacing, from its flow at `height`).
+double curved_tops_uncovered_mm2(const ExPolygon &fp, const std::vector<CurvedTopsFillPath> &paths, double height, double min_width);
 
 // The point of `loop` (closed, first point not repeated) where curved layer k's loop number `index` starts. The
 // loop is measured from a fixed anchor (its vertex with the smallest X, then Y), and the start is the vertex

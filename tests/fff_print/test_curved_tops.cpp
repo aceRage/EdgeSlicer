@@ -2856,3 +2856,45 @@ TEST_CASE("Curved tops P4: loop starts spread along a long loop", "[CurvedTops][
     for (int k = 0; k < 3; ++k)
         CHECK(rotated[curved_tops_seam_index(rotated, Point(0, 0), k, -1)] == loop[curved_tops_seam_index(loop, Point(0, 0), k, -1)]);
 }
+
+// Owner, 2026-11-17 (arm, Concentric): the concentric loops left the spine of each narrowing limb open. Every
+// curved layer's beads (wall loop, fill, gap fill) must cover the patch: what stays open, slivers narrower than a
+// quarter of the nozzle not counted, is under 1.5 % of the patch, for both patterns, on a tapered L (the arm in
+// small) and on a dome's disc. The numbers are printed (WARN) for the report.
+TEST_CASE("Curved tops P4: a curved layer's beads cover the patch, the spine of a narrowing limb included", "[CurvedTops][CurvedTopsP4]")
+{
+    const PrintConfig       pcfg;
+    const PrintObjectConfig ocfg;
+    const Flow              wall_flow(0.45f, 0.2f, 0.4f);
+    const Flow              solid_flow(0.42f, 0.2f, 0.4f);
+    const double            min_width = curved_tops_min_gap_width(pcfg);
+    CHECK_THAT(min_width, WithinAbs(0.1, 1e-9));
+    ExPolygon l_shape;
+    l_shape.contour = Polygon::new_scale(std::vector<Vec2d>{ Vec2d(0., 0.), Vec2d(40., 2.), Vec2d(40., 5.), Vec2d(7., 8.), Vec2d(5., 30.), Vec2d(0., 30.) });
+    ExPolygon disc;
+    for (int i = 0; i < 180; ++i) {
+        const double t = 2. * M_PI * i / 180.;
+        disc.contour.points.push_back(Point::new_scale(20. * std::cos(t), 20. * std::sin(t)));
+    }
+    for (int shape = 0; shape < 2; ++shape)
+        for (const CurvedTopsPattern pattern : { ctpMonotonic, ctpConcentric })
+            for (int k = 0; k < 3; ++k) {
+                const ExPolygon &fp = shape == 0 ? l_shape : disc;
+                bool failed = false;
+                const std::vector<CurvedTopsFillPath> paths = curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg, &failed);
+                const double patch    = fp.area() * SCALING_FACTOR * SCALING_FACTOR;
+                const double open     = curved_tops_uncovered_mm2(fp, paths, 0.2, min_width);
+                WARN((shape == 0 ? "tapered L" : "disc") << ", " << (pattern == ctpMonotonic ? "monotonic" : "concentric") << ", layer " << k
+                                                         << ": " << paths.size() << " paths, open " << open << " mm2 of " << patch << " mm2 ("
+                                                         << 100. * open / patch << " %)");
+                CHECK_FALSE(failed);
+                CHECK(open < 0.015 * patch);
+                // Every bead inside the patch.
+                const ExPolygon grown = offset_ex(fp, scale_(0.01)).front();
+                size_t outside = 0;
+                for (const CurvedTopsFillPath &p : paths)
+                    for (const Point &pt : p.points)
+                        outside += grown.contains(pt) ? 0 : 1;
+                CHECK(outside == 0);
+            }
+}
