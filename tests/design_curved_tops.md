@@ -2,11 +2,11 @@
 
 Status: **experimental, off by default** (`curved_tops_enabled`). Started as a spike on
 `feat/curved-tops-spike` (owner OK 2026-11-12, D2/D3 in `tests/ideas_pancakeslicer.md`), PR #1021.
-Works **only on printers whose print head clearance is known**: the Elegoo Centauri Carbon and the
-Bambu Lab X1 Carbon. On any other printer the setting is refused: the G-code is the same as with the
-setting off, and a slicing warning (`SlicingCurvedTopsUnavailable`) says curved tops is experimental
-and only available on those two printers for now. With the setting off, the G-code is byte-identical
-to a build without the feature.
+Works **only on printers whose head clearance file records a curved print**: the Elegoo Centauri
+Carbon and the Bambu Lab X1 Carbon (see "Head clearance"). On any other printer the setting is
+refused: the G-code is the same as with the setting off, and a slicing warning
+(`SlicingCurvedTopsUnavailable`) says why. With the setting off, the G-code is byte-identical to a
+build without the feature.
 
 ## What it does
 
@@ -34,18 +34,34 @@ to a build without the feature.
 
 ## Head clearance
 
-Hard-coded in `curved_tops_head_clearance()` (CurvedTops.cpp):
+Since P1 of `tests/design_curved_tops_any_printer.md` (branch `feat/curved-tops-p1`) the hard-coded
+table is gone. One resolver, `resolve_head_clearance()` (HeadClearance.cpp), picks the head model from
+`resources/head_clearance/` by `printer_model`; the planner, the Z contouring warning and the curved
+tops check all use it. No head file = refused. From the head (`curved_tops_head_limits()`):
 
-| Printer model | Nozzle clearance | Max slope | Source |
-|---|---|---|---|
-| Elegoo Centauri Carbon (not CC2) | 2.0 mm | 20 deg | conservative guess, not measured |
-| Bambu Lab X1 Carbon (exact name) | 2.0 mm | 20 deg | owner measured 2.5 mm tip to sock (2026-11-15), 0.5 mm margin; slope not measured |
-| anything else | - | - | `known = false`: refused, left planar, slicing warning |
+- allowed rise = lowest head box above the tip - 0.5 mm margin;
+- head angle cap = nozzle flank angle (profile points more than 0.1 mm above the tip, seen from the
+  tip land's edge) - 5 deg, at most 20 deg (as #1021; the lead kept 20 for P1); the effective angle is min(`curved_tops_max_angle`, cap).
 
-Next step (designed separately): take these from the head-clearance model of #1004
-(`HeadClearance.hpp`, `head_clearance_for_printer_model()`, data in `resources/head_clearance/`,
-which already has X1 and CC1 files), and run #1004's head collision check (`check_head_clearance()`
-in GCode.cpp, today ZAA-only) over the curved block too.
+| Printer model | Lowest part | Allowed rise | Angle cap | Usable in P1 |
+|---|---|---|---|---|
+| Bambu Lab X1 Carbon | sock 2.5 mm (owner measured) | 2.0 mm | 20 deg | yes: the file records the Dome40 print (1.8 mm, 10.3 deg) |
+| Elegoo Centauri Carbon | sock 2.5 mm (guess) | 2.0 mm | 20 deg | yes: the file records the Dome40 print |
+| Bambu Lab X1, X1E; Snapmaker U1; Bambu Lab H2D | estimates | - | - | no: estimate nobody printed curved tops with (P2 acknowledgement) |
+| anything else | - | - | - | no: no head data |
+
+P1 also: every refusal is a slicing warning naming its reason (`SlicingCurvedTopsUnavailable`), a
+built block gets a summary line (`SlicingCurvedTopsSummary`), the block ends with a retract + lift to
+the safe Z (R5), wipes on curved lines are held to 40 mm/s, and `check_head_clearance()` runs on
+curved prints and stops the export on a contact (D2). New refusals: by-object, more than one filament,
+smooth timelapse tower, local-Z / sub-layer plans, mixed nozzle diameters, draft shield or skirt taller
+than one layer, supports or stabilizers on the object, Z contouring on the same object, safe travel
+Z above the printable height, several surfaces whose combined height span exceeds the allowed rise.
+Every value a guard reads is recorded per object (`curved_tops_guard_inputs()`); `Print::apply()`
+regenerates that object's walls when any of them changes, or when the curved step was left
+unfinished over walls it already cut, so the block is always planned on uncut layers. The head check
+lets the tip land meet the neighbouring bead up to the slope the block actually follows, on the
+block's layer's extrusions only.
 
 ## Source choice and credit
 

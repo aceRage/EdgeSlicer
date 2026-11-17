@@ -337,6 +337,19 @@ void PrintObject::_transform_hole_to_polyholes()
 // 1) Merges typed region slices into stInternal type.
 // 2) Increases an "extra perimeters" counter at region slices where needed.
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
+// EdgeSlicer, curved tops: written on the slicing thread, read by Print::apply() under the state mutex.
+void PrintObject::set_curved_tops_clipped(bool clipped)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_clipped = clipped;
+}
+
+void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_guard_inputs = std::move(inputs);
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -344,6 +357,9 @@ void PrintObject::make_perimeters()
 
     if (! this->set_started(posPerimeters))
         return;
+    // Curved tops: the walls are regenerated whole here (the fills follow in posInfill, which this
+    // step invalidates), so nothing an earlier curved-tops run cut is left.
+    this->set_curved_tops_clipped(false);
 
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
@@ -900,14 +916,31 @@ void PrintObject::contour_z()
     m_print->throw_if_canceled();
 
     if (curved_tops) {
-        // Refuses (and leaves the object planar) on a printer with no known head clearance; tell the user.
-        apply_curved_tops(*this, mesh, imesh);
-        if (!curved_tops_head_clearance(m_print->config()).known)
+        // A refusal leaves the object planar; every refusal and every block is reported to the user.
+        // What the guards read is recorded, so Print::apply() regenerates the walls when it changes.
+        this->set_curved_tops_guard_inputs_used(curved_tops_guard_inputs(*this));
+        const bool             clipped_before = m_curved_tops_clipped;
+        const CurvedTopsResult ct             = apply_curved_tops(*this, mesh, imesh);
+        // Safety net (review finding g): this step running again over layers an earlier, unfinished run
+        // already cut (a cancel), with a guard now refusing, would print a cut-down top with nothing on
+        // it. Print::apply() regenerates the walls before that can happen; should it ever be reached
+        // anyway, stop rather than slice it.
+        if (!ct.applied && clipped_before)
+            throw Slic3r::SlicingError(Slic3r::format(_u8L("Curved tops: the top layers of %1% were cut for a curved top that is now "
+                                                           "refused. Slice again."),
+                                                      this->model_object()->name),
+                                       this->id().id);
+        if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                                          Slic3r::format(_u8L("Curved tops is experimental and for now only available on the Elegoo Centauri Carbon "
-                                                              "and the Bambu Lab X1 Carbon. %1% is printed with flat top layers."),
-                                                         this->model_object()->name),
+                                          Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
+                                                         this->model_object()->name, ct.refusal),
                                           PrintStateBase::SlicingCurvedTopsUnavailable);
+        else {
+            std::string msg = ct.summary;
+            for (const std::string &note : ct.notes)
+                msg += "\n" + note;
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
+        }
     }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
