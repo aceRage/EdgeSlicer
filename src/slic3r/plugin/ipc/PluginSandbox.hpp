@@ -144,6 +144,9 @@ void  close_parent_sandbox();
 // A session is rewritten
 // with only the remainder and kept if any grant was skipped or failed; the
 // journal is deleted only after every grant in every session is removed.
+// Sweep skips a session whose recorded owner pid is still alive (same start
+// time), so two Edge processes sharing a data_dir do not revoke each other.
+// Journal load-modify-write is serialized with a per-path Local\\ mutex.
 // Leftover package-SID ACEs are recorded even when RX is already present.
 // ALL APPLICATION PACKAGES RX (Program Files) is not journaled. A missing journal
 // directory is created; spawn fails only when no data dir is resolvable.

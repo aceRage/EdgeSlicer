@@ -70,6 +70,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
@@ -268,7 +269,9 @@ struct JournalSession
     std::string           python_home;
     std::string           helper_dir;
     std::string           resources_dir;
-    std::uint64_t         granted_at = 0; // FILETIME 100ns since 1601, stamped at prepare
+    std::uint64_t         granted_at  = 0; // FILETIME 100ns since 1601, stamped at prepare
+    std::uint32_t         owner_pid   = 0;
+    std::uint64_t         owner_start = 0; // FILETIME of the owning Edge process
     std::vector<DirGrant> grants;
 };
 
@@ -289,8 +292,10 @@ struct WinState
     std::string                  session_python_home;
     std::string                  session_helper_dir;
     std::string                  session_resources_dir;
-    std::uint64_t                granted_at = 0;
-    bool                         ready      = false;
+    std::uint64_t                granted_at  = 0;
+    std::uint32_t                owner_pid   = 0;
+    std::uint64_t                owner_start = 0;
+    bool                         ready       = false;
 };
 
 std::vector<std::string>        g_known_journal_data_dirs;
@@ -676,6 +681,28 @@ std::uint64_t now_filetime_u64()
     return filetime_to_u64(ft);
 }
 
+std::uint64_t process_start_filetime(HANDLE process)
+{
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (process == nullptr || !::GetProcessTimes(process, &created, &exited, &kernel, &user))
+        return 0;
+    return filetime_to_u64(created);
+}
+
+bool session_owner_alive(const JournalSession& session)
+{
+    if (session.owner_pid == 0 || session.owner_start == 0)
+        return false;
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, session.owner_pid);
+    if (process == nullptr)
+        return false;
+    DWORD exit_code = 0;
+    const bool times_match = process_start_filetime(process) == session.owner_start;
+    const bool queried     = ::GetExitCodeProcess(process, &exit_code) != 0;
+    ::CloseHandle(process);
+    return times_match && queried && exit_code == STILL_ACTIVE;
+}
+
 bool query_file_info(const std::wstring& wide, BY_HANDLE_FILE_INFORMATION& info)
 {
     HANDLE h = ::CreateFileW(wide.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -869,6 +896,8 @@ nlohmann::json session_to_json(const JournalSession& session)
             {"helper_dir", session.helper_dir},
             {"resources_dir", session.resources_dir},
             {"granted_at", session.granted_at},
+            {"owner_pid", session.owner_pid},
+            {"owner_start", session.owner_start},
             {"grants", grants_to_json(session.grants)}};
 }
 
@@ -895,6 +924,8 @@ JournalSession session_from_json_object(const nlohmann::json& json)
     session.helper_dir    = json.value("helper_dir", std::string());
     session.resources_dir = json.value("resources_dir", std::string());
     session.granted_at    = json.value("granted_at", static_cast<std::uint64_t>(0));
+    session.owner_pid     = json.value("owner_pid", 0u);
+    session.owner_start   = json.value("owner_start", static_cast<std::uint64_t>(0));
     if (json.contains("grants") && json["grants"].is_array()) {
         for (const auto& item : json["grants"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
@@ -934,6 +965,10 @@ void merge_session(std::vector<JournalSession>& sessions, JournalSession incomin
             existing.resources_dir = incoming.resources_dir;
         if (existing.granted_at == 0)
             existing.granted_at = incoming.granted_at;
+        if (incoming.owner_pid != 0) {
+            existing.owner_pid   = incoming.owner_pid;
+            existing.owner_start = incoming.owner_start;
+        }
         return;
     }
     sessions.push_back(std::move(incoming));
@@ -1029,6 +1064,50 @@ bool persist_sessions_at(const boost::filesystem::path& path, const std::vector<
     return write_journal_file(path, sessions);
 }
 
+// One writer per journal path. Named so two Edge processes sharing a data_dir
+// serialize load-modify-write. persist_sessions_at does not take this lock;
+// callers that already hold it must not re-enter.
+struct JournalFileLock
+{
+    HANDLE mutex  = nullptr;
+    bool   locked = false;
+
+    explicit JournalFileLock(const boost::filesystem::path& journal)
+    {
+        if (journal.empty())
+            return;
+        const std::wstring key  = win_path_key(journal);
+        std::uint64_t      hash = 14695981039346656037ull;
+        for (wchar_t c : key) {
+            hash ^= static_cast<unsigned char>(c & 0xff);
+            hash *= 1099511628211ull;
+            hash ^= static_cast<unsigned char>((static_cast<unsigned>(c) >> 8) & 0xff);
+            hash *= 1099511628211ull;
+        }
+        wchar_t name[80];
+        _snwprintf(name, 80, L"Local\\EdgeSlicer.acl_journal.%016llx", static_cast<unsigned long long>(hash));
+        mutex = ::CreateMutexW(nullptr, FALSE, name);
+        if (mutex == nullptr)
+            return;
+        const DWORD wait = ::WaitForSingleObject(mutex, INFINITE);
+        locked           = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    }
+
+    ~JournalFileLock()
+    {
+        if (mutex == nullptr)
+            return;
+        if (locked)
+            ::ReleaseMutex(mutex);
+        ::CloseHandle(mutex);
+    }
+
+    JournalFileLock(const JournalFileLock&)            = delete;
+    JournalFileLock& operator=(const JournalFileLock&) = delete;
+
+    bool ok() const { return locked; }
+};
+
 bool persist_acl_journal(PSID sid)
 {
     if (!parent_acl_ops_allowed())
@@ -1036,6 +1115,11 @@ bool persist_acl_journal(PSID sid)
     // Live persist uses the path pinned at grant time, never the current global data_dir().
     if (g_win.journal_path.empty())
         return false;
+    JournalFileLock lock(g_win.journal_path);
+    if (!lock.ok()) {
+        BOOST_LOG_TRIVIAL(error) << "AppContainer ACL journal lock failed: " << g_win.journal_path.string();
+        return false;
+    }
     JournalSession current;
     current.package_sid   = boost::nowide::narrow(sid_to_string(sid));
     current.profile_name  = boost::nowide::narrow(g_win.profile_name);
@@ -1044,6 +1128,8 @@ bool persist_acl_journal(PSID sid)
     current.helper_dir    = g_win.session_helper_dir;
     current.resources_dir = g_win.session_resources_dir;
     current.granted_at    = g_win.granted_at;
+    current.owner_pid     = g_win.owner_pid;
+    current.owner_start   = g_win.owner_start;
     current.grants        = g_win.grants;
     auto all              = load_journal_sessions_at(g_win.journal_path);
     bool replaced         = false;
@@ -1065,6 +1151,11 @@ bool remove_session_from_journals(const std::string& package_sid)
         return false;
     if (g_win.journal_path.empty())
         return false;
+    JournalFileLock lock(g_win.journal_path);
+    if (!lock.ok()) {
+        BOOST_LOG_TRIVIAL(error) << "AppContainer ACL journal lock failed: " << g_win.journal_path.string();
+        return false;
+    }
     auto all = load_journal_sessions_at(g_win.journal_path);
     all.erase(std::remove_if(all.begin(), all.end(), [&](const JournalSession& session) { return session.package_sid == package_sid; }),
               all.end());
@@ -1235,8 +1326,10 @@ void release_win_handles()
     g_win.session_python_home.clear();
     g_win.session_helper_dir.clear();
     g_win.session_resources_dir.clear();
-    g_win.granted_at = 0;
-    g_win.ready      = false;
+    g_win.granted_at  = 0;
+    g_win.owner_pid   = 0;
+    g_win.owner_start = 0;
+    g_win.ready       = false;
 }
 
 void clear_win_state()
@@ -1473,6 +1566,8 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     g_win.session_helper_dir    = helper_path().parent_path().string();
     g_win.session_resources_dir = Slic3r::resources_dir();
     g_win.granted_at            = now_filetime_u64();
+    g_win.owner_pid             = ::GetCurrentProcessId();
+    g_win.owner_start           = process_start_filetime(::GetCurrentProcess());
 
     const std::wstring name = profile_name(spec.plugin_key);
     PSID               sid  = nullptr;
@@ -1703,11 +1798,22 @@ void sweep_win_acl_journal()
     resolve_apis();
     const std::string live_sid = boost::nowide::narrow(sid_to_string(g_win.sid));
     for (const auto& path : journal_paths_to_sweep()) {
+        JournalFileLock lock(path);
+        if (!lock.ok()) {
+            BOOST_LOG_TRIVIAL(error) << "AppContainer ACL journal lock failed: " << path.string();
+            continue;
+        }
         auto                        sessions = load_journal_sessions_at(path);
         std::vector<JournalSession> leftover;
         leftover.reserve(sessions.size());
         for (JournalSession& session : sessions) {
             if (g_win.ready && !live_sid.empty() && session.package_sid == live_sid) {
+                leftover.push_back(std::move(session));
+                continue;
+            }
+            if (session_owner_alive(session)) {
+                BOOST_LOG_TRIVIAL(info) << "AppContainer ACL journal skipped live owner pid " << session.owner_pid << " for "
+                                        << session.package_sid;
                 leftover.push_back(std::move(session));
                 continue;
             }
@@ -1762,6 +1868,24 @@ std::wstring win_current_package_sid_string_for_testing() { return sid_to_string
 void win_abandon_grants_for_testing()
 {
     g_win.grants.clear();
+    // Crash: the owner process is gone. This process is still alive in tests, so
+    // clear owner fields on the journal or sweep would skip the leftover session.
+    if (!g_win.journal_path.empty()) {
+        JournalFileLock lock(g_win.journal_path);
+        if (lock.ok()) {
+            auto              all  = load_journal_sessions_at(g_win.journal_path);
+            const std::string live = boost::nowide::narrow(sid_to_string(g_win.sid));
+            for (JournalSession& session : all) {
+                if (live.empty() || session.package_sid == live) {
+                    session.owner_pid   = 0;
+                    session.owner_start = 0;
+                }
+            }
+            persist_sessions_at(g_win.journal_path, all);
+        }
+    }
+    g_win.owner_pid   = 0;
+    g_win.owner_start = 0;
     release_win_handles();
 }
 

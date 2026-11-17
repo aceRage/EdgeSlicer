@@ -1790,6 +1790,82 @@ TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[Plugi
     }
 }
 
+TEST_CASE("AppContainer sweep skips a journal session whose owner process is still alive", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-live-owner");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-live-owner-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    CloseSandbox close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Live_Owner");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.write_root        = dir.string();
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    REQUIRE(path_dacl_has_sid(dir.string(), package.sid));
+    const std::string journal = plugin_ipc::win_acl_journal_path_for_testing();
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+    REQUIRE(journal_file_exists(journal));
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    FILETIME created{}, exited{}, kernel{}, user{};
+    REQUIRE(::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user));
+    ULARGE_INTEGER start{};
+    start.LowPart  = created.dwLowDateTime;
+    start.HighPart = created.dwHighDateTime;
+    {
+        boost::nowide::ifstream in(journal);
+        REQUIRE(in);
+        auto json = nlohmann::json::parse(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        REQUIRE(json.contains("sessions"));
+        REQUIRE_FALSE(json["sessions"].empty());
+        json["sessions"][0]["owner_pid"]   = static_cast<std::uint32_t>(::GetCurrentProcessId());
+        json["sessions"][0]["owner_start"] = start.QuadPart;
+        write_acl_journal(json["sessions"]);
+    }
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+    REQUIRE(journal_file_exists(journal));
+
+    {
+        boost::nowide::ifstream in(journal);
+        REQUIRE(in);
+        auto json = nlohmann::json::parse(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        json["sessions"][0]["owner_pid"]   = 0;
+        json["sessions"][0]["owner_start"] = 0;
+        write_acl_journal(json["sessions"]);
+    }
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
+    {
+        boost::system::error_code jec;
+        CHECK_FALSE(fs::exists(journal, jec));
+    }
+}
+
 TEST_CASE("AppContainer copy-replaces a Low-IL file when WRITE_OWNER is missing", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();

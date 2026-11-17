@@ -192,7 +192,12 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
   already removed so a vanished temp dir cannot pin the journal forever. The
   journal is a list of sessions (package SID + profile name + session roots +
-  grants) and is deleted only after every ACE in every session is removed. Parent
+  grant time + owner pid/start + grants) and is deleted only after every ACE
+  in every session is removed. Each session records the Edge process that
+  granted it; sweep skips a session whose owner pid is still alive with the
+  same process start time, so two instances sharing a `data_dir` do not
+  revoke each other. Journal load-modify-write is serialized with a named
+  mutex (`Local\EdgeSlicer.acl_journal.<hash>`). Parent
   `PluginManager::initialize`, CLI after `set_data_dir`, G-code viewer
   startup, and the next `prepare` revoke anything the journal still lists
   except the live session. `close_win_appcontainer` revokes, restores the
