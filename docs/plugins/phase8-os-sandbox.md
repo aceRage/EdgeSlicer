@@ -158,19 +158,26 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   missing `data_dir` skips the traverse ACE with a warning (the helper
   `set_data_dir` treats not-found as create). Each grant is journalled **before**
   it is applied, in a **parent-only** file at
-  `{data_dir}/plugin_host_acl/acl_journal.json`. That directory is a sibling of
-  the helper-writable `plugin_host` log dir and is never granted to the package
-  SID or ALL APPLICATION PACKAGES; an explicit protected DACL allows only the
-  creating user and SYSTEM. The helper must not read or write the journal
+  `{spec.data_dir or data_dir()}/plugin_host_acl/acl_journal.json`. The path is
+  resolved once at grant time and stored on the session; close/revoke never
+  re-reads the global (a test or caller that restores `data_dir()` before
+  close would otherwise leave a journal with 0 ACEs). That directory is a
+  sibling of the helper-writable `plugin_host` log dir and is never granted
+  to the package SID or ALL APPLICATION PACKAGES; an explicit protected DACL
+  allows only the creating user and SYSTEM. A missing `plugin_host_acl`
+  folder is created; spawn fails only when neither `spec.data_dir` nor
+  `data_dir()` is set. The helper must not read or write the journal
   (`PluginManager::initialize` skips the sweep in-process; journal functions
   no-op inside an AppContainer / `in_child_process`). There is no
   `%LOCALAPPDATA%` / `Packages/*/AC` copy — `SHGetKnownFolderPath` inside the
   helper would resolve to the container folder. Sweep accepts only SIDs that
   match a derived `EdgeSlicer.ph.*` profile (never `S-1-15-2-1`) and paths
-  under known roots (`data_dir`, plugin dirs, `python_home`, helper,
-  `resources_dir`, temp). Copy-replace of Low-IL files from a journal session
-  stays inside that session's write grants under those roots. A leftover
-  helper-writable `{data_dir}/plugin_host/acl_journal.json` is deleted unread.
+  under known roots (current `data_dir`, remembered spec data dirs, plugin
+  dirs, `python_home`, helper, `resources_dir`, temp). Copy-replace of Low-IL
+  files from a journal session stays inside that session's write grants
+  under those roots. A leftover helper-writable
+  `{data_dir}/plugin_host/acl_journal.json` is deleted unread. Permanent
+  uninstall calls `DeleteAppContainerProfile` for that plugin key.
   `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` on revoke is treated as
   already removed so a vanished temp dir cannot pin the journal forever. The
   journal is a list of sessions (package SID + profile name + grants) and is

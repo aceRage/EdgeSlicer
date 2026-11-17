@@ -128,15 +128,21 @@ void  close_parent_sandbox();
 // left by a crash/kill, then delete the journal. No-op on POSIX, in the helper, and when
 // no journal exists. Call on every **parent** process start that can spawn the helper
 // (GUI PluginManager::initialize, CLI after data_dir is set, and prepare). The journal
-// is parent-only at `{data_dir}/plugin_host_acl/acl_journal.json` (not the helper-writable
-// `plugin_host` log dir, and not `%LOCALAPPDATA%` / Packages\\*\\AC). An explicit DACL
-// excludes the package SID and ALL APPLICATION PACKAGES. Sweep accepts only derived
-// `EdgeSlicer.ph.*` package SIDs and paths under known roots (data_dir, plugin dirs,
-// python_home, helper, resources, temp). Copy-replace of Low-IL files is limited to
-// write grants inside those roots. The journal exists from before the first ACE until
-// after the last ACE is removed; leftover package-SID ACEs are recorded even when RX is
-// already present. ALL APPLICATION PACKAGES RX (Program Files) is not journaled.
+// is parent-only at `{spec.data_dir or data_dir()}/plugin_host_acl/acl_journal.json` (not
+// the helper-writable `plugin_host` log dir, and not `%LOCALAPPDATA%` / Packages\\*\\AC).
+// The path is resolved once at grant time and stored on the session; close/revoke never
+// re-reads the global. An explicit DACL excludes the package SID and ALL APPLICATION
+// PACKAGES. Sweep accepts only derived `EdgeSlicer.ph.*` package SIDs and paths under
+// known roots (current data_dir, remembered spec data_dirs, plugin dirs, python_home,
+// helper, resources, temp). Copy-replace of Low-IL files is limited to write grants
+// inside those roots. The journal exists from before the first ACE until after the last
+// ACE is removed; leftover package-SID ACEs are recorded even when RX is already present.
+// ALL APPLICATION PACKAGES RX (Program Files) is not journaled. A missing journal
+// directory is created; spawn fails only when no data dir is resolvable.
 void sweep_stale_parent_sandbox_grants();
+// Windows: DeleteAppContainerProfile for this plugin_key (permanent uninstall). No-op
+// elsewhere, if the profile is missing, or while a host still uses it.
+void delete_parent_sandbox_profile(const std::string& plugin_key);
 
 #ifdef _WIN32
 // Named-pipe SECURITY_ATTRIBUTES that lets the AppContainer SID connect. nullptr when unused.

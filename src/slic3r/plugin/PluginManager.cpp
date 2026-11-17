@@ -2226,6 +2226,8 @@ bool PluginManager::delete_installed_plugin_package(const PluginDescriptor& plug
     if (!delete_plugin_root(resolved_root, plugin.plugin_key, error))
         return false;
 
+    plugin_ipc::delete_parent_sandbox_profile(plugin.plugin_key);
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_plugins.erase(std::remove_if(m_plugins.begin(), m_plugins.end(),
@@ -2364,6 +2366,7 @@ bool PluginManager::finalize_cloud_plugin_removal(const PluginDescriptor& plugin
                                        [&plugin](const Plugin& entry) { return entry.descriptor.plugin_key == plugin.plugin_key; }),
                         m_plugins.end());
     }
+    plugin_ipc::delete_parent_sandbox_profile(plugin.plugin_key);
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Removed cloud-only plugin: " << plugin.plugin_key;
     return true;
 }

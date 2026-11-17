@@ -22,6 +22,7 @@ bool probe_win_sandbox(SandboxProbe& probe)
 bool  prepare_win_appcontainer(const SandboxSpec&, std::string&) { return true; }
 void  close_win_appcontainer() {}
 void  sweep_win_acl_journal() {}
+void  delete_win_appcontainer_profile(const std::string&) {}
 void* win_security_capabilities() { return nullptr; }
 void* win_pipe_security_attributes() { return nullptr; }
 
@@ -254,37 +255,62 @@ struct WinState
     PACL                         pipe_acl = nullptr;
     std::vector<DirGrant>        grants;
     std::wstring                 profile_name;
+    boost::filesystem::path      journal_path; // pinned at grant time; never re-read from global data_dir()
     bool                         ready = false;
 };
+
+std::vector<std::string> g_known_journal_data_dirs;
 
 WinState g_win;
 bool     g_low_label_used_copy_replace = false;
 
+std::wstring win_path_key(const boost::filesystem::path& path);
+
 // Parent-only journal. Sibling of the helper-writable {data_dir}/plugin_host log dir so
-// AppContainer grants (inheritable RW on plugin_host) cannot reach it.
-boost::filesystem::path data_dir_acl_journal_path()
+// AppContainer grants (inheritable RW on plugin_host) cannot reach it. The data_dir is
+// spec.data_dir at grant time (fallback: Slic3r::data_dir()), then stored on the session.
+boost::filesystem::path acl_journal_path_for(const std::string& data_dir)
 {
-    const std::string dir = Slic3r::data_dir();
-    if (dir.empty())
+    if (data_dir.empty())
         return {};
-    return boost::filesystem::path(dir) / "plugin_host_acl" / "acl_journal.json";
+    return boost::filesystem::path(data_dir) / "plugin_host_acl" / "acl_journal.json";
 }
 
-boost::filesystem::path helper_writable_legacy_journal_path()
+std::string journal_data_dir_from_spec(const SandboxSpec& spec) { return !spec.data_dir.empty() ? spec.data_dir : Slic3r::data_dir(); }
+
+void remember_journal_data_dir(const std::string& data_dir)
 {
-    const std::string dir = Slic3r::data_dir();
-    if (dir.empty())
-        return {};
-    return boost::filesystem::path(dir) / "plugin_host" / "acl_journal.json";
+    if (data_dir.empty())
+        return;
+    const std::wstring key = win_path_key(data_dir);
+    for (const std::string& existing : g_known_journal_data_dirs) {
+        if (win_path_key(existing) == key)
+            return;
+    }
+    g_known_journal_data_dirs.push_back(data_dir);
 }
 
-void delete_helper_writable_legacy_journal()
+boost::filesystem::path helper_writable_legacy_journal_path_for(const std::string& data_dir)
 {
-    const auto path = helper_writable_legacy_journal_path();
+    if (data_dir.empty())
+        return {};
+    return boost::filesystem::path(data_dir) / "plugin_host" / "acl_journal.json";
+}
+
+void delete_helper_writable_legacy_journal_for(const std::string& data_dir)
+{
+    const auto path = helper_writable_legacy_journal_path_for(data_dir);
     if (path.empty())
         return;
     boost::system::error_code ec;
     boost::filesystem::remove(path, ec);
+}
+
+std::string data_dir_from_journal_path(const boost::filesystem::path& journal)
+{
+    if (journal.empty() || journal.parent_path().empty())
+        return {};
+    return journal.parent_path().parent_path().string();
 }
 
 std::wstring sid_to_string(PSID sid)
@@ -361,6 +387,8 @@ std::vector<boost::filesystem::path> known_sandbox_roots()
     };
     for (const std::string& path : parent_sandbox_known_roots())
         add(path);
+    for (const std::string& path : g_known_journal_data_dirs)
+        add(path);
     wchar_t     tmp[MAX_PATH] = {};
     const DWORD n             = ::GetTempPathW(MAX_PATH, tmp);
     if (n > 0 && n < MAX_PATH)
@@ -386,10 +414,20 @@ bool path_in_known_root(const std::string& path)
 
 bool path_is_acl_journal_tree(const std::string& path)
 {
-    const auto journal = data_dir_acl_journal_path();
-    if (journal.empty() || path.empty())
+    if (path.empty())
         return false;
-    return path_is_under_root(path, journal.parent_path());
+    auto under_journal = [&](const boost::filesystem::path& journal) {
+        return !journal.empty() && path_is_under_root(path, journal.parent_path());
+    };
+    if (under_journal(g_win.journal_path))
+        return true;
+    if (under_journal(acl_journal_path_for(Slic3r::data_dir())))
+        return true;
+    for (const std::string& dir : g_known_journal_data_dirs) {
+        if (under_journal(acl_journal_path_for(dir)))
+            return true;
+    }
+    return false;
 }
 
 bool is_edgeslicer_profile_name(const std::wstring& name)
@@ -768,10 +806,31 @@ std::vector<JournalSession> read_journal_file(const boost::filesystem::path& pat
     return out;
 }
 
-std::vector<JournalSession> load_journal_sessions()
+std::vector<JournalSession> load_journal_sessions_at(const boost::filesystem::path& path)
 {
-    delete_helper_writable_legacy_journal();
-    return read_journal_file(data_dir_acl_journal_path());
+    delete_helper_writable_legacy_journal_for(data_dir_from_journal_path(path));
+    return read_journal_file(path);
+}
+
+std::vector<boost::filesystem::path> journal_paths_to_sweep()
+{
+    std::vector<boost::filesystem::path> paths;
+    auto                                 add = [&](const boost::filesystem::path& path) {
+        if (path.empty())
+            return;
+        const std::wstring key = win_path_key(path);
+        for (const auto& existing : paths) {
+            if (win_path_key(existing) == key)
+                return;
+        }
+        paths.push_back(path);
+    };
+    add(acl_journal_path_for(Slic3r::data_dir()));
+    for (const std::string& dir : g_known_journal_data_dirs)
+        add(acl_journal_path_for(dir));
+    if (!g_win.journal_path.empty())
+        add(g_win.journal_path);
+    return paths;
 }
 
 bool write_journal_file(const boost::filesystem::path& path, const std::vector<JournalSession>& sessions)
@@ -799,11 +858,10 @@ bool write_journal_file(const boost::filesystem::path& path, const std::vector<J
     return true;
 }
 
-bool persist_sessions(const std::vector<JournalSession>& sessions)
+bool persist_sessions_at(const boost::filesystem::path& path, const std::vector<JournalSession>& sessions)
 {
     if (!parent_acl_ops_allowed())
         return false;
-    const auto path = data_dir_acl_journal_path();
     if (path.empty())
         return false;
     return write_journal_file(path, sessions);
@@ -813,11 +871,14 @@ bool persist_acl_journal(PSID sid)
 {
     if (!parent_acl_ops_allowed())
         return false;
+    // Live persist uses the path pinned at grant time, never the current global data_dir().
+    if (g_win.journal_path.empty())
+        return false;
     JournalSession current;
     current.package_sid  = boost::nowide::narrow(sid_to_string(sid));
     current.profile_name = boost::nowide::narrow(g_win.profile_name);
     current.grants       = g_win.grants;
-    auto all             = load_journal_sessions();
+    auto all             = load_journal_sessions_at(g_win.journal_path);
     bool replaced        = false;
     for (JournalSession& session : all) {
         if (session.package_sid == current.package_sid) {
@@ -828,17 +889,19 @@ bool persist_acl_journal(PSID sid)
     }
     if (!replaced)
         all.push_back(std::move(current));
-    return persist_sessions(all);
+    return persist_sessions_at(g_win.journal_path, all);
 }
 
 bool remove_session_from_journals(const std::string& package_sid)
 {
     if (!parent_acl_ops_allowed())
         return false;
-    auto all = load_journal_sessions();
+    if (g_win.journal_path.empty())
+        return false;
+    auto all = load_journal_sessions_at(g_win.journal_path);
     all.erase(std::remove_if(all.begin(), all.end(), [&](const JournalSession& session) { return session.package_sid == package_sid; }),
               all.end());
-    return persist_sessions(all);
+    return persist_sessions_at(g_win.journal_path, all);
 }
 
 // Files a Low-IL helper creates inherit a Low mandatory label even when the parent
@@ -968,6 +1031,7 @@ void release_win_handles()
     g_win.caps    = {};
     g_win.pipe_sa = {};
     g_win.profile_name.clear();
+    g_win.journal_path.clear();
     g_win.ready = false;
 }
 
@@ -1183,13 +1247,23 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         return false;
     }
     // Drop this process's live grants first, then sweep leftover sessions (other SIDs)
-    // from the parent-only data_dir journal. Sweep other SIDs even if we were ready.
+    // from the parent-only journals we know. Sweep other SIDs even if we were ready.
     clear_win_state();
     sweep_win_acl_journal();
     if (!g_apis_ok) {
         error = "AppContainer APIs are not available; refusing to start the plugin host unsandboxed";
         return false;
     }
+
+    // Pin the journal to spec.data_dir (fallback: global data_dir()) before the first ACE.
+    // A missing plugin_host_acl folder is created; spawn fails only when no data dir exists.
+    const std::string journal_root = journal_data_dir_from_spec(spec);
+    g_win.journal_path             = acl_journal_path_for(journal_root);
+    if (g_win.journal_path.empty()) {
+        error = "AppContainer ACL journal failed (no data dir)";
+        return false;
+    }
+    remember_journal_data_dir(journal_root);
 
     const std::wstring name = profile_name(spec.plugin_key);
     PSID               sid  = nullptr;
@@ -1414,53 +1488,55 @@ void sweep_win_acl_journal()
     if (!parent_acl_ops_allowed())
         return;
     resolve_apis();
-    auto                        sessions = load_journal_sessions();
-    const std::string           live_sid = boost::nowide::narrow(sid_to_string(g_win.sid));
-    std::vector<JournalSession> leftover;
-    leftover.reserve(sessions.size());
-    for (JournalSession& session : sessions) {
-        if (g_win.ready && !live_sid.empty() && session.package_sid == live_sid) {
-            leftover.push_back(std::move(session));
-            continue;
-        }
-        if (!session_sid_allowed(session)) {
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped untrusted SID " << session.package_sid;
-            continue;
-        }
-        PSID sid = nullptr;
-        if (!session.package_sid.empty()) {
-            const std::wstring wide = boost::nowide::widen(session.package_sid);
-            if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
-                sid = nullptr;
-        }
-        bool                  ok = true;
-        std::vector<DirGrant> keep;
-        keep.reserve(session.grants.size());
-        for (const DirGrant& grant : session.grants) {
-            if (!grant_path_is_actionable(grant, GrantActionSource::Journal)) {
-                BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped path outside known roots: " << grant.path;
+    const std::string live_sid = boost::nowide::narrow(sid_to_string(g_win.sid));
+    for (const auto& path : journal_paths_to_sweep()) {
+        auto                        sessions = load_journal_sessions_at(path);
+        std::vector<JournalSession> leftover;
+        leftover.reserve(sessions.size());
+        for (JournalSession& session : sessions) {
+            if (g_win.ready && !live_sid.empty() && session.package_sid == live_sid) {
+                leftover.push_back(std::move(session));
                 continue;
             }
-            if (sid) {
-                if (!revoke_one_grant(sid, grant, GrantActionSource::Journal)) {
-                    ok = false;
-                    keep.push_back(grant);
+            if (!session_sid_allowed(session)) {
+                BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped untrusted SID " << session.package_sid;
+                continue;
+            }
+            PSID sid = nullptr;
+            if (!session.package_sid.empty()) {
+                const std::wstring wide = boost::nowide::widen(session.package_sid);
+                if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
+                    sid = nullptr;
+            }
+            bool                  ok = true;
+            std::vector<DirGrant> keep;
+            keep.reserve(session.grants.size());
+            for (const DirGrant& grant : session.grants) {
+                if (!grant_path_is_actionable(grant, GrantActionSource::Journal)) {
+                    BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal dropped path outside known roots: " << grant.path;
+                    continue;
                 }
-            } else if (grant.low_label && grant.write) {
-                if (!restore_label_sddl(grant.path, grant.original_label)) {
-                    ok = false;
-                    keep.push_back(grant);
+                if (sid) {
+                    if (!revoke_one_grant(sid, grant, GrantActionSource::Journal)) {
+                        ok = false;
+                        keep.push_back(grant);
+                    }
+                } else if (grant.low_label && grant.write) {
+                    if (!restore_label_sddl(grant.path, grant.original_label)) {
+                        ok = false;
+                        keep.push_back(grant);
+                    }
                 }
             }
+            if (sid)
+                ::LocalFree(sid);
+            if (!ok) {
+                session.grants = std::move(keep);
+                leftover.push_back(std::move(session));
+            }
         }
-        if (sid)
-            ::LocalFree(sid);
-        if (!ok) {
-            session.grants = std::move(keep);
-            leftover.push_back(std::move(session));
-        }
+        persist_sessions_at(path, leftover);
     }
-    persist_sessions(leftover);
 }
 
 std::vector<std::string> win_granted_paths_for_testing()
@@ -1490,7 +1566,25 @@ void win_clear_low_integrity_label(const std::string& path)
     restore_label_sddl(path, {});
 }
 
-std::string win_acl_journal_path_for_testing() { return data_dir_acl_journal_path().string(); }
+std::string win_acl_journal_path_for_testing()
+{
+    if (!g_win.journal_path.empty())
+        return g_win.journal_path.string();
+    return acl_journal_path_for(Slic3r::data_dir()).string();
+}
+
+void delete_win_appcontainer_profile(const std::string& plugin_key)
+{
+    resolve_apis();
+    if (!p_DeleteProfile || plugin_key.empty())
+        return;
+    const std::wstring name = profile_name(plugin_key);
+    const HRESULT      hr   = p_DeleteProfile(name.c_str());
+    if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) ||
+        hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND))
+        return;
+    BOOST_LOG_TRIVIAL(warning) << "DeleteAppContainerProfile failed for " << plugin_key;
+}
 
 bool win_low_label_used_copy_replace_for_testing() { return g_low_label_used_copy_replace; }
 
