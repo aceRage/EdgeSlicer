@@ -47,6 +47,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <boost/nowide/convert.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -105,16 +106,15 @@ std::wstring profile_name(const std::string& plugin_key)
 bool label_low_integrity(const std::string& path)
 {
     PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr) ||
-        sd == nullptr)
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr) || sd == nullptr)
         return false;
-    BOOL present = FALSE, defaulted = FALSE;
-    PACL sacl    = nullptr;
-    DWORD rc     = ERROR_INVALID_PARAMETER;
+    BOOL  present = FALSE, defaulted = FALSE;
+    PACL  sacl = nullptr;
+    DWORD rc   = ERROR_INVALID_PARAMETER;
     if (::GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted) && present && sacl != nullptr) {
         const std::wstring wide = boost::nowide::widen(path);
-        rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr,
-                                     nullptr, nullptr, sacl);
+        rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
+                                     nullptr, sacl);
     }
     ::LocalFree(sd);
     return rc == ERROR_SUCCESS;
@@ -335,13 +335,25 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             BOOST_LOG_TRIVIAL(warning) << "AppContainer low-IL label skipped for " << path;
         return true;
     };
-    // python_home is often under Program Files: a standard user has no WRITE_DAC, and
-    // ALL APPLICATION PACKAGES can already read it. Skip rather than fail the spawn.
+    auto looks_like_program_files = [](const std::string& path) {
+        std::string lower = path;
+        for (char& c : lower)
+            c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        return lower.find("\\program files") != std::string::npos || lower.find("/program files") != std::string::npos;
+    };
+    // python_home under Program Files: a standard user has no WRITE_DAC, and ALL APPLICATION
+    // PACKAGES can already read it. A user-owned build/dev tree must be granted or CPython
+    // cannot open python312.dll / Lib / encodings inside the AppContainer.
     if (!spec.python_home.empty()) {
         if (grant_dir_acl(sid, spec.python_home, false, SET_ACCESS))
             g_win.grants.emplace_back(spec.python_home, false);
-        else
+        else if (looks_like_program_files(spec.python_home))
             BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
+        else {
+            error = "AppContainer ACL grant failed for python_home " + spec.python_home;
+            clear_win_state();
+            return false;
+        }
     }
     if (!spec.write_root.empty()) {
         boost::system::error_code ec;

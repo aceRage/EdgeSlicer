@@ -15,6 +15,7 @@
 #include <pytypedefs.h>
 #include "PluginFsUtils.hpp"
 #include "slic3r/plugin/EdgePythonInclude.hpp"
+#include "slic3r/plugin/ipc/PluginIpcProtocol.hpp"
 #include <pybind11/pybind11.h>
 
 #include <pybind11/embed.h>
@@ -25,6 +26,7 @@
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -207,6 +209,32 @@ void ensure_system_ssl_cert_file()
         BOOST_LOG_TRIVIAL(warning) << "Python: no system CA bundle found; ssl.create_default_context() may have no CAs";
 }
 #endif
+
+void pyconfig_child_log(const std::string& msg)
+{
+    BOOST_LOG_TRIVIAL(info) << msg;
+    if (plugin_ipc::in_child_process()) {
+        std::fprintf(stderr, "edge-plugin-host: %s\n", msg.c_str());
+        std::fflush(stderr);
+    }
+}
+
+bool pyconfig_append_search_path(PyConfig& config, const std::string& path)
+{
+    if (path.empty())
+        return true;
+#ifdef _WIN32
+    const std::wstring w  = boost::nowide::widen(path);
+    const PyStatus     st = PyWideStringList_Append(&config.module_search_paths, w.c_str());
+#else
+    wchar_t* w = Py_DecodeLocale(path.c_str(), nullptr);
+    if (w == nullptr)
+        return false;
+    const PyStatus st = PyWideStringList_Append(&config.module_search_paths, w);
+    PyMem_RawFree(w);
+#endif
+    return !PyStatus_Exception(st);
+}
 
 bool add_sys_path_entry(const boost::filesystem::path& path, std::string& error, bool* inserted = nullptr,
                         bool append = false)
@@ -600,17 +628,24 @@ bool PythonInterpreter::initialize()
             BOOST_LOG_TRIVIAL(warning) << "Encodings module NOT found at: " << encodings_path.string();
         }
 
-        BOOST_LOG_TRIVIAL(info) << "Using Python 3.12 PyConfig initialization API";
+        pyconfig_child_log("Using Python 3.12 PyConfig initialization API");
+        pyconfig_child_log(std::string("Py init start home=") + python_home + " lib=" + python_lib.string());
 
-        // Set Python home - this is the prefix where Python libraries are located
-        PyConfig config;
-        PyConfig_InitPythonConfig(&config);
-        // Do not let the host process's PYTHONPATH or user site-packages override the bundled
-        // runtime used by plugins.
+        // Isolated config in the helper: AppContainer cannot probe %APPDATA%, the registry, or
+        // the user site. Explicit module_search_paths so encodings is found without those probes.
+        const bool in_helper = plugin_ipc::in_child_process();
+        PyConfig   config;
+        if (in_helper)
+            PyConfig_InitIsolatedConfig(&config);
+        else
+            PyConfig_InitPythonConfig(&config);
         config.use_environment     = 0;
         config.user_site_directory = 0;
-        // Plugin loads must import the hashed source, not a planted or stale .pyc.
         config.write_bytecode      = 0;
+        if (in_helper) {
+            config.safe_path    = 1;
+            config.faulthandler = 1;
+        }
 
         BOOST_LOG_TRIVIAL(debug) << "Calling PyConfig_SetBytesString with home=" << python_home;
         PyStatus status = PyConfig_SetBytesString(&config, &config.home, python_home.c_str());
@@ -622,8 +657,7 @@ bool PythonInterpreter::initialize()
         }
         BOOST_LOG_TRIVIAL(debug) << "Python home set successfully";
 
-        // Set program name
-        status = PyConfig_SetBytesString(&config, &config.program_name, "EdgeSlicer");
+        status = PyConfig_SetBytesString(&config, &config.program_name, in_helper ? "edge-plugin-host" : "EdgeSlicer");
         if (PyStatus_Exception(status)) {
             m_last_error = status.err_msg ? status.err_msg : "Failed to set program name";
             BOOST_LOG_TRIVIAL(error) << "Failed to set program name: " << m_last_error;
@@ -632,18 +666,48 @@ bool PythonInterpreter::initialize()
         }
         BOOST_LOG_TRIVIAL(debug) << "Program name set successfully";
 
-        // Keep bytecode out of the Python home. The shipped .pyc files are stale against their
-        // sources, so a writable install would rewrite them inside the app (breaking a signed
-        // macOS bundle's seal) and a read-only one would recompile them on every launch.
-        const std::string pycache_prefix = data_dir() + "/python/pycache";
+        {
+            std::vector<std::string> search;
 #ifdef _WIN32
-        status = PyConfig_SetString(&config, &config.pycache_prefix, boost::nowide::widen(pycache_prefix).c_str());
+            search.push_back((fs::path(python_home) / "python312.zip").string());
+            search.push_back((fs::path(python_home) / "DLLs").string());
+            search.push_back(python_lib.string());
+            search.push_back(python_home);
 #else
-        status = PyConfig_SetBytesString(&config, &config.pycache_prefix, pycache_prefix.c_str());
+            search.push_back(python_lib.string());
+            search.push_back((python_lib / "lib-dynload").string());
+            search.push_back(python_home);
 #endif
-        if (PyStatus_Exception(status))
-            BOOST_LOG_TRIVIAL(warning) << "Failed to set the Python bytecode cache to " << pycache_prefix << ": "
-                                       << (status.err_msg ? status.err_msg : "unknown error");
+            const std::string packages = shared_packages_dir();
+            if (!packages.empty())
+                search.push_back(packages);
+            bool paths_ok = true;
+            for (const std::string& p : search) {
+                boost::system::error_code ec;
+                if (!fs::exists(p, ec) || ec)
+                    continue;
+                if (!pyconfig_append_search_path(config, p)) {
+                    paths_ok = false;
+                    break;
+                }
+            }
+            if (paths_ok && config.module_search_paths.length > 0)
+                config.module_search_paths_set = 1;
+        }
+
+        // Keep bytecode out of the Python home. Skip in the helper: the pycache dir is not
+        // granted inside AppContainer, and write_bytecode is already off.
+        if (!in_helper) {
+            const std::string pycache_prefix = data_dir() + "/python/pycache";
+#ifdef _WIN32
+            status = PyConfig_SetString(&config, &config.pycache_prefix, boost::nowide::widen(pycache_prefix).c_str());
+#else
+            status = PyConfig_SetBytesString(&config, &config.pycache_prefix, pycache_prefix.c_str());
+#endif
+            if (PyStatus_Exception(status))
+                BOOST_LOG_TRIVIAL(warning) << "Failed to set the Python bytecode cache to " << pycache_prefix << ": "
+                                           << (status.err_msg ? status.err_msg : "unknown error");
+        }
 
         // Looked up before the interpreter exists: a throw after scoped_interpreter is created would
         // leave it running and make the next initialize() attempt fail with "already running".
@@ -667,6 +731,7 @@ bool PythonInterpreter::initialize()
         }
         // PyConfig is cleared by pybind11's initialize_interpreter() internally.
         BOOST_LOG_TRIVIAL(debug) << "py::scoped_interpreter initialized successfully";
+        pyconfig_child_log(std::string("Py init end home=") + python_home);
 
         if (!Py_IsInitialized()) {
             m_last_error = "Python interpreter not initialized";
@@ -733,7 +798,9 @@ bool PythonInterpreter::initialize()
 
         // Persist Python stderr (plugin tracebacks, including uncaught
         // background-thread exceptions) to <data_dir>/log/python_*.log.
-        install_python_stderr_redirect();
+        // The helper already redirected fd 2 / faulthandler to --host-log.
+        if (!in_helper)
+            install_python_stderr_redirect();
 
         // Attribute plugin-spawned Python threads to the plugin/capability that created them.
         // Must run while the GIL is still held here, after the audit hook is in place and
