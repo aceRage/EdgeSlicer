@@ -901,7 +901,9 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
                                     mm_str(head.allowed_rise_mm), deg_str(slope_used), deg_str(max_angle),
                                     float_to_string_decimal_point(CURVED_TOPS_MAX_SPEED_MM_S, 0), head.source);
     if (partial) {
-        if (cut_surfaces > 0)
+        // Material beside raised the cut: said even when every curved surface lies wholly above it (the
+        // flanks around it are what prints flat).
+        if (cut_surfaces > 0 || cut_by_beside)
             result.notes.push_back(
                 (cut_by_beside ?
                      Slic3r::format(_u8L("Partly curved: below Z %1% mm, parts of the object next to the curved surface stand where the "
