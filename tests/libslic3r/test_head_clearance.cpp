@@ -562,7 +562,13 @@ TEST_CASE("Head clearance P4: the curved tops record may carry the deepest nozzl
     const std::string saved = resources_dir();
     set_resources_dir((boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources").string());
     const HeadClearancePtr cc1 = resolve_head_clearance("Elegoo Centauri Carbon");
+    const HeadClearancePtr x1c = resolve_head_clearance("Bambu Lab X1 Carbon");
     set_resources_dir(saved);
+    // The X1 Carbon records the owner's 07e arm print of 2026-11-17 (rise and slope unchanged: 1.78 / 10.0 is within them).
+    REQUIRE(x1c != nullptr);
+    REQUIRE(x1c->curved_tops_verified.has_value());
+    CHECK(x1c->curved_tops_verified->nozzle_contact_mm == Approx(0.44));
+    CHECK(x1c->curved_tops_verified->rise_mm == Approx(1.8));
     REQUIRE(cc1 != nullptr);
     REQUIRE(cc1->curved_tops_verified.has_value());
     CHECK(cc1->curved_tops_verified->rise_mm == Approx(2.37));

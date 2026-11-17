@@ -975,7 +975,7 @@ TEST_CASE("Curved tops: head limits come from the head model only", "[CurvedTops
     CHECK_THAT(cc1.verified_rise_mm, WithinAbs(2.37, 1e-9));
     CHECK_THAT(cc1.verified_angle_deg, WithinAbs(20.0, 1e-9));
     CHECK_THAT(cc1.verified_nozzle_contact_mm, WithinAbs(0.61, 1e-9));
-    CHECK_THAT(x1c.verified_nozzle_contact_mm, WithinAbs(0.0, 1e-9));
+    CHECK_THAT(x1c.verified_nozzle_contact_mm, WithinAbs(0.44, 1e-9));
 
     // The default 15 stays 15, nothing goes above 20 (as #1021).
     CHECK_THAT(curved_tops_effective_max_angle(15., cc1), WithinAbs(15., 1e-9));
@@ -2771,63 +2771,88 @@ TEST_CASE("Curved tops P4: both patterns slice and export", "[CurvedTops][Curved
     CHECK_NOTHROW(Test::gcode(print));
 }
 
-// Review M2: the tolerance in force is the setting capped by the head's printed record. The X1 Carbon has no
-// nozzle contact record: strict (P3's planner rules, said in the summary) unless the developer override lifts it.
-// The Centauri Carbon records 0.61 mm: a larger setting is capped and said.
+// Review M2: the tolerance in force is the setting capped by the head's printed record. A head with no nozzle
+// contact record (a synthetic copy of the Centauri Carbon's without it) is strict (P3's planner rules, said in the
+// summary) unless the developer override lifts it. The Centauri Carbon records 0.61 mm: a larger setting is capped
+// and said; the X1 Carbon records 0.44 mm since the owner's 07e print.
 TEST_CASE("Curved tops P4: the nozzle tolerance is capped by the print head's printed record", "[CurvedTops][CurvedTopsP4]")
 {
-    const ResourcesDirGuard resources;
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("curvedtops_norecord_%%%%-%%%%");
+    boost::filesystem::create_directories(dir / "head_clearance");
     {
-        Print print;
-        Model model;
-        slice_puck(print, model, true, { { "printer_model", "Bambu Lab X1 Carbon" }, { "curved_tops_max_angle", "5" } });
-        REQUIRE(top_block(print));
-        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
-        INFO("summary: " << summary);
-        CHECK(summary.find("Nozzle contact tolerance not applied: no contact print recorded for this print head (the setting asks for 0.40 mm)") !=
-              std::string::npos);
-        // Strict: the planner works as with tolerance 0 (see "material beside within the nozzle tolerance").
-        CHECK(summary.find("Partly curved: below Z 4.80 mm") != std::string::npos);
-        CHECK_NOTHROW(Test::gcode(print));
-        CHECK(print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck).find("The nozzle passes") == std::string::npos);
+        std::ofstream f((dir / "head_clearance" / "no-record.json").string());
+        f << R"({
+    "schema": "edgeslicer.head_clearance.v1",
+    "id": "no-record-test",
+    "name": "Head with no contact record",
+    "printer_models": ["Elegoo Centauri Carbon"],
+    "calibrated": false,
+    "source": "unit test",
+    "nozzle": { "profile": [[0.0, 0.5], [1.0, 1.3], [2.0, 2.1], [4.0, 3.5]] },
+    "boxes": [ {"name": "heater block and silicone sock", "min": [-12, -12, 2.5], "max": [12, 12, 24]} ],
+    "curved_tops": { "verified_printer_models": ["Elegoo Centauri Carbon"], "verified_rise_mm": 2.37, "verified_angle_deg": 20 }
+})";
     }
     {
-        const DevModeGuard dev(true);
-        Print print;
-        Model model;
-        slice_puck(print, model, true,
-                   { { "printer_model", "Bambu Lab X1 Carbon" }, { "curved_tops_max_angle", "5" },
-                     { "curved_tops_dev_nozzle_tolerance_unrecorded", "1" } });
-        REQUIRE(top_block(print));
-        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
-        INFO("summary: " << summary);
-        CHECK(summary.find("Developer override: nozzle contact tolerance 0.40 mm applied although no nozzle contact print is recorded") !=
-              std::string::npos);
-        CHECK(summary.find("Partly curved") == std::string::npos);
-        CHECK_NOTHROW(Test::gcode(print));
-        const std::string check = print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck);
-        INFO("head check: " << check);
-        CHECK(check.find("No nozzle contact has been printed with this print head yet") != std::string::npos);
+        const ResourcesDirGuard none(dir.string());
+        {
+            Print print;
+            Model model;
+            slice_puck(print, model, true, { { "curved_tops_max_angle", "5" } });
+            REQUIRE(top_block(print));
+            const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+            INFO("summary: " << summary);
+            CHECK(summary.find("Nozzle contact tolerance not applied: no contact print recorded for this print head (the setting asks for 0.40 mm)") !=
+                  std::string::npos);
+            // Strict: the planner works as with tolerance 0 (see "material beside within the nozzle tolerance").
+            CHECK(summary.find("Partly curved: below Z 4.80 mm") != std::string::npos);
+            CHECK_NOTHROW(Test::gcode(print));
+            CHECK(print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck).find("The nozzle passes") == std::string::npos);
+        }
+        {
+            const DevModeGuard dev(true);
+            Print print;
+            Model model;
+            slice_puck(print, model, true, { { "curved_tops_max_angle", "5" }, { "curved_tops_dev_nozzle_tolerance_unrecorded", "1" } });
+            REQUIRE(top_block(print));
+            const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+            INFO("summary: " << summary);
+            CHECK(summary.find("Developer override: nozzle contact tolerance 0.40 mm applied although no nozzle contact print is recorded") !=
+                  std::string::npos);
+            CHECK(summary.find("Partly curved") == std::string::npos);
+            CHECK_NOTHROW(Test::gcode(print));
+            const std::string check = print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck);
+            INFO("head check: " << check);
+            CHECK(check.find("No nozzle contact has been printed with this print head yet") != std::string::npos);
+        }
     }
     {
-        Print print;
-        Model model;
-        slice_puck(print, model, true, { { "curved_tops_nozzle_tolerance", "0.8" } });
-        REQUIRE(top_block(print));
-        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
-        INFO("summary: " << summary);
-        CHECK(summary.find("Nozzle contact tolerance capped at 0.61 mm") != std::string::npos);
-        CHECK(summary.find("the setting asks for 0.80 mm") != std::string::npos);
+        const ResourcesDirGuard resources;
+        {
+            Print print;
+            Model model;
+            slice_puck(print, model, true, { { "curved_tops_nozzle_tolerance", "0.8" } });
+            REQUIRE(top_block(print));
+            const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+            INFO("summary: " << summary);
+            CHECK(summary.find("Nozzle contact tolerance capped at 0.61 mm") != std::string::npos);
+            CHECK(summary.find("the setting asks for 0.80 mm") != std::string::npos);
+        }
+        {
+            // At or under the record: nothing said; the X1 Carbon now has a record too.
+            for (const char *printer : { "Elegoo Centauri Carbon", "Bambu Lab X1 Carbon" }) {
+                INFO(printer);
+                Print print;
+                Model model;
+                slice_puck(print, model, true, { { "printer_model", printer } });
+                REQUIRE(top_block(print));
+                CHECK(object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary).find("Nozzle contact tolerance") ==
+                      std::string::npos);
+            }
+        }
     }
-    {
-        // At or under the record: nothing said.
-        Print print;
-        Model model;
-        slice_puck(print, model, true);
-        REQUIRE(top_block(print));
-        CHECK(object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary).find("Nozzle contact tolerance") ==
-              std::string::npos);
-    }
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(dir, ec);
 }
 
 // Review S2: on a long narrow loop the starts of consecutive layers and loops spread along its length instead of

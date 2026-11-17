@@ -6134,8 +6134,8 @@ void PrintConfigDef::init_fff_params()
                       "and reported; deeper, or by any other head part (sock, heater block, fan duct), the G-code is "
                       "not exported. 0 = no nozzle contact allowed.\n"
                       "Capped by what has been printed with the printer's print head: never more than the deepest nozzle "
-                      "contact its head data records from a clean print (0.61 mm on the Elegoo Centauri Carbon), and not "
-                      "applied at all on a print head with no such print recorded (Bambu Lab X1 Carbon, for now). The "
+                      "contact its head data records from a clean print (0.61 mm on the Elegoo Centauri Carbon, 0.44 mm on "
+                      "the Bambu Lab X1 Carbon), and not applied at all on a print head with no such print recorded. The "
                       "slicing summary says when the value is capped or not applied.");
     def->sidetext = L("mm");
     def->min      = 0;
