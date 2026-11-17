@@ -350,17 +350,9 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
 
     // macOS first-launch of a freshly linked helper (Gatekeeper / dyld, including libpython
     // pages faulted during hello) is charged on the first full spawn+handshake, not on a
-    // spawn-only warmup that kills the child before CPython init. Run an untimed full
-    // handshake, then time a second one; retry once if that second exec is still cold.
+    // spawn-only warmup that kills the child before CPython init. Time cold then warm;
+    // retry once if the warm exec is still over budget.
     // The 1500 ms (5000 ms ASan) budget is the steady-state spawn+handshake, not first-exec.
-    {
-        ScopedSpawnedHost warm;
-        nlohmann::json    warm_reply;
-        std::string       warm_error;
-        REQUIRE(spawn_and_handshake(warm.host, spec, warm_reply, warm_error));
-        REQUIRE(warm_reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
-    }
-
 #ifdef __SANITIZE_ADDRESS__
     const long long budget_ms = 5000;
 #else
@@ -376,12 +368,20 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
         return std::make_tuple(ok, error, reply, ms);
     };
 
+    auto [cold_ok, cold_error, cold_reply, cold_ms] = timed_handshake();
+    WARN("cold spawn+handshake ms=" << cold_ms);
+    INFO("cold handshake error: " << cold_error);
+    REQUIRE(cold_ok);
+    REQUIRE(cold_reply.value("type", std::string()) == plugin_ipc::k_type_hello_ok);
+
     auto [ok, error, reply, ms] = timed_handshake();
+    WARN("warm spawn+handshake ms=" << ms);
     INFO("handshake error: " << error);
     REQUIRE(ok);
     if (ms >= budget_ms) {
-        INFO("cold spawn+handshake ms=" << ms << "; retrying once");
+        WARN("warm spawn+handshake still cold; retrying once");
         std::tie(ok, error, reply, ms) = timed_handshake();
+        WARN("warm spawn+handshake retry ms=" << ms);
         INFO("handshake error: " << error);
         REQUIRE(ok);
     }
@@ -423,7 +423,7 @@ TEST_CASE("handshake reports the OS sandbox state", "[PluginSandbox][handshake][
         CHECK(report.kind == plugin_ipc::k_sandbox_kind_none);
     }
 #endif
-    INFO("spawn+handshake ms=" << ms);
+    INFO("warm spawn+handshake ms=" << ms);
     CHECK(ms < budget_ms);
 }
 
