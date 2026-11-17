@@ -60,6 +60,7 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <boost/nowide/convert.hpp>
 #endif
 
 using namespace Slic3r;
@@ -1166,6 +1167,45 @@ bool dacl_has_allowed_sid(PACL dacl, PSID sid)
     return false;
 }
 
+constexpr DWORD k_data_dir_traverse_mask = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+constexpr BYTE  k_inherit_ace_flags      = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+
+bool dacl_has_data_dir_traverse_ace(PACL dacl)
+{
+    if (dacl == nullptr)
+        return false;
+    ACL_SIZE_INFORMATION info{};
+    if (!::GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation))
+        return false;
+    for (DWORD i = 0; i < info.AceCount; ++i) {
+        LPVOID ace = nullptr;
+        if (!::GetAce(dacl, i, &ace) || ace == nullptr)
+            continue;
+        auto* header = static_cast<ACE_HEADER*>(ace);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        if ((header->AceFlags & k_inherit_ace_flags) != 0)
+            continue;
+        auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+        if (allowed->Mask == k_data_dir_traverse_mask)
+            return true;
+    }
+    return false;
+}
+
+bool path_has_data_dir_traverse_ace(const std::string& path)
+{
+    const std::wstring       wide = boost::nowide::widen(path);
+    PACL                     dacl = nullptr;
+    PSECURITY_DESCRIPTOR     sd   = nullptr;
+    const DWORD              rc   = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                                            nullptr, nullptr, &dacl, nullptr, &sd);
+    const bool               found = rc == ERROR_SUCCESS && dacl_has_data_dir_traverse_ace(dacl);
+    if (sd)
+        ::LocalFree(sd);
+    return found;
+}
+
 struct LocalSid
 {
     PSID sid = nullptr;
@@ -1293,6 +1333,45 @@ TEST_CASE("AppContainer helper env keeps LOCALAPPDATA and drops APPDATA", "[Plug
     CHECK_FALSE(has_var(L"USERPROFILE"));
     CHECK_FALSE(has_var(L"HOMEDRIVE"));
     CHECK_FALSE(has_var(L"HOMEPATH"));
+}
+
+TEST_CASE("AppContainer data_dir ACE is traverse-only and revoked on close", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-data-dir-ace-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "DataDir_Traverse";
+    spec.data_dir   = dir.string();
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    CHECK(path_has_data_dir_traverse_ace(spec.data_dir));
+    // Exact mask: RA|X|SYNCHRONIZE, no FILE_LIST_DIRECTORY / FILE_READ_DATA.
+    CHECK((k_data_dir_traverse_mask & FILE_LIST_DIRECTORY) == 0);
+
+    plugin_ipc::close_parent_sandbox();
+    CHECK_FALSE(path_has_data_dir_traverse_ace(spec.data_dir));
 }
 
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")
