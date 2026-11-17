@@ -333,8 +333,12 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     }
     for (const std::string& path : permissions.fs_readwrite) {
         const std::string stripped = strip_tree_wildcard(path);
+        // AppContainer is Low IL. The helper cannot write up into a Medium folder, so each
+        // fs_readwrite root gets package-SID modify plus a Low label when one is not already
+        // present. The parent journals both and restores them on close/sweep. Missing
+        // WRITE_OWNER fail-closes that root rather than leaving it read-only.
         if (ensure_grant_directory(stripped))
-            add_unique_path(spec.extra_paths, stripped, true);
+            add_unique_path(spec.extra_paths, stripped, true, true);
     }
     return spec;
 }

@@ -33,8 +33,9 @@ struct SandboxPath
 {
     std::string path;
     bool        write = false;
-    // Windows: apply a Low-IL mandatory label only on Edge-created work dirs (plugin_data,
-    // host-log, write_root). User-chosen fs_readwrite folders stay at their original label.
+    // Windows: apply a Low-IL mandatory label when the helper needs to write (plugin_data,
+    // host-log, write_root, and user fs_readwrite). Skip if the path is already Low; restore
+    // only a label this process added.
     bool low_label = false;
 };
 
@@ -137,10 +138,13 @@ void  close_parent_sandbox();
 // is rejected). ACE revoke and Low-label restore on a recorded grant path are
 // allowed for that session's python_home / helper / resources / data_dir even when
 // those paths sit outside this process's current roots (moved install, portable
-// copy, test binary vs GUI). Copy-replace of Low-IL files stays inside this
-// process's known user-rw roots (current data_dir, remembered spec data_dirs,
-// plugin dirs, python_home, helper, resources, temp) and only rewrites files
-// created at/after the session grant time that are Low-labelled, singly linked,
+// copy, test binary vs GUI). Hosted `fs_readwrite` roots get package-SID modify
+// and a Low label when needed for writes; close/sweep restore only a label this
+// process added (WRITE_OWNER failure fail-closes that root). Copy-replace of
+// Low-IL files stays inside this process's known user-rw roots (current data_dir,
+// remembered spec data_dirs, plugin dirs, python_home, helper, resources, temp)
+// and only rewrites files created at/after the session grant time that are
+// Low-labelled, singly linked,
 // and have no extra ADS (MoveFileEx replace; original kept if the move fails).
 // A session is rewritten
 // with only the remainder and kept if any grant was skipped or failed; the

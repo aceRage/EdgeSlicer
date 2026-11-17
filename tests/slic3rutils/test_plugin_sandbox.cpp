@@ -1122,6 +1122,27 @@ TEST_CASE("make_sandbox_spec creates the shared python packages dir", "[PluginSa
     CHECK(granted);
 }
 
+TEST_CASE("make_sandbox_spec marks fs_readwrite extras writable and Low-labelled", "[PluginSandbox]")
+{
+    ScopedDataDir             data("plugin-sandbox-fsrw-spec");
+    boost::system::error_code ec;
+    const fs::path            user_rw = data.dir / "user-rw";
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+
+    PluginDescriptor  descriptor;
+    descriptor.plugin_key = "FsRw_Spec";
+    PluginPermissions permissions;
+    permissions.fs_readwrite = {user_rw.string()};
+    const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec(descriptor, permissions, {});
+    bool granted = false;
+    for (const auto& extra : spec.extra_paths) {
+        if (extra.path == user_rw.string() && extra.write && extra.low_label)
+            granted = true;
+    }
+    CHECK(granted);
+}
+
 TEST_CASE("host log dir is plugin_host not the ACL journal sibling", "[PluginSandbox]")
 {
     ScopedDataDir           data("plugin-sandbox-log-vs-journal");
@@ -1473,6 +1494,26 @@ bool path_dacl_has_sid(const std::string& path, PSID sid)
     return found;
 }
 
+std::string path_dacl_sddl(const std::string& path)
+{
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                                nullptr, &sd) != ERROR_SUCCESS ||
+        sd == nullptr)
+        return {};
+    LPWSTR            sddl = nullptr;
+    std::string       out;
+    if (::ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &sddl, nullptr) &&
+        sddl != nullptr) {
+        out = boost::nowide::narrow(sddl);
+        ::LocalFree(sddl);
+    }
+    ::LocalFree(sd);
+    return out;
+}
+
 bool granted_paths_contain(const std::string& path)
 {
     const auto granted = plugin_ipc::win_granted_paths_for_testing();
@@ -1502,6 +1543,45 @@ bool restrict_dacl_to_modify(const std::string& path)
                                FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | READ_CONTROL | SYNCHRONIZE;
     EXPLICIT_ACCESSW ea{};
     ea.grfAccessPermissions = k_modify;
+    ea.grfAccessMode        = SET_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_USER;
+    ea.Trustee.ptstrName    = static_cast<LPWSTR>(user);
+    PACL neu                = nullptr;
+    if (::SetEntriesInAclW(1, &ea, nullptr, &neu) != ERROR_SUCCESS)
+        return false;
+    const std::wstring wide = boost::nowide::widen(path);
+    const DWORD        rc   = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT,
+                                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, neu,
+                                                      nullptr);
+    ::LocalFree(neu);
+    return rc == ERROR_SUCCESS;
+}
+
+bool restrict_dacl_dac_without_write_owner(const std::string& path)
+{
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    std::vector<BYTE> buf(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    ::CloseHandle(token);
+    PSID user = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+    // WRITE_DAC so we can still append the package-SID ACE; no WRITE_OWNER so the Low label fails.
+    constexpr DWORD k_dac_no_owner = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_EA | FILE_WRITE_EA | FILE_EXECUTE |
+                                     FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | READ_CONTROL | SYNCHRONIZE | WRITE_DAC;
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = k_dac_no_owner;
     ea.grfAccessMode        = SET_ACCESS;
     ea.grfInheritance       = NO_INHERITANCE;
     ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
@@ -1664,7 +1744,7 @@ TEST_CASE("AppContainer grants a user-owned RO directory", "[PluginSandbox][wind
     CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
 }
 
-TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs only", "[PluginSandbox][windows][acl]")
+TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs and fs_readwrite roots", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();
     if (!probe.appcontainer)
@@ -1693,19 +1773,26 @@ TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs only", "[Plugin
 
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    const std::string original_dacl = path_dacl_sddl(user_rw.string());
+    REQUIRE_FALSE(original_dacl.empty());
 
     plugin_ipc::SandboxSpec spec;
     spec.plugin_key        = unique_test_plugin_key("Low_Label");
     close_guard.plugin_key = spec.plugin_key;
     spec.data_dir          = data.dir.string();
     spec.write_root        = write_root.string();
-    spec.extra_paths.push_back({user_rw.string(), true, false});
+    spec.extra_paths.push_back({user_rw.string(), true, true});
     std::string error;
     const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
     INFO("prepare error: " << error);
     REQUIRE(ok);
     CHECK(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
-    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK(path_dacl_has_sid(user_rw.string(), package.sid));
 
     const fs::path user_file = user_rw / "plugin_out.txt";
     {
@@ -1720,6 +1807,227 @@ TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs only", "[Plugin
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_file.string()));
+    CHECK_FALSE(path_dacl_has_sid(user_rw.string(), package.sid));
+    CHECK(path_dacl_sddl(user_rw.string()) == original_dacl);
+}
+
+TEST_CASE("AppContainer helper can write into an fs_readwrite root", "[PluginSandbox][windows][acl][Python]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir             data("plugin-sandbox-fs-readwrite");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-hosted-rw-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+
+    const fs::path    out_file = user_rw / "hosted.txt";
+    const std::string original_dacl = path_dacl_sddl(user_rw.string());
+    REQUIRE_FALSE(original_dacl.empty());
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    std::string source = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "FsRw Write"
+# type = "script"
+# ///
+import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        open(r'''__OUT__''', "w", encoding="utf-8").write("hosted-ok")
+        return orca.ExecutionResult.success("wrote")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.register_capability(Echo)
+)PY";
+    source = replace_all(source, "__OUT__", out_file.string());
+    write_plugin(data, "Sandbox_FsRw", source);
+    PluginInstallState state;
+    state.installed_from             = "local";
+    state.plugin_name                = "FsRw Write";
+    state.enabled                    = true;
+    state.permissions.fs_readwrite   = {user_rw.string()};
+    REQUIRE(write_install_state(data.plugins_dir() / "Sandbox_FsRw", state));
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    std::string error;
+    REQUIRE(load_and_wait(manager, "Sandbox_FsRw", error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK(path_dacl_has_sid(user_rw.string(), package.sid));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_FsRw", "Echo");
+    INFO("hosted write: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "wrote");
+    {
+        boost::nowide::ifstream in(out_file.string(), std::ios::binary);
+        REQUIRE(in);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == "hosted-ok");
+    }
+
+    plugin_ipc::PluginHostClient::instance().shutdown();
+    CHECK_FALSE(path_dacl_has_sid(user_rw.string(), package.sid));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    CHECK(path_dacl_sddl(user_rw.string()) == original_dacl);
+    {
+        boost::nowide::ifstream in(out_file.string(), std::ios::binary);
+        REQUIRE(in);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == "hosted-ok");
+    }
+}
+
+TEST_CASE("AppContainer crash sweep restores an fs_readwrite root", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-fsrw-crash");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-fsrw-crash-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+    CloseSandbox close_guard;
+
+    const std::string original_dacl = path_dacl_sddl(user_rw.string());
+    REQUIRE_FALSE(original_dacl.empty());
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("FsRw_Crash");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.extra_paths.push_back({user_rw.string(), true, true});
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    LocalSid           package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    REQUIRE(path_dacl_has_sid(user_rw.string(), package.sid));
+    REQUIRE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    REQUIRE(path_dacl_has_sid(user_rw.string(), package.sid));
+    REQUIRE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(path_dacl_has_sid(user_rw.string(), package.sid));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    CHECK(path_dacl_sddl(user_rw.string()) == original_dacl);
+}
+
+TEST_CASE("AppContainer fail-closes fs_readwrite when WRITE_OWNER is missing", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-fsrw-nowriteowner");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-fsrw-nowo-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+    CloseSandbox close_guard;
+
+    REQUIRE(restrict_dacl_dac_without_write_owner(user_rw.string()));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("FsRw_NoWO");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.extra_paths.push_back({user_rw.string(), true, true});
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE_FALSE(ok);
+    CHECK(error.find("WRITE_OWNER") != std::string::npos);
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+}
+
+TEST_CASE("AppContainer leaves a pre-existing Low label on fs_readwrite after close", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-fsrw-prelow");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-fsrw-prelow-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+    CloseSandbox close_guard;
+
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(user_rw.string()));
+    REQUIRE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("FsRw_PreLow");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.extra_paths.push_back({user_rw.string(), true, true});
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+    plugin_ipc::close_parent_sandbox();
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
 }
 
 TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[PluginSandbox][windows][acl]")

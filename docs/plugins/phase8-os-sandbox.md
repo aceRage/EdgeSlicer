@@ -207,25 +207,31 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `EdgeSlicer.ph.*` / `EdgeSlicer.t.*` profile name (not a bare package SID).
   Each sweep revokes at most 64 leftover sessions / 512 grants and logs if
   it truncated. The next `prepare` continues the remainder. `close_win_appcontainer` revokes, restores the
-  original SACL mandatory label on Edge-created work dirs, walks write-granted
+  original SACL mandatory label on Edge-created work dirs **and** on user
+  `fs_readwrite` roots that this process labelled, walks write-granted
   trees (bounded) to strip Low labels from files the Low-IL helper created
   (`edge-plugin-host.log`, `post_process.gcode`, plugin output in user
-  `fs_readwrite`), and clears the journal. Changing a mandatory label needs
-  `WRITE_OWNER`; when that is missing (Modify-only folders such as a `C:\Dev`
-  tree) the strip **logs** the `SetNamedSecurityInfo` error and copy-replaces
-  only files created at/after the session grant time that are Low-labelled,
-  have a single hard link, and have no alternate data streams (MOTW /
-  Zone.Identifier). Pre-grant, hard-linked, or ADS files are left labelled.
-  Copy-replace creates a Medium-IL temp with `CREATE_NEW` in the same
-  directory, copies bytes (preserving timestamps and attributes), then
+  `fs_readwrite`), and clears the journal. Hosted writes into `fs_readwrite`
+  need package-SID modify plus a Low integrity label (AppContainer is Low IL
+  and cannot write up). The parent adds that label only when the root is not
+  already Low, journals the ACE and the prior label SDDL, and on close/sweep
+  revokes the ACE and restores **only** a label it added — a folder that was
+  already Low stays Low. Copy-replace is never used to apply or restore a
+  user folder's label. If `WRITE_OWNER` is missing, spawn fail-closes for
+  that root with a clear error rather than leaving it read-only. Changing a
+  mandatory label on helper-created files still needs `WRITE_OWNER`; when
+  that is missing the strip **logs** the `SetNamedSecurityInfo` error and
+  copy-replaces only files created at/after the session grant time that are
+  Low-labelled, have a single hard link, and have no alternate data streams
+  (MOTW / Zone.Identifier). Pre-grant, hard-linked, or ADS files are left
+  labelled. Copy-replace creates a Medium-IL temp with `CREATE_NEW` in the
+  same directory, copies bytes (preserving timestamps and attributes), then
   `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`. It never deletes the
   original first; if the move fails the original is kept and only the temp
   is removed. `ReplaceFile` is not used because it copies the Low label.
   A successful copy-replace is logged at warning. Hosted G-code that Edge
   writes out of `plugin_data` is stripped of a Low label after the write.
-  Low-IL labels are
-  applied only to Edge-owned write dirs (`plugin_data`, host-log, `write_root`),
-  not to user-chosen `fs_readwrite` folders. `apply_dir_acl`
+  `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating
   user. Subfolder grants do not make `data_dir` itself `GetFileAttributes`-able, so the
   parent also sets a non-inherited `FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE`

@@ -1209,14 +1209,14 @@ bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source,
     // recorded python_home / helper / resources tree that may now be an install dir.
     const bool allow_copy_replace = source == GrantActionSource::Live || path_in_known_root(grant.path);
     if (grant.low_label) {
-        // LABEL_SECURITY_INFORMATION on the recorded grant path itself is allowed even
-        // when that path is outside this process's current roots (moved python_home).
-        if (!restore_label_sddl(grant.path, grant.original_label, allow_copy_replace))
+        // Restore only a label this process added (original_label captured at grant).
+        // Never copy-replace the grant root itself to strip a user folder's label.
+        if (!restore_label_sddl(grant.path, grant.original_label, false))
             ok = false;
     }
-    // User fs_readwrite is write && !low_label. Also walk Edge write dirs so
-    // helper-created files (edge-plugin-host.log, post_process.gcode) lose Low.
-    // Journal-sourced copy-replace stays inside known user-rw roots / write grants.
+    // Walk write-granted trees so helper-created files (edge-plugin-host.log,
+    // post_process.gcode, plugin output in fs_readwrite) lose Low. Journal-sourced
+    // copy-replace stays inside known user-rw roots / write grants and grant-time.
     const std::uint64_t granted_at = session ? session->granted_at : g_win.granted_at;
     if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path, granted_at))
         ok = false;
@@ -1579,7 +1579,9 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         grant.permissions = perms;
         grant.inheritance = k_acl_inherit;
         grant.write       = write;
-        grant.low_label   = apply_low;
+        // Only restore a Low label this process added. A folder that was already Low stays Low.
+        const bool already_low = apply_low && path_has_low_integrity_label(path);
+        grant.low_label        = apply_low && !already_low;
         if (apply_low)
             grant.original_label = capture_label_sddl(path);
         g_win.grants.push_back(grant);
@@ -1592,10 +1594,14 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             error = "AppContainer ACL grant failed for " + path;
             return false;
         }
-        // Low-IL label only on Edge-created work dirs. User fs_readwrite stays at its original
-        // label so a Low-IL process outside the helper cannot write it after we grant.
-        if (apply_low && !label_low_integrity(path))
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer low-IL label skipped for " << path;
+        // Low IL is required for AppContainer writes (no-write-up). Fail closed when
+        // WRITE_OWNER is missing rather than leaving the root read-only. Do not copy-replace
+        // the user folder to apply a label.
+        if (grant.low_label && !label_low_integrity(path)) {
+            error = "AppContainer Low-IL label failed for " + path +
+                    " (WRITE_OWNER is required to make this folder writable to the helper)";
+            return false;
+        }
         return true;
     };
     if (!grant_or_fail(spec.python_home, false, false)) {
