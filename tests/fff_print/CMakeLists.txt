@@ -37,6 +37,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tower_labels_and_order.cpp
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
+	test_preload_validate.cpp
 	test_printgcode.cpp
 	test_h2c_timelapse_placement.cpp
 	test_h2c_tower_wait_pos.cpp
