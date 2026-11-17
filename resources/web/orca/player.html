@@ -16,6 +16,36 @@ html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000;
      ?src=<stream name>&mode=<mse|webrtc|webrtc,mse|mp4|mjpeg>[&lt=<hub secret; the PC's own Stream tab only>]
      The WebSocket goes to api/ws on the hub, which attaches go2rtc's credentials; WebRTC signalling
      (offer / answer / candidate) rides that same WebSocket, so nothing else has to be opened. -->
+<script>
+    // What go2rtc said when it could not start the stream, as a short code (see the "No video" report
+    // in the module below). Every WebSocket this page opens is watched from its first byte, so an
+    // error that arrives before the player has looked at the socket is not missed. Only a code is
+    // kept - go2rtc's own text can carry the camera's address or password.
+    (() => {
+        const classify = (t) => {
+            t = String(t || '');
+            if (/\b40[13]\b|unauthori[sz]ed|forbidden|wrong user|auth(entication)? fail|access denied/i.test(t)) return 'auth';
+            if (/connection refused|actively refused/i.test(t)) return 'refused';
+            if (/no route to host|network is unreachable|host is unreachable|no such host|unreachable/i.test(t)) return 'unreachable';
+            if (/i\/o timeout|deadline exceeded|timed out|timeout/i.test(t)) return 'timeout';
+            if (/codecs? not matched|unsupported codec|no supported codec/i.test(t)) return 'codec';
+            if (/ffmpeg/i.test(t)) return 'ffmpeg';
+            return '';
+        };
+        window.__snorcaReason = '';
+        const Native = window.WebSocket;
+        window.WebSocket = class extends Native {
+            constructor(url, protocols) {
+                super(url, protocols);
+                this.addEventListener('message', (ev) => {
+                    if (typeof ev.data !== 'string') return;
+                    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+                    if (m && m.type === 'error') { const r = classify(m.value); if (r) window.__snorcaReason = r; }
+                });
+            }
+        };
+    })();
+</script>
 <script type="module" src="./video-stream.js"></script>
 <script type="module">
     const params = new URLSearchParams(location.search);
@@ -141,6 +171,32 @@ html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000;
             return true;
         };
         if (!hook()) { let n = 0; const h = setInterval(() => { if (hook() || ++n > 40) clearInterval(h); }, 250); }
+    }
+    // "No video" report for the embedding page (stream_center.html shows the hint). Once the player
+    // has run for NO_PICTURE_MS without a picture it posts { snorcaNoPicture, reason }; the moment a
+    // picture is up it posts { snorcaPicture } (which also clears a hint shown earlier). The clock
+    // counts only while the player is running (a hidden page pauses it and the clock restarts on
+    // resume), so a normal start, a scrolled-away tile or a locked screen never reports. A picture
+    // is a decoded frame (readyState >= 2 with a size) or, in the mjpeg mode, a poster.
+    // `reason` is only ever a code for what go2rtc said in a {"type":"error"} message over the
+    // WebSocket, and only when its words are recognisable - never go2rtc's own text, which can carry
+    // the camera's address or password. Unknown text leaves reason ''. Posted with targetOrigin '*'
+    // because the PC's Stream tab is not on the hub's origin; the page matches the frame itself.
+    {
+        const NO_PICTURE_MS = parseInt(params.get('nopicms') || '10000', 10);
+        let since = Date.now(), state = '';
+        const tell = (msg) => { try { parent.postMessage(Object.assign(msg, { src: params.get('src') || '' }), '*'); } catch (e) {} };
+        const hasPicture = () => {
+            const iv = video.video || video.querySelector('video');
+            if (!iv) return false;
+            return (iv.readyState >= 2 && iv.videoWidth > 0) || !!iv.poster;
+        };
+        setInterval(() => {
+            if (paused) { since = Date.now(); state = ''; return; }
+            if (hasPicture()) { if (state !== 'picture') { state = 'picture'; tell({ snorcaPicture: true }); } return; }
+            if (state === 'picture') { since = Date.now(); state = ''; } // it dropped: a fresh clock, the player reconnects
+            if (state !== 'none' && Date.now() - since >= NO_PICTURE_MS) { state = 'none'; tell({ snorcaNoPicture: true, reason: window.__snorcaReason || '' }); }
+        }, 250);
     }
     const armGiveUp = () => { if (both && giveUp > 0) setTimeout(() => {
         if (video.pcState === WebSocket.OPEN || !video.pc) return; // WebRTC won, or was never started
