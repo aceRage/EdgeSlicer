@@ -12,6 +12,7 @@ bool apply_mac_sandbox(const SandboxSpec& spec, SandboxReport& report, std::stri
 
 bool  prepare_win_appcontainer(const SandboxSpec& spec, std::string& error);
 void  close_win_appcontainer();
+void  sweep_win_acl_journal();
 void* win_security_capabilities();
 void* win_pipe_security_attributes();
 

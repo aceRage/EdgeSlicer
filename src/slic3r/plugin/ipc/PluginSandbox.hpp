@@ -33,16 +33,19 @@ struct SandboxPath
 {
     std::string path;
     bool        write = false;
+    // Windows: apply a Low-IL mandatory label only on Edge-created work dirs (plugin_data,
+    // host-log, write_root). User-chosen fs_readwrite folders stay at their original label.
+    bool low_label = false;
 };
 
 // What the child should lock down to. Built on the Edge side from p4 grants plus the
 // bundled Python tree, the plugin dir, and the post-process G-code folder.
 struct SandboxSpec
 {
-    std::string              plugin_key;
-    std::string              python_home;
-    std::string              plugin_root;
-    std::string              write_root; // extra writable path for tests; post-process G-code is inlined over IPC
+    std::string plugin_key;
+    std::string python_home;
+    std::string plugin_root;
+    std::string write_root; // extra writable path for tests; post-process G-code is inlined over IPC
     // Parent AppContainer grants a non-inherited traverse ACE on this folder (not list/read).
     std::string              data_dir;
     std::vector<SandboxPath> extra_paths;
@@ -121,6 +124,9 @@ bool apply_os_sandbox(const SandboxSpec& spec, SandboxReport& report, std::strin
 bool  prepare_parent_sandbox(const SandboxSpec& spec, std::string& error);
 void* parent_sandbox_security_capabilities(); // Windows STARTUPINFOEX blob; nullptr elsewhere
 void  close_parent_sandbox();
+// Windows: revoke package-SID ACEs and restore Low-IL labels listed in the grant journal
+// left by a crash/kill, then delete the journal. No-op on POSIX and when no journal exists.
+void sweep_stale_parent_sandbox_grants();
 
 #ifdef _WIN32
 // Named-pipe SECURITY_ATTRIBUTES that lets the AppContainer SID connect. nullptr when unused.
@@ -132,6 +138,14 @@ std::wstring win_appcontainer_profile_name(const std::string& plugin_key);
 // Administrators as deny-only, so the user/groups check fails). SACL is Low IL + no-write-up.
 // Caller LocalFree's *out_sd. container_sid / out_sd are PSID / PSECURITY_DESCRIPTOR.
 bool win_build_pipe_security_descriptor(void* container_sid, void** out_sd, std::string& error);
+// Paths that received a package-SID ACE during the current prepare (skipped RO grants omitted).
+std::vector<std::string> win_granted_paths_for_testing();
+std::wstring             win_current_package_sid_string_for_testing();
+// Drop in-memory grant state without revoking or deleting the journal (crash simulation).
+void win_abandon_grants_for_testing();
+bool win_path_has_low_integrity_label(const std::string& path);
+// Packages\<family>\AC when the current AppContainer SID is known; empty otherwise.
+std::wstring win_appcontainer_localappdata_path();
 #endif
 
 // Test-only: EDGE_PLUGIN_SANDBOX=0 / FORCE_UNAVAILABLE, same gate as EDGE_PLUGIN_HOST.

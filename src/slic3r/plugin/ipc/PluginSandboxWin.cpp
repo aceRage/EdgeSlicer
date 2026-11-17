@@ -21,6 +21,7 @@ bool probe_win_sandbox(SandboxProbe& probe)
 
 bool  prepare_win_appcontainer(const SandboxSpec&, std::string&) { return true; }
 void  close_win_appcontainer() {}
+void  sweep_win_acl_journal() {}
 void* win_security_capabilities() { return nullptr; }
 void* win_pipe_security_attributes() { return nullptr; }
 
@@ -36,6 +37,7 @@ void* win_pipe_security_attributes() { return nullptr; }
 #endif
 #include <windows.h>
 #include <aclapi.h>
+#include <objbase.h>
 #include <sddl.h>
 #include <userenv.h>
 #ifndef PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
@@ -47,11 +49,14 @@ void* win_pipe_security_attributes() { return nullptr; }
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
+#include <nlohmann/json.hpp>
 
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,11 +68,13 @@ using CreateAppContainerProfile_fn                 = HRESULT(WINAPI*)(PCWSTR, PC
 using DeriveAppContainerSidFromAppContainerName_fn = HRESULT(WINAPI*)(PCWSTR, PSID*);
 using DeriveCapabilitySidsFromName_fn              = BOOL(WINAPI*)(LPCWSTR, PSID**, DWORD*, PSID**, DWORD*);
 using DeleteAppContainerProfile_fn                 = HRESULT(WINAPI*)(PCWSTR);
+using GetAppContainerFolderPath_fn                 = HRESULT(WINAPI*)(PCWSTR, PWSTR*);
 
 CreateAppContainerProfile_fn                 p_CreateProfile = nullptr;
 DeriveAppContainerSidFromAppContainerName_fn p_DeriveSid     = nullptr;
 DeriveCapabilitySidsFromName_fn              p_DeriveCaps    = nullptr;
 DeleteAppContainerProfile_fn                 p_DeleteProfile = nullptr;
+GetAppContainerFolderPath_fn                 p_GetAcFolder   = nullptr;
 bool                                         g_resolved      = false;
 bool                                         g_apis_ok       = false;
 
@@ -83,6 +90,7 @@ void resolve_apis()
         p_DeriveSid     = reinterpret_cast<DeriveAppContainerSidFromAppContainerName_fn>(
             ::GetProcAddress(userenv, "DeriveAppContainerSidFromAppContainerName"));
         p_DeleteProfile = reinterpret_cast<DeleteAppContainerProfile_fn>(::GetProcAddress(userenv, "DeleteAppContainerProfile"));
+        p_GetAcFolder   = reinterpret_cast<GetAppContainerFolderPath_fn>(::GetProcAddress(userenv, "GetAppContainerFolderPath"));
     }
     if (kernel) {
         p_DeriveCaps = reinterpret_cast<DeriveCapabilitySidsFromName_fn>(::GetProcAddress(kernel, "DeriveCapabilitySidsFromName"));
@@ -125,9 +133,9 @@ bool label_low_integrity(const std::string& path)
 // Subfolder grants: inheritable GENERIC_READ|EXECUTE (plus write/delete when write=true).
 // data_dir itself: non-inherited FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE so
 // GetFileAttributes/status() on the folder succeeds without FILE_LIST_DIRECTORY.
-constexpr DWORD k_acl_ro    = GENERIC_READ | GENERIC_EXECUTE;
-constexpr DWORD k_acl_rw    = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE;
-constexpr DWORD k_acl_inherit = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+constexpr DWORD k_acl_ro            = GENERIC_READ | GENERIC_EXECUTE;
+constexpr DWORD k_acl_rw            = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE;
+constexpr DWORD k_acl_inherit       = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
 constexpr DWORD k_data_dir_traverse = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
 
 bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD inheritance, ACCESS_MODE mode)
@@ -171,10 +179,12 @@ bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD i
 
 struct DirGrant
 {
-    std::string path;
-    DWORD       permissions = 0;
-    DWORD       inheritance = 0;
-    bool        write       = false;
+    std::string  path;
+    DWORD        permissions = 0;
+    DWORD        inheritance = 0;
+    bool         write       = false;
+    bool         low_label   = false;
+    std::wstring original_label; // LABEL_SECURITY_INFORMATION SDDL; empty = no ML ACE
 };
 
 struct WinState
@@ -193,18 +203,125 @@ struct WinState
 
 WinState g_win;
 
+boost::filesystem::path acl_journal_path()
+{
+    const std::string dir = Slic3r::data_dir();
+    if (dir.empty())
+        return {};
+    return boost::filesystem::path(dir) / "plugin_host" / "acl_journal.json";
+}
+
+std::wstring sid_to_string(PSID sid)
+{
+    if (sid == nullptr || !::IsValidSid(sid))
+        return {};
+    LPWSTR str = nullptr;
+    if (!::ConvertSidToStringSidW(sid, &str) || str == nullptr)
+        return {};
+    std::wstring out = str;
+    ::LocalFree(str);
+    return out;
+}
+
+std::wstring capture_label_sddl(const std::string& path)
+{
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 sacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr,
+                                &sacl, &sd) != ERROR_SUCCESS ||
+        sd == nullptr)
+        return {};
+    LPWSTR sddl = nullptr;
+    if (!::ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, LABEL_SECURITY_INFORMATION, &sddl, nullptr) ||
+        sddl == nullptr) {
+        ::LocalFree(sd);
+        return {};
+    }
+    std::wstring out = sddl;
+    ::LocalFree(sddl);
+    ::LocalFree(sd);
+    return out;
+}
+
+bool restore_label_sddl(const std::string& path, const std::wstring& sddl)
+{
+    const std::wstring wide = boost::nowide::widen(path);
+    if (sddl.empty()) {
+        // No original ML ACE: restore the default (no label / Medium) by writing an empty SACL.
+        BYTE  buf[sizeof(ACL) + 16]{};
+        auto* acl = reinterpret_cast<PACL>(buf);
+        if (!::InitializeAcl(acl, sizeof(buf), ACL_REVISION))
+            return false;
+        return ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
+                                       nullptr, acl) == ERROR_SUCCESS;
+    }
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr)
+        return false;
+    BOOL  present = FALSE, defaulted = FALSE;
+    PACL  sacl = nullptr;
+    DWORD rc   = ERROR_INVALID_PARAMETER;
+    if (::GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted))
+        rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
+                                     nullptr, present ? sacl : nullptr);
+    ::LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
+void delete_acl_journal()
+{
+    const auto path = acl_journal_path();
+    if (path.empty())
+        return;
+    boost::system::error_code ec;
+    boost::filesystem::remove(path, ec);
+}
+
+bool persist_acl_journal(PSID sid)
+{
+    const auto path = acl_journal_path();
+    if (path.empty())
+        return true;
+    boost::system::error_code ec;
+    boost::filesystem::create_directories(path.parent_path(), ec);
+    if (ec)
+        return false;
+    nlohmann::json grants = nlohmann::json::array();
+    for (const DirGrant& g : g_win.grants) {
+        grants.push_back({
+            {"path", g.path},
+            {"permissions", g.permissions},
+            {"inheritance", g.inheritance},
+            {"write", g.write},
+            {"low_label", g.low_label},
+            {"original_label", boost::nowide::narrow(g.original_label)},
+        });
+    }
+    nlohmann::json body = {{"package_sid", boost::nowide::narrow(sid_to_string(sid))}, {"grants", std::move(grants)}};
+    std::string    err;
+    return Slic3r::write_file_atomically(path.string(), body.dump(1, '\t') + "\n", &err);
+}
+
+void revoke_one_grant(PSID sid, const DirGrant& grant)
+{
+    apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS);
+    if (grant.low_label)
+        restore_label_sddl(grant.path, grant.original_label);
+}
+
 void revoke_grants()
 {
     if (g_win.sid) {
         for (const auto& grant : g_win.grants)
-            apply_dir_acl(g_win.sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS);
+            revoke_one_grant(g_win.sid, grant);
     }
     g_win.grants.clear();
+    delete_acl_journal();
 }
 
-void clear_win_state()
+void release_win_handles()
 {
-    revoke_grants();
     if (g_win.attr_list) {
         ::DeleteProcThreadAttributeList(g_win.attr_list);
         ::HeapFree(::GetProcessHeap(), 0, g_win.attr_list);
@@ -229,6 +346,108 @@ void clear_win_state()
     g_win.caps    = {};
     g_win.pipe_sa = {};
     g_win.ready   = false;
+}
+
+void clear_win_state()
+{
+    revoke_grants();
+    release_win_handles();
+}
+
+// AppContainer access is two checks: (1) user/groups and (2) the package SID plus
+// ALL APPLICATION PACKAGES (S-1-15-2-1), which every AppContainer token includes as a
+// group. A Users RX ACE is not enough — the package half would still fail. AccessCheck
+// against a user token would therefore skip a needed grant. We walk the object's DACL
+// (including inherited ACEs; skip INHERIT_ONLY) for ALLOW of FILE_GENERIC_READ|
+// FILE_GENERIC_EXECUTE after MapGenericMask on this package SID or S-1-15-2-1. That is
+// the package half of AccessCheck without synthesizing a token (SeCreateTokenPrivilege).
+bool package_already_has_rx(const std::string& path, PSID package_sid)
+{
+    PSID any_sid = nullptr;
+    if (!::ConvertStringSidToSidW(L"S-1-15-2-1", &any_sid) || any_sid == nullptr)
+        any_sid = nullptr;
+
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    const DWORD rc = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                             &dacl, nullptr, &sd);
+    bool        allowed = false;
+    if (rc == ERROR_SUCCESS && dacl != nullptr) {
+        ACL_SIZE_INFORMATION info{};
+        if (::GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation)) {
+            GENERIC_MAPPING   mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+            const ACCESS_MASK need = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+            for (DWORD i = 0; i < info.AceCount; ++i) {
+                LPVOID ace = nullptr;
+                if (!::GetAce(dacl, i, &ace) || ace == nullptr)
+                    continue;
+                auto* header = static_cast<ACE_HEADER*>(ace);
+                if ((header->AceFlags & INHERIT_ONLY_ACE) != 0)
+                    continue;
+                if (header->AceType != ACCESS_ALLOWED_ACE_TYPE && header->AceType != ACCESS_DENIED_ACE_TYPE)
+                    continue;
+                auto*      allowed_ace = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+                PSID       ace_sid     = reinterpret_cast<PSID>(&allowed_ace->SidStart);
+                const bool ours        = (package_sid != nullptr && ::EqualSid(ace_sid, package_sid)) ||
+                                  (any_sid != nullptr && ::EqualSid(ace_sid, any_sid));
+                if (!ours)
+                    continue;
+                ACCESS_MASK mask = allowed_ace->Mask;
+                ::MapGenericMask(&mask, &mapping);
+                if (header->AceType == ACCESS_DENIED_ACE_TYPE && (mask & need) != 0) {
+                    allowed = false;
+                    break;
+                }
+                if (header->AceType == ACCESS_ALLOWED_ACE_TYPE && (mask & need) == need)
+                    allowed = true;
+            }
+        }
+    }
+    if (sd)
+        ::LocalFree(sd);
+    if (any_sid)
+        ::LocalFree(any_sid);
+    return allowed;
+}
+
+bool path_has_low_integrity_label(const std::string& path)
+{
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 sacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr,
+                                &sacl, &sd) != ERROR_SUCCESS ||
+        sacl == nullptr) {
+        if (sd)
+            ::LocalFree(sd);
+        return false;
+    }
+    PSID low = nullptr;
+    if (!::ConvertStringSidToSidW(L"S-1-16-4096", &low) || low == nullptr) {
+        ::LocalFree(sd);
+        return false;
+    }
+    bool                 found = false;
+    ACL_SIZE_INFORMATION info{};
+    if (::GetAclInformation(sacl, &info, sizeof(info), AclSizeInformation)) {
+        for (DWORD i = 0; i < info.AceCount; ++i) {
+            LPVOID ace = nullptr;
+            if (!::GetAce(sacl, i, &ace) || ace == nullptr)
+                continue;
+            auto* header = static_cast<ACE_HEADER*>(ace);
+            if (header->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                continue;
+            auto* ml = static_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace);
+            if (::EqualSid(reinterpret_cast<PSID>(&ml->SidStart), low)) {
+                found = true;
+                break;
+            }
+        }
+    }
+    ::LocalFree(low);
+    ::LocalFree(sd);
+    return found;
 }
 
 bool token_user_sid_string(HANDLE token, std::wstring& out, std::string& error)
@@ -322,6 +541,7 @@ bool probe_win_sandbox(SandboxProbe& probe)
 bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
 {
     resolve_apis();
+    sweep_win_acl_journal();
     clear_win_state();
     if (!g_apis_ok) {
         error = "AppContainer APIs are not available; refusing to start the plugin host unsandboxed";
@@ -340,52 +560,64 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     }
     g_win.sid = sid;
 
-    auto grant_or_fail = [&](const std::string& path, bool write) {
+    auto grant_or_fail = [&](const std::string& path, bool write, bool apply_low) {
         if (path.empty())
             return true;
         const DWORD perms = write ? k_acl_rw : k_acl_ro;
+        // Every read-only grant (helper dir, resources_dir, python_home, packages, plugin_root,
+        // extras): skip if the package half of the AppContainer check already allows RX.
+        if (!write && package_already_has_rx(path, sid)) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped (package already has RX): " << path;
+            return true;
+        }
+        DirGrant grant;
+        grant.path        = path;
+        grant.permissions = perms;
+        grant.inheritance = k_acl_inherit;
+        grant.write       = write;
+        grant.low_label   = apply_low;
+        if (apply_low)
+            grant.original_label = capture_label_sddl(path);
+        g_win.grants.push_back(grant);
+        if (!persist_acl_journal(sid)) {
+            error = "AppContainer ACL journal failed for " + path;
+            g_win.grants.pop_back();
+            return false;
+        }
         if (!apply_dir_acl(sid, path, perms, k_acl_inherit, SET_ACCESS)) {
             error = "AppContainer ACL grant failed for " + path;
             return false;
         }
-        g_win.grants.push_back({path, perms, k_acl_inherit, write});
-        // Writable grants are created by this process at medium IL. Without a low label the
-        // AppContainer child cannot create files there (same no-write-up as the named pipe).
-        if (write && !label_low_integrity(path))
+        // Low-IL label only on Edge-created work dirs. User fs_readwrite stays at its original
+        // label so a Low-IL process outside the helper cannot write it after we grant.
+        if (apply_low && !label_low_integrity(path))
             BOOST_LOG_TRIVIAL(warning) << "AppContainer low-IL label skipped for " << path;
         return true;
     };
-    auto looks_like_program_files = [](const std::string& path) {
-        std::string lower = path;
-        for (char& c : lower)
-            c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-        return lower.find("\\program files") != std::string::npos || lower.find("/program files") != std::string::npos;
-    };
-    // python_home under Program Files: a standard user has no WRITE_DAC, and ALL APPLICATION
-    // PACKAGES can already read it. A user-owned build/dev tree must be granted or CPython
-    // cannot open python312.dll / Lib / encodings inside the AppContainer.
-    if (!spec.python_home.empty()) {
-        if (apply_dir_acl(sid, spec.python_home, k_acl_ro, k_acl_inherit, SET_ACCESS))
-            g_win.grants.push_back({spec.python_home, k_acl_ro, k_acl_inherit, false});
-        else if (looks_like_program_files(spec.python_home))
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
-        else {
-            error = "cannot change permissions on python_home " + spec.python_home;
-            clear_win_state();
-            return false;
-        }
+    if (!grant_or_fail(spec.python_home, false, false)) {
+        clear_win_state();
+        return false;
     }
     // Subfolder grants do not make data_dir itself GetFileAttributes-able. Without this
     // non-inherited (RA,X)+SYNCHRONIZE ACE, set_data_dir's status() is Access denied (5)
     // and the helper exits 10 before Py init. No FILE_LIST_DIRECTORY / FILE_READ_DATA.
     const std::string data_dir = spec.data_dir.empty() ? Slic3r::data_dir() : spec.data_dir;
     if (!data_dir.empty()) {
+        DirGrant grant;
+        grant.path        = data_dir;
+        grant.permissions = k_data_dir_traverse;
+        grant.inheritance = NO_INHERITANCE;
+        g_win.grants.push_back(grant);
+        if (!persist_acl_journal(sid)) {
+            error = "AppContainer ACL journal failed for " + data_dir;
+            clear_win_state();
+            return false;
+        }
         if (!apply_dir_acl(sid, data_dir, k_data_dir_traverse, NO_INHERITANCE, SET_ACCESS)) {
             error = "AppContainer ACL grant failed for " + data_dir;
             clear_win_state();
             return false;
         }
-        g_win.grants.push_back({data_dir, k_data_dir_traverse, NO_INHERITANCE, false});
     }
     if (!spec.write_root.empty()) {
         boost::system::error_code ec;
@@ -399,7 +631,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             }
         }
     }
-    if (!grant_or_fail(spec.plugin_root, false) || !grant_or_fail(spec.write_root, true)) {
+    if (!grant_or_fail(spec.plugin_root, false, false) || !grant_or_fail(spec.write_root, true, true)) {
         clear_win_state();
         return false;
     }
@@ -424,7 +656,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
                 continue;
             }
         }
-        if (!grant_or_fail(extra.path, extra.write)) {
+        if (!grant_or_fail(extra.path, extra.write, extra.write && extra.low_label)) {
             clear_win_state();
             return false;
         }
@@ -497,6 +729,93 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
 }
 
 void close_win_appcontainer() { clear_win_state(); }
+
+void sweep_win_acl_journal()
+{
+    if (g_win.ready)
+        return;
+    const auto path = acl_journal_path();
+    if (path.empty())
+        return;
+    boost::system::error_code ec;
+    if (!boost::filesystem::exists(path, ec) || ec)
+        return;
+    boost::nowide::ifstream in(path.string());
+    if (!in) {
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal unreadable: " << path.string();
+        return;
+    }
+    const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const auto json = nlohmann::json::parse(body, nullptr, false);
+    if (json.is_discarded() || !json.is_object()) {
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal invalid; deleting " << path.string();
+        delete_acl_journal();
+        return;
+    }
+    const std::string sid_utf8 = json.value("package_sid", std::string());
+    PSID              sid      = nullptr;
+    if (!sid_utf8.empty()) {
+        const std::wstring wide = boost::nowide::widen(sid_utf8);
+        if (!::ConvertStringSidToSidW(wide.c_str(), &sid))
+            sid = nullptr;
+    }
+    if (json.contains("grants") && json["grants"].is_array()) {
+        for (const auto& item : json["grants"]) {
+            if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
+                continue;
+            DirGrant grant;
+            grant.path           = item["path"].get<std::string>();
+            grant.permissions    = static_cast<DWORD>(item.value("permissions", 0u));
+            grant.inheritance    = static_cast<DWORD>(item.value("inheritance", 0u));
+            grant.write          = item.value("write", false);
+            grant.low_label      = item.value("low_label", false);
+            grant.original_label = boost::nowide::widen(item.value("original_label", std::string()));
+            if (sid)
+                revoke_one_grant(sid, grant);
+            else if (grant.low_label)
+                restore_label_sddl(grant.path, grant.original_label);
+        }
+    }
+    if (sid)
+        ::LocalFree(sid);
+    delete_acl_journal();
+}
+
+std::vector<std::string> win_granted_paths_for_testing()
+{
+    std::vector<std::string> out;
+    out.reserve(g_win.grants.size());
+    for (const DirGrant& g : g_win.grants)
+        out.push_back(g.path);
+    return out;
+}
+
+std::wstring win_current_package_sid_string_for_testing() { return sid_to_string(g_win.sid); }
+
+void win_abandon_grants_for_testing()
+{
+    g_win.grants.clear();
+    release_win_handles();
+}
+
+bool win_path_has_low_integrity_label(const std::string& path) { return path_has_low_integrity_label(path); }
+
+std::wstring win_appcontainer_localappdata_path()
+{
+    resolve_apis();
+    if (g_win.sid == nullptr || p_GetAcFolder == nullptr)
+        return {};
+    const std::wstring sid = sid_to_string(g_win.sid);
+    if (sid.empty())
+        return {};
+    PWSTR path = nullptr;
+    if (FAILED(p_GetAcFolder(sid.c_str(), &path)) || path == nullptr)
+        return {};
+    std::wstring out = path;
+    ::CoTaskMemFree(path);
+    return out;
+}
 
 std::wstring win_appcontainer_profile_name(const std::string& plugin_key) { return profile_name(plugin_key); }
 

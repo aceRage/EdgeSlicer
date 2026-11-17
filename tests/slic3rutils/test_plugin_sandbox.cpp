@@ -20,6 +20,7 @@
 #endif
 #include <slic3r/Utils/HomePluginsLogic.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -1195,12 +1196,12 @@ bool dacl_has_data_dir_traverse_ace(PACL dacl)
 
 bool path_has_data_dir_traverse_ace(const std::string& path)
 {
-    const std::wstring       wide = boost::nowide::widen(path);
-    PACL                     dacl = nullptr;
-    PSECURITY_DESCRIPTOR     sd   = nullptr;
-    const DWORD              rc   = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                                                            nullptr, nullptr, &dacl, nullptr, &sd);
-    const bool               found = rc == ERROR_SUCCESS && dacl_has_data_dir_traverse_ace(dacl);
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    const DWORD rc = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                             &dacl, nullptr, &sd);
+    const bool  found = rc == ERROR_SUCCESS && dacl_has_data_dir_traverse_ace(dacl);
     if (sd)
         ::LocalFree(sd);
     return found;
@@ -1327,7 +1328,8 @@ TEST_CASE("AppContainer helper env keeps LOCALAPPDATA and drops APPDATA", "[Plug
         return false;
     };
     // CreateProcessW + AppContainer SECURITY_CAPABILITIES requires LOCALAPPDATA (error 203
-    // without it). Windows redirects it to Packages\<moniker>\AC; APPDATA/USERPROFILE stay out.
+    // without it). Only the known-folder API is redirected inside the container; this
+    // test does not prepare a profile, so the env var still carries the real path.
     CHECK(has_var(L"LOCALAPPDATA"));
     CHECK_FALSE(has_var(L"APPDATA"));
     CHECK_FALSE(has_var(L"USERPROFILE"));
@@ -1372,6 +1374,246 @@ TEST_CASE("AppContainer data_dir ACE is traverse-only and revoked on close", "[P
 
     plugin_ipc::close_parent_sandbox();
     CHECK_FALSE(path_has_data_dir_traverse_ace(spec.data_dir));
+}
+
+bool grant_all_app_packages_rx(const std::string& path)
+{
+    LocalSid any(L"S-1-15-2-1");
+    if (any.sid == nullptr)
+        return false;
+    const std::wstring wide = boost::nowide::widen(path);
+    EXPLICIT_ACCESSW   ea{};
+    ea.grfAccessPermissions   = GENERIC_READ | GENERIC_EXECUTE;
+    ea.grfAccessMode          = SET_ACCESS;
+    ea.grfInheritance         = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.Trustee.TrusteeForm    = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType    = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName      = static_cast<LPWSTR>(any.sid);
+    PACL                 prev = nullptr;
+    PACL                 neu  = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &prev,
+                                nullptr, &sd) != ERROR_SUCCESS)
+        sd = nullptr;
+    if (::SetEntriesInAclW(1, &ea, prev, &neu) != ERROR_SUCCESS) {
+        if (sd)
+            ::LocalFree(sd);
+        return false;
+    }
+    const DWORD rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                             neu, nullptr);
+    ::LocalFree(neu);
+    if (sd)
+        ::LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
+bool path_dacl_has_sid(const std::string& path, PSID sid)
+{
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    const DWORD rc = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                             &dacl, nullptr, &sd);
+    const bool  found = rc == ERROR_SUCCESS && dacl_has_allowed_sid(dacl, sid);
+    if (sd)
+        ::LocalFree(sd);
+    return found;
+}
+
+bool granted_paths_contain(const std::string& path)
+{
+    const auto granted = plugin_ipc::win_granted_paths_for_testing();
+    return std::find(granted.begin(), granted.end(), path) != granted.end();
+}
+
+TEST_CASE("AppContainer skips a RO grant when ALL APPLICATION PACKAGES already has RX", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-skip-rx");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-skip-rx-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    REQUIRE(grant_all_app_packages_rx(dir.string()));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Skip_RX";
+    spec.data_dir   = data.plugins_dir().string();
+    spec.extra_paths.push_back({dir.string(), false, false});
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    CHECK_FALSE(granted_paths_contain(dir.string()));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
+    LocalSid any(L"S-1-15-2-1");
+    REQUIRE(any.sid != nullptr);
+    CHECK(path_dacl_has_sid(dir.string(), any.sid));
+}
+
+TEST_CASE("AppContainer grants a user-owned RO directory", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-user-ro");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-user-ro-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "User_RO";
+    spec.data_dir   = data.plugins_dir().string();
+    spec.extra_paths.push_back({dir.string(), false, false});
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    CHECK(granted_paths_contain(dir.string()));
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+
+    plugin_ipc::close_parent_sandbox();
+    CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
+}
+
+TEST_CASE("AppContainer restores Low-IL labels on Edge work dirs only", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-low-label");
+    boost::system::error_code ec;
+    const fs::path            write_root = fs::temp_directory_path() / fs::unique_path("orca-low-owned-%%%%-%%%%");
+    const fs::path            user_rw    = fs::temp_directory_path() / fs::unique_path("orca-low-user-%%%%-%%%%");
+    fs::create_directories(write_root, ec);
+    REQUIRE_FALSE(ec);
+    ec.clear();
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path a, b;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(a, ignore);
+            fs::remove_all(b, ignore);
+        }
+    } cleanup{write_root, user_rw};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Low_Label";
+    spec.data_dir   = data.plugins_dir().string();
+    spec.write_root = write_root.string();
+    spec.extra_paths.push_back({user_rw.string(), true, false});
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    plugin_ipc::close_parent_sandbox();
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(write_root.string()));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+}
+
+TEST_CASE("AppContainer grant journal is swept after a simulated crash", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-acl-journal");
+    boost::system::error_code ec;
+    const fs::path            dir = fs::temp_directory_path() / fs::unique_path("orca-journal-%%%%-%%%%");
+    fs::create_directories(dir, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{dir};
+    struct CloseSandbox
+    {
+        ~CloseSandbox() { plugin_ipc::close_parent_sandbox(); }
+    } close_guard;
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key = "Journal_Sweep";
+    spec.data_dir   = data.plugins_dir().string();
+    spec.write_root = dir.string();
+    std::string error;
+    const bool  ok = plugin_ipc::prepare_parent_sandbox(spec, error);
+    INFO("prepare error: " << error);
+    REQUIRE(ok);
+    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    REQUIRE_FALSE(sid_str.empty());
+    LocalSid package(sid_str.c_str());
+    REQUIRE(package.sid != nullptr);
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(dir.string()));
+
+    plugin_ipc::win_abandon_grants_for_testing();
+    CHECK(path_dacl_has_sid(dir.string(), package.sid));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(dir.string()));
+
+    plugin_ipc::sweep_stale_parent_sandbox_grants();
+    CHECK_FALSE(path_dacl_has_sid(dir.string(), package.sid));
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(dir.string()));
 }
 
 TEST_CASE("AppContainer spawn SKIP without a working profile", "[PluginSandbox][windows]")

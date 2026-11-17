@@ -67,18 +67,19 @@ std::string strip_tree_wildcard(std::string path)
     return path;
 }
 
-void add_unique_path(std::vector<SandboxPath>& paths, std::string path, bool write)
+void add_unique_path(std::vector<SandboxPath>& paths, std::string path, bool write, bool low_label = false)
 {
     path = strip_tree_wildcard(std::move(path));
     if (path.empty())
         return;
     for (SandboxPath& existing : paths) {
         if (existing.path == path) {
-            existing.write = existing.write || write;
+            existing.write     = existing.write || write;
+            existing.low_label = existing.low_label || low_label;
             return;
         }
     }
-    paths.push_back(SandboxPath{std::move(path), write});
+    paths.push_back(SandboxPath{std::move(path), write, low_label});
 }
 
 bool path_exists(const std::string& path)
@@ -121,13 +122,11 @@ nlohmann::json sandbox_spec_to_json(const SandboxSpec& spec)
 {
     nlohmann::json extra = nlohmann::json::array();
     for (const SandboxPath& p : spec.extra_paths)
-        extra.push_back({{"path", p.path}, {"write", p.write}});
+        extra.push_back({{"path", p.path}, {"write", p.write}, {"low_label", p.low_label}});
     return {
-        {"plugin_key", spec.plugin_key},     {"python_home", spec.python_home},
-        {"plugin_root", spec.plugin_root},   {"write_root", spec.write_root},
-        {"data_dir", spec.data_dir},         {"extra_paths", std::move(extra)},
-        {"allow_network", spec.allow_network},
-        {"allow_exec", spec.allow_exec},     {"dev_seatbelt_probe", spec.dev_seatbelt_probe},
+        {"plugin_key", spec.plugin_key},       {"python_home", spec.python_home}, {"plugin_root", spec.plugin_root},
+        {"write_root", spec.write_root},       {"data_dir", spec.data_dir},       {"extra_paths", std::move(extra)},
+        {"allow_network", spec.allow_network}, {"allow_exec", spec.allow_exec},   {"dev_seatbelt_probe", spec.dev_seatbelt_probe},
     };
 }
 
@@ -150,7 +149,7 @@ bool sandbox_spec_from_json(const nlohmann::json& json, SandboxSpec& spec, std::
         for (const auto& item : json["extra_paths"]) {
             if (!item.is_object() || !item.contains("path") || !item["path"].is_string())
                 continue;
-            add_unique_path(spec.extra_paths, item["path"].get<std::string>(), item.value("write", false));
+            add_unique_path(spec.extra_paths, item["path"].get<std::string>(), item.value("write", false), item.value("low_label", false));
         }
     }
     return true;
@@ -190,7 +189,8 @@ bool sandbox_specs_equal(const SandboxSpec& a, const SandboxSpec& b)
     if (a.extra_paths.size() != b.extra_paths.size())
         return false;
     for (size_t i = 0; i < a.extra_paths.size(); ++i) {
-        if (a.extra_paths[i].path != b.extra_paths[i].path || a.extra_paths[i].write != b.extra_paths[i].write)
+        if (a.extra_paths[i].path != b.extra_paths[i].path || a.extra_paths[i].write != b.extra_paths[i].write ||
+            a.extra_paths[i].low_label != b.extra_paths[i].low_label)
             return false;
     }
     return true;
@@ -294,7 +294,7 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     // Helper crash log. AppContainer must be able to create this file during CPython init.
     const std::string log_dir = host_child_log_dir(spec);
     if (ensure_grant_directory(log_dir))
-        add_unique_path(spec.extra_paths, log_dir, true);
+        add_unique_path(spec.extra_paths, log_dir, true, true);
 
     const boost::filesystem::path helper_dir = helper_path().parent_path();
     if (path_exists(helper_dir.string()))
@@ -321,7 +321,7 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
 
     if (!descriptor.plugin_key.empty()) {
         try {
-            add_unique_path(spec.extra_paths, PluginManager::instance().get_storage_dir(descriptor.plugin_key), true);
+            add_unique_path(spec.extra_paths, PluginManager::instance().get_storage_dir(descriptor.plugin_key), true, true);
         } catch (...) {}
     }
 
@@ -393,6 +393,13 @@ void close_parent_sandbox()
 {
 #ifdef _WIN32
     close_win_appcontainer();
+#endif
+}
+
+void sweep_stale_parent_sandbox_grants()
+{
+#ifdef _WIN32
+    sweep_win_acl_journal();
 #endif
 }
 
