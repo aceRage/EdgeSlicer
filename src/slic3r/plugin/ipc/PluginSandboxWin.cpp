@@ -350,7 +350,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         else if (looks_like_program_files(spec.python_home))
             BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
         else {
-            error = "AppContainer ACL grant failed for python_home " + spec.python_home;
+            error = "cannot change permissions on python_home " + spec.python_home;
             clear_win_state();
             return false;
         }

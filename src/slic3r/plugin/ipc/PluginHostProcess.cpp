@@ -194,7 +194,13 @@ bool win_env_entry_allowed(const wchar_t* entry)
                                         L"PROGRAMW6432=",
                                         L"PYTHONNOUSERSITE=",
                                         L"ALLUSERSPROFILE=",
-                                        L"PUBLIC="};
+                                        L"PUBLIC=",
+                                        // CreateProcessW with SECURITY_CAPABILITIES fails with
+                                        // ERROR_ENVVAR_NOT_FOUND (203) if LOCALAPPDATA is absent.
+                                        // Windows redirects it to Packages\<moniker>\AC for the
+                                        // AppContainer child, so this is not the real user folder.
+                                        // APPDATA / USERPROFILE / HOMEDRIVE / HOMEPATH stay dropped.
+                                        L"LOCALAPPDATA="};
     for (const wchar_t* prefix : prefixes) {
         if (starts(entry, prefix))
             return true;

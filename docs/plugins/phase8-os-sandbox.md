@@ -154,9 +154,11 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   exec env is an allow-list (no `DISPLAY` / `DBUS_*` / `XDG_RUNTIME_DIR` /
   `APP_SANDBOX_CONTAINER_ID` / `PYTHONPATH`). `LD_LIBRARY_PATH`, `APPDIR`, and `APPIMAGE`
   are passed through so an AppImage-started helper still finds bundled libs. Windows
-  `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`). Windows also
-  omits `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` / `HOMEDRIVE` / `HOMEPATH` so CPython
-  inside AppContainer cannot probe the real user profile. The helper opens
+  `CreateProcessW` uses the same allow-list (not `lpEnvironment=nullptr`). Windows omits
+  `APPDATA` / `USERPROFILE` / `HOMEDRIVE` / `HOMEPATH` so CPython cannot probe the real
+  user profile, but keeps `LOCALAPPDATA`: CreateProcess with AppContainer
+  `SECURITY_CAPABILITIES` fails with `ERROR_ENVVAR_NOT_FOUND` (203) without it, and
+  Windows redirects that variable to `Packages\<moniker>\AC` for the child. The helper opens
   `--host-log <write_root|data_dir/plugin_host>/edge-plugin-host.log` (stderr, faulthandler,
   `Py_FatalError`). Uncaught exceptions, `std::terminate`, abort, and the MSVC invalid-
   parameter handler exit 10–14 instead of a silent `0xc0000409`. The parent attaches
