@@ -42,6 +42,8 @@ void* win_pipe_security_attributes() { return nullptr; }
 #define PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
 #endif
 
+#include <libslic3r/Utils.hpp>
+
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
@@ -120,21 +122,30 @@ bool label_low_integrity(const std::string& path)
     return rc == ERROR_SUCCESS;
 }
 
-bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mode)
+// Subfolder grants: inheritable GENERIC_READ|EXECUTE (plus write/delete when write=true).
+// data_dir itself: non-inherited FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE so
+// GetFileAttributes/status() on the folder succeeds without FILE_LIST_DIRECTORY.
+constexpr DWORD k_acl_ro    = GENERIC_READ | GENERIC_EXECUTE;
+constexpr DWORD k_acl_rw    = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE;
+constexpr DWORD k_acl_inherit = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+constexpr DWORD k_data_dir_traverse = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+
+bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD inheritance, ACCESS_MODE mode)
 {
     if (path.empty() || sid == nullptr)
         return true;
     const std::wstring wide = boost::nowide::widen(path);
     EXPLICIT_ACCESSW   ea{};
-    ea.grfAccessPermissions = write ? (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE) : (GENERIC_READ | GENERIC_EXECUTE);
+    ea.grfAccessPermissions = permissions;
     ea.grfAccessMode        = mode;
     // One SetNamedSecurityInfoW. An inheritable ACE does propagate to existing
     // children (that is the grant). Do not SET then immediately REVOKE — that was
     // the redundant second walk. Grants live until close_win_appcontainer.
     // SetEntriesInAclW below appends this package-SID ACE onto the existing DACL,
     // which already allows the creating user; the user-plus-package rule is met
-    // without replacing the DACL.
-    ea.grfInheritance      = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    // without replacing the DACL. REVOKE_ACCESS uses the same Trustee / permissions /
+    // inheritance as SET so only that ACE is removed.
+    ea.grfInheritance      = inheritance;
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName   = static_cast<LPWSTR>(sid);
@@ -158,18 +169,26 @@ bool grant_dir_acl(PSID sid, const std::string& path, bool write, ACCESS_MODE mo
     return rc == ERROR_SUCCESS;
 }
 
+struct DirGrant
+{
+    std::string path;
+    DWORD       permissions = 0;
+    DWORD       inheritance = 0;
+    bool        write       = false;
+};
+
 struct WinState
 {
-    PSID                                      sid     = nullptr;
-    PSID                                      cap_sid = nullptr;
-    SID_AND_ATTRIBUTES                        cap_attr{};
-    SECURITY_CAPABILITIES                     caps{};
-    LPPROC_THREAD_ATTRIBUTE_LIST              attr_list = nullptr;
-    SECURITY_ATTRIBUTES                       pipe_sa{};
-    PSECURITY_DESCRIPTOR                      pipe_sd  = nullptr;
-    PACL                                      pipe_acl = nullptr;
-    std::vector<std::pair<std::string, bool>> grants;
-    bool                                      ready = false;
+    PSID                         sid     = nullptr;
+    PSID                         cap_sid = nullptr;
+    SID_AND_ATTRIBUTES           cap_attr{};
+    SECURITY_CAPABILITIES        caps{};
+    LPPROC_THREAD_ATTRIBUTE_LIST attr_list = nullptr;
+    SECURITY_ATTRIBUTES          pipe_sa{};
+    PSECURITY_DESCRIPTOR         pipe_sd  = nullptr;
+    PACL                         pipe_acl = nullptr;
+    std::vector<DirGrant>        grants;
+    bool                         ready = false;
 };
 
 WinState g_win;
@@ -178,7 +197,7 @@ void revoke_grants()
 {
     if (g_win.sid) {
         for (const auto& grant : g_win.grants)
-            grant_dir_acl(g_win.sid, grant.first, grant.second, REVOKE_ACCESS);
+            apply_dir_acl(g_win.sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS);
     }
     g_win.grants.clear();
 }
@@ -324,11 +343,12 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     auto grant_or_fail = [&](const std::string& path, bool write) {
         if (path.empty())
             return true;
-        if (!grant_dir_acl(sid, path, write, SET_ACCESS)) {
+        const DWORD perms = write ? k_acl_rw : k_acl_ro;
+        if (!apply_dir_acl(sid, path, perms, k_acl_inherit, SET_ACCESS)) {
             error = "AppContainer ACL grant failed for " + path;
             return false;
         }
-        g_win.grants.emplace_back(path, write);
+        g_win.grants.push_back({path, perms, k_acl_inherit, write});
         // Writable grants are created by this process at medium IL. Without a low label the
         // AppContainer child cannot create files there (same no-write-up as the named pipe).
         if (write && !label_low_integrity(path))
@@ -345,8 +365,8 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     // PACKAGES can already read it. A user-owned build/dev tree must be granted or CPython
     // cannot open python312.dll / Lib / encodings inside the AppContainer.
     if (!spec.python_home.empty()) {
-        if (grant_dir_acl(sid, spec.python_home, false, SET_ACCESS))
-            g_win.grants.emplace_back(spec.python_home, false);
+        if (apply_dir_acl(sid, spec.python_home, k_acl_ro, k_acl_inherit, SET_ACCESS))
+            g_win.grants.push_back({spec.python_home, k_acl_ro, k_acl_inherit, false});
         else if (looks_like_program_files(spec.python_home))
             BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL grant skipped for python_home (WRITE_DAC): " << spec.python_home;
         else {
@@ -354,6 +374,18 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
             clear_win_state();
             return false;
         }
+    }
+    // Subfolder grants do not make data_dir itself GetFileAttributes-able. Without this
+    // non-inherited (RA,X)+SYNCHRONIZE ACE, set_data_dir's status() is Access denied (5)
+    // and the helper exits 10 before Py init. No FILE_LIST_DIRECTORY / FILE_READ_DATA.
+    const std::string data_dir = spec.data_dir.empty() ? Slic3r::data_dir() : spec.data_dir;
+    if (!data_dir.empty()) {
+        if (!apply_dir_acl(sid, data_dir, k_data_dir_traverse, NO_INHERITANCE, SET_ACCESS)) {
+            error = "AppContainer ACL grant failed for " + data_dir;
+            clear_win_state();
+            return false;
+        }
+        g_win.grants.push_back({data_dir, k_data_dir_traverse, NO_INHERITANCE, false});
     }
     if (!spec.write_root.empty()) {
         boost::system::error_code ec;
@@ -448,7 +480,7 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     //   * ConnectNamedPipe / Channel OVERLAPPED events are unnamed and parent-only.
     //   * The Job object is unnamed; the child is assigned by handle, not by name.
     //   * No file mappings. Writable grant directories are labelled Low above.
-    // Filesystem grants append a package-SID ACE onto the existing DACL (grant_dir_acl),
+    // Filesystem grants append a package-SID ACE onto the existing DACL (apply_dir_acl),
     // which already allows the creating user.
     void* sd = nullptr;
     if (!win_build_pipe_security_descriptor(sid, &sd, error) || sd == nullptr) {

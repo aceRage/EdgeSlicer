@@ -141,9 +141,12 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
 - Windows: the Job object kills every assigned process; `ACTIVE_PROCESS=1` stops them spawning.
   AppContainer profile names are a fixed-length FNV hash of `plugin_key` (no truncation
   collisions). Directory ACLs are granted at the folder with inheritance (not a recursive
-  walk), checked fail-closed, and revoked on `close_win_appcontainer`. `grant_dir_acl`
+  walk), checked fail-closed, and revoked on `close_win_appcontainer`. `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating
-  user. The IPC named-pipe DACL is
+  user. Subfolder grants do not make `data_dir` itself `GetFileAttributes`-able, so the
+  parent also sets a non-inherited `FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE`
+  ACE on `data_dir` (no list/read). `set_data_dir` uses `error_code` overloads so a
+  denied `status()` cannot abort the helper. The IPC named-pipe DACL is
   `D:(A;;GA;;;<package SID>)(A;;GA;;;<TokenUser>)(A;;GA;;;SY)S:(ML;;NW;;;LW)` — not BA,
   because a non-elevated token has Administrators as deny-only and the AppContainer
   access check requires both the user/groups SID and the package SID (helper exit 1005

@@ -43,6 +43,8 @@ struct SandboxSpec
     std::string              python_home;
     std::string              plugin_root;
     std::string              write_root; // extra writable path for tests; post-process G-code is inlined over IPC
+    // Parent AppContainer grants a non-inherited traverse ACE on this folder (not list/read).
+    std::string              data_dir;
     std::vector<SandboxPath> extra_paths;
     bool                     allow_network = false;
     bool                     allow_exec    = false;
