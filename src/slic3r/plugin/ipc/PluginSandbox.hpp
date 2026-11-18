@@ -153,6 +153,10 @@ void  close_parent_sandbox();
 // and only rewrites files created at/after the session grant time that are
 // Low-labelled, singly linked,
 // and have no extra ADS (MoveFileEx replace; original kept if the move fails).
+// Write roots also get an inheritable user/SYSTEM ACE (journaled, restored on
+// close) so helper-created files are not left with an empty DACL after the
+// package ACE is revoked. ERROR_ACCESS_DENIED on a stream/link query is not
+// treated as extra ADS.
 // A session is rewritten
 // with only the remainder and kept if any grant was skipped or failed; the
 // journal is deleted only after every grant in every session is removed.

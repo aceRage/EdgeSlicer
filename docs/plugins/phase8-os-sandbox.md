@@ -239,8 +239,15 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`. It never deletes the
   original first; if the move fails the original is kept and only the temp
   is removed. `ReplaceFile` is not used because it copies the Low label.
-  A successful copy-replace is logged at warning. Hosted G-code that Edge
-  writes out of `plugin_data` is stripped of a Low label after the write.
+  A successful copy-replace is logged at warning. `FindFirstStreamW` /
+  link-count `ERROR_ACCESS_DENIED` is logged as access denied, not as extra
+  ADS: an empty DACL (only the inherited package-SID ACE, then revoked)
+  makes those queries fail even when there are no streams. Write-granted
+  directories also get an inheritable user/SYSTEM ACE, journaled and restored
+  on close, so helper-created files under `plugin_host` and user
+  `fs_readwrite` keep a user DACL after the package ACE is removed. Hosted
+  G-code that Edge writes out of `plugin_data` is stripped of a Low label
+  after the write.
   `apply_dir_acl`
   appends a package-SID ACE onto the existing DACL, which already allows the creating
   user. Subfolder grants do not make `data_dir` itself `GetFileAttributes`-able, so the

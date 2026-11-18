@@ -1670,6 +1670,55 @@ bool restrict_dacl_dac_without_write_owner(const std::string& path)
     return rc == ERROR_SUCCESS;
 }
 
+// WRITE_OWNER so Low-label fail-close does not fire; user ACE is not inheritable, so
+// helper-created children would otherwise inherit only the package SID.
+bool restrict_dacl_full_noninheritable(const std::string& path)
+{
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    std::vector<BYTE> buf(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    ::CloseHandle(token);
+    PSID user = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = FILE_ALL_ACCESS;
+    ea.grfAccessMode        = SET_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_USER;
+    ea.Trustee.ptstrName    = static_cast<LPWSTR>(user);
+    PACL neu                = nullptr;
+    if (::SetEntriesInAclW(1, &ea, nullptr, &neu) != ERROR_SUCCESS)
+        return false;
+    const std::wstring wide = boost::nowide::widen(path);
+    const DWORD        rc   = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT,
+                                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, neu,
+                                                      nullptr);
+    ::LocalFree(neu);
+    return rc == ERROR_SUCCESS;
+}
+
+bool path_current_user_can_rw(const std::string& path)
+{
+    const std::wstring wide = boost::nowide::widen(path);
+    HANDLE h = ::CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    ::CloseHandle(h);
+    return true;
+}
+
 bool journal_file_exists(const std::string& path)
 {
     if (path.empty())
@@ -1989,6 +2038,94 @@ class Pkg(orca.base):
     }
 }
 
+TEST_CASE("AppContainer helper-created fs_readwrite file keeps a user DACL after close", "[PluginSandbox][windows][acl][Python]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+    if (!plugin_ipc::helper_exists())
+        SKIP("edge-plugin-host is not next to the test binary");
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir             data("plugin-sandbox-fsrw-nowo-dacl");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-hosted-rw-nowo-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+
+    REQUIRE(restrict_dacl_full_noninheritable(user_rw.string()));
+    const std::string original_dacl = path_dacl_sddl(user_rw.string());
+    REQUIRE_FALSE(original_dacl.empty());
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(user_rw.string()));
+
+    const fs::path out_file = user_rw / "hosted.txt";
+    std::string    source   = R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "FsRw DACL"
+# type = "script"
+# ///
+import orca
+class Echo(orca.script.ScriptPluginCapabilityBase):
+    def get_name(self):
+        return "Echo"
+    def execute(self):
+        open(r'''__OUT__''', "w", encoding="utf-8").write("dacl-ok")
+        return orca.ExecutionResult.success("wrote")
+@orca.plugin
+class Pkg(orca.base):
+    def register_capabilities(self):
+        orca.request_permissions(fs_readwrite=[r'''__RW_TREE__'''])
+        orca.register_capability(Echo)
+)PY";
+    source = replace_all(source, "__OUT__", out_file.string());
+    source = replace_all(source, "__RW_TREE__", user_rw.string() + "/*");
+    write_plugin(data, "Sandbox_FsRwDacl", source);
+
+    PluginManager& manager = PluginManager::instance();
+    manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    PluginAuditManager::set_permission_message_prompt_for_testing([](const std::string&) { return true; });
+    std::string error;
+    const bool  loaded = load_and_wait(manager, "Sandbox_FsRwDacl", error);
+    PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
+    REQUIRE(loaded);
+    const ScriptCompletion completion = wait_for_script(manager, "Sandbox_FsRwDacl", "Echo");
+    INFO("fsrw dacl: " << completion.result.message << " err=" << completion.error);
+    CHECK(completion.error.empty());
+    CHECK(completion.result.message == "wrote");
+
+    plugin_ipc::PluginHostClient::instance().shutdown();
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(out_file.string()));
+    CHECK(path_current_user_can_rw(out_file.string()));
+    {
+        const std::string file_dacl = path_dacl_sddl(out_file.string());
+        INFO("hosted.txt DACL: " << file_dacl);
+        REQUIRE_FALSE(file_dacl.empty());
+        CHECK(file_dacl.find("(A;") != std::string::npos);
+    }
+    CHECK(path_dacl_sddl(user_rw.string()) == original_dacl);
+    {
+        boost::nowide::ifstream in(out_file.string(), std::ios::binary);
+        REQUIRE(in);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == "dacl-ok");
+    }
+}
+
 TEST_CASE("AppContainer crash sweep restores an fs_readwrite root", "[PluginSandbox][windows][acl]")
 {
     const auto probe = plugin_ipc::probe_os_sandbox();
@@ -2129,6 +2266,13 @@ class Pkg(orca.base):
         REQUIRE((fs::exists(host_log, ec) && !ec));
     }
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(host_log.string()));
+    CHECK(path_current_user_can_rw(host_log.string()));
+    {
+        const std::string log_dacl = path_dacl_sddl(host_log.string());
+        INFO("host log DACL: " << log_dacl);
+        REQUIRE_FALSE(log_dacl.empty());
+        CHECK(log_dacl.find("(A;") != std::string::npos);
+    }
     {
         boost::system::error_code ec;
         fs::remove_all(data.dir, ec);

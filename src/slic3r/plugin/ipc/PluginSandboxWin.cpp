@@ -209,10 +209,11 @@ bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD i
     // One SetNamedSecurityInfoW. An inheritable ACE does propagate to existing
     // children (that is the grant). Do not SET then immediately REVOKE — that was
     // the redundant second walk. Grants live until close_win_appcontainer.
-    // SetEntriesInAclW below appends this package-SID ACE onto the existing DACL,
-    // which already allows the creating user; the user-plus-package rule is met
-    // without replacing the DACL. REVOKE_ACCESS uses the same Trustee / permissions /
-    // inheritance as SET so only that ACE is removed.
+    // SetEntriesInAclW below appends this package-SID ACE onto the existing DACL.
+    // Write grants also stamp an inheritable user/SYSTEM ACE (see apply_owner_aces):
+    // a parent whose user ACE is not inheritable would otherwise leave helper-created
+    // files with only the package SID, then an empty DACL after revoke. REVOKE_ACCESS
+    // uses the same Trustee / permissions / inheritance as SET so only that ACE is removed.
     ea.grfInheritance      = inheritance;
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
@@ -250,6 +251,143 @@ bool apply_dir_acl(PSID sid, const std::string& path, DWORD permissions, DWORD i
     return true;
 }
 
+bool token_user_sid(std::vector<BYTE>& buf, PSID& sid)
+{
+    sid            = nullptr;
+    HANDLE token   = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    buf.resize(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        const DWORD err = ::GetLastError();
+        ::CloseHandle(token);
+        ::SetLastError(err);
+        return false;
+    }
+    ::CloseHandle(token);
+    sid = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+    return sid != nullptr;
+}
+
+// User + SYSTEM GENERIC_READ|WRITE|EXECUTE|DELETE. Inheritable on write roots so
+// AppContainer-created children are not left with only the package-SID ACE.
+bool apply_owner_aces(const std::string& path, DWORD inheritance)
+{
+    if (path.empty())
+        return true;
+    std::vector<BYTE> user_buf;
+    PSID              user = nullptr;
+    if (!token_user_sid(user_buf, user)) {
+        log_win32_failure("owner ACE TokenUser", path, ::GetLastError());
+        return false;
+    }
+    PSID system = nullptr;
+    if (!::ConvertStringSidToSidW(L"S-1-5-18", &system) || system == nullptr) {
+        log_win32_failure("owner ACE SYSTEM SID", path, ::GetLastError());
+        return false;
+    }
+    EXPLICIT_ACCESSW ea[2]{};
+    auto             fill = [&](DWORD i, PSID s, TRUSTEE_TYPE type) {
+        ea[i].grfAccessPermissions = k_acl_rw;
+        ea[i].grfAccessMode        = SET_ACCESS;
+        ea[i].grfInheritance       = inheritance;
+        ea[i].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+        ea[i].Trustee.TrusteeType  = type;
+        ea[i].Trustee.ptstrName    = static_cast<LPWSTR>(s);
+    };
+    fill(0, user, TRUSTEE_IS_USER);
+    fill(1, system, TRUSTEE_IS_WELL_KNOWN_GROUP);
+
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 prev = nullptr;
+    PACL                 neu  = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    const DWORD get_rc = ::GetNamedSecurityInfoW(wide.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &prev, nullptr,
+                                                 &sd);
+    if (get_rc != ERROR_SUCCESS) {
+        ::LocalFree(system);
+        log_win32_failure("owner ACE read", path, get_rc);
+        return false;
+    }
+    const DWORD acl_rc = ::SetEntriesInAclW(2, ea, prev, &neu);
+    DWORD       rc     = acl_rc;
+    if (acl_rc == ERROR_SUCCESS && neu != nullptr) {
+        rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, neu,
+                                     nullptr);
+        ::LocalFree(neu);
+    }
+    if (sd)
+        ::LocalFree(sd);
+    ::LocalFree(system);
+    if (rc != ERROR_SUCCESS) {
+        log_win32_failure("owner ACE grant", path, rc);
+        return false;
+    }
+    return true;
+}
+
+std::wstring capture_dacl_sddl(const std::string& path)
+{
+    const std::wstring   wide = boost::nowide::widen(path);
+    PACL                 dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd   = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                                nullptr, &sd) != ERROR_SUCCESS ||
+        sd == nullptr)
+        return {};
+    LPWSTR sddl = nullptr;
+    if (!::ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &sddl, nullptr) ||
+        sddl == nullptr) {
+        ::LocalFree(sd);
+        return {};
+    }
+    std::wstring out = sddl;
+    ::LocalFree(sddl);
+    ::LocalFree(sd);
+    return out;
+}
+
+bool restore_dacl_sddl(const std::string& path, const std::wstring& sddl)
+{
+    if (path.empty() || sddl.empty())
+        return true;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr) || sd == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "AppContainer DACL SDDL convert failed for " << path;
+        return false;
+    }
+    BOOL  present = FALSE, defaulted = FALSE;
+    PACL  dacl = nullptr;
+    if (!::GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted)) {
+        const DWORD err = ::GetLastError();
+        ::LocalFree(sd);
+        log_win32_failure("DACL restore GetSecurityDescriptorDacl", path, err);
+        return false;
+    }
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD                       revision = 0;
+    const bool                  prot     = ::GetSecurityDescriptorControl(sd, &control, &revision) && (control & SE_DACL_PROTECTED) != 0;
+    const DWORD                 flags    = DACL_SECURITY_INFORMATION |
+                            (prot ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION);
+    const std::wstring wide = boost::nowide::widen(path);
+    const DWORD        rc   = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, flags, nullptr, nullptr,
+                                                      present ? dacl : nullptr, nullptr);
+    ::LocalFree(sd);
+    if (rc != ERROR_SUCCESS) {
+        if (acl_target_already_gone(rc))
+            return true;
+        log_win32_failure("DACL restore", path, rc);
+        return false;
+    }
+    return true;
+}
+
 struct DirGrant
 {
     std::string  path;
@@ -259,6 +397,8 @@ struct DirGrant
     bool         low_label   = false;
     bool         existing    = false; // package-SID ACE already present; journaled so sweep can drop it
     std::wstring original_label;      // LABEL_SECURITY_INFORMATION SDDL; empty = no ML ACE
+    bool         owner_inherit = false;
+    std::wstring original_dacl; // DACL SDDL captured before the inheritable owner ACE
 };
 
 struct JournalSession
@@ -670,20 +810,31 @@ bool query_file_info(const std::wstring& wide, BY_HANDLE_FILE_INFORMATION& info)
                              OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE)
         return false;
-    const BOOL ok = ::GetFileInformationByHandle(h, &info);
+    const BOOL  ok  = ::GetFileInformationByHandle(h, &info);
+    const DWORD err = ok ? ERROR_SUCCESS : ::GetLastError();
     ::CloseHandle(h);
+    if (!ok)
+        ::SetLastError(err);
     return ok != 0;
 }
 
 // Extra named streams besides the default ::$DATA (Zone.Identifier / MOTW, etc.).
 // Unknown / unsupported volume: treat as extra so we do not rewrite the file.
+// ACCESS_DENIED is not extra: an empty DACL makes FindFirstStreamW fail even when
+// there are no ADS (owner implicit rights are only READ_CONTROL / WRITE_DAC).
 bool file_has_extra_data_streams(const std::wstring& wide)
 {
     WIN32_FIND_STREAM_DATA data{};
     HANDLE                 find = ::FindFirstStreamW(wide.c_str(), FindStreamInfoStandard, &data, 0);
     if (find == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
-        return err != ERROR_HANDLE_EOF && err != ERROR_INVALID_PARAMETER && err != ERROR_NOT_SUPPORTED && err != ERROR_INVALID_FUNCTION;
+        if (err == ERROR_HANDLE_EOF || err == ERROR_INVALID_PARAMETER || err == ERROR_NOT_SUPPORTED || err == ERROR_INVALID_FUNCTION)
+            return false;
+        if (err == ERROR_ACCESS_DENIED) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer stream query access denied for " << boost::nowide::narrow(wide);
+            return false;
+        }
+        return true;
     }
     bool extra = false;
     do {
@@ -713,8 +864,12 @@ bool file_eligible_for_low_copy_replace(const std::string& path, std::uint64_t g
         return false;
     const std::wstring            wide = boost::nowide::widen(path);
     BY_HANDLE_FILE_INFORMATION    info{};
-    if (!query_file_info(wide, info))
+    if (!query_file_info(wide, info)) {
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_ACCESS_DENIED)
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer link query access denied for " << path;
         return false;
+    }
     if (info.nNumberOfLinks > 1)
         return false;
     if (file_has_extra_data_streams(wide))
@@ -852,6 +1007,8 @@ nlohmann::json grants_to_json(const std::vector<DirGrant>& grants)
             {"low_label", g.low_label},
             {"existing", g.existing},
             {"original_label", boost::nowide::narrow(g.original_label)},
+            {"owner_inherit", g.owner_inherit},
+            {"original_dacl", boost::nowide::narrow(g.original_dacl)},
         });
     }
     return arr;
@@ -881,6 +1038,8 @@ DirGrant grant_from_json(const nlohmann::json& item)
     grant.low_label      = item.value("low_label", false);
     grant.existing       = item.value("existing", false);
     grant.original_label = boost::nowide::widen(item.value("original_label", std::string()));
+    grant.owner_inherit  = item.value("owner_inherit", false);
+    grant.original_dacl  = boost::nowide::widen(item.value("original_dacl", std::string()));
     return grant;
 }
 
@@ -1147,6 +1306,44 @@ bool remove_session_from_journals(const std::string& package_sid)
     return persist_sessions_at(g_win.journal_path, all);
 }
 
+// Explicit (non-inherited) user+SYSTEM ACE so restoring the grant root's original
+// DACL cannot strip owner access from helper-created children.
+void ensure_owner_aces_in_tree(const std::string& root)
+{
+    namespace fs = boost::filesystem;
+    boost::system::error_code ec;
+    const fs::path            path(root);
+    if (root.empty() || !fs::exists(path, ec) || ec)
+        return;
+    auto stamp_one = [&](const fs::path& p) {
+        const std::string s = p.string();
+        if (path_is_acl_journal_tree(s) || s == root)
+            return;
+        apply_owner_aces(s, NO_INHERITANCE);
+    };
+    if (!fs::is_directory(path, ec) || ec) {
+        stamp_one(path);
+        return;
+    }
+    constexpr int k_max_entries = 4096;
+    int           n             = 0;
+    for (fs::recursive_directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+        if (++n >= k_max_entries) {
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer owner ACE walk stopped after " << k_max_entries << " entries in " << root;
+            break;
+        }
+        boost::system::error_code st_ec;
+        const fs::file_status     st = it->symlink_status(st_ec);
+        if (st_ec)
+            continue;
+        if (fs::is_symlink(st)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        stamp_one(it->path());
+    }
+}
+
 // Files a Low-IL helper creates inherit a Low mandatory label even when the parent
 // directory was not labelled (user fs_readwrite) or after the directory label is
 // restored (Edge work dirs). Bounded walk: skip the grant root (restore_label_sddl
@@ -1186,7 +1383,7 @@ bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
         if (!path_has_low_integrity_label(s))
             return;
         if (!file_eligible_for_low_copy_replace(s, granted_at)) {
-            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped (hard link or ADS) for " << s;
+            BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL copy-replace skipped for " << s;
             return;
         }
         if (!copy_replace_file_as_user(s) || path_has_low_integrity_label(s))
@@ -1241,26 +1438,29 @@ bool revoke_one_grant(PSID sid, const DirGrant& grant, GrantActionSource source,
         return false;
     }
     bool ok = true;
-    if (sid != nullptr && !apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS))
-        ok = false;
     // Copy-replace rewrites file bytes; only user-rw roots of this process, not a
     // recorded python_home / helper / resources tree that may now be an install dir.
     const bool allow_copy_replace = source == GrantActionSource::Live || path_in_known_root(grant.path);
+    // Stamp explicit owner ACEs and strip Low while the package ACE still exists
+    // (and after the inheritable owner ACE at grant). Revoking first leaves an
+    // empty DACL on helper-created files, and stream/link queries then fail with 5.
+    const std::uint64_t granted_at = session ? session->granted_at : g_win.granted_at;
+    if (grant.write && allow_copy_replace) {
+        ensure_owner_aces_in_tree(grant.path);
+        if (!strip_low_labels_in_tree(grant.path, granted_at))
+            ok = false;
+    } else if (grant.write && source == GrantActionSource::Journal && !allow_copy_replace)
+        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped copy-replace outside known user-rw roots: " << grant.path;
+    if (sid != nullptr && !apply_dir_acl(sid, grant.path, grant.permissions, grant.inheritance, REVOKE_ACCESS))
+        ok = false;
     if (grant.low_label) {
         // Restore only a label this process added (original_label captured at grant).
         // Never copy-replace the grant root itself to strip a user folder's label.
         if (!restore_label_sddl(grant.path, grant.original_label, false))
             ok = false;
     }
-    // Walk write-granted trees so helper-created files (edge-plugin-host.log,
-    // post_process.gcode, plugin output in fs_readwrite) lose Low. The grant root
-    // is not stripped here. Creation >= grant time gates every label removal.
-    // Journal-sourced copy-replace stays inside known user-rw roots / write grants.
-    const std::uint64_t granted_at = session ? session->granted_at : g_win.granted_at;
-    if (grant.write && allow_copy_replace && !strip_low_labels_in_tree(grant.path, granted_at))
+    if (grant.owner_inherit && !restore_dacl_sddl(grant.path, grant.original_dacl))
         ok = false;
-    else if (grant.write && source == GrantActionSource::Journal && !allow_copy_replace)
-        BOOST_LOG_TRIVIAL(warning) << "AppContainer ACL journal skipped copy-replace outside known user-rw roots: " << grant.path;
     return ok;
 }
 
@@ -1637,9 +1837,21 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         grant.low_label        = apply_low && !already_low;
         if (apply_low)
             grant.original_label = capture_label_sddl(path);
+        // Helper-created files inherit only inheritable ACEs. Stamp user+SYSTEM so
+        // a non-inheritable parent user ACE cannot leave children with only the
+        // package SID (empty DACL after revoke).
+        if (write) {
+            grant.original_dacl = capture_dacl_sddl(path);
+            if (!grant.original_dacl.empty() && apply_owner_aces(path, k_acl_inherit))
+                grant.owner_inherit = true;
+            else
+                BOOST_LOG_TRIVIAL(warning) << "AppContainer inheritable owner ACE skipped for " << path;
+        }
         g_win.grants.push_back(grant);
         if (!persist_acl_journal(sid)) {
             error = "AppContainer ACL journal failed for " + path;
+            if (grant.owner_inherit)
+                restore_dacl_sddl(path, grant.original_dacl);
             g_win.grants.pop_back();
             return false;
         }
