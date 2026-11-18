@@ -43,17 +43,30 @@ bool model_to_csgmesh(const ModelObject &mo,
                 *out = std::move(part_begin);
                 ++out;
 
-                its_split(vol->mesh().its, SplitOutputFn{[&out, &vol, &trafo](indexed_triangle_set &&its) {
-                              if (its.empty())
-                                  return;
-
-                              CSGPart part{std::make_unique<indexed_triangle_set>(std::move(its)),
-                                       CSGType::Union,
-                                       (trafo * vol->get_matrix()).cast<float>()};
-
-                              *out = std::move(part);
-                              ++out;
+                // A shell wound inwards is a void (the hollow of a hollow part): it is taken away from
+                // the shells around it, flipped outward, rather than unioned inside out. Largest first,
+                // so each shell comes after every shell that encloses it: an island in a void is added
+                // back after the void is taken away.
+                std::vector<std::pair<float, indexed_triangle_set>> shells;
+                its_split(vol->mesh().its, SplitOutputFn{[&shells](indexed_triangle_set &&its) {
+                              if (!its.empty()) {
+                                  const float volume = its_volume(its);
+                                  shells.emplace_back(volume, std::move(its));
+                              }
                           }});
+                std::stable_sort(shells.begin(), shells.end(),
+                                 [](const auto &a, const auto &b) { return std::abs(a.first) > std::abs(b.first); });
+                for (auto &[volume, its] : shells) {
+                    const bool is_void = volume < 0.f;
+                    if (is_void)
+                        its_flip_triangles(its);
+                    CSGPart part{std::make_unique<indexed_triangle_set>(std::move(its)),
+                                 is_void ? CSGType::Difference : CSGType::Union,
+                                 (trafo * vol->get_matrix()).cast<float>()};
+                    part.name = vol->name;
+                    *out = std::move(part);
+                    ++out;
+                }
 
                 CSGPart part_end{{}};
                 part_end.stack_operation = CSGStackOp::Pop;

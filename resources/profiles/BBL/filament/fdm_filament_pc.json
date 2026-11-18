@@ -4,6 +4,9 @@
     "inherits": "fdm_filament_common",
     "from": "system",
     "instantiation": "false",
+    "filament_adhesiveness_category": [
+        "500"
+    ],
     "supertack_plate_temp": [
         "0"
     ],

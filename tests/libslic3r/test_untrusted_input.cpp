@@ -1514,6 +1514,39 @@ TEST_CASE("An untextured OBJ still loads with no UVs", "[obj][uv]")
     CHECK(loaded.info.face_colors.empty());
 }
 
+// OBJ vertex indices start at 1. Index 0 (or a relative index reaching before the first vertex)
+// used to become -1, the parser's end-of-face marker, so the face was cut there and the file read
+// with the wrong faces instead of being refused.
+TEST_CASE("An OBJ face naming vertex 0 is refused as an invalid vertex index", "[obj][Regression]")
+{
+    const std::string vertices = "v 0 0 0\nv 10 0 0\nv 0 10 0\nv 0 0 10\n";
+
+    SECTION("vertex 0 at the start of a quad") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("vertex 0 in the middle of a face of seven") {
+        // Read as two triangles, 1 2 3 and 2 4 3, before; one face of seven vertices, refused, now.
+        LoadedObj loaded = load_obj_body(vertices + "f 1 2 3 0 2 4 3\n", false);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("a relative index one before the first vertex") {
+        LoadedObj loaded = load_obj_body(vertices + "f -5 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("with a material too") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", true);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("valid relative indices still load") {
+        LoadedObj loaded = load_obj_body(vertices + "f -4 -2 -3\nf -4 -3 -1\nf -4 -1 -2\nf -3 -2 -1\n", false);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+    }
+}
+
 // ---- CLI assemble list ------------------------------------------------------------------------
 //
 // Port of Orca #15978's tests/libslic3r/test_assemble_list.cpp to Catch2 v2, kept in this existing

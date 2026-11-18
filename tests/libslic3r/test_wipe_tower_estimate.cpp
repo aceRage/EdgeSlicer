@@ -81,18 +81,24 @@ TEST_CASE("A rectangle wall tower is sized by the purge volume", "[WipeTowerEsti
 }
 
 TEST_CASE("Each planner spaces its purge lines by its own option", "[WipeTowerEstimate]") {
-    // Type2 reads wipe_tower_extra_spacing. Type1 uses prime_tower_infill_gap only when the
-    // caller set that Orca key; otherwise it falls back to wipe_tower_extra_spacing.
+    // Type2 reads wipe_tower_extra_spacing, Type1 prime_tower_infill_gap (Orca #10780, 150 % by default).
     DynamicPrintConfig config = make_config();
     config.set_key_value("wipe_tower_extra_flow", new ConfigOptionPercent(250.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(20., 1e-9));
     const std::vector<WipeTower::PurgeEstimate> type1_purges{{100.f, 0}, {100.f, 0}, {100.f, 0}};
-    const double type1_plain_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.f);
+    const double type1_default_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.5f);
     CHECK_THAT(estimate(config, 3, 0.2, 5., WipeTowerType::Type1).depth,
-               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_plain_blocks), 1e-6));
+               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_default_blocks), 1e-6));
+    {
+        DynamicPrintConfig plain = config;
+        plain.set_key_value("prime_tower_infill_gap", new ConfigOptionPercent(100.));
+        const double type1_plain_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.f);
+        CHECK_THAT(estimate(plain, 3, 0.2, 5., WipeTowerType::Type1).depth,
+                   WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, type1_plain_blocks), 1e-6));
+    }
     config.set_key_value("wipe_tower_extra_spacing", new ConfigOptionPercent(150.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(30., 1e-9));
-    // Type1 only sees the Orca key when the caller set it; 150 % stretches the block stack.
+    // Type2 ignores the Type1 key; 150 % stretches the Type1 block stack.
     config.set_key_value("prime_tower_infill_gap", new ConfigOptionPercent(150.));
     CHECK_THAT(estimate(config, 3, 0.2, 5.).depth, WithinAbs(30., 1e-9));
     const double type1_spaced_blocks = WipeTower::estimate_tower_blocks_depth(type1_purges, 50.f, 0.2f, 0.4f, 1.5f);
@@ -108,15 +114,15 @@ TEST_CASE("Type1 sizes the tower from each filament's own prime volume", "[WipeT
     // filament_prime_volume is read on hotend_as_extruder printers (H3C) only; elsewhere every change primes prime_volume.
     config.set_key_value("filament_prime_volume", new ConfigOptionFloats({30., 45.}));
     config.set_key_value("handle_hotend_as_extruder", new ConfigOptionBool(false));
-    config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({100, 0}));
+    config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({100, 300}));
     // No ramming here (Bambu Studio 2.9.1 rams filament_change_length on every H3C hotend change; its own case below).
     config.set_key_value("filament_change_length", new ConfigOptionFloats({0., 0.}));
     const double flat = estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth;
     // make_config()'s prime_volume is 100 for both filaments.
-    const double flat_blocks = WipeTower::estimate_tower_blocks_depth({{100.f, 100}, {100.f, 0}}, 35.f, 0.21f, 0.4f, 1.5f);
+    const double flat_blocks = WipeTower::estimate_tower_blocks_depth({{100.f, 100}, {100.f, 300}}, 35.f, 0.21f, 0.4f, 1.5f);
     CHECK_THAT(flat, WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, flat_blocks), 1e-4));
     config.set_key_value("handle_hotend_as_extruder", new ConfigOptionBool(true));
-    const std::vector<WipeTower::PurgeEstimate> purges{{30.f, 100}, {45.f, 0}};
+    const std::vector<WipeTower::PurgeEstimate> purges{{30.f, 100}, {45.f, 300}};
     const double blocks = WipeTower::estimate_tower_blocks_depth(purges, 35.f, 0.21f, 0.4f, 1.5f);
     REQUIRE_THAT(blocks, WithinAbs(18.5, 0.01));
     CHECK_THAT(estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth, WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, blocks), 1e-4));
@@ -131,7 +137,8 @@ TEST_CASE("Type1 sizes the tower from each filament's own prime volume", "[WipeT
     }
     config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({0, 0}));
     CHECK_THAT(estimate(config, 2, 0.21, 5., WipeTowerType::Type1).depth,
-               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5, 11.), 0.01));
+               WithinAbs(std::max(double(WipeTower::get_limit_depth_by_height(5.f)) + 0.5,
+                                  double(WipeTower::estimate_tower_blocks_depth({{30.f, 0}, {45.f, 0}}, 35.f, 0.21f, 0.4f, 1.5f))), 0.01));
     config.set_deserialize_strict("wipe_tower_wall_type", "rib");
     const WipeTowerFootprint rib = estimate(config, 2, 0.21, 5., WipeTowerType::Type1);
     CHECK_THAT(rib.width, WithinAbs(rib.depth, 1e-9));
@@ -162,7 +169,7 @@ TEST_CASE("The tower is sized for the first layer when it is the thinnest", "[Wi
     const double at_thinnest = estimate(config, 3, 0.2, 5.).depth;
     CHECK_THAT(estimate(config, 3, 0.28, 5.).depth, WithinAbs(at_thinnest, 1e-9));
     config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.3));
-    CHECK((estimate(config, 3, 0.28, 5.).depth < at_thinnest || at_thinnest <= WipeTower::get_limit_depth_by_height(5.f) + EPSILON));
+    CHECK((estimate(config, 3, 0.28, 5.).depth < at_thinnest || at_thinnest <= WipeTower::get_limit_depth_by_height(5.f, true) + EPSILON));
 }
 
 TEST_CASE("Object height sets the stability floor and the auto brim", "[WipeTowerEstimate]") {
@@ -190,19 +197,20 @@ TEST_CASE("A single filament only gets a tower when one is printed anyway", "[Wi
 
     config.set_deserialize_strict("timelapse_type", "1");
     CHECK_THAT(estimate(config, 1, 0.2, 100.).depth, WithinAbs(20., 1e-9));
-    CHECK_THAT(estimate(config, 1, 0.2, 5.).depth, WithinAbs(WipeTower::get_limit_depth_by_height(5.f), 1e-9));
+    CHECK_THAT(estimate(config, 1, 0.2, 5.).depth, WithinAbs(WipeTower::get_limit_depth_by_height(5.f, true), 1e-9));
 }
 
 TEST_CASE("A tool change reserves a tower even with nothing to purge", "[WipeTowerEstimate]") {
     const double     height = GENERATE(5., 100.);
-    const float      floor  = WipeTower::get_limit_depth_by_height(float(height));
+    const float      floor  = WipeTower::get_limit_depth_by_height(float(height), true);
+    const float      floor1 = WipeTower::get_limit_depth_by_height(float(height));
     const char      *wall   = GENERATE("rectangle", "rib");
     DynamicPrintConfig config = make_config(wall);
     config.set_key_value("prime_volume", new ConfigOptionFloat(0.));
     config.set_key_value("filament_prime_volume", new ConfigOptionFloats({0.}));
 
     CHECK(estimate(config, 3, 0.2, height, WipeTowerType::Type2).depth >= floor);
-    CHECK(estimate(config, 3, 0.2, height, WipeTowerType::Type1).depth >= floor);
+    CHECK(estimate(config, 3, 0.2, height, WipeTowerType::Type1).depth >= floor1);
     CHECK_THAT(estimate(config, 1, 0.2, height, WipeTowerType::Type2).depth, WithinAbs(0., 1e-9));
     CHECK_THAT(estimate(config, 1, 0.2, height, WipeTowerType::Type1).depth, WithinAbs(0., 1e-9));
 }
@@ -220,8 +228,8 @@ TEST_CASE("Both wall types agree on whether there is a tower at all", "[WipeTowe
     CHECK_THAT(estimate(rect, 1, 0.2, height).depth, WithinAbs(0., 1e-9));
     CHECK_THAT(estimate(rib, 1, 0.2, height).depth, WithinAbs(0., 1e-9));
 
-    CHECK(estimate(rect, 2, 0.2, height).depth >= WipeTower::get_limit_depth_by_height(float(height)));
-    CHECK(estimate(rib, 2, 0.2, height).depth >= WipeTower::get_limit_depth_by_height(float(height)));
+    CHECK(estimate(rect, 2, 0.2, height).depth >= WipeTower::get_limit_depth_by_height(float(height), true));
+    CHECK(estimate(rib, 2, 0.2, height).depth >= WipeTower::get_limit_depth_by_height(float(height), true));
 }
 
 TEST_CASE("A rib wall squares the tower and caps the rib width", "[WipeTowerEstimate]") {
@@ -236,7 +244,7 @@ TEST_CASE("A rib wall squares the tower and caps the rib width", "[WipeTowerEsti
     config.set_key_value("prime_volume", new ConfigOptionFloat(5.));
     // Body sqrt(5/0.2)=5 mm is under this tree's 20 mm floor, so the ribs stretch to the floor
     // and the 8 mm rib is capped at half the body.
-    const float floor = WipeTower::get_limit_depth_by_height(5.f);
+    const float floor = WipeTower::get_limit_depth_by_height(5.f, true);
     CHECK_THAT(estimate(config, 2, 0.2, 5.).depth, WithinAbs(floor + 2.5 / std::sqrt(2.), 1e-5));
 }
 
@@ -294,7 +302,7 @@ TEST_CASE("The shipped defaults size the tower from the flush matrix", "[WipeTow
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4}));
 
     const double flush_volume = WipeTower2::estimate_semm_flush_volume(config, 2);
-    const double expected     = std::max(double(WipeTower::get_limit_depth_by_height(5.f)), flush_volume / (0.2 * 50.));
+    const double expected     = std::max(double(WipeTower::get_limit_depth_by_height(5.f, true)), flush_volume / (0.2 * 50.));
     CHECK_THAT(estimate(config, 2, 0.2, 5.).depth, WithinAbs(expected, 1e-6));
 
     // The flush volume is nonzero for one slot, but a lone filament makes no tool change.

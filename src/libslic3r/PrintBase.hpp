@@ -142,7 +142,28 @@ public:
         SlicingPreciseZNotApplied,
         // An object rests on the bed but its first layer has no extrusions (a bed contact narrower
         // than the first-layer wall can print), so it gets no brim and starts in mid-air. Appended; own id.
-        SlicingEmptyFirstLayer
+        SlicingEmptyFirstLayer,
+        // Head clearance check (GCode/HeadCollisionCheck.hpp): a Z-contoured print has moves where the
+        // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
+        SlicingHeadCollision,
+        // Curved tops (CurvedTops.hpp) asked for on a printer with no known head clearance: left planar.
+        // Raised in posContouring; appended, own id. Also every other refusal of curved tops (the
+        // object prints planar), each naming its reason.
+        SlicingCurvedTopsUnavailable,
+        // Curved tops built a block: one summary line (rise and slope used against the limits, head data)
+        // plus any notes (surfaces left flat, beyond what has been printed). Raised in posContouring;
+        // appended, own id.
+        SlicingCurvedTopsSummary,
+        // Curved tops P3: developer overrides are in force for an object (each listed with its value).
+        // Raised in posContouring on every slice; appended, own id.
+        SlicingCurvedTopsDevOverrides,
+        // Curved tops P3: the head check's result on a curved print with developer overrides in force
+        // (contacts downgraded to a warning, or none found, with the nearest head part). Raised during
+        // export_gcode; CRITICAL when there is a contact. Appended, own id.
+        SlicingCurvedTopsHeadCheck,
+        // Thin features (ThinFeatures.hpp): features the wall generator skipped, or printed wider than the model.
+        // Raised in the wall step, one notice per object; appended, own id.
+        SlicingThinFeatures
     };
 
     typedef size_t TimeStamp;

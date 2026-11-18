@@ -8541,10 +8541,10 @@ msgid "Presets inherited by other presets cannot be deleted!"
 msgstr ""
 "As predefinições herdados por outras predefinições não podem ser excluídas!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
-msgstr[0] "As seguintes predefinições herdam esta predefinição."
-msgstr[1] "A seguinte predefinição herda esta predefinição."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
+msgstr[0] "A seguinte predefinição herda esta predefinição."
+msgstr[1] "As seguintes predefinições herdam esta predefinição."
 
 #. TRN  Remove/Delete
 #, boost-format

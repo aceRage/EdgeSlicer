@@ -4247,6 +4247,14 @@ msgstr ""
 msgid "Avoid extrusion calibration region"
 msgstr ""
 
+msgid "Avoid nozzle reach zones"
+msgstr ""
+
+msgid ""
+"Keep arranged objects out of the hatched strips that only one nozzle can "
+"reach, so every object can be printed with either nozzle."
+msgstr ""
+
 msgid "Align to Y axis"
 msgstr ""
 
@@ -7880,8 +7888,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr ""
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] ""
 msgstr[1] ""
 

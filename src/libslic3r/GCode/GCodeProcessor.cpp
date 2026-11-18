@@ -1406,6 +1406,7 @@ void GCodeProcessor::reset()
     m_extrusion_role = erNone;
     m_extruder_id = 0;
     m_last_extruder_id = 0;
+    m_filament_selected = false;
     m_extruder_colors.resize(MIN_EXTRUDERS_COUNT);
     for (size_t i = 0; i < MIN_EXTRUDERS_COUNT; ++i) {
         m_extruder_colors[i] = static_cast<unsigned char>(i);
@@ -4255,18 +4256,31 @@ void GCodeProcessor::process_T(const std::string_view command)
             // Per-nozzle process P4: a G-code that names assigned tools is read back in filaments.
             unsigned char id = static_cast<unsigned char>(filament_of_output_tool(new_extruder));
             bool tool_change_stored = false;
-            if (m_extruder_id != id) {
+            if (m_extruder_id == id) {
+                // A first selection of filament 0 (the placeholder m_extruder_id starts on) loads it.
+                m_filament_selected = true;
+            } else {
                 if (id >= m_result.extruders_count)
                     BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
                 else {
+                    // The first selection loads a filament: nothing of this print is in the nozzle yet. As in
+                    // BambuStudio / OrcaSlicer (which start with no filament, -1), it is not a filament change,
+                    // the start sequence's flush is not split off to filament 0, and anything extruded before
+                    // it is booked to the filament it selects. Before, a print on filament 3 booked the
+                    // nozzle_volume share of its start flush to filament 1, which Bambu Connect then listed.
+                    const bool first_selection = !m_filament_selected;
+                    m_filament_selected = true;
                     m_last_extruder_id = m_extruder_id;
-                    process_filaments(CustomGCode::ToolChange);
+                    if (!first_selection)
+                        process_filaments(CustomGCode::ToolChange);
                     m_extruder_id = id;
                     m_cp_color.current = m_extruder_colors[id];
                     //BBS: increase filament change times
-                    m_result.lock();
-                    m_result.print_statistics.total_filamentchanges++;
-                    m_result.unlock();
+                    if (!first_selection) {
+                        m_result.lock();
+                        m_result.print_statistics.total_filamentchanges++;
+                        m_result.unlock();
+                    }
 
                     // Specific to the MK3 MMU2:
                     // The initial value of extruder_unloaded is set to true indicating
@@ -4295,7 +4309,9 @@ void GCodeProcessor::process_T(const std::string_view command)
                         m_time_processor.extruder_unloaded = false;
                         extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
                     }
-                    extra_time += m_time_processor.machine_tool_change_time;
+                    // OrcaSlicer books the tool change time only when a tool was already active.
+                    if (!first_selection)
+                        extra_time += m_time_processor.machine_tool_change_time;
 
                     // Orca #14573: store the tool-change move first, then attribute the filament-change delay to
                     // it rather than to whichever motion block happens to be pending. This keeps the delay out of

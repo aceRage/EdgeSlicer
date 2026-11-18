@@ -122,6 +122,9 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
+#include "libslic3r/HeadClearance.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
@@ -18931,6 +18934,12 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingInvalidPrintSpeed) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
+                // EdgeSlicer, curved tops P3: a head contact downgraded to a warning by a developer override, or a curved
+                // top that could not be checked at all, must not look like the ordinary warnings next to it. The same
+                // message type also carries the harmless "no head contact found", which is NON_CRITICAL.
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingCurvedTopsHeadCheck &&
+                    warning.level == PrintStateBase::WarningLevel::CRITICAL)
+                    notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);
                 add_warning(warning, object_id.id);
             }
@@ -20255,9 +20264,9 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     auto orig = this->partplate_list.get_curr_plate()->get_origin();
     Vec2d orig2d = { orig[0], orig[1] };
 
-    BBoxData data;
     for (auto obj : objects)
     {
+        BBoxData data;
         // Ultra (H2C nozzle rack): PrintObject::get_first_layer_bbox already returns plate-relative
         // coordinates, so subtracting the plate origin here shifted every object bbox in
         // Metadata/plate_N.json by exactly one plate origin (measured on the user's plate 5:
@@ -20279,15 +20288,11 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
         auto   wt_corners = print->first_layer_wipe_tower_corners();
         // when loading gcode.3mf, wipe tower info may not be correct
         if (!wt_corners.empty()) {
-            BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-            auto        bb        = unscaled(bb_scaled);
-            bb.min -= orig2d;
-            bb.max -= orig2d;
-            bbox_all.merge(bb);
-            data.name = "wipe_tower";
-            data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-            data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
-            id_bboxes.emplace_back(data);
+            // Its own entry: it used to reuse the last object's, area and layer height included.
+            BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, partplate_list.get_curr_plate()->get_index(),
+                                                             float(print->config().initial_layer_print_height.value));
+            bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
+            id_bboxes.emplace_back(std::move(data));
         }
     }
 
@@ -21906,6 +21911,16 @@ bool Plater::is_active_project() const
     return shown == nullptr || shown == this;
 }
 
+void Plater::invalidate_slices_for_developer_mode()
+{
+    p->partplate_list.invalid_all_slice_result();
+    if (is_active_project()) {
+        post_slice_state_change_update();
+        schedule_background_process();
+    } else
+        p->update_while_hidden = true;
+}
+
 void Plater::on_project_hidden()
 {
     // A re-apply scheduled just before the switch would apply the next project's presets to this one: it waits.
@@ -23518,6 +23533,7 @@ void Plater::calib_VFA(const Calib_Params& params)
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     if (params.nozzle_based_resize) {
         print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
@@ -23582,6 +23598,7 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23645,6 +23662,7 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23716,6 +23734,7 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -26316,12 +26335,20 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
     else
         mesh_to_export = mesh_to_export_sla;
 
-    auto get_save_file = [](std::string const & dir, std::string const & name) {
-        auto path = dir + name + ".stl";
-        int n = 1;
-        while (boost::filesystem::exists(path))
-            path = dir + name + "(" + std::to_string(n++) + ").stl";
-        return path;
+    // A file that could not be written (a name the file system refuses, a full disk) used to be
+    // reported as nothing at all; collect them and say so once.
+    std::vector<std::string> failed_files;
+    auto store = [&failed_files](const std::string &file, TriangleMesh &mesh) {
+        if (!Slic3r::store_stl(file.c_str(), &mesh, true))
+            failed_files.push_back(file);
+    };
+    auto report_failed = [this, &failed_files]() {
+        if (failed_files.empty())
+            return;
+        wxString files;
+        for (const std::string &file : failed_files)
+            files += "\n" + from_u8(file);
+        show_error(this, _L("The following STL files could not be written:") + files);
     };
 
     TriangleMesh mesh;
@@ -26353,8 +26380,9 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
                 auto mesh = mesh_to_export(*object, i.second);
                 mesh.translate(-object->origin_translation.cast<float>());
 
-                Slic3r::store_stl(get_save_file(path_u8, object->name).c_str(), &mesh, true);
+                store(stl_export_file_path(path_u8, object->name), mesh);
             }
+            report_failed();
             return;
         }
     }
@@ -26366,12 +26394,14 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
         for (const ModelObject* o : p->model.objects) {
             auto mesh = mesh_to_export(*o, -1);
             mesh.translate(-o->origin_translation.cast<float>());
-            Slic3r::store_stl(get_save_file(path_u8, o->name).c_str(), &mesh, true);
+            store(stl_export_file_path(path_u8, o->name), mesh);
         }
+        report_failed();
         return;
     }
 
-    Slic3r::store_stl(path_u8.c_str(), &mesh, true);
+    store(path_u8, mesh);
+    report_failed();
 }
 
 // Strip the characters no filesystem we ship on will take, so an object or part named
@@ -26462,7 +26492,8 @@ void Plater::export_stl_part()
     if (mesh.empty())
         return;
 
-    Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
+    if (!Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true))
+        show_error(this, _L("The following STL files could not be written:") + "\n" + out_path);
 }
 
 // "Export outline as DXF": the 2D shape an SVG or text part is embossed from, in the plane of the
@@ -29309,6 +29340,8 @@ bool Plater::guard_before_slice_plate()
     sync_flow_ratio_zero_notification();
     sync_cold_plate_notification();
     check_seq_print_caution(false);
+    if (!confirm_curved_tops_head_before_slice())
+        return false;
     return confirm_filament_temp_mixing_before_slice();
 }
 
@@ -29318,7 +29351,79 @@ bool Plater::guard_before_slice_all()
         return false;
     sync_flow_ratio_zero_notification();
     check_seq_print_caution(true);
+    if (!confirm_curved_tops_head_before_slice())
+        return false;
     return confirm_filament_temp_mixing_before_slice_all();
+}
+
+// EdgeSlicer, curved tops on any printer (tests/design_curved_tops_any_printer.md, 3.4 and D3). A printer whose head
+// values no curved print has checked (an EdgeSlicer estimate, or the nozzle protrusion the user entered) runs curved
+// tops only once the user accepted that risk. Asked here, when the user presses Slice, once per printer preset and
+// head values (a changed value asks again). The answer is kept in the app settings, never in a preset, a project or
+// the G-code, so a downloaded project cannot carry someone else's acceptance. Without it the slicer prints the tops
+// flat and says why; the head contact check runs either way.
+bool Plater::confirm_curved_tops_head_before_slice()
+{
+    const DynamicPrintConfig &full = wxGetApp().preset_bundle->full_config();
+    auto curved_on = [](const DynamicPrintConfig &cfg) {
+        const ConfigOptionBool *opt = cfg.option<ConfigOptionBool>("curved_tops_enabled");
+        return opt != nullptr && opt->value;
+    };
+    bool on = curved_on(full);
+    for (const ModelObject *mo : p->model.objects) {
+        if (on)
+            break;
+        if (mo == nullptr)
+            continue;
+        on = curved_on(mo->config.get());
+        for (const ModelVolume *mv : mo->volumes)
+            on = on || (mv != nullptr && curved_on(mv->config.get()));
+        for (const auto &range : mo->layer_config_ranges)
+            on = on || curved_on(range.second.get());
+    }
+    if (!on)
+        return true;
+
+    PrintConfig printer;
+    printer.apply(full, true);
+    const ConfigOptionString *preset_opt = full.option<ConfigOptionString>("printer_settings_id");
+    const std::string         preset     = preset_opt != nullptr ? preset_opt->value : std::string();
+    const CurvedTopsHeadLimits limits     = curved_tops_head_limits(printer, CurvedTopsDevOverrides(), preset);
+    // Nothing to accept: verified, already accepted, or refused for another reason (no values at all: the slicing warning
+    // says where to enter them).
+    if (!limits.known || !limits.needs_acknowledgement || limits.acknowledged || limits.acknowledgement_key.empty())
+        return true;
+
+    const double lowest = limits.head ? limits.head->lowest_box_z() : 0.;
+    const ConfigOptionFloat *angle_opt = full.option<ConfigOptionFloat>("curved_tops_max_angle");
+    const double             angle     = curved_tops_effective_max_angle(angle_opt != nullptr ? angle_opt->value : 15., limits);
+    auto mm = [](double v) { return wxString::FromUTF8(float_to_string_decimal_point(v, 2)); };
+    const wxString printer_name = wxString::FromUTF8(preset.empty() ? printer.printer_model.value : preset);
+    const wxString what = limits.user_values ? _L("your own values from the printer settings") : _L("an EdgeSlicer estimate");
+    wxString msg = _L("Curved tops is experimental on this printer.") + "\n\n" +
+                   wxString::Format(_L("The print head clearance for %s is %s and has not been checked on a real print. If it is "
+                                       "wrong, the silicone sock, a fan duct, the bed probe or a second nozzle can hit the part."),
+                                    printer_name, what) +
+                   "\n\n" +
+                   wxString::Format(_L("Nozzle stands %s mm below the lowest head part; curved surfaces may rise %s mm, slope up to %s degrees."),
+                                    mm(lowest), mm(limits.allowed_rise_mm), wxString::FromUTF8(float_to_string_decimal_point(angle, 1))) +
+                   "\n\n" +
+                   _L("The head contact check still runs on every slice and stops the export when it finds a contact. Watch the "
+                      "first print. The values are in Printer settings > Basic information > Head clearance.") +
+                   "\n\n" + _L("This is asked once for this printer preset and these values; changing a value asks again.");
+    MessageDialog dlg(this, msg, _L("Curved tops on an unverified print head"), wxICON_WARNING | wxOK | wxCANCEL);
+    dlg.SetButtonLabel(wxID_OK, _L("I understand the risk, continue"));
+    dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+
+    const std::string today = wxDateTime::Now().FormatISOCombined(' ').ToStdString();
+    wxGetApp().app_config->set(CURVED_TOPS_ACK_SECTION, limits.acknowledgement_key, today);
+    add_curved_tops_acknowledgement(limits.acknowledgement_key);
+    BOOST_LOG_TRIVIAL(warning) << "Curved tops: the user accepted unverified head values (" << limits.acknowledgement_key << ")";
+    // Plates planned before the acceptance printed their tops flat: plan them again.
+    invalidate_slices_for_developer_mode();
+    return true;
 }
 
 bool Plater::confirm_filament_temp_mixing_before_slice()

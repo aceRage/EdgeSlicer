@@ -533,6 +533,8 @@ void PreCoolingInjector::inject_cooling_heating_command(
         }
         m104_line += " S" + std::to_string(temp);
         m104_line += " N0"; // N0: written by the slicer
+        // Bambu Studio ef8222a6c (GCodeProcessor.cpp:6865): every printer marks a heating (W) or cooling (C) line.
+        m104_line += is_heating ? " W" : " C";
         if (!comment.empty())
             m104_line += " ;" + comment;
         m104_line += '\n';

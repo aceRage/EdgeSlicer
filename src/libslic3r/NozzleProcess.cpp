@@ -382,23 +382,59 @@ void layer_height_limits_for_nozzles(const ConfigBase &printer_config, const std
     max_layer_height = maxs->get_at(size_t(smallest));
 }
 
-void stamp_nozzle_line_widths(PrintRegionConfig &c)
+namespace {
+struct RoleWidth
 {
-    // The filament of each role, as PrintRegion::extruder() resolves it.
+    ConfigOptionFloatOrPercent         *width;
+    const ConfigOptionFloatsOrPercents *array;
+    int                                 filament;
+};
+// Every role width of a region, the per-nozzle array it is stamped from and the filament that prints the role, as
+// PrintRegion::extruder() resolves it. stamp_nozzle_line_widths() and restamp_painted_nozzle_line_widths() walk the
+// same list, so they never disagree on a role's filament.
+std::vector<RoleWidth> role_widths(PrintRegionConfig &c)
+{
     const int wall   = c.wall_filament.value;
     const int outer  = c.outer_wall_filament.value > 0 ? c.outer_wall_filament.value : wall;
     const int sparse = c.sparse_infill_filament.value;
     const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? sparse : c.solid_infill_filament.value;
-    stamp_width(c.outer_wall_line_width, c.nozzle_outer_wall_line_width, outer);
-    stamp_width(c.inner_wall_line_width, c.nozzle_inner_wall_line_width, wall);
-    stamp_width(c.sparse_infill_line_width, c.nozzle_sparse_infill_line_width, sparse);
-    stamp_width(c.internal_solid_infill_line_width, c.nozzle_internal_solid_infill_line_width, solid);
-    stamp_width(c.top_surface_line_width, c.nozzle_top_surface_line_width, c.solid_infill_filament.value);
-    // P5: the locked-zag skin and skeleton are sparse infill.
-    stamp_width(c.skin_infill_line_width, c.nozzle_skin_infill_line_width, sparse);
-    stamp_width(c.skeleton_infill_line_width, c.nozzle_skeleton_infill_line_width, sparse);
-    // P6: bridges are solid infill (LayerRegion::bridging_flow takes the solid infill filament's nozzle).
-    stamp_width(c.bridge_line_width, c.nozzle_bridge_line_width, solid);
+    return {
+        { &c.outer_wall_line_width, &c.nozzle_outer_wall_line_width, outer },
+        { &c.inner_wall_line_width, &c.nozzle_inner_wall_line_width, wall },
+        { &c.sparse_infill_line_width, &c.nozzle_sparse_infill_line_width, sparse },
+        { &c.internal_solid_infill_line_width, &c.nozzle_internal_solid_infill_line_width, solid },
+        { &c.top_surface_line_width, &c.nozzle_top_surface_line_width, c.solid_infill_filament.value },
+        // P5: the locked-zag skin and skeleton are sparse infill.
+        { &c.skin_infill_line_width, &c.nozzle_skin_infill_line_width, sparse },
+        { &c.skeleton_infill_line_width, &c.nozzle_skeleton_infill_line_width, sparse },
+        // P6: bridges are solid infill (LayerRegion::bridging_flow takes the solid infill filament's nozzle).
+        { &c.bridge_line_width, &c.nozzle_bridge_line_width, solid },
+    };
+}
+} // namespace
+
+void stamp_nozzle_line_widths(PrintRegionConfig &c)
+{
+    for (const RoleWidth &role : role_widths(c))
+        stamp_width(*role.width, *role.array, role.filament);
+}
+
+void restamp_painted_nozzle_line_widths(PrintRegionConfig &painted, const PrintRegionConfig &parent)
+{
+    PrintRegionConfig            parent_copy = parent;
+    const std::vector<RoleWidth> before      = role_widths(parent_copy);
+    const std::vector<RoleWidth> after       = role_widths(painted);
+    for (size_t i = 0; i < after.size(); ++ i) {
+        if (after[i].filament == before[i].filament)
+            continue;
+        // Only a width the parent's nozzle process gave it follows the paint to the new filament's nozzle. A width set
+        // on the object, part, modifier or layer range (region_config_from_model_volume() puts those back over the
+        // stamp) is not the array's value for the parent's filament, and it still wins.
+        const FloatOrPercent *stamped = nozzle_width_at(*before[i].array, before[i].filament);
+        if (stamped == nullptr || before[i].width->value != stamped->value || before[i].width->percent != stamped->percent)
+            continue;
+        stamp_width(*after[i].width, *after[i].array, after[i].filament);
+    }
 }
 
 void stamp_nozzle_line_widths(PrintObjectConfig &c)

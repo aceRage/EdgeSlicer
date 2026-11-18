@@ -376,9 +376,11 @@ indexed_triangle_set    its_make_swept_loop(const std::vector<Vec3d> &path, doub
 // start angle) and `left_hand` flips the sense of the rise.
 // Unlike its_make_swept_loop the path does NOT close, so there is no residual twist to spread:
 // every step is the same rotation about +Z plus the same rise along it - the helix's own frame,
-// known analytically. `lead_frac` tapers the profile's RADIAL extent linearly to zero over that
-// fraction of a turn at EACH end, which is both the printable lead-in chamfer and what closes
-// the ribbon's ends without a cap mesh; at lead_frac == 0 the ends are capped flat instead.
+// known analytically. `lead_frac` shrinks the profile linearly to nothing over that fraction of
+// a turn at EACH end, about the middle of its innermost edge (so a convex profile stays inside
+// its full self and keeps its root where it was), which is both the printable lead-in chamfer
+// and what closes the ribbon's ends without a cap mesh; at lead_frac == 0 the ends are capped
+// flat instead.
 // The helix runs from z == 0 up to z == pitch * turns. Each returned mesh is watertight.
 // Fewer than 3 profile points, a non-positive radius/pitch/turns, fewer than 3 segments per
 // turn or a starts count outside 1..8 returns an empty vector.

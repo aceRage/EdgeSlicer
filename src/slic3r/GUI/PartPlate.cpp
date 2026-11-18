@@ -2854,6 +2854,7 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	new_conf.set_key_value("enable_support", new ConfigOptionBool(false));
 	new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
 	new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+	new_conf.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
 	new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
 	new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 	new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
@@ -5651,7 +5652,7 @@ void PartPlateList::postprocess_bed_index_for_unselected(arrangement::ArrangePol
 }
 
 //postprocess an arrangement::ArrangePolygon, other instances are under locked states
-void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon)
+void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before)
 {
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": bed_idx %1%, locked_plate %2%, translation(x) %3%, (y) %4%") % arrange_polygon.bed_idx % arrange_polygon.locked_plate % unscale<double>(arrange_polygon.translation(X)) % unscale<double>(arrange_polygon.translation(Y));
 
@@ -5662,8 +5663,18 @@ void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::Arrange
 	}
 	else if (arrange_polygon.bed_idx == 0)
 		arrange_polygon.bed_idx += m_current_plate;
-	else
+	else if (plates_before < 0)
 		arrange_polygon.bed_idx = m_plate_list.size();
+	else
+	{
+		// What did not fit the plate comes back on beds 1, 2, ..., each object at its place on its own bed.
+		// One plate per bed, after the existing ones: put on one place, the beds' objects lay on top of each other.
+		const int plate_index = plates_before + arrange_polygon.bed_idx - 1;
+		while ((int)m_plate_list.size() <= plate_index && create_plate(false) >= 0)
+			;
+		// Past the plate limit: beside the last plate, as before.
+		arrange_polygon.bed_idx = std::min(plate_index, (int)m_plate_list.size());
+	}
 
 	return;
 }
@@ -6191,15 +6202,16 @@ int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool ex
 	{
 		for (unsigned int i = (unsigned int)m_plate_list.size() - 1; i > 0; --i)
 		{
-			if (m_plate_list[i]->empty()
+			// A locked plate is left as it is, empty or not.
+			if (m_plate_list[i]->is_locked()) {
+				continue;
+			}
+			else if (m_plate_list[i]->empty()
 				|| !m_plate_list[i]->has_printable_instances())
 			{
 				//delete it
 				BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":delete plate %1% for empty") % i;
 				delete_plate(i);
-			}
-			else if (m_plate_list[i]->is_locked()) {
-				continue;
 			}
 			else
 			{
@@ -6313,12 +6325,9 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							// for all of them told the printer every filament lived in the first nozzle
 							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
 							// live config and the emitted G-code are untouched.
-							const std::vector<int> identity_map =
-								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
+							const DynamicPrintConfig &full_config = print->full_print_config();
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								int group = 0;
-								if (info.id >= 0 && size_t(info.id) < identity_map.size())
-									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								const int group = identity_filament_group(full_config, info.id);
 								info.group_id = { group };
 								const size_t nozzle_idx = size_t(group);
 								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());

@@ -436,7 +436,7 @@ SCENARIO("H2D print by object: the idle hotend is never set to print temperature
 // way Bambu Studio does (no pre-tower cooling on the first layer).
 //
 // A toolchange that cools before the tower must heat back up before the new filament prints: Bambu
-// Studio's tower writes "M104 T<extruder> S<print temperature> N0 ;Wipe tower reheat before wipe"
+// Studio's tower writes "M104 T<extruder> S<print temperature> N0 W ;Wipe tower reheat before wipe"
 // (WipeTower.cpp toolchange_wipe_new). Without it an H2D printed the rest of the plate 10 degrees cold
 // (owner's hardware test of #392). check_reheats() below is the G-code-level rule.
 
@@ -600,11 +600,11 @@ std::set<std::string> values_on(const std::vector<std::pair<int, std::string>> &
 }
 
 const std::regex re_m620_15(R"(^M620\.15 C(-?\d+(\.\d+)?)$)");
-const std::regex re_reheat(R"(^M104 T(\d+) S(\d+) N0 ;Wipe tower reheat before wipe$)");
+const std::regex re_reheat(R"(^M104 T(\d+) S(\d+) N0 W ;Wipe tower reheat before wipe$)");
 
 // The rule the H2D hardware test asked for. For every M620.15 C<c> below the print temperature P of the
 // filament being loaded (the template's "M620.10 A1 ... P[new_filament_temp] S1" just before it), the
-// tower's "M104 T<e> S<P> N0 ;Wipe tower reheat before wipe" follows, before the toolchange ends
+// tower's "M104 T<e> S<P> N0 W ;Wipe tower reheat before wipe" follows, before the toolchange ends
 // ("; CP TOOLCHANGE END") and before any printing move (X/Y with positive E). Every reheat answers such
 // a cool-down (Bambu Studio writes it only after one).
 struct ReheatCheck
@@ -744,7 +744,7 @@ TEST_CASE("H2D PLA + PETG HF: M620.15 cools 10 degrees before the tower, the tow
     require_reheats(check);
     CHECK(check.cooled >= 2);
     CHECK(std::set<std::string>(check.reheat_lines.begin(), check.reheat_lines.end()) ==
-          std::set<std::string>{ "M104 T1 S220 N0 ;Wipe tower reheat before wipe", "M104 T0 S245 N0 ;Wipe tower reheat before wipe" });
+          std::set<std::string>{ "M104 T1 S220 N0 W ;Wipe tower reheat before wipe", "M104 T0 S245 N0 W ;Wipe tower reheat before wipe" });
     // None on the first layer.
     CHECK(values_on(lines_by_layer(gcode, re_reheat), true).empty());
 
