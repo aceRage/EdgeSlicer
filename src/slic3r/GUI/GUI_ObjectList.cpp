@@ -3393,22 +3393,24 @@ void ObjectList::boolean()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
-    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -1, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
+    // The parts in the object's own coordinates: combine_mesh_fff() applies no instance's
+    // matrix for an id that is neither -1 (every copy merged into one mesh) nor a copy's.
+    // The copies are kept as copies below; merged, they became one body of one copy.
+    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -2, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
 
-    // add mesh to model as a new object, keep the original object's name and config
+    // add mesh to model as a new object, keep the original object's name, config and copies
     Model* model = object->get_model();
     ModelObject* new_object = model->add_object();
     new_object->name = object->name;
     new_object->config.assign_config(object->config);
+    // Centred on its own volume, whose offset keeps it where the parts were in the object.
+    new_object->add_volume(mesh);
+    for (const ModelInstance* instance : object->instances)
+        new_object->add_instance(*instance);
     if (new_object->instances.empty())
         new_object->add_instance();
-    ModelVolume* new_volume = new_object->add_volume(mesh);
 
-    // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();
-    new_object->center_around_origin();
-    new_object->translate_instances(-new_object->origin_translation);
-    new_object->origin_translation = Vec3d::Zero();
 
     // BBS: notify it before move
     notify_instance_updated(m_objects->size() - 1);
