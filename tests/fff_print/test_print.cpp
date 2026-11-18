@@ -3338,3 +3338,15 @@ TEST_CASE("No sparse layers still refuses an object that rises past the lid clea
     print.set_status_silent();
     REQUIRE_THROWS_WITH(print.process(), Catch::Contains("No sparse layers"));
 }
+
+TEST_CASE("Print validation rejects a zero layer height", "[Print]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "layer_height", 0. } });
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const StringObjectException result = print.validate();
+    CHECK_FALSE(result.string.empty());
+    CHECK(result.opt_key == "layer_height");
+}
