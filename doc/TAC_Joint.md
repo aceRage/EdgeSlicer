@@ -27,7 +27,7 @@ Other negative volumes and modifiers stay editable, and the original body parts
 retain their settings. **Cut to parts** keeps its two bodies as separate parts.
 If applying a joint fails, the cut is refused and the source object is preserved.
 
-![Exported body meshes with applied TAC sockets and the original separate pin](images/tac_joint_mesh_application.png)
+![tac_joint_mesh_application](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/tac_joint_mesh_application.png?raw=true)
 
 Rendered from the exported STL meshes: both 15 mm halves of a 30 mm cube contain
 their sockets, and the separate pin retains its reference profile.
