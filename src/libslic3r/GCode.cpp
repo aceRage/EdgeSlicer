@@ -533,6 +533,10 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         if (pos + 1 == custom_gcode.size())
             break;
         from_pos = pos + 1;
+        // The tool number follows the whole prefix: "T", but also "M135 T", "M108 T" or the manual
+        // change's "; MANUAL_TOOL_CHANGE T". Read from pos + 1, a prefix longer than one character
+        // was never found to name the tool, and the change was written a second time after it.
+        const size_t number_pos = pos + tch_prefix.size();
         // only whitespace is allowed before the command
         while (--pos < custom_gcode.size() && custom_gcode[pos] != '\n') {
             if (!std::isspace(custom_gcode[pos]))
@@ -540,7 +544,7 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         }
         {
             // we should also check that the extruder changes to what was expected
-            std::istringstream ss(custom_gcode.substr(from_pos, std::string::npos));
+            std::istringstream ss(custom_gcode.substr(number_pos, std::string::npos));
             unsigned           num = 0;
             if (ss >> num)
                 ok = (num == next_extruder);
