@@ -1584,7 +1584,9 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
         for (LayerRegion *region : layer->regions()) {
             ExPolygons sparse;
             for (const Surface &s : region->fill_surfaces.surfaces)
-                if (s.surface_type == stInternal)
+                // stInternalVoid: with infill combination the sparse infill of several layers is printed on the top one
+                // of them; the others carry void there, which is just as unsupported.
+                if (s.surface_type == stInternal || s.surface_type == stInternalVoid)
                     sparse.push_back(s.expolygon);
             if (sparse.empty())
                 continue;

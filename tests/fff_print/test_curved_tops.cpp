@@ -3553,7 +3553,8 @@ TriangleMesh puck_with_rim(double rim_deg)
 
 // Owner, P5 (2026-11-17): on a steeper dome the lowest curved layer floated about a layer above the planar walls below it.
 // For caps whose rim slopes 10, 15, 20 and 30 degrees (the last two curve partly: rise or material beside), with default
-// settings and with the owner's overrides (angle ceiling and max angle 30, material beside allowed), on the Centauri Carbon:
+// settings and with the owner's overrides (angle ceiling and max angle 30, material beside allowed, and infill combination
+// on as in the Centauri Carbon process), on the Centauri Carbon:
 // every lowest curved bead rests on planar material (its planned bottom at most 1.5 layers above the planar top within 0.6
 // mm: its 1-2 x flow fills one layer, the rest is the surface's slope across that 0.6 mm; none without planar material under
 // it), and at most 1 % of the cap's surface no
@@ -3568,8 +3569,11 @@ TEST_CASE("Curved tops P5: the curved block rests on the planar stack along the 
                 const DevModeGuard dev(overrides);
                 ConfigItems        items;
                 if (overrides)
+                    // As the owner's steeper dome (Centauri Carbon process): infill combination on, so most layers under
+                    // the plateau carry void where the sparse infill of two layers is printed on the upper one.
                     items = { { "curved_tops_max_angle", "30" }, { "curved_tops_dev_angle_ceiling", "30" },
-                              { "curved_tops_dev_allow_material_beside", "1" }, { "curved_tops_pattern", "spiral" } };
+                              { "curved_tops_dev_allow_material_beside", "1" }, { "curved_tops_pattern", "spiral" },
+                              { "infill_combination", "1" } };
                 const TriangleMesh mesh = puck_with_rim(rim);
                 Print              print;
                 Model              model;
