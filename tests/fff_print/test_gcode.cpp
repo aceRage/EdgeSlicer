@@ -1334,6 +1334,57 @@ TEST_CASE("Z contouring: a wipe over a contoured line keeps to the line's height
     CHECK(digging == 0);
 }
 
+// Printing object by object, the nozzle went from the finished copy to the next at m_max_layer_z,
+// the top of the layers without the Z offset, while every layer is printed at print_z + z_offset:
+// with an offset above 0 the nozzle was driven down into the copy it had just finished.
+TEST_CASE("Between copies printed one by one the nozzle stays above the finished copy with a Z offset", "[GCode][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"skirt_loops",         0},
+        {"brim_type",           "no_brim"},
+        {"print_sequence",      "by object"},
+        {"z_offset",            0.3},
+        {"gcode_comments",      1},
+        {"machine_start_gcode", ""},
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    const std::string gcode = Test::gcode(print);
+
+    const size_t origin = gcode.find("move to origin position for next object");
+    REQUIRE(origin != std::string::npos);
+    // Every Z from the first copy's last extrusion to the travel to the next copy.
+    double z = 0., last_extrusion_z = -1., lowest_after = DBL_MAX;
+    std::istringstream lines(gcode.substr(0, origin));
+    for (std::string line; std::getline(lines, line);) {
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G1", 0) != 0 && code.rfind("G0", 0) != 0)
+            continue;
+        const auto word = [&code](char axis, double& value) {
+            const size_t at = code.find(std::string(" ") + axis);
+            if (at == std::string::npos)
+                return false;
+            value = std::atof(code.c_str() + at + 2);
+            return true;
+        };
+        double value = 0.;
+        if (word('Z', value)) {
+            z            = value;
+            lowest_after = std::min(lowest_after, z);
+        }
+        double x = 0., e = 0.;
+        if ((word('X', x) || word('Y', x)) && word('E', e) && e > 0.) {
+            last_extrusion_z = z;
+            lowest_after     = DBL_MAX;
+        }
+    }
+    REQUIRE(last_extrusion_z > 0.);
+    CHECK(last_extrusion_z == Approx(20.3));
+    CHECK(lowest_after >= last_extrusion_z - EPSILON);
+}
 // custom_gcode_changes_tool read the tool number from one character into the tool change prefix,
 // so with a prefix longer than "T" (the manual change's "; MANUAL_TOOL_CHANGE T", MakerWare's
 // "M135 T", Sailfish's "M108 T") a change the template already made was never seen, and the
