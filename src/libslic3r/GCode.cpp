@@ -5851,9 +5851,10 @@ GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, 
     }
 
     const double z_before_timelapse = m_writer.get_position()(2);
-    // Only the safe-position branch moves the head (in the firmware, M9711). The inline photo only
-    // triggers the shutter where the head already is, so the tracked position stays valid.
-    if (!skip_pos_pick)
+    // Only g-code that actually moves the toolhead can make the last commanded position unusable.
+    // Inert timelapse (comments, M971 shutter, M622/M623 flags) used to clear the position here
+    // and skip avoid-crossing on the layer's first travel. M9711 / G0-G3 / G28 still clear it.
+    if (GCodeProcessor::gcode_moves_toolhead(timelapse_gcode))
         m_writer.set_current_position_clear(false);
 
     double z_after_timelapse;
@@ -8133,7 +8134,8 @@ LayerResult GCode::process_layer(const Print& print,
             std::string timepals_gcode = insert_timelapse_gcode();
             if (!timepals_gcode.empty()) {
                 gcode += timepals_gcode;
-                m_writer.set_current_position_clear(false);
+                if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                    m_writer.set_current_position_clear(false);
                 // BBS: check whether custom gcode changes the z position. Update if changed
                 double temp_z_after_timepals_gcode;
                 if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
@@ -8151,7 +8153,8 @@ LayerResult GCode::process_layer(const Print& print,
             std::string timepals_gcode = insert_timelapse_gcode();
             if (!timepals_gcode.empty()) {
                 gcode += timepals_gcode;
-                m_writer.set_current_position_clear(false);
+                if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                    m_writer.set_current_position_clear(false);
                 double temp_z_after_timepals_gcode;
                 if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
                     Vec3d pos = m_writer.get_position();
@@ -10274,7 +10277,8 @@ LayerResult GCode::process_layer(const Print& print,
                     std::string timepals_gcode = insert_timelapse_gcode();
                     if (!timepals_gcode.empty()) {
                         gcode += timepals_gcode;
-                        m_writer.set_current_position_clear(false);
+                        if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                            m_writer.set_current_position_clear(false);
                         // BBS: check whether custom gcode changes the z position. Update if changed
                         double temp_z_after_timepals_gcode;
                         if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
@@ -10295,7 +10299,8 @@ LayerResult GCode::process_layer(const Print& print,
                 std::string timepals_gcode = insert_timelapse_gcode();
                 if (!timepals_gcode.empty()) {
                     gcode += timepals_gcode;
-                    m_writer.set_current_position_clear(false);
+                    if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                        m_writer.set_current_position_clear(false);
                     double temp_z_after_timepals_gcode;
                     if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
                         Vec3d pos = m_writer.get_position();
@@ -10661,7 +10666,8 @@ LayerResult GCode::process_layer(const Print& print,
                             std::string timepals_gcode = insert_timelapse_gcode();
                             if (!timepals_gcode.empty()) {
                                 gcode += timepals_gcode;
-                                m_writer.set_current_position_clear(false);
+                                if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                                    m_writer.set_current_position_clear(false);
                                 // BBS: check whether custom gcode changes the z position. Update if changed
                                 double temp_z_after_timepals_gcode;
                                 if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
@@ -10777,7 +10783,8 @@ LayerResult GCode::process_layer(const Print& print,
         std::string timepals_gcode = insert_timelapse_gcode();
         if (!timepals_gcode.empty()) {
             gcode += timepals_gcode;
-            m_writer.set_current_position_clear(false);
+            if (GCodeProcessor::gcode_moves_toolhead(timepals_gcode))
+                m_writer.set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_timepals_gcode;
             if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
