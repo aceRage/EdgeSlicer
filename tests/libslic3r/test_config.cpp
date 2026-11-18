@@ -1139,6 +1139,38 @@ TEST_CASE("fill_missing_project_keys skips keys handle_legacy drops on load", "[
     REQUIRE_THAT(project.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.2, 1e-9));
 }
 
+TEST_CASE("Per-filament text lists a project leaves out read as their fallback", "[Config][CLI]")
+{
+    // A Bambu A1 mini project without filament_ids crashed --slice --export-3mf: the plate data
+    // read filament_ids->get_at(id) on the empty list.
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FFFFFF", "#202020"};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "");
+    CHECK(cfg.filament_string_at("filament_colour", 1, "#FFFFFF") == "#202020");
+    // Past the end reads the first entry, as get_at() does.
+    CHECK(cfg.filament_string_at("filament_colour", 5, "#FFFFFF") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("filament_colour", 0, "#000000") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("not_an_option", 0, "fallback") == "fallback");
+
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values = {"GFA00", "GFS00"};
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "GFS00");
+}
+
+TEST_CASE("A support filament's type reads without filament_ids", "[Config][CLI]")
+{
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_type", true)->values  = {"PLA", "PA"};
+    cfg.option<ConfigOptionBools>("filament_is_support", true)->values = {false, true};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    std::string shown;
+    CHECK(cfg.get_filament_type(shown, 0) == "PLA");
+    CHECK(cfg.get_filament_type(shown, 1) == "PA-S");
+    CHECK(shown == "Sup.PA");
+}
+
 TEST_CASE("missing_project_keys is empty when the project already has every listed key", "[Config][CLI]")
 {
     DynamicPrintConfig project;
