@@ -1298,7 +1298,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/SendMultiMachinePage.cpp                  # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/DeviceTab/uiDeviceUpdateVersion.cpp       # #define VERSION_STR breaks paho's async_client.h in neighbours
     Utils/Bonjour.cpp                             # optional becomes ambiguous (std vs boost) after a neighbour's using-directive
-    GUI/BitmapCache.cpp                           # defines NANOSVG(RAST)_IMPLEMENTATION before its include
+    GUI/BitmapCache.cpp                           # defines NANOSVGRAST_IMPLEMENTATION before its include
     GUI/GLTexture.cpp                             # defines STB_DXT_IMPLEMENTATION before its include
     GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
