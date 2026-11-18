@@ -36,6 +36,7 @@
 #include "GCode/PreCoolingInjector.hpp"
 #include "GCode/HeadCollisionCheck.hpp"
 #include "HeadClearance.hpp"
+#include "CurvedTops.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -532,6 +533,10 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         if (pos + 1 == custom_gcode.size())
             break;
         from_pos = pos + 1;
+        // The tool number follows the whole prefix: "T", but also "M135 T", "M108 T" or the manual
+        // change's "; MANUAL_TOOL_CHANGE T". Read from pos + 1, a prefix longer than one character
+        // was never found to name the tool, and the change was written a second time after it.
+        const size_t number_pos = pos + tch_prefix.size();
         // only whitespace is allowed before the command
         while (--pos < custom_gcode.size() && custom_gcode[pos] != '\n') {
             if (!std::isspace(custom_gcode[pos]))
@@ -539,7 +544,7 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         }
         {
             // we should also check that the extruder changes to what was expected
-            std::istringstream ss(custom_gcode.substr(from_pos, std::string::npos));
+            std::istringstream ss(custom_gcode.substr(number_pos, std::string::npos));
             unsigned           num = 0;
             if (ss >> num)
                 ok = (num == next_extruder);
@@ -722,6 +727,9 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     // Calculate wipe speed
     double wipe_speed = config.role_based_wipe_speed ? writer.get_current_speed() / 60.0 : config.get_abs_value("wipe_speed");
     wipe_speed        = std::max(toolchange_wipe_speed(gcodegen, toolchange, wipe_speed), 10.0);
+    // EdgeSlicer, curved tops: the same cap as Wipe::wipe() below.
+    if (this->curved_top)
+        wipe_speed = std::min(wipe_speed, this->curved_wipe_speed_cap);
 
     // Process wipe path & calculate wipe path length
     double   wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(config.wipe_distance.get_at(extruder_id)));
@@ -752,6 +760,14 @@ void Wipe::update_path(const ExtrusionPaths &paths, bool reverse, double base_z)
 {
     reset_path();
     const bool contoured = std::any_of(paths.begin(), paths.end(), [](const ExtrusionPath &p) { return p.z_contoured(); });
+    this->curved_top = std::any_of(paths.begin(), paths.end(),
+                                   [](const ExtrusionPath &p) { return p.z_contoured() && p.z_contour->curved_top; });
+    // Curved tops P3: the wipe cap of the first curved path (all paths of a block share it).
+    for (const ExtrusionPath &p : paths)
+        if (p.z_contoured() && p.z_contour->curved_top) {
+            this->curved_wipe_speed_cap = curved_tops_wipe_speed_cap(*p.z_contour);
+            break;
+        }
     for (const ExtrusionPath& extrusion_path : paths) {
         const size_t first_new = path.points.size();
         path.append(extrusion_path.polyline);
@@ -782,6 +798,10 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
     _wipe_speed = toolchange_wipe_speed(gcodegen, toolchange, _wipe_speed);
     if (_wipe_speed < 10)
         _wipe_speed = 10;
+    // EdgeSlicer, curved tops: a wipe back along a curved line moves Z with it, so it keeps to the
+    // curved paths' speed cap (design 3.2, "Wipes"). Never set for a planar or ZAA line.
+    if (this->curved_top)
+        _wipe_speed = std::min(_wipe_speed, this->curved_wipe_speed_cap);
 
     // SoftFever: allow 100% retract before wipe
     if (length >= 0) {
@@ -2851,7 +2871,10 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
             }
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between)
+            // EdgeSlicer: a curved-tops block reaches down into the layers it emptied.
+            const bool curved_tops_block = layer_to_print.object_layer != nullptr && layer_to_print.object_layer->curved_tops_block;
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between &&
+                ! curved_tops_block)
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
@@ -3251,34 +3274,225 @@ WipeTowerType GCode::wipe_tower_type() const
 // (resources/head_clearance) and reports contact as a slicing warning. Never changes the G-code.
 // Skipped entirely, before any work, when no object is contoured: planar output and planar slicing
 // time are untouched.
+// EdgeSlicer, curved tops (design D2): it also runs for objects with curved tops on, with the same
+// head the planner used (resolve_head_clearance). A contact on a print that carries a curved block
+// stops the export with an error; a Z contouring only print keeps the warning below. Every extrusion in
+// the G-code is an obstacle, support and side-stabilizer extrusions included (curved tops P2 lets an
+// object with supports keep its curved top when the planner finds them out of the head's way).
 static void check_head_clearance(Print &print, const GCodeProcessorResult &result)
 {
+    // An object with curved tops on whose planner refused prints planar (and was told why): it is not
+    // checked for that, as no planar print is.
     bool contoured = false;
-    for (const PrintObject *object : print.objects())
-        if (object->need_z_contouring()) {
+    std::vector<const PrintObject *> curved_objects;
+    for (const PrintObject *object : print.objects()) {
+        if (object->need_z_contouring())
             contoured = true;
-            break;
-        }
-    if (!contoured)
+        if (object->config().curved_tops_enabled.value && has_curved_tops_block(*object))
+            curved_objects.push_back(object);
+    }
+    if (!contoured && curved_objects.empty())
         return;
 
+    // Curved tops P3: developer overrides of the curved objects. A contact is downgraded to a warning only
+    // when every curved object asks for it; the same for a missing head model.
+    bool any_dev = false, contact_warning_only = !curved_objects.empty(), unchecked_ok = !curved_objects.empty();
+    for (const PrintObject *object : curved_objects) {
+        const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+        // A block planned with other developer overrides (or another Developer mode) than are in force now is
+        // never exported: the guard record's tail says what the planner used.
+        const std::string &used     = object->curved_tops_guard_inputs_used();
+        const size_t       dev_pos  = used.find(";dev=");
+        const std::string  used_dev = dev_pos == std::string::npos ? std::string() : used.substr(dev_pos + 5);
+        if (used_dev != dev.record())
+            throw Slic3r::SlicingError(Slic3r::format(_(L("Curved tops: %1% was sliced with other developer override settings (or "
+                                                          "another Developer mode) than are in force now. Slice again.")),
+                                                      object->model_object()->name),
+                                       object->id().id);
+        any_dev |= dev.active;
+        contact_warning_only &= dev.active && dev.contact_warning_only;
+        unchecked_ok &= dev.active && dev.allow_unverified_head;
+    }
+    auto object_names = [&curved_objects]() {
+        std::string names;
+        for (const PrintObject *object : curved_objects)
+            names += (names.empty() ? "" : ", ") + object->model_object()->name;
+        return names;
+    };
+
     const std::string &printer_model = print.config().printer_model.value;
-    const auto         head          = head_clearance_for_printer_model(printer_model);
+    const auto         head          = resolve_head_clearance(print.config());
     if (!head) {
         BOOST_LOG_TRIVIAL(info) << "Head clearance check: no head model for printer_model \"" << printer_model << "\", skipped";
+        if (!curved_objects.empty() && unchecked_ok) {
+            print.active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL,
+                                          Slic3r::format(_(L("Curved tops (developer override): %1% has a curved top that was NOT checked for "
+                                                             "head contacts: there is no print head data for \"%2%\". Do not print it "
+                                                             "unattended.")),
+                                                         object_names(), printer_model),
+                                          PrintStateBase::SlicingCurvedTopsHeadCheck);
+            return;
+        }
+        // The planner never builds a curved block without a head; should one exist, it is unchecked.
+        if (!curved_objects.empty())
+            throw Slic3r::SlicingError(Slic3r::format(_(L("Curved tops: %1% has a curved top but there is no print head data for \"%2%\" "
+                                                          "to check it against. The G-code was not exported.")),
+                                                      curved_objects.front()->model_object()->name, printer_model),
+                                       curved_objects.front()->id().id);
         return;
     }
 
+    // Curved tops: an extruding nozzle follows a sloped surface, so its tip land meets the neighbouring
+    // bead of the line it is laying next to (design 2.1: "the tip land ploughing the neighbouring bead"
+    // is a quality limit, not a crash). The check allows exactly that: up to the steepest slope the
+    // block really follows (not the configured maximum), within the land only, and only for extrusions
+    // on the block's layer - the last printed layer, as curved tops runs on one object, by layer, with
+    // no Z contouring on it. Travels, wipes, the nozzle cone and the boxes are checked as for Z contouring.
+    HeadCollisionParams params;
+    if (!curved_objects.empty()) {
+        for (const PrintObject *object : curved_objects)
+            params.extrusion_surface_slope_deg = std::max(params.extrusion_surface_slope_deg,
+                                                          double(object->layers().back()->curved_tops_slope_deg));
+        unsigned int last_layer = 0;
+        for (const GCodeProcessorResult::MoveVertex &m : result.moves)
+            if (m.type == EMoveType::Extrude && !m.prepare_stage)
+                last_layer = std::max(last_layer, m.layer_id);
+        params.extrusion_surface_slope_min_layer = last_layer;
+        // P3: the nearest head box over the block's layer, measured only (the summary and the log say it).
+        params.measure_clearance_from_layer = last_layer;
+        // P4: the nozzle (tip and flank, nothing else) may pass through printed material on the block's layer
+        // up to the smallest tolerance of the curved objects. Never on a plate that also has Z contouring:
+        // its check keeps exactly its own numbers.
+        if (!contoured) {
+            double tol = std::numeric_limits<double>::max();
+            // Review M2: each object's tolerance in force, capped by the head's printed record as the planner had it.
+            for (const PrintObject *object : curved_objects) {
+                const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+                tol = std::min(tol, curved_tops_nozzle_tolerance(object->config(), curved_tops_head_limits(print, dev), dev).used);
+            }
+            if (tol > 0. && tol < std::numeric_limits<double>::max()) {
+                params.nozzle_contact_tolerance = tol + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM;
+                params.nozzle_contact_min_layer = last_layer;
+            }
+        }
+    }
     const auto                t0     = std::chrono::steady_clock::now();
-    const HeadCollisionReport report = check_head_collisions(result.moves, *head, HeadCollisionParams(),
+    const HeadCollisionReport report = check_head_collisions(result.moves, *head, params,
                                                              [&print]() { if (print.canceled()) throw CanceledException(); });
     BOOST_LOG_TRIVIAL(info) << "Head clearance check (" << head->id << "): " << report.moves_checked << " moves, "
                             << report.hit_moves << " with contact, deepest " << report.max_depth << " mm, "
                             << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s";
-    if (report.hit_moves == 0)
-        return;
-
     auto mm = [](double v) { return float_to_string_decimal_point(v, 2); };
+    // The nearest head box over the curved block (curved prints only).
+    std::string nearest;
+    if (!curved_objects.empty() && std::isfinite(report.min_box_clearance)) {
+        nearest = Slic3r::format(_(L("Nearest head part over the curved layer: %1%, %2% mm above the printed material (tip at X %3% Y %4% Z %5%).")),
+                                 report.min_box_clearance_part, mm(report.min_box_clearance),
+                                 mm(report.min_box_clearance_position.x()), mm(report.min_box_clearance_position.y()),
+                                 mm(report.min_box_clearance_position.z()));
+        BOOST_LOG_TRIVIAL(info) << "Curved tops head check: hits " << report.hit_moves << ", deepest " << report.max_depth
+                                << " mm, min box clearance " << report.min_box_clearance << " mm (" << report.min_box_clearance_part << ")";
+    }
+    // P4: nozzle contacts within the nozzle contact tolerance, said as information (with how they compare to
+    // what has been printed on this printer, when its head file records that).
+    std::string tolerated;
+    if (report.tolerated_moves > 0) {
+        tolerated = Slic3r::format(_(L("The nozzle passes up to %1% mm through printed material in %2% moves (nozzle contact tolerance "
+                                       "%3% mm); no other head part touches in those moves.")),
+                                   mm(report.tolerated_max_depth), report.tolerated_moves,
+                                   mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
+        // Curved tops on any printer: a head with the user's values carries the user's own record, never the file's.
+        const double verified = head->user_values ? head->user_nozzle_contact_mm :
+                                head->curved_tops_verified_for(printer_model) ? head->curved_tops_verified->nozzle_contact_mm : 0.;
+        const std::string verified_on = head->user_values ? _(L("your value in the printer settings")) :
+                                        head->curved_tops_verified ? head->curved_tops_verified->on : std::string();
+        // Never silent (review M2): with no record (developer override only) or beyond it, say so.
+        if (verified <= 0.)
+            tolerated += " " + _(L("No nozzle contact has been printed with this print head yet (developer override). Watch the first print."));
+        else if (double(report.tolerated_max_depth) > verified + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM)
+            tolerated += " " + Slic3r::format(_(L("That is deeper than has been printed on this printer so far (%1% mm, %2%). Watch the "
+                                                  "first print.")),
+                                              mm(verified), verified_on);
+        BOOST_LOG_TRIVIAL(info) << "Curved tops head check: " << report.tolerated_moves << " moves with nozzle contact within the tolerance, deepest "
+                                << report.tolerated_max_depth << " mm";
+    }
+    if (report.hit_moves == 0) {
+        if (any_dev || !tolerated.empty())
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          (any_dev ? _(L("Curved tops head check (developer overrides active):")) : _(L("Curved tops head check:"))) +
+                                              " " + (tolerated.empty() ? _(L("no head contact found.")) : tolerated) +
+                                              (nearest.empty() ? std::string() : " " + nearest),
+                                          PrintStateBase::SlicingCurvedTopsHeadCheck);
+        return;
+    }
+
+    if (!curved_objects.empty()) {
+        if (contact_warning_only) {
+            // P3, developer override: the contact is reported, impossible to miss, and the G-code exported.
+            std::string msg = Slic3r::format(_(L("EXPECTED CONTACT - do not print unattended. Curved tops (developer override, contact is a "
+                                                 "warning only): %1% moves bring the print head into material that is already printed, "
+                                                 "up to %2% mm deep (objects: %3%; head model: %4%). The G-code WAS exported.")),
+                                             report.hit_moves, mm(report.max_depth), object_names(), head->name);
+            // Every head part that touched, with its count and deepest contact, so a box hit never hides behind
+            // the nozzle hits listed below; and whether anything other than the nozzle tip touched at all.
+            std::string by_part, other_parts;
+            for (const HeadCollisionPartStat &ps : report.parts) {
+                if (ps.hit_moves == 0)
+                    continue;
+                const std::string one = Slic3r::format(_(L("%1%: %2% moves, up to %3% mm")), ps.part, ps.hit_moves, mm(ps.max_depth));
+                by_part += (by_part.empty() ? "" : "; ") + one;
+                if (ps.part != "nozzle tip")
+                    other_parts += (other_parts.empty() ? "" : "; ") + one;
+            }
+            msg += "\n" + _(L("By head part:")) + " " + by_part + ".";
+            msg += "\n" + (other_parts.empty() ? _(L("Only the nozzle tip touched; no other head part did.")) :
+                                                 _(L("NOT ONLY THE NOZZLE TIP: other head parts touched too:")) + " " + other_parts + ".");
+            if (!tolerated.empty())
+                msg += "\n" + _(L("Besides those:")) + " " + tolerated;
+            const size_t shown_dev = std::min<size_t>(report.hits.size(), 5);
+            for (size_t i = 0; i < shown_dev; ++i) {
+                const HeadCollisionHit &h = report.hits[i];
+                msg += "\n" + Slic3r::format(_(L("Layer %1%, X %2% Y %3% Z %4%: %5% during %6%, %7% mm.")), h.layer_id + 1,
+                                             mm(h.position.x()), mm(h.position.y()), mm(h.position.z()),
+                                             h.part == "nozzle" ? _(L("nozzle")) : h.part,
+                                             h.travel ? _(L("travel")) : _(L("extrusion")), mm(h.depth));
+            }
+            if (!nearest.empty())
+                msg += "\n" + nearest;
+            BOOST_LOG_TRIVIAL(warning) << msg;
+            print.active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, msg, PrintStateBase::SlicingCurvedTopsHeadCheck);
+            return;
+        }
+        // D2: a contact on a curved print is an error. The planner used this same head, so a hit means
+        // something its rules did not cover; exporting it would risk a crash into the part.
+        std::string names;
+        for (const PrintObject *object : curved_objects)
+            names += (names.empty() ? "" : ", ") + object->model_object()->name;
+        std::string err = Slic3r::format(_(L("Curved tops: %1% moves would bring the print head into material that is already printed, "
+                                             "up to %2% mm deep (objects with curved tops: %3%; head model: %4%).")),
+                                         report.hit_moves, mm(report.max_depth), names, head->name);
+        if (!head->calibrated)
+            err += " " + _(L("The head model is an estimate, not a measurement."));
+        // P4: what the error counts, and what was tolerated besides.
+        if (params.nozzle_contact_tolerance > 0.)
+            err += " " + Slic3r::format(_(L("These are contacts deeper than the nozzle contact tolerance (%1% mm) or by a head part other "
+                                            "than the nozzle.")),
+                                        mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
+        if (!tolerated.empty())
+            err += " " + _(L("Besides those:")) + " " + tolerated;
+        const size_t shown_err = std::min<size_t>(report.hits.size(), 3);
+        for (size_t i = 0; i < shown_err; ++i) {
+            const HeadCollisionHit &h = report.hits[i];
+            err += "\n" + Slic3r::format(_(L("Layer %1%, X %2% Y %3% Z %4%: %5% during %6%, %7% mm.")), h.layer_id + 1,
+                                         mm(h.position.x()), mm(h.position.y()), mm(h.position.z()),
+                                         h.part == "nozzle" ? _(L("nozzle")) : h.part,
+                                         h.travel ? _(L("travel")) : _(L("extrusion")), mm(h.depth));
+        }
+        err += "\n" + _(L("The G-code was not exported. Turn curved tops off for this object, or lower its maximum angle or its number "
+                          "of curved layers."));
+        throw Slic3r::SlicingError(err, curved_objects.front()->id().id);
+    }
+
     std::string msg = Slic3r::format(_(L("Z contouring: %1% moves would bring the print head into material that is already printed, "
                                          "up to %2% mm deep (head model: %3%).")),
                                      report.hit_moves, mm(report.max_depth), head->name);
@@ -3488,8 +3702,14 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     }
 
     m_processor.finalize(true);
-    // EdgeSlicer: check-only head clearance pass. Returns at once unless an object is Z contoured.
-    check_head_clearance(*print, m_processor.result());
+    // EdgeSlicer: check-only head clearance pass. Returns at once unless an object is Z contoured or
+    // has curved tops on. On a curved-tops print a contact is an error: no G-code file is left behind.
+    try {
+        check_head_clearance(*print, m_processor.result());
+    } catch (const Slic3r::SlicingError &) {
+        boost::nowide::remove(path_tmp.c_str());
+        throw;
+    }
     //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
     DoExport::update_print_estimated_stats(m_processor, m_writer.extruders(), print->m_print_statistics, print->config());
     if (result != nullptr) {
@@ -3955,13 +4175,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
     m_layer_count = 0;
+    // EdgeSlicer, curved tops: the planar layers a curved block emptied on purpose are not
+    // printed (no layer change), so they are not counted either; the printer's layer x / total and
+    // the progress then end at the real count. Always false with curved tops off.
+    auto curved_tops_emptied = [](const Layer *layer) {
+        const Layer *top = layer->object()->layers().empty() ? nullptr : layer->object()->layers().back();
+        return top != nullptr && top != layer && top->curved_tops_block && !layer->has_extrusions();
+    };
     if (print.config().print_sequence == PrintSequence::ByObject) {
         // Add each of the object's layers separately.
         for (auto object : print.objects()) {
             std::vector<coordf_t> zs;
             zs.reserve(object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
             std::sort(zs.begin(), zs.end());
@@ -3980,7 +4208,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         for (auto object : print.objects()) {
             zs.reserve(zs.size() + object->layers().size() + object->support_layers().size());
             for (auto layer : object->layers())
-                zs.push_back(layer->print_z);
+                if (!curved_tops_emptied(layer))
+                    zs.push_back(layer->print_z);
             for (auto layer : object->support_layers())
                 zs.push_back(layer->print_z);
         }
@@ -5219,7 +5448,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     } else {
                         file.write(this->retract());
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z));
+                    // m_max_layer_z is the top of the layers without the Z offset, which every layer is
+                    // printed with (change_layer): with an offset above 0 the nozzle went down into the
+                    // copy just finished.
+                    file.write(m_writer.travel_to_z(m_max_layer_z + m_config.z_offset.value));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
@@ -6534,32 +6766,28 @@ void GCode::_print_first_layer_extruder_temperatures(
             if (active_temp > 0)
                 file.write(m_writer.set_temperature(active_temp, wait, active_tool));
         } else {
-            // Set temperatures of all the printing extruders.
-            bool is_active   = true;
-            int  target_temp = -1;
-            int  target_tool = -1;
+            // Set temperatures of all the printing extruders, the first printing one last. Every other tool was set
+            // only with ooze prevention (to standby): without it only the highest-numbered tool was, so the tool
+            // that prints first could start cold.
+            int target_temp = -1;
             for (unsigned int tool_id : print.extruders()) {
-                is_active = true;
-                int temp  = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
-                                         ConfigFlowDomain::Filament, tool_id);
-                if (print.config().ooze_prevention.value && tool_id != first_printing_extruder_id) {
-                    is_active = false;
+                int temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
+                                        ConfigFlowDomain::Filament, tool_id);
+                if (tool_id == first_printing_extruder_id) {
+                    target_temp = temp;
+                    continue;
+                }
+                if (print.config().ooze_prevention.value) {
                     if (print.config().idle_temperature.get_at(tool_id) == 0)
                         temp += print.config().standby_temperature_delta.value;
                     else
                         temp = print.config().idle_temperature.get_at(tool_id);
                 }
-                if (temp > 0) {
-                    if (is_active) {
-                        target_temp = temp;
-                        target_tool = tool_id;
-                    } else
-                        file.write(m_writer.set_temperature(temp, wait, tool_id));
-                }
+                if (temp > 0)
+                    file.write(m_writer.set_temperature(temp, wait, tool_id));
             }
-            if (target_temp != -1 && target_tool != -1) {
-                file.write(m_writer.set_temperature(target_temp, wait, target_tool));
-            }
+            if (target_temp > 0)
+                file.write(m_writer.set_temperature(target_temp, wait, first_printing_extruder_id));
         }
     }
 }
@@ -11377,6 +11605,11 @@ std::string GCode::extrude_path(ExtrusionPath path, std::string description, dou
             m_wipe.path.reverse();
         }
     }
+    // EdgeSlicer, curved tops: the block's last path. Its wipe path is in place, so the exit wipe
+    // runs back along it at its heights before the lift.
+    if (path.z_contoured() && path.z_contour->curved_top && path.z_contour->exit_lift)
+        gcode += this->curved_tops_exit_lift(path.role(), m_nominal_z + double(path.z_offset) * double(path.height) +
+                                                              double(path.z_contour->safe_z_delta));
 
     return gcode;
 }
@@ -11733,6 +11966,16 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool   zaa_contoured = path.z_contoured();
     const double zaa_base_z    = m_nominal_z + double(path.z_offset) * double(path.height);
     const double zaa_first_z   = zaa_contoured ? zaa_base_z + double(path.z_contour->z_at(path.first_point())) : zaa_base_z;
+    // EdgeSlicer, curved tops (CurvedTops.cpp): a conformal path is reached from above. Lift to
+    // a Z that clears the whole surface, travel in XY there and only then descend vertically, so
+    // the nozzle never crosses the curved layers it has just printed. False for every ZAA path.
+    const bool   curved_top    = zaa_contoured && path.z_contour->curved_top;
+    const double curved_safe_z = curved_top ? zaa_base_z + double(path.z_contour->safe_z_delta) : zaa_base_z;
+    // Curved tops P3: the developer overrides in force, listed before the block's first path.
+    if (curved_top && !path.z_contour->block_comment.empty())
+        gcode += path.z_contour->block_comment;
+    if (curved_top)
+        gcode += this->curved_tops_travel_to(path.first_point(), path.role(), "move to first " + description + " point", curved_safe_z);
 
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
@@ -11747,7 +11990,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // Move to first point of extrusion path
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
-    if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
+    // Curved tops: curved_tops_travel_to() above already went there; the ZAA block below descends.
+    if (!curved_top && (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel)) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
@@ -12101,6 +12345,17 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             }
         }
     }
+    // EdgeSlicer, Fine detail (P2): a wall line narrower than the Thinnest line (min_bead_width), which only Fine detail
+    // makes on Arachne and only its thin-wall detection makes on Classic, prints no faster than fine_detail_speed.
+    // A 0.22 mm line from a 0.4 nozzle at the outer wall speed is the fragile case. Off never enters.
+    if (m_config.fine_detail.value != FineDetailLevel::Off && m_config.fine_detail_speed.value > 0. && is_perimeter(path.role())) {
+        const double thinnest_line = m_config.min_bead_width.value * 0.01 * min_physical_nozzle_diameter(m_config) +
+                                     double(path.height) * (1. - 0.25 * PI);
+        if (double(path.width) < thinnest_line - EPSILON && speed > m_config.fine_detail_speed.value) {
+            speed         = m_config.fine_detail_speed.value;
+            speed_setting = "fine_detail_speed";
+        }
+    }
     // Override skirt speed if set
     if (path.role() == erSkirt) {
         const double skirt_speed = m_config.skirt_speed.value; // a plain float option: same value get_abs_value("skirt_speed") returned
@@ -12279,6 +12534,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
+    // EdgeSlicer, curved tops: every conformal move also moves Z, and a printer's Z axis is far
+    // slower than XY (Elegoo Centauri Carbon: 20 mm/s, 100-500 mm/s2), so the role speed would only be
+    // throttled segment by segment by the firmware, i.e. stutter. Cap the path speed instead.
+    if (curved_top)
+        F = std::min(F, curved_tops_speed_cap(*path.z_contour) * 60.);
 
     // Snapmaker (feedrate guard): hand the writer the provenance of this feedrate and the
     // preferred substitute, so that if F turns out to be non-positive / non-finite the guard can
@@ -12351,7 +12611,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // filament_max_volumetric_speed cap that `speed` has already been clamped to.
     // Not ironing: its flow is not scaled for the local height (contour_z_extrusion_ratio), and its path.height is
     // the ironing line's own few thousandths of a mm, not a layer's, so the ratio would slow it to a crawl.
-    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value && path.role() != erIroning;
+    // Not curved tops either: their Z is a placement, not a bead height.
+    const bool   zaa_speed_scaling = zaa_contoured && !curved_top && m_config.zaa_speed_scaling.value && path.role() != erIroning;
     const double zaa_h_nominal     = double(path.height);
     const double zaa_max_vol       = filament_max_volumetric_speed;
     // The local height that set the F currently in force, mm; <= 0 means "no scaled F emitted yet
@@ -12635,7 +12896,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                         // reads as fuzz. The trapezoid rule is the exact volume for a linear ramp.
                         const double z_prev = double(path.z_contour->z_at(line.a));
                         const double z_mean = 0.5 * (z_prev + z_diff);
-                        const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                        // Curved tops: z is a placement, not a bead height; the flow is stored per sample.
+                        const double ratio  = curved_top ?
+                            0.5 * (double(path.z_contour->flow_at(line.a)) + double(path.z_contour->flow_at(line.b))) :
+                            contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                         const double e      = dE * ratio;
                         // ZAA speed scaling. The segment's local height is exactly the height the
                         // E above was derived from (the trapezoid mean), so scaling F by the same
@@ -12787,6 +13051,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 continue;
             path_length += line_length;
             double new_speed = pre_processed_point.speed * 60.0;
+            // EdgeSlicer, curved tops: the overhang speeds are worked out from the role speed, so the
+            // curved paths' cap (see F above) applies to them too.
+            if (curved_top)
+                new_speed = std::min(new_speed, curved_tops_speed_cap(*path.z_contour) * 60.);
 
             if ((std::abs(last_set_speed - new_speed) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
                 // ORCA: Adaptive PA code segment when adjusting PA within the same feature
@@ -12856,7 +13124,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 const double z_diff = double(path.z_contour->z_at(processed_point.p));
                 const double z_prev = double(path.z_contour->z_at(pre_processed_point.p));
                 const double z_mean = 0.5 * (z_prev + z_diff);
-                const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                const double ratio  = curved_top ?
+                    0.5 * (double(path.z_contour->flow_at(pre_processed_point.p)) + double(path.z_contour->flow_at(processed_point.p))) :
+                    contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
                 const double e      = dE * ratio;
                 // ZAA speed scaling on top of the per-point dynamic speed: the reference is
                 // last_set_speed, i.e. the F the overhang / curled-perimeter estimator just put in
@@ -13159,6 +13429,72 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         this->set_last_pos(travel.points.back());
     }
 
+    return gcode;
+}
+
+// EdgeSlicer, curved tops (CurvedTops.cpp): the travel to the first point of a conformal path.
+// The nozzle sits on (or just above) curved lines laid moments ago, so the order is fixed:
+//  1. retract, and wipe if enabled, where the nozzle is: the wipe runs back along the line just
+//     laid at that line's own heights (Wipe::update_path), so it has to happen before the lift;
+//  2. lift straight up to safe_z, which clears the highest curved surface by SAFE_LIFT_MM;
+//  3. travel in XY, level, at safe_z: no avoid-crossing detour (it would drop to the layer Z at its
+//     first point) and no z-hop of any type on top (a slope lift or spiral lift would merge Z into
+//     the XY move, and a spiral circles at the surface; safe_z is the hop);
+//  4. (the caller) descend vertically to the path's first Z.
+// Before this, the lift came first and travel_to() then retracted and wiped, which put the nozzle
+// back down on the surface, and the travel climbed from there to safe_z in one diagonal move
+// through the curved lines (hand test 2026-11-15).
+std::string GCode::curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z)
+{
+    std::string gcode;
+    m_need_change_layer_lift_z = false;
+    if (m_last_pos_defined && m_last_pos == point)
+        return gcode; // no XY move: the caller just sets the path's Z
+
+    // Travel acceleration and jerk, as travel_to() sets them for a travel off the first layer.
+    unsigned int acceleration_to_set = 0;
+    double       jerk_to_set         = 0.;
+    if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0)
+        acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+    if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0)
+        jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+    if (m_writer.get_gcode_flavor() == gcfKlipper) {
+        gcode += m_writer.set_accel_and_jerk(acceleration_to_set, jerk_to_set);
+    } else {
+        gcode += m_writer.set_travel_acceleration(acceleration_to_set);
+        gcode += m_writer.set_jerk_xy(jerk_to_set);
+    }
+
+    // 1. Retract and wipe at the surface.
+    gcode += this->retract(false, false, LiftType::NormalLift, role);
+    // 2. Straight up.
+    const double travel_z = std::max(safe_z, m_writer.get_position().z());
+    if (m_writer.get_position().z() < safe_z - EPSILON)
+        gcode += m_writer.travel_to_z(safe_z, "curved tops: lift clear of the surface", true);
+    // The safe Z is the hop: drop the one retract() asked for, of whatever z_hop_types.
+    m_writer.cancel_pending_lift();
+    m_avoid_crossing_perimeters.reset_once_modifiers();
+
+    m_writer.add_object_change_labels(gcode);
+    // 3. Level, straight.
+    gcode += m_writer.travel_to_xyz(Vec3d(this->point_to_gcode(point).x(), this->point_to_gcode(point).y(), travel_z), comment);
+    this->set_last_pos(point);
+    return gcode;
+}
+
+// EdgeSlicer, curved tops (design R5): the nozzle ends the block's last path at the surface, maybe
+// at the rim with the high part of the surface under the head. Whatever comes next (the end G-code,
+// a travel to another island) must not start from there: retract and wipe in place (the wipe runs
+// back along the line at its heights and is speed capped), lift straight up to safe_z, drop the
+// z-hop retract() asked for (safe_z is the hop) and let the next travel go straight, since an
+// avoid-crossing detour would drop to the layer Z at its first point.
+std::string GCode::curved_tops_exit_lift(ExtrusionRole role, double safe_z)
+{
+    std::string gcode = this->retract(false, false, LiftType::NormalLift, role);
+    if (m_writer.get_position().z() < safe_z - EPSILON)
+        gcode += m_writer.travel_to_z(safe_z, "curved tops: lift clear after the curved block", true);
+    m_writer.cancel_pending_lift();
+    m_avoid_crossing_perimeters.disable_once();
     return gcode;
 }
 

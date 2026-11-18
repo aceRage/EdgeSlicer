@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Slic3r
 {
@@ -74,6 +75,11 @@ public:
         int   category               = 0;     // filament_adhesiveness_category; one purge block per category
         float filament_change_length = 0.f;   // mm of filament rammed when it leaves its nozzle; 0 when no nozzle change is planned
         float filament_diameter      = 1.75f;
+        // PR-C, a mixed-diameter plate: the filament's nozzle (its block is (category, nozzle)), its tower line width and the
+        // slab its purge lies on. 0 = the tower's nozzle, width and layer height.
+        float nozzle_diameter        = 0.f;
+        float line_width             = 0.f;
+        float slab_height            = 0.f;
     };
     // Depth of the Type1 purge stack at the given width (also the rectangle-wall depth): each
     // purge is whole lines at the block infill gap, one block per adhesiveness category sized by
@@ -308,6 +314,33 @@ public:
     // Optional: printers without a grouping leave it unset.
     void set_nozzle_group_result(std::shared_ptr<const MultiNozzleUtils::LayeredNozzleGroupResult> group) { m_nozzle_group = std::move(group); }
 
+    // PR-C, the tower side of AdaptiveLayerMerge (Bambu Studio 2.9.1 set_multi_diameter_print(),
+    // set_tower_grid_layer_height(), set_per_nozzle_tower_params(); Print.cpp:4222-4225). One filament's Z ladder as the
+    // object planner cuts it (PrintObject::compute_adaptive_merge_groups()): the printable window of its nozzle and the
+    // base layers one of its slabs spans (1: it prints every layer).
+    struct NozzleLadder
+    {
+        float  min_height = 0.f;
+        float  max_height = 0.f;
+        size_t band_size  = 1;
+    };
+    // A plate whose filaments print through more than one nozzle diameter (Print::uses_multiple_nozzle_diameters()), the
+    // base layer height its objects are sliced at, and per filament the ladder of its nozzle. Call before set_extruder():
+    // the per-nozzle tower line widths and feedrate factor are read there. Never called on a single-diameter plate, whose
+    // tower is unchanged.
+    void set_multi_diameter_print(float grid_layer_height, std::vector<NozzleLadder> ladders)
+    {
+        m_multi_diameter_print    = true;
+        m_tower_grid_layer_height = grid_layer_height;
+        m_nozzle_ladders          = std::move(ladders);
+    }
+    // Bambu Studio set_foundation_required(): the first tower layer also carries object or support extrusions, so the
+    // merged ladder keeps it on its own (it is the tower's foundation) instead of folding it into the layer above.
+    void set_foundation_required(bool required) { m_foundation_required = required; }
+    bool multi_diameter_print() const { return m_multi_diameter_print; }
+    // Whether the planned tower deviates from one slab per base layer anywhere (valid after generate(); for the tests).
+    bool merged_slabs_active() const { return m_merged_slabs_active; }
+
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
 	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume,
@@ -449,6 +482,9 @@ public:
     // tower is unchanged.
     float tool_line_width(size_t tool) const
     {
+        // PR-C: on a mixed-diameter plate, Bambu Studio 2.9.1's per-nozzle tower width (multi_nozzle_prime_tower_line_width()).
+        if (tool < m_filpar.size() && m_filpar[tool].tower_line_width > 0.f)
+            return m_filpar[tool].tower_line_width;
         // Bambu Studio 2.9.1 prime_tower_line_width (WipeTower.cpp:2054-2063): one width for every tool.
         if (m_tower_line_width > 0.f)
             return m_tower_line_width;
@@ -468,7 +504,9 @@ public:
     }
 
 	bool get_floating_area(float& start_pos_y, float& end_pos_y) const;
-	bool need_thick_bridge_flow(float pos_y) const;
+	bool need_thick_bridge_flow(float pos_y) const { return need_thick_bridge_flow(pos_y, m_layer_height); }
+    // PR-C (Bambu Studio 2.9.1): the bridge flow is for an extrusion of slab_height (a merged slab of 0.2 mm or more needs none).
+	bool need_thick_bridge_flow(float pos_y, float slab_height) const;
     float get_extrusion_flow() const { return m_extrusion_flow; }
 
 	// Is the current layer finished?
@@ -532,6 +570,8 @@ public:
         // prime_tower_feedrate_factor the H3C tower speed is scaled by.
         std::vector<float>  speed_factor_curve;
         float               feedrate_factor       = 1.f;
+        // PR-C: the line width of this filament's nozzle on a mixed-diameter plate (0 = tool_line_width()'s rule).
+        float               tower_line_width      = 0.f;
     };
 
     // Orca #10780 (Bambu Studio): a block holds the purges of one adhesiveness category, in a fixed band
@@ -546,9 +586,17 @@ public:
     {
         int                             block_id{0};
         int                             filament_adhesiveness_category{0};
+        // The key the block is looked up by: the category, or on a mixed-diameter plate (PR-C) the packed
+        // (category, nozzle diameter, lane) of Bambu Studio's encode_block_key().
+        int                             block_key{0};
         std::vector<float>              layer_depths;  // depth this block takes on each layer
         std::vector<float>              finish_depth;  // where the previous layer's sparse fill of this block starts
         std::vector<WipeTowerLayerType> layers_type;
+        // PR-C (Bambu Studio 2.9.1): the slab height the band lays down on each layer, whether it is the empty trench
+        // of a merged slab above (reserved), and the filament its merged fill ladder picked (-1: chosen while generating).
+        std::vector<float>              layer_heights;
+        std::vector<char>               layer_reserved;
+        std::vector<int>                layer_fill_filament;
         float                           depth{0};
         float                           start_depth{0};
         float                           cur_depth{0};
@@ -713,7 +761,29 @@ private:
     std::vector<double>             m_printable_height;
     std::shared_ptr<const MultiNozzleUtils::LayeredNozzleGroupResult> m_nozzle_group;
 
-    bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
+    bool is_first_layer() const
+    {
+        // PR-C (Bambu Studio WipeTower.hpp:810): with merged slabs a whole-tower slab reaching down to the bed is a first layer.
+        return m_merged_slabs_active ? is_first_layer_for_slab(m_layer_height) : size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx;
+    }
+    // Bambu Studio 2.9.1 is_first_layer_for_slab() (WipeTower.hpp:813): whether an extrusion of slab_height topping out at the
+    // current Z sits on the bed. Without merged slabs this is is_first_layer(), whatever the height.
+    bool is_first_layer_for_slab(float slab_height) const
+    {
+        if (m_plan.empty() || m_layer_info == m_plan.end())
+            return false;
+        const size_t idx = size_t(m_layer_info - m_plan.begin());
+        if (idx == m_first_layer_idx)
+            return true;
+        if (! m_merged_slabs_active)
+            return false;
+        const size_t first = m_first_layer_idx == size_t(-1) ? 0 : m_first_layer_idx;
+        if (first >= m_plan.size())
+            return false;
+        const float bed = m_plan[first].z - m_plan[first].height;
+        return m_z_pos - slab_height <= bed + WT_EPSILON;
+    }
+
 
 	// Calculates length of extrusion line to extrude given volume
 	float volume_to_length(float volume, float line_width, float layer_height) const {
@@ -747,7 +817,9 @@ private:
     // Bambu Studio 2.9.1 calc_tower_feedrate(): the tower speed of tool's extrusions at the tower flow. First layer: the
     // first-layer speed; on hotend_as_extruder printers (H3C) the volumetric speed times prime_tower_feedrate_factor,
     // capped by the machine's XY limit; otherwise the volumetric speed capped at prime_tower_max_speed.
-    float   calc_tower_feedrate(size_t tool, bool first_layer) const;
+    float   calc_tower_feedrate(size_t tool, bool first_layer) const { return calc_tower_feedrate(tool, first_layer, m_extrusion_flow); }
+    // PR-C (Bambu Studio calc_tower_feedrate(filament, extrusion_flow, first_layer)): at the flow the extrusion is laid with.
+    float   calc_tower_feedrate(size_t tool, bool first_layer, float extrusion_flow) const;
     // Speed of the outer wall, brim and fills (calc_tower_feedrate() on the current layer).
     float   wall_feedrate(size_t tool) const { return calc_tower_feedrate(tool, is_first_layer()); }
 
@@ -779,6 +851,8 @@ private:
     void    record_scrape_wall(const Polygon &wall);
     // The brim chamfer loops the tower prints on plan layer `layer` (finish_layer_new()'s rule).
     int     brim_chamfer_loops_num(size_t layer) const;
+    // PR-C: the outer wall's slab on a plan layer (the layer's own height without merged slabs).
+    float   wall_slab_height_at(size_t layer) const;
     // First layer with the scrape on (Bambu Studio finish_layer_new()): loops fill what the outer wall encloses beside
     // the purge bands, so the base the scrape pushes against is glued to the bed everywhere.
     void    fill_first_layer_voids(WipeTowerWriter &writer, const Polygon &outer_wall, const std::vector<std::pair<float, float>> &purge_bands, float feedrate);
@@ -831,6 +905,100 @@ private:
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
 
+    // ---- PR-C: the tower side of AdaptiveLayerMerge (Bambu Studio 2.9.1 WipeTower.cpp 5222-5440, 5832-7600) ----
+    bool                     m_multi_diameter_print    = false;
+    float                    m_tower_grid_layer_height = 0.f;
+    std::vector<NozzleLadder> m_nozzle_ladders;
+    bool                     m_foundation_required     = true;
+    // Set by the ladder planners once the tower deviates from one slab per base layer; while false the tower is as before.
+    bool                     m_merged_slabs_active     = false;
+    // Lane of each purge event (layer, filament); slab height of a band that digs its own trench (layer, block key); bands
+    // left empty because a merged slab above reaches into them (layer); the whole-tower slab of each planned layer and
+    // the layers merged out of it; the outer wall's own ladder (filament, slab height, merged into the layer above).
+    std::vector<std::unordered_map<int, int>>   m_lane_assignment;
+    std::vector<std::unordered_map<int, float>> m_block_slab_height;
+    std::vector<std::unordered_set<int>>        m_reserved_blocks;
+    std::vector<float>                          m_layer_slab_height;
+    std::vector<char>                           m_layer_skipped;
+    std::vector<int>                            m_wall_filament;
+    std::vector<float>                          m_wall_slab_height;
+    std::vector<char>                           m_wall_reserved;
+
+    struct MergeLadderGroup
+    {
+        int   begin_step  { 0 };
+        int   top_step    { 0 };
+        int   filament_id { -1 };
+        float height      { 0.f };
+    };
+
+    // Bambu Studio encode_block_key() (WipeTower.hpp:445): (category, nozzle diameter, lane) in one int.
+    static int encode_block_key(int category, float nozzle_diameter, int lane)
+    {
+        const int diam_units = std::min(0x3F, int(nozzle_diameter / 0.05f + 0.5f));
+        return (std::max(0, category) << 10) | (diam_units << 4) | (lane & 0xF);
+    }
+    // The block a filament purges into on a layer (layer -1: its lane-independent group). The plain category on a
+    // single-diameter plate.
+    int   get_block_key(size_t filament, int layer_id) const;
+    int   get_gap_key(size_t filament) const { return get_block_key(filament, -1); }
+    int   block_key_category(int block_key) const { return m_multi_diameter_print ? block_key >> 10 : block_key; }
+    float block_key_nozzle(int block_key) const { return m_multi_diameter_print ? float((block_key >> 4) & 0x3F) * 0.05f : 0.f; }
+    bool  has_multiple_nozzle_diameters() const { return m_multi_diameter_print; }
+    bool  merged_fill_active() const;
+    bool  layer_is_skipped(int layer_id) const
+    {
+        return layer_id >= 0 && size_t(layer_id) < m_layer_skipped.size() && m_layer_skipped[layer_id] != 0;
+    }
+    float layer_slab_height(int layer_id, float fallback) const
+    {
+        return (layer_id >= 0 && size_t(layer_id) < m_layer_slab_height.size() && m_layer_slab_height[layer_id] > 0.f) ?
+                   m_layer_slab_height[layer_id] : fallback;
+    }
+    float slab_height_for(size_t filament, int layer_id, float fallback) const;
+    float filament_extrusion_height(size_t filament) const { return slab_height_for(filament, int(m_cur_layer_id), m_layer_height); }
+    float min_layer_height_for_filament(int filament) const;
+    float max_layer_height_for_filament(int filament) const;
+    bool  filament_can_print_height(int filament, float height) const;
+    size_t preferred_band_size_for_filament(int filament) const;
+    float preferred_height_for_filament(int filament) const;
+    bool  can_print_base_layers(int filament) const;
+    int   first_printed_layer_idx() const;
+    int   loaded_filament(int layer_id) const;
+    double tower_bed_z() const;
+    void  collect_printed_steps(std::vector<int> &printed) const;
+    int   same_category_filler(const WipeTowerInfo &layer, int block_key) const;
+    float band_fill_depth(const WipeTowerBlock &block, int layer_id) const;
+    int   get_wall_filament_for_layer(const WipeTowerInfo &layer, int layer_id, int wall_filament) const;
+    int   block_fill_filament_base(const WipeTowerInfo &layer, int layer_id, const WipeTowerBlock &block, int wall_filament) const;
+    int   get_block_fill_filament(const WipeTowerInfo &layer, int layer_id, const WipeTowerBlock &block, int wall_filament) const;
+    bool  absorb_run_into_next_layer(int run_begin, int run_end);
+    void  plan_tower_ladder();
+    void  plan_merged_slabs();
+    void  plan_merged_block_fill();
+    void  plan_merged_outer_wall();
+    void  audit_merged_slabs() const;
+    void  merged_finish_block(const WipeTowerInfo &layer, WipeTowerBlock &block, int wall_idx, std::vector<ToolChangeResult> &layer_result,
+                              ToolChangeResult &finish_layer_tcr);
+    bool  plan_band_merge_ladder(const std::vector<int> &printed, int first_step, int last_step, double bottom_z,
+                                 const std::vector<std::vector<int>> &visitors, const std::vector<char> &reservable,
+                                 const std::vector<char> &can_merge_top, std::vector<MergeLadderGroup> &groups,
+                                 float preferred_height, bool prefer_max_height, float height_ceiling) const;
+    void  fold_thin_ladder_groups(const std::vector<std::vector<int>> &visitors, const std::vector<char> &reservable,
+                                  const std::vector<char> &can_merge_top, std::vector<MergeLadderGroup> &groups,
+                                  float height_ceiling) const;
+    // Extrusion flow of a line of width w at height h.
+    float flow_for(float h, float w) const { return h * (w - h * (1.f - float(M_PI) / 4.f)) / filament_area(); }
+public:
+    // PR-C, for the tests: the planned layers the tower merges out, and the slab each band / the outer wall lays down.
+    bool  test_layer_skipped(size_t layer) const { return layer_is_skipped(int(layer)); }
+    float test_layer_slab_height(size_t layer) const { return layer < m_plan.size() ? layer_slab_height(int(layer), m_plan[layer].height) : 0.f; }
+    float test_wall_slab_height(size_t layer) const { return layer < m_wall_slab_height.size() ? m_wall_slab_height[layer] : 0.f; }
+    bool  test_wall_reserved(size_t layer) const { return layer < m_wall_reserved.size() && m_wall_reserved[layer] != 0; }
+    size_t test_plan_size() const { return m_plan.size(); }
+    float test_plan_z(size_t layer) const { return layer < m_plan.size() ? m_plan[layer].z : 0.f; }
+private:
+
     // Tower interface: marks the interface tool changes and sizes the run-in reserve.
     void    mark_interfaces();
     // The current layer's outer wall (rectangle or rib) around wt_box, cut open at its wall gaps (the tool
@@ -855,7 +1023,8 @@ private:
     void               update_all_layer_depth(float idle_depth);
     void               set_nozzle_last_layer_id();
     // Bambu Studio set_toolchange(): a change's purge and ramming depth at the current width and block gaps.
-    void               replan_toolchange(WipeTowerInfo::ToolChange &tool_change, float layer_height) const;
+    // PR-C: layer_id gives the slabs the purge and the ramming lie on (set_toolchange(), WipeTower.cpp:3085); -1 for none.
+    void               replan_toolchange(WipeTowerInfo::ToolChange &tool_change, float layer_height, int layer_id) const;
     WipeTowerBlock    *get_block_by_category(int category, bool create);
     void               add_depth_to_block(int category, float depth, bool is_nozzle_change = false);
     int                get_filament_category(size_t tool) const { return tool < m_filpar.size() ? m_filpar[tool].category : 0; }
@@ -876,7 +1045,13 @@ private:
     // the first layer, the block's gap otherwise.
     float              wipe_line_spacing(size_t tool, bool solid_toolchange) const;
     ToolChangeResult   tool_change_new(size_t new_tool, bool solid_toolchange = false, bool solid_nozzlechange = false);
-    ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true);
+    ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true)
+    {
+        return finish_layer_new(extrude_perimeter, extrude_fill, extrude_fill_wall, -1.f, false);
+    }
+    // PR-C (Bambu Studio 2.9.1 finish_layer_new()): the outer wall laid at its own merged slab (wall_height, negative = the
+    // layer's), or not at all on a layer whose wall a group above prints (wall_reserved).
+    ToolChangeResult   finish_layer_new(bool extrude_perimeter, bool extrude_fill, bool extrude_fill_wall, float wall_height, bool wall_reserved);
     ToolChangeResult   finish_block(const WipeTowerBlock &block, size_t filament_id, bool extrude_fill = true);
     // Edge (#1052 review S3): the next layer lays purge or ramming rows in this category's block (multi-block towers).
     bool               next_layer_purges_into(int category) const;

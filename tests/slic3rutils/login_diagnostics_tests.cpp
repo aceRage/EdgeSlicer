@@ -50,3 +50,41 @@ TEST_CASE("Login failure log: long bodies are cut and kept on one line", "[Login
     CHECK_FALSE(contains(out, "\r"));
     CHECK(contains(out, "Internal Server Error"));
 }
+
+// NetworkAgent::body_for_log: what the other calls log of a body or message that can carry a
+// printer's LAN access code (the account's printer list, a printer's answer to get_access_code).
+
+TEST_CASE("Body log: the account's printer list loses each printer's access code", "[LoginDiagnostics]")
+{
+    const std::string body = R"({"message":"success","devices":[{"dev_id":"01P00A451601234","name":"Lab P1S",)"
+                             R"("online":true,"dev_access_code":"87654321","dev_model_name":"C12"}]})";
+    const std::string out  = NetworkAgent::body_for_log(body);
+    INFO("logged: " << out);
+    CHECK_FALSE(contains(out, "87654321"));
+    CHECK_FALSE(contains(out, "01P00A451601234"));
+    CHECK(contains(out, "dev_access_code"));
+    CHECK(contains(out, "C12"));
+}
+
+TEST_CASE("Body log: a printer's get_access_code answer loses the code, pretty-printed too", "[LoginDiagnostics]")
+{
+    const std::string compact = R"({"system":{"command":"get_access_code","sequence_id":"7","access_code":"13572468","result":"success"}})";
+    const std::string pretty  = "{\n    \"system\": {\n        \"access_code\": \"13572468\",\n        \"command\": \"get_access_code\"\n    }\n}";
+    for (const std::string& report : {compact, pretty}) {
+        const std::string out = NetworkAgent::body_for_log(report, 0);
+        INFO("logged: " << out);
+        CHECK_FALSE(contains(out, "13572468"));
+        CHECK(contains(out, "get_access_code"));
+    }
+}
+
+TEST_CASE("Body log: the sign-in data loses its tokens", "[LoginDiagnostics]")
+{
+    const std::string user_info = R"({"data":{"refresh_token":"rt-1a2b3c4d5e6f7a8b","token":"at-9f8e7d6c5b4a3f2e",)"
+                                  R"("expires_in":"7776000","user":{"uid":"1234567","name":"someone"}}})";
+    const std::string out       = NetworkAgent::body_for_log(user_info);
+    INFO("logged: " << out);
+    CHECK_FALSE(contains(out, "rt-1a2b3c4d5e6f7a8b"));
+    CHECK_FALSE(contains(out, "at-9f8e7d6c5b4a3f2e"));
+    CHECK(contains(out, "expires_in"));
+}

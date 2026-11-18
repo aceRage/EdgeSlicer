@@ -23,6 +23,7 @@
 #include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
+#include "ThinFeatures.hpp"
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -781,8 +782,27 @@ public:
     // zaa_enabled and no guard forbids it). Public for the G-code head clearance check.
     bool need_z_contouring() const;
 
+    // EdgeSlicer, curved tops (CurvedTops.cpp). apply_curved_tops() cuts the planar perimeters and fills
+    // under a curved block; only the perimeter step brings them back. clipped: they are cut now (reset
+    // when the walls are regenerated). guard inputs: every value a curved-tops guard read on the last
+    // run (curved_tops_guard_inputs()); Print::apply() regenerates the walls when they change.
+    // Both are written by the slicing thread under the print's state mutex (the setters lock it) and
+    // read by Print::apply(), which holds that mutex; the getters do not lock (call them from apply()
+    // or with the slicing stopped).
+    bool               curved_tops_clipped() const { return m_curved_tops_clipped; }
+    // EdgeSlicer, thin feature notice: what the last wall step skipped or widened (ThinFeatures.hpp).
+    const ThinFeatureSummary &thin_feature_summary() const { return m_thin_feature_summary; }
+    void               set_curved_tops_clipped(bool clipped);
+    const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
+    void               set_curved_tops_guard_inputs_used(std::string inputs);
+    // Curved tops on (P2): Print::process() runs posContouring after posSupportMaterial for this object,
+    // so the block is planned against the final support layers; a change to the supports re-plans it
+    // (invalidate_step). False for every object without curved tops: their step order is unchanged.
+    bool               curved_tops_after_support() const { return m_config.curved_tops_enabled.value && !m_instances.empty(); }
+
   private:
     // to be called from Print only.
+    friend struct CurvedTopsTestAccess;
     friend class Print;
     // Test entry point to compute_adaptive_merge_groups(), so a unit test can re-plan a sliced object.
     friend struct AdaptiveMergePlanAccess;
@@ -885,6 +905,11 @@ private:
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // The slice-time Local-Z plan, kept while adapt_local_z_ratio_plan_to_merge_bands() has replaced it.
     std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
+    // EdgeSlicer, curved tops: see curved_tops_clipped().
+    bool                                    m_curved_tops_clipped { false };
+    // EdgeSlicer, thin feature notice: written by make_perimeters() after its parallel loop.
+    ThinFeatureSummary                      m_thin_feature_summary;
+    std::string                             m_curved_tops_guard_inputs;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 

@@ -8624,10 +8624,10 @@ msgid "Presets inherited by other presets cannot be deleted!"
 msgstr ""
 "Les préréglages hérités d’autres préréglages ne peuvent pas être supprimés !"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
-msgstr[0] "Les préréglages suivants héritent de ce préréglage."
-msgstr[1] "Le préréglage suivant hérite de ce préréglage."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
+msgstr[0] "Le préréglage suivant hérite de ce préréglage."
+msgstr[1] "Les préréglages suivants héritent de ce préréglage."
 
 #. TRN  Remove/Delete
 #, boost-format

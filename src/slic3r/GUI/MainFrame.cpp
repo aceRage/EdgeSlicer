@@ -1405,11 +1405,12 @@ void MainFrame::activate_plater(Plater *plater)
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(now - first_show).count() << " ms (3D canvas GL "
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(now - gl_started).count() << " ms)";
     }
-    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
-    // this project's selection now.
+    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they let go
+    // of it and follow this project's selection now. Only the tabs change: reset_model_config() would erase the settings of
+    // what was selected in the previous project.
     for (Tab *tab : wxGetApp().model_tabs_list)
         if (auto *model_tab = dynamic_cast<TabPrintModel *>(tab))
-            model_tab->reset_model_config();
+            model_tab->set_model_config({});
     plater->sidebar().obj_list()->part_selection_changed();
     if (m_platers_need_rescale.erase(plater) > 0)
         plater->msw_rescale();
@@ -3717,7 +3718,8 @@ void MainFrame::init_menubar_as_editor()
                 wxKeyEvent e;
                 e.SetEventType(wxEVT_KEY_DOWN);
                 e.SetControlDown(true);
-                e.m_keyCode = 'M';
+                // The key of this entry's shortcut (Cmd+K), as the other entries pass theirs; it was 'M'.
+                e.m_keyCode = 'K';
                 if (handle_key_event(e)) {
                     return;
                 }
@@ -4579,13 +4581,14 @@ void MainFrame::load_config_file()
         m_last_config = file;
     }
     bool update = false;
+    PresetBundle::PresetImportReport report;
     wxGetApp().preset_bundle->import_presets(cfiles, [this](std::string const & name) {
             ConfigsOverwriteConfirmDialog dlg(this, from_u8(name), false);
             int           res = dlg.ShowModal();
             int           ids[]{wxID_NO, wxID_YES, wxID_NOTOALL, wxID_YESTOALL};
             return std::find(ids, ids + 4, res) - ids;
         },
-        ForwardCompatibilitySubstitutionRule::Enable);
+        ForwardCompatibilitySubstitutionRule::Enable, &report);
     if (!cfiles.empty()) {
         wxGetApp().app_config->update_config_dir(get_dir_name(cfiles.back()));
         wxGetApp().load_current_presets();
@@ -4599,6 +4602,15 @@ void MainFrame::load_config_file()
     update_side_preset_ui();
     auto msg = wxString::Format(_L_PLURAL("There is %d config imported. (Only non-system and compatible configs)",
         "There are %d configs imported. (Only non-system and compatible configs)", cfiles.size()), cfiles.size());
+    // Presets left out that the user did not choose to leave out: say how many, the log has their names.
+    if (!report.bad_version.empty())
+        msg += "\n" + wxString::Format(_L_PLURAL("%d config was not imported: its version cannot be read.",
+                                                 "%d configs were not imported: their version cannot be read.", report.bad_version.size()),
+                                       int(report.bad_version.size()));
+    if (!report.missing_parent.empty())
+        msg += "\n" + wxString::Format(_L_PLURAL("%d config was not imported: the preset it inherits was not found.",
+                                                 "%d configs were not imported: the presets they inherit were not found.", report.missing_parent.size()),
+                                       int(report.missing_parent.size()));
     if(cfiles.empty())
         msg += _L("\nHint: Make sure you have added the corresponding printer before importing the configs.");
     MessageDialog dlg2(this,msg ,
@@ -5191,8 +5203,10 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
     }
     else
     {
-        MessageDialog msg(this, _L("The project is no longer available."), _L("Error"), wxOK | wxYES_DEFAULT);
-        if (msg.ShowModal() == wxID_YES)
+        // The box has only OK (wxID_OK); the entry used to go only on wxID_YES, which it never returns,
+        // so the missing project stayed in the list and the box came back on every click.
+        MessageDialog msg(this, _L("The project is no longer available."), _L("Error"), wxOK);
+        msg.ShowModal();
         {
             m_recent_projects.RemoveFileFromHistory(file_id);
             std::vector<std::string> recent_projects;

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,6 +46,28 @@ struct ContourZSamples
     // see the clamp in ContourZ.cpp and the emitter in GCode.cpp).
     std::vector<float> z;
 
+    // EdgeSlicer, curved tops (CurvedTops.cpp). False for every ZAA path, which keeps the
+    // emitter's ZAA behaviour byte-identical. When true:
+    //  - z holds a PLACEMENT delta (the path's absolute Z minus its layer's print_z, several mm
+    //    below on the deferred conformal layers), not a change of bead height, so the emitter
+    //    takes the flow from `flow` instead of contour_z_extrusion_ratio();
+    //  - before travelling to this path the emitter first lifts to base + safe_z_delta, which
+    //    clears every surface of the object, and only then moves in XY and descends vertically.
+    bool               curved_top   = false;
+    float              safe_z_delta = 0.f;
+    //  - exit_lift: the last path of a curved block. After it the emitter retracts (and wipes) and
+    //    lifts to base + safe_z_delta before anything else moves the head (design R5).
+    bool               exit_lift    = false;
+    //  - speed caps for this path's extrusion and for a wipe back along it, mm/s; 0 means
+    //    CURVED_TOPS_MAX_SPEED_MM_S. Set only by a curved-tops developer override (P3).
+    float              speed_cap      = 0.f;
+    float              wipe_speed_cap = 0.f;
+    //  - G-code comment lines written before the block's first path (developer overrides in force).
+    //    Empty otherwise, which keeps the G-code byte-identical.
+    std::string        block_comment;
+    // Per-sample flow multiplier (same order as points); empty means 1.
+    std::vector<float> flow;
+
     // Build the coordinate index. Must be called once, after points/z are filled.
     void build_index();
 
@@ -52,6 +75,8 @@ struct ContourZSamples
     // the nearest sample segment (this only happens for the single point a seam split or a
     // clip_end introduces).
     float z_at(const Point &p) const;
+    // Curved tops: flow multiplier for p, 1 when there is none or p is not an original sample.
+    float flow_at(const Point &p) const;
 
     bool   empty() const { return this->points.empty(); }
     size_t size() const { return this->points.size(); }
@@ -67,9 +92,24 @@ private:
         }
     };
     std::unordered_map<std::pair<int64_t, int64_t>, float, KeyHash> m_index;
+    // Curved tops only; stays empty for ZAA paths.
+    std::unordered_map<std::pair<int64_t, int64_t>, float, KeyHash> m_flow_index;
 };
 
 using ContourZSamplesPtr = std::shared_ptr<const ContourZSamples>;
+
+// EdgeSlicer, curved tops: speed cap for conformal paths, mm/s (see GCode.cpp).
+static constexpr double CURVED_TOPS_MAX_SPEED_MM_S = 40.0;
+
+// The speed caps a curved path keeps to: its own (developer override) or the built-in one.
+inline double curved_tops_speed_cap(const ContourZSamples &s)
+{
+    return s.speed_cap > 0.f ? double(s.speed_cap) : CURVED_TOPS_MAX_SPEED_MM_S;
+}
+inline double curved_tops_wipe_speed_cap(const ContourZSamples &s)
+{
+    return s.wipe_speed_cap > 0.f ? double(s.wipe_speed_cap) : CURVED_TOPS_MAX_SPEED_MM_S;
+}
 
 // ---------------------------------------------------------------------------------------------
 // The tuning constants of the pass. All of them exist because of a measured artifact on a real

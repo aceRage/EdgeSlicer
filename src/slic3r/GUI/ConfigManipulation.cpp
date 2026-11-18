@@ -9,6 +9,7 @@
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/AdaptiveLayerMerge.hpp"
 #include "Plater.hpp"
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
@@ -255,19 +256,40 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
 // Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
 // smallest minimum and its largest maximum. Per-nozzle process P2 (D9): with mixed nozzle sizes, by the limits of
 // the smallest nozzle the current plate prints with (layer_height_limits_for_nozzles).
-void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
+void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height, wxString* rack_nozzle) const
 {
     PresetBundle*             bundle         = GUI::wxGetApp().preset_bundle;
     const DynamicPrintConfig& printer_config = bundle->printers.get_edited_preset().config;
     std::vector<size_t>       used_nozzles;
-    if (Plater* plater = GUI::wxGetApp().plater(); plater != nullptr && has_mixed_nozzle_diameters(printer_config)) {
+    Plater*                   plater         = GUI::wxGetApp().plater();
+    PartPlate*                plate          = plater != nullptr ? plater->get_partplate_list().get_curr_plate() : nullptr;
+    if (plate != nullptr && has_mixed_nozzle_diameters(printer_config)) {
         const std::vector<size_t> filament_nozzles = bundle->filament_nozzles();
-        if (PartPlate* plate = plater->get_partplate_list().get_curr_plate())
-            for (int filament : plate->get_extruders())
-                if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
-                    used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
+        for (int filament : plate->get_extruders())
+            if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
+                used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
     }
     layer_height_limits_for_nozzles(printer_config, used_nozzles, min_layer_height, max_layer_height);
+    if (rack_nozzle != nullptr)
+        rack_nozzle->clear();
+    // H3C rack (owner hand test 2026-11-16): the plate's layer height is what the finest nozzle in use prints, and a rack
+    // slot of another size than the mounted nozzle has no limits in the printer preset. Held to that nozzle's window, as a
+    // printer of that nozzle size is held to its preset's. Not while a nozzle's own process is shown (its own layer height).
+    if (plate != nullptr && bundle->nozzle_tool_view() < 0) {
+        std::vector<unsigned int> used_filaments;
+        for (int filament : plate->get_extruders())
+            if (filament >= 1)
+                used_filaments.push_back(unsigned(filament));
+        PrintConfig full;
+        full.apply(bundle->full_config(), true);
+        RackLayerHeightLimit limit;
+        if (rack_nozzle_layer_height_limits(full, used_filaments, limit)) {
+            min_layer_height = limit.min_height;
+            max_layer_height = limit.max_height;
+            if (rack_nozzle != nullptr)
+                *rack_nozzle = wxString::Format(_L("the %g mm rack nozzle of filament %u"), limit.nozzle_diameter, limit.filament_id);
+        }
+    }
 }
 
 ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
@@ -285,8 +307,9 @@ ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(d
 // "initial_layer_print_height": both are held to the same printer limits and answer "Ignore" the same way.
 bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const std::string& opt_key)
 {
-    double min_layer_height = 0., max_layer_height = 0.;
-    layer_height_limits(min_layer_height, max_layer_height);
+    double   min_layer_height = 0., max_layer_height = 0.;
+    wxString rack_nozzle;
+    layer_height_limits(min_layer_height, max_layer_height, &rack_nozzle);
     const bool   is_initial   = opt_key == "initial_layer_print_height";
     const double layer_height = config->opt_float(opt_key);
 
@@ -305,16 +328,25 @@ bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const st
         apply(config, &new_conf);
         return true;
     }
-    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key);
-    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key);
+    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key, rack_nozzle);
+    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key, rack_nozzle);
     default: return false;
     }
 }
 
 // "Ignore" keeps the value as the user typed it; update_print_fff_config() no longer clamps it behind the dialog.
-bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key)
+bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key,
+                                                          const wxString& rack_nozzle)
 {
-    wxString msg_text = opt_key == "initial_layer_print_height" ?
+    wxString msg_text;
+    if (!rack_nozzle.empty())
+        // H3C rack: the limit is the finest rack nozzle's, which the printer preset does not list.
+        msg_text = wxString::Format(opt_key == "initial_layer_print_height" ?
+                                        _L("Initial layer height is outside what %s can print, this may cause printing quality issues.") :
+                                        _L("Layer height is outside what %s can print, this may cause printing quality issues."),
+                                    rack_nozzle);
+    else
+        msg_text = opt_key == "initial_layer_print_height" ?
         _(L("Initial layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
             "this may cause printing quality issues.")) :
         _(L("Layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
@@ -468,6 +500,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            ! config->opt_bool("enable_support") &&
            config->opt_int("enforce_support_layers") == 0 &&
            ! config->opt_bool("detect_thin_wall") &&
+           // EdgeSlicer: Fine detail detects thin walls on Classic, which open the spiral's single wall.
+           (! config->has("fine_detail") || config->opt_enum<FineDetailLevel>("fine_detail") == FineDetailLevel::Off) &&
            ! config->opt_bool("overhang_reverse") &&
            // Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
            (! config->has("stabilizer_supports") || config->opt_enum<StabilizerMode>("stabilizer_supports") == smOff) &&
@@ -484,6 +518,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("enable_support", new ConfigOptionBool(false));
             new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
             new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+            if (new_conf.has("fine_detail"))
+                new_conf.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
             if (new_conf.has("stabilizer_supports"))
                 new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
@@ -1157,6 +1193,22 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "zaa_speed_scaling", "zaa_max_segment_rate"})
         toggle_line(el, has_zaa);
 
+    // EdgeSlicer: curved tops (experimental) detail settings.
+    bool has_curved_tops = config->opt_bool("curved_tops_enabled");
+    for (auto el : {"curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern"})
+        toggle_line(el, has_curved_tops);
+    // Curved tops P3: the developer overrides (their lines are comDevelop and need Developer mode on too).
+    for (auto el : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",
+                     "curved_tops_dev_flank_margin", "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin",
+                     "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap", "curved_tops_dev_safe_lift",
+                     "curved_tops_dev_contact_warning_only", "curved_tops_dev_allow_multiple_objects", "curved_tops_dev_allow_by_object",
+                     "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
+                     "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
+                     "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
+                     "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
+        // Shown exactly when the overrides can act (GUI_App::update_mode() sets the slicer's gate the same way).
+        toggle_line(el, has_curved_tops && GUI::wxGetApp().curved_tops_developer_lines_shown());
+
     bool have_sequential_printing = (config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
     // for (auto el : { "extruder_clearance_radius", "extruder_clearance_height_to_rod", "extruder_clearance_height_to_lid" })
     //     toggle_field(el, have_sequential_printing);
@@ -1372,9 +1424,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
-        "wall_maximum_resolution", "wall_maximum_deviation"})
+        "wall_maximum_resolution", "wall_maximum_deviation", "min_odd_wall_line_width", "min_even_wall_line_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
+    // EdgeSlicer, Fine detail: the level works on both generators (on Classic it detects thin walls); its two floors
+    // are Arachne's, and the floors and the speed only act while a level is chosen.
+    if (config->has("fine_detail")) {
+        const bool fine_detail_on = config->opt_enum<FineDetailLevel>("fine_detail") != FineDetailLevel::Off;
+        for (auto el : { "thin_feature_line_width", "thin_feature_min_size" }) {
+            toggle_line(el, have_arachne);
+            toggle_field(el, fine_detail_on);
+        }
+        toggle_field("fine_detail_speed", fine_detail_on);
+    }
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

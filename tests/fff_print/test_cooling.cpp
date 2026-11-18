@@ -1411,3 +1411,61 @@ TEST_CASE("The cooling pass keeps a move that repeats the position, without its 
     // Here "G1 F1800" that opens the path and the first "G1 F2400"; the second "G1 F2400" changes nothing.
     CHECK(f_only == 2);
 }
+
+// FanMover gave a duration to G0/G1 only, so an arc (G2/G3, written with arc fitting or as a spiral lift)
+// took no time and a fan command after arcs was moved back much further than fan_speedup_time asked.
+TEST_CASE("FanMover counts the time of an arc", "[FanMover][Arc]")
+{
+    // F600 is 10 mm/s. Speed-up 0.5 s. The fan increase comes after a 1 s move and an arc longer than
+    // 0.5 s, so it belongs inside the arc, short of its last tenth. An arc is not split: the command goes
+    // before it, not 0.5 s into the move before it (which is where an arc taking no time put it).
+    auto check = [](const std::string &arc) {
+        const std::vector<std::string> out = fan_mover_layers(0.5f, false, 0.f, {
+            "G1 X0 Y0 F600\n"
+            "G1 X10 E.5\n"     // 1 s
+            + arc + "\n"
+            "M106 S255\n"
+            "G1 X40 E.5\n",
+        });
+        REQUIRE(out.size() == 1);
+        const std::string &g = out[0];
+        INFO(g);
+        // Before, the move was split 0.5 s in ("G1 X5.000 ...") and the command written there.
+        const size_t move = g.find("G1 X10 E.5\n");
+        const size_t fan  = g.find("M106 S255\n");
+        const size_t arc_at = g.find(arc + "\n");
+        REQUIRE(move != std::string::npos);
+        REQUIRE(fan != std::string::npos);
+        REQUIRE(arc_at != std::string::npos);
+        CHECK(move < fan);
+        CHECK(fan < arc_at);
+    };
+    SECTION("centre given by I and J") {
+        check("G2 X30 Y0 I10 J0 E1");        // half a turn of radius 10: 31.4 mm, 3.14 s
+    }
+    SECTION("centre given by R") {
+        check("G3 X30 Y20 R20 E1");          // a quarter turn of radius 20: 31.4 mm, 3.14 s
+    }
+    SECTION("a whole turn that rises (spiral lift)") {
+        check("G3 Z.4 I0 J1 P1");            // a full turn of radius 1: 6.28 mm, 0.63 s
+    }
+}
+
+// The kick-start command FanMover adds when the fan is not moved (fan_speedup_time 0) kept its line end in
+// the buffer and got another when written, which left an empty line after it.
+TEST_CASE("FanMover's kickstart writes no empty line", "[FanMover]")
+{
+    // No speed-up, kickstart 3 s: a raise from 0 to 49% kicks at full speed for 1.47 s.
+    const std::vector<std::string> out = fan_mover_layers(0.f, false, 3.f, {
+        "G1 X0 Y0 F600\n"
+        "M106 S127\n"
+        "G1 X60 E1\n"      // 6 s
+        "G1 X70 E1\n",
+    });
+    REQUIRE(out.size() == 1);
+    const std::string &g = out[0];
+    INFO(g);
+    CHECK(g.find("M106 S255") != std::string::npos);
+    CHECK(g.find("M106 S127\n") != std::string::npos);
+    CHECK(g.find("\n\n") == std::string::npos);
+}

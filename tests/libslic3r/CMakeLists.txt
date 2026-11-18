@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_model_rotate_center.cpp
+	test_orient.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
@@ -33,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
 	test_arrange_nozzle_reach.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
+	test_appconfig_recent_projects.cpp
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
@@ -86,6 +88,8 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_paint.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
+	test_cut_mesh_caps.cpp
+	test_cut_halves.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
@@ -145,6 +149,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_output.cpp
+	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp
@@ -186,11 +191,14 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
 	test_process_preset_export.cpp
+	test_preset_import_order.cpp
 	test_preset_manager_model.cpp
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_state.cpp
+	test_preset_printer_own_presets.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
@@ -224,7 +232,11 @@ add_executable(${_TEST_NAME}_tests
     test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_tower_alm.cpp
     test_bbl_rib_tower.cpp
+    test_prime_tower_defaults.cpp
+    test_fine_detail.cpp
+    test_thin_features.cpp
     test_bbl_h3c.cpp
     test_bs29_keys_import.cpp
     test_tower_interface.cpp
@@ -258,7 +270,7 @@ add_executable(${_TEST_NAME}_tests
 	)
 
 if (TARGET OpenVDB::openvdb)
-    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp test_voxel_remesh.cpp)
 endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)

@@ -732,6 +732,21 @@ void ParamsPanel::notify_object_config_changed()
             }
         }
         if (has_config) break;
+        // A height range always holds a layer height: it counts as a setting where it differs from the object's, as in
+        // the object list (ObjectList::add_settings_item()).
+        const double object_layer_height = obj->config.has("layer_height") ?
+            obj->config.opt_float("layer_height") :
+            wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
+        for (const auto &range : obj->layer_config_ranges) {
+            const DynamicPrintConfig &range_config = range.second.get();
+            const ConfigOption       *layer_height = range_config.option("layer_height");
+            if (SettingsFactory::get_bundle(&range_config, false).size() > 0 ||
+                (layer_height != nullptr && std::abs(layer_height->getFloat() - object_layer_height) > EPSILON)) {
+                has_config = true;
+                break;
+            }
+        }
+        if (has_config) break;
     }
     if (has_config == m_has_object_config) return;
     m_has_object_config = has_config;

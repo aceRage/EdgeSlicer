@@ -121,6 +121,10 @@ void layer_height_limits_for_nozzles(const ConfigBase &printer_config, const std
 // Stamps the arrays into the role widths, each through the filament that prints the role (PrintRegion::extruder).
 void stamp_nozzle_line_widths(PrintRegionConfig &config);
 void stamp_nozzle_line_widths(PrintObjectConfig &config);
+// A painted region starts from its parent region's config, whose widths were stamped for the parent's filaments. Every
+// role the paint moved to another filament takes that filament's nozzle width, unless the parent's width was set on the
+// object, part, modifier or layer range instead of stamped (that one still wins). No-op without per-nozzle processes.
+void restamp_painted_nozzle_line_widths(PrintRegionConfig &painted, const PrintRegionConfig &parent);
 
 // The values a filament on extruder `extruder` reads for `key` in a filled config: what the G-code of
 // that extruder will use. Test and UI helper.

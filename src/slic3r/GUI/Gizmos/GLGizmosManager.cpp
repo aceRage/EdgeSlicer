@@ -77,9 +77,19 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
                 out.push_back(i);
     }
     else {
-        for (size_t i = 0; i < m_gizmos.size(); ++i)
+        // Split to Fit P4: its button sits right after Cut's. Only the toolbar ORDER changes: its EType
+        // stays last, so m_gizmos, the sprite ids and icon texture rows, the shortcut lookup and every
+        // index by EType are unchanged. Everything that maps a toolbar slot to a gizmo goes through
+        // this list (mouse hit test, drawing, the arrow, lookup by icon name).
+        const bool split_fit_known = size_t(SplitToFit) < m_gizmos.size();
+        for (size_t i = 0; i < m_gizmos.size(); ++i) {
+            if (split_fit_known && i == size_t(SplitToFit))
+                continue;
             if (m_gizmos[i]->is_selectable())
                 out.push_back(i);
+            if (split_fit_known && i == size_t(Cut) && m_gizmos[SplitToFit]->is_selectable())
+                out.push_back(size_t(SplitToFit));
+        }
     }
     return out;
 }

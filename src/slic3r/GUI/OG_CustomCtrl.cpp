@@ -197,6 +197,13 @@ wxPoint OG_CustomCtrl::get_pos(const Line& line, Field* field_in/* = nullptr*/)
 #ifndef DISABLE_BLINKING
                 h_pos += (line.has_undo_ui() ? 3 : 1) * blinking_button_width;
 #endif
+                // A widget-only row (no option) in a group whose option rows keep the revert-button slot in front of
+                // their control (option_label_at_right: every Process tab page, see below) starts its widget in the
+                // same column as those controls. Without this the Prime tower group's "Use Bambu defaults" button sat
+                // one slot left of the Enable checkbox and the Width field (owner hand test of #1080). Lines that
+                // carry an option next to their widget keep their old position.
+                if (opt_group->option_label_at_right && line.get_options().empty())
+                    add_buttons_width(blinking_button_width);
 
                 for (auto child : line.widget_sizer->GetChildren())
                     if (child->IsWindow())

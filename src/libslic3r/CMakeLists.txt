@@ -162,6 +162,7 @@ set(lisbslic3r_sources
     BuildVolume.hpp
     ExtruderAreas.cpp
     ExtruderAreas.hpp
+    SplitLabels.cpp
     SplitToVolume.cpp
     SplitToVolume.hpp
     calib.cpp
@@ -242,6 +243,8 @@ set(lisbslic3r_sources
     ExtrusionEntityCollection.hpp
     ContourZ.cpp
     ContourZ.hpp
+    CurvedTops.cpp
+    CurvedTops.hpp
     HeadClearance.cpp
     HeadClearance.hpp
     ExtrusionEntity.cpp
@@ -509,6 +512,8 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     MixedSublayer.cpp
     MixedSublayer.hpp
+    CliNamedPresets.cpp
+    CliNamedPresets.hpp
     CliPresetSlots.cpp
     CliPresetSlots.hpp
     CliOutput.cpp
@@ -558,6 +563,12 @@ set(lisbslic3r_sources
     FilamentSyncMatch.hpp
     PlateBedTypes.cpp
     PlateBedTypes.hpp
+    PrimeTowerDefaults.cpp
+    PrimeTowerDefaults.hpp
+    FineDetail.cpp
+    FineDetail.hpp
+    ThinFeatures.cpp
+    ThinFeatures.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp
