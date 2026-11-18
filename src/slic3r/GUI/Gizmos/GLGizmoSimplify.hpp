@@ -59,7 +59,9 @@ private:
         bool use_count = false;
         float    decimate_ratio = 50.f; // in percent
         uint32_t wanted_count = 0; // initialize by percents
-        float max_error = 1.; // maximal quadric error
+        // maximal quadric error; starts at Medium's, as the "Detail level" slider does
+        // (reduction = 2 in on_render_input_window), so the first preview is what it says
+        float max_error = 0.1f;
 
         void fix_count_by_ratio(size_t triangle_count);
         bool operator==(const Configuration& rhs) {
