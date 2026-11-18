@@ -27,6 +27,10 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/Geometry/Voronoi.hpp"
+#include "libslic3r/Arachne/SkeletalTrapezoidation.hpp"
+#include "libslic3r/Arachne/utils/PolygonsSegmentIndex.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -338,4 +342,42 @@ TEST_CASE("Arachne toolpaths stay inside a nearly straight notched strip", "[Ara
                 REQUIRE(bounds.contains(junction.p));
             }
     CHECK(junctions > 0);
+}
+
+// A sliver whose apex lies metres away gives a Voronoi diagram that rotating the input cannot repair.
+// The skeletal graph built from such a diagram has edges without twins, so it must not be used.
+TEST_CASE("Arachne generates no toolpaths from an unrepairable Voronoi diagram", "[Arachne][Regression]") {
+    // Extra parentheses keep GENERATE from splitting on commas inside the Polygon constructors (Catch2 v2).
+    // Large apex coordinates are written as long long so MSVC does not truncate the literals.
+    const Polygon sliver = GENERATE(
+        (Polygon{Point(7085722, -9761944), Point(7086662, -16961944), Point(8169022, coord_t(-8295690726LL))}),
+        (Polygon{Point(8805310, -23391484), Point(8008853, coord_t(6064690973LL)), Point(8534015, -23391518)}));
+    CAPTURE(sliver.points);
+    const Polygons outline{sliver};
+
+    std::vector<PolygonsSegmentIndex> segments;
+    for (size_t point_idx = 0; point_idx < sliver.size(); ++point_idx)
+        segments.emplace_back(&outline, 0, static_cast<unsigned int>(point_idx));
+    Geometry::VoronoiDiagram voronoi;
+    voronoi.construct_voronoi(segments.cbegin(), segments.cend());
+    REQUIRE_FALSE(voronoi.is_valid());
+
+    // FillConcentricInternal's settings for a 0.4 mm nozzle, 0.4 mm lines at 0.2 mm layers.
+    const coord_t spacing        = scaled<coord_t>(Flow::rounded_rectangle_extrusion_spacing(0.4f, 0.2f));
+    const coord_t min_bead_width = scaled<coord_t>(0.85 * 0.4);
+    const auto    strategy       = BeadingStrategyFactory::makeStrategy(spacing, spacing, scaled<coord_t>(0.4), static_cast<float>(Geometry::deg2rad(10.)),
+                                                                        /*print_thin_walls*/ false, min_bead_width, scaled<coord_t>(0.25 * 0.4),
+                                                                        /*split_middle_threshold*/ 0.5, /*add_middle_threshold*/ 0.5,
+                                                                        /*max_bead_count*/ 260, /*outer_wall_offset*/ 0, /*inward_distributed_center_wall_count*/ 1);
+
+    SkeletalTrapezoidation wall_maker(outline, *strategy, strategy->getTransitioningAngle(), scaled<coord_t>(0.8), scaled<coord_t>(100.),
+                                      scaled<coord_t>(0.25 * 0.4), scaled<coord_t>(0.4));
+    std::vector<VariableWidthLines> toolpaths;
+    wall_maker.generateToolpaths(toolpaths);
+
+    size_t junctions = 0;
+    for (const VariableWidthLines &lines : toolpaths)
+        for (const ExtrusionLine &line : lines)
+            junctions += line.size();
+    CHECK(junctions == 0);
 }
