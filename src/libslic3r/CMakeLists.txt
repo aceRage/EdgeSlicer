@@ -563,6 +563,8 @@ set(lisbslic3r_sources
     PlateBedTypes.hpp
     PrimeTowerDefaults.cpp
     PrimeTowerDefaults.hpp
+    FineDetail.cpp
+    FineDetail.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp
