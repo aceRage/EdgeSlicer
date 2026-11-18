@@ -300,15 +300,18 @@ static ExtrusionPaths thick_polyline_to_extrusion_paths_2(const ThickPolyline& t
         }
     }
     //BBS: handle the remaining segment
+    // EdgeSlicer: laid at its average width like every other part. It used to weigh each of its segments by the
+    // width at the segment's start, which laid the tip of a line narrowing to its end too wide (and of one widening
+    // to its end too narrow).
     size_t final_size = lines.size();
     if (start_index < final_size) {
         path = ExtrusionPath(role);
         double length = lines[start_index].length();
-        double sum = lines[start_index].length() * lines[start_index].a_width;
+        double sum = lines[start_index].length() * 0.5 * (lines[start_index].a_width + lines[start_index].b_width);
         path.polyline.append(lines[start_index].a);
         for (int idx = start_index + 1; idx < final_size; idx++) {
             length += lines[idx].length();
-            sum += lines[idx].length() * lines[idx].a_width;
+            sum += lines[idx].length() * 0.5 * (lines[idx].a_width + lines[idx].b_width);
             path.polyline.append(lines[idx].a);
         }
         path.polyline.append(lines[final_size - 1].b);
