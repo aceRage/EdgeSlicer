@@ -1294,7 +1294,14 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
             it = m_section_open.emplace(id, v.empty() ? default_open : v == "1").first;
         }
         ImGui::SetNextItemOpen(it->second, ImGuiCond_Always);
+        // The Orca accent, not the toolbar style's orange: the tints the app derives from it for headers
+        // (hover 0.50, active 0.75 as in ImGuiWrapper's style), with a lighter resting fill.
+        auto orca = [](float alpha) { ImVec4 c = ImGuiWrapper::COL_ORCA; c.w = alpha; return c; };
+        ImGui::PushStyleColor(ImGuiCol_Header, orca(0.30f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, orca(0.50f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, orca(0.75f));
         const bool open = ImGui::CollapsingHeader((into_u8(title) + "##split_sec_" + id).c_str());
+        ImGui::PopStyleColor(3);
         if (open != it->second) {
             it->second = open;
             wxGetApp().app_config->set(std::string("split_fit_open_") + id, open ? "1" : "0");
@@ -1310,7 +1317,7 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
     float limit_y = float(m_parent.get_canvas_size().get_height());
     if (bottom_limit > 0.f)
         limit_y = std::min(limit_y, bottom_limit);
-    const float footer_h = m_footer_h > 0.f ? m_footer_h : ImGui::GetFrameHeight() * 1.6f + style.ItemSpacing.y * 3.f;
+    const float footer_h = m_footer_h > 0.f ? m_footer_h : ImGui::GetFrameHeight() * 1.3f + style.ItemSpacing.y * 3.f;
     const float avail_h  = std::max(em * 6.f, limit_y - ImGui::GetCursorScreenPos().y - footer_h - style.WindowPadding.y - em * 0.75f);
     const bool  scrolls  = m_body_content_h <= 0.f || m_body_content_h > avail_h;
     const float body_h   = scrolls ? avail_h : m_body_content_h;
@@ -1804,16 +1811,34 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
 
     // ---- actions: pinned under the scrolling body ------------------------------------------------
     const float footer_y0 = ImGui::GetCursorPosY();
-    if (m_imgui->button(_L("Reset"), _L("Back to the default margins, axes, layout and dowels"))) {
+    // Both buttons are 1.3 x the usual frame height (font relative, so DPI follows), as wide as their text
+    // needs, never under 5.5 em.
+    const float btn_h = ImGui::GetFrameHeight() * 1.3f;
+    auto        btn_w = [&](const wxString &text) {
+        return std::max(em * 5.5f, (ImGui::CalcTextSize(into_u8(text).c_str()).x + style.FramePadding.x * 2.f) * 1.3f);
+    };
+    if (m_imgui->button(_L("Reset"), ImVec2(btn_w(_L("Reset")), btn_h), true)) {
         reset_options();
         changed = true;
     }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Back to the default margins, axes, layout and dowels"), wrap_w);
     ImGui::SameLine();
     // P4: only the plan of the panel's current values may be applied.
     const bool can_apply = m_plan.valid && !m_plan.planes.empty() && single_copy && plan_current();
-    m_imgui->disabled_begin(!can_apply);
-    const bool apply_now = m_imgui->button(_L("Apply"), _L("Cut the object into these parts and arrange them over the plates"));
-    m_imgui->disabled_end();
+    // Apply is the primary button: the app's confirm style (the Orca accent fill), the disabled style when
+    // there is nothing to apply.
+    if (can_apply)
+        ImGuiWrapper::push_confirm_button_style();
+    else
+        ImGuiWrapper::push_button_disable_style();
+    const bool apply_now = m_imgui->button(_L("Apply"), ImVec2(btn_w(_L("Apply")), btn_h), can_apply);
+    if (can_apply)
+        ImGuiWrapper::pop_confirm_button_style();
+    else
+        ImGuiWrapper::pop_button_disable_style();
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Cut the object into these parts and arrange them over the plates"), wrap_w);
     m_footer_h = ImGui::GetCursorPosY() - footer_y0 + ImGui::GetStyle().ItemSpacing.y + 1.f;
 
     GizmoImguiEnd();
