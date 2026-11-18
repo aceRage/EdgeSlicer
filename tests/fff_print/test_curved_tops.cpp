@@ -3551,13 +3551,106 @@ TriangleMesh puck_with_rim(double rim_deg)
 
 } // namespace
 
+namespace {
+
+// What carries each curved bead (owner, P5: the steeper dome), on 0.1 mm cells and by footprint rather than centre line:
+// every extrusion covers its centre line grown by half its width plus 0.05 mm. For each cell some curved bead covers, the
+// distance from the lowest such bead's planned bottom (Z - h) down to the highest planar extrusion covering the cell;
+// `bare` counts cells no planar extrusion covers. Sparse infill counts as planar material here.
+struct BeadSupport
+{
+    size_t cells { 0 }, bare { 0 }, over_one { 0 }, over_one_half { 0 };
+    double max_gap { -1e9 };
+    Vec3d  at { Vec3d::Zero() };
+};
+
+BeadSupport bead_support(const PrintObject &object, double h)
+{
+    const double cell = 0.1;
+    using Key         = std::pair<long, long>;
+    std::map<Key, double> planar, curved;
+    const auto stamp = [cell](std::map<Key, double> &grid, const Points &pts, const std::vector<double> &z, double width, bool lowest) {
+        const double r  = 0.5 * width + 0.05;
+        const int    ri = int(std::ceil(r / cell));
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const Vec2d a = unscale(pts[i]);
+            const Vec2d b = i + 1 < pts.size() ? unscale(pts[i + 1]) : a;
+            const int   n = std::max(1, int(std::ceil((b - a).norm() / 0.05)));
+            for (int j = 0; j <= n; ++j) {
+                const Vec2d  q  = a + (b - a) * (double(j) / n);
+                const double zq = i + 1 < pts.size() ? z[i] + (z[i + 1] - z[i]) * (double(j) / n) : z[i];
+                const long   i0 = long(std::floor(q.x() / cell)), j0 = long(std::floor(q.y() / cell));
+                for (long di = -ri; di <= ri; ++di)
+                    for (long dj = -ri; dj <= ri; ++dj) {
+                        const Vec2d c((i0 + di + 0.5) * cell, (j0 + dj + 0.5) * cell);
+                        if ((c - q).squaredNorm() > r * r)
+                            continue;
+                        auto [it, fresh] = grid.try_emplace({ i0 + di, j0 + dj }, zq);
+                        if (!fresh)
+                            it->second = lowest ? std::min(it->second, zq) : std::max(it->second, zq);
+                    }
+            }
+        }
+    };
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions()) {
+            std::vector<const ExtrusionPath *> paths;
+            std::function<void(const ExtrusionEntity *)> collect = [&](const ExtrusionEntity *e) {
+                if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+                    for (const ExtrusionEntity *child : c->entities)
+                        collect(child);
+                } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e))
+                    paths.push_back(p);
+                else if (const auto *l = dynamic_cast<const ExtrusionLoop *>(e))
+                    for (const ExtrusionPath &p : l->paths)
+                        paths.push_back(&p);
+                else if (const auto *m = dynamic_cast<const ExtrusionMultiPath *>(e))
+                    for (const ExtrusionPath &p : m->paths)
+                        paths.push_back(&p);
+            };
+            collect(&region->perimeters);
+            collect(&region->fills);
+            collect(&region->thin_fills);
+            for (const ExtrusionPath *p : paths) {
+                if (p->z_contour != nullptr && p->z_contour->curved_top) {
+                    std::vector<double> z;
+                    for (float dz : p->z_contour->z)
+                        z.push_back(layer->print_z + double(dz));
+                    if (z.size() == p->z_contour->points.size())
+                        stamp(curved, p->z_contour->points, z, p->width, true);
+                } else
+                    stamp(planar, p->polyline.points, std::vector<double>(p->polyline.points.size(), layer->print_z), p->width, false);
+            }
+        }
+    BeadSupport out;
+    for (const auto &[k, z] : curved) {
+        ++out.cells;
+        const auto it = planar.find(k);
+        if (it == planar.end()) {
+            ++out.bare;
+            continue;
+        }
+        const double gap = z - h - it->second;
+        out.over_one += gap > h + 0.01 ? 1 : 0;
+        out.over_one_half += gap > 1.5 * h + 0.01 ? 1 : 0;
+        if (gap > out.max_gap) {
+            out.max_gap = gap;
+            out.at      = Vec3d((k.first + 0.5) * cell, (k.second + 0.5) * cell, z);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 // Owner, P5 (2026-11-17): on a steeper dome the lowest curved layer floated about a layer above the planar walls below it.
 // For caps whose rim slopes 10, 15, 20 and 30 degrees (the last two curve partly: rise or material beside), with default
 // settings and with the owner's overrides (angle ceiling and max angle 30, material beside allowed, and infill combination
 // on as in the Centauri Carbon process), on the Centauri Carbon:
 // every lowest curved bead rests on planar material (its planned bottom at most 1.5 layers above the planar top within 0.6
-// mm: its 1-2 x flow fills one layer, the rest is the surface's slope across that 0.6 mm; none without planar material under
-// it), and at most 1 % of the cap's surface no
+// mm, in every cell: its 1-2 x flow fills one layer, the rest is the surface's slope across that 0.6 mm; none without planar
+// material under it; the holes in the solid infill under the block are filled since the second P5 round), and at most 1 %
+// of the cap's surface no
 // steeper than the angle in force is printed more than 0.7 layer short (none short by more than 1.5 layers).
 TEST_CASE("Curved tops P5: the curved block rests on the planar stack along the whole rim", "[CurvedTops][CurvedTopsP5]")
 {
@@ -3587,18 +3680,15 @@ TEST_CASE("Curved tops P5: the curved block rests on the planar stack along the 
                                   << j.max_gap << " mm at (" << j.at_gap.x() << ", " << j.at_gap.y() << ", " << j.at_gap.z() << "), "
                                   << j.over_gap << " over a layer, " << j.unsupported << " unsupported; surface " << j.surface_points
                                   << " points, " << j.short_points << " short by > 0.7 layer, worst " << j.worst_short << " mm. " << summary);
+                const BeadSupport s = bead_support(*object, 0.2);
+                WARN("bead support (footprints), " << (overrides ? "overrides" : "defaults") << ", rim " << rim << " deg: " << s.cells
+                                                   << " cells, max gap " << s.max_gap << " mm, " << s.over_one << " over 1 layer, "
+                                                   << s.over_one_half << " over 1.5 layers, " << s.bare << " bare");
                 CHECK(j.unsupported == 0);
-                // At most one cell in a thousand beyond 1.5 layers (the surface's slope across the 0.6 mm neighbourhood), and
-                // none beyond 2 layers (what the lowest bead's 2 x gap flow fills). With infill combination (the override
-                // case) the count is printed and the bound is 3 layers: under 0.5 % of the cells there lie up to 2.6 layers
-                // above the planar top (not explained yet, see the PR).
-                if (!overrides) {
-                    CHECK(j.over_gap * 1000 <= j.beads);
-                    CHECK(j.max_gap <= 2. * 0.2 + 0.01);
-                } else {
-                    CHECK(j.over_gap * 200 <= j.beads);
-                    CHECK(j.max_gap <= 3. * 0.2 + 0.01);
-                }
+                // No cell beyond 1.5 layers, defaults and overrides alike (before the hole fill under the block the override
+                // case, with infill combination, had up to 0.5 % of its cells up to 2.6 layers above the planar top).
+                CHECK(j.over_gap == 0);
+                CHECK(j.max_gap <= 1.5 * 0.2 + 0.01);
                 CHECK(j.short_points <= j.surface_points / 100);
                 CHECK(j.worst_short <= 1.5 * 0.2);
                 std::string error;
@@ -3615,6 +3705,75 @@ TEST_CASE("Curved tops P5: the curved block rests on the planar stack along the 
                     CHECK(error.empty());
             }
         }
+}
+
+// Owner, P5 (2026-11-18, the steeper dome printed on the Centauri Carbon): the curved layers did not land on the planar
+// material below; up to about two layers lay open under the lowest curved beads. Cause: the planar layers left under the
+// lowered block carry the slicer's own solid infill, laid out for the original dome surface, and it has holes there (the
+// solid rings, the internal bridges over sparse infill and the solid beside them do not meet). A mesh like the owner's (40
+// mm disc, cap rising 5.8 mm to a 32 degree rim) with the owner's process (5 top shells / 1 mm, 2 walls, 15 % rectilinear,
+// thick internal bridges) and developer overrides (angle ceiling and max angle 30, clearance and reach margins 0, material
+// beside allowed, Z contouring allowed; Spiral), with Z contouring off and on: every curved bead lies over planar material,
+// at most 1.5 layers above it (its own 1-2 x flow fills one layer), and the head check finds no contact beyond the nozzle
+// tolerance.
+TEST_CASE("Curved tops P5: the owner's steeper dome lands on the planar material all over", "[CurvedTops][CurvedTopsP5][slow]")
+{
+    const ResourcesDirGuard resources;
+    const DevModeGuard      dev(true);
+    for (const bool zaa : { false, true }) {
+        DYNAMIC_SECTION("Z contouring " << (zaa ? "on" : "off"))
+        {
+            const ConfigItems items = {
+                { "top_shell_layers", "5" },
+                { "top_shell_thickness", "1" },
+                { "wall_loops", "2" },
+                { "sparse_infill_pattern", "rectilinear" },
+                { "internal_solid_infill_pattern", "monotonic" },
+                { "thick_internal_bridges", "1" },
+                { "ensure_vertical_shell_thickness", "ensure_all" },
+                { "curved_tops_max_angle", "30" },
+                { "curved_tops_pattern", "spiral" },
+                { "curved_tops_nozzle_tolerance", "0.4" },
+                { "curved_tops_dev_angle_ceiling", "30" },
+                { "curved_tops_dev_clearance_margin", "0" },
+                { "curved_tops_dev_reach_margin", "0" },
+                { "curved_tops_dev_allow_material_beside", "1" },
+                { "curved_tops_dev_allow_z_contouring", "1" },
+                { "zaa_enabled", zaa ? "1" : "0" },
+            };
+            const TriangleMesh mesh = make_capped_puck(20., 3.6, 5.8, 40, 160);
+            Print              print;
+            Model              model;
+            Test::init_print(std::vector<TriangleMesh>{ mesh }, print, model, puck_config(true, items));
+            print.process();
+            REQUIRE(top_block(print));
+            const PrintObject *object  = print.objects().front();
+            const std::string  summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+            const BeadSupport  s       = bead_support(*object, 0.2);
+            const RimJoin      j       = rim_join(*object, mesh, 0.2, 30.);
+            WARN("steeper dome, Z contouring " << (zaa ? "on" : "off") << ": " << s.cells << " bead cells, max gap " << s.max_gap << " mm at ("
+                                               << s.at.x() << ", " << s.at.y() << ", " << s.at.z() << "), " << s.over_one << " over 1 layer, "
+                                               << s.over_one_half << " over 1.5 layers, " << s.bare << " bare; rim join max gap " << j.max_gap
+                                               << " mm, " << j.over_gap << " over 1.5 layers, surface " << j.short_points << " of "
+                                               << j.surface_points << " short, worst " << j.worst_short << " mm. " << summary);
+            CHECK(s.bare == 0);
+            CHECK(s.over_one_half == 0);
+            CHECK(s.max_gap <= 1.5 * 0.2 + 0.01);
+            CHECK(j.unsupported == 0);
+            CHECK(j.over_gap == 0);
+            std::string error;
+            try {
+                Test::gcode(print);
+            } catch (const Slic3r::SlicingError &ex) {
+                error = ex.what();
+            }
+            INFO("error: " << error);
+            CHECK(error.empty());
+            const std::string check = print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck);
+            WARN("steeper dome export, Z contouring " << (zaa ? "on" : "off") << ": " << check);
+            CHECK(head_check_clean(check));
+        }
+    }
 }
 
 namespace {

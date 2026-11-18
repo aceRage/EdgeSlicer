@@ -1543,6 +1543,86 @@ void clip_collection(ExtrusionEntityCollection &coll, const ExPolygons &drop, co
     coll.entities = std::move(out);
 }
 
+// Owner, P5 (rim gap, steeper dome, second round): the planar layers under the curved block carry the slicer's own solid
+// infill, laid out for the model's original top surface. Lowering the planar body under the block takes away the layers
+// above them and leaves the next ones as the block's support, and there their solid fill is not whole: the solid rings
+// projected from the original surface, the internal bridges over sparse infill and the solid next to them leave holes up to
+// about a millimetre across (seen on the owner's steeper dome: the lowest curved bead up to 2 layers above the planar
+// material under it). Here every part of `under` (where this layer is one of the top solid layers under the block) that
+// no extrusion of the layer covers (each path's centre line grown by half its width; sparse infill does not count) and that
+// is at least CURVED_TOPS_HOLE_MIN_WIDTH wide gets solid infill: sparse lines inside it are cut away, and the hole, grown
+// by half a spacing so the new lines meet the old ones, is filled monotonic at the region's solid flow. Returns how many
+// layer regions got such a fill.
+constexpr double CURVED_TOPS_HOLE_MIN_WIDTH_SPACINGS = 0.5;
+size_t fill_holes_under_curved_block(Layer &layer, const ExPolygons &under, size_t layer_idx)
+{
+    if (under.empty())
+        return 0;
+    const BoundingBox under_bb = get_extents(under);
+    // What the layer prints already, every region (a hole is a hole whichever region's material borders it).
+    Polygons covered;
+    for (const LayerRegion *region : layer.regions()) {
+        std::vector<const ExtrusionPath *> paths;
+        collect_all_paths(&region->perimeters, paths);
+        collect_all_paths(&region->fills, paths);
+        collect_all_paths(&region->thin_fills, paths);
+        for (const ExtrusionPath *p : paths) {
+            if (p->role() == erInternalInfill || p->polyline.size() < 2 || (p->z_contour != nullptr && p->z_contour->curved_top))
+                continue;
+            BoundingBox bb(p->polyline.points);
+            bb.offset(scale_(p->width));
+            if (!bb.overlap(under_bb))
+                continue;
+            polygons_append(covered, offset(p->polyline, float(scale_(0.5 * std::max(0.05f, p->width)))));
+        }
+    }
+    const ExPolygons open = diff_ex(under, union_ex(covered));
+    if (open.empty())
+        return 0;
+    size_t added = 0;
+    for (LayerRegion *region : layer.regions()) {
+        const Flow       flow    = region->flow(frSolidInfill, layer.height);
+        const double     spacing = flow.spacing();
+        const ExPolygons slices  = to_expolygons(region->slices.surfaces);
+        // Slivers between neighbouring lines (a thick bridge's beads lie a little apart) are not holes.
+        const ExPolygons holes = opening_ex(intersection_ex(open, slices), float(scale_(0.5 * CURVED_TOPS_HOLE_MIN_WIDTH_SPACINGS * spacing)));
+        if (holes.empty())
+            continue;
+        BOOST_LOG_TRIVIAL(debug) << "Curved tops: under the block, layer Z " << layer.print_z << ": " << holes.size() << " hole(s), "
+                                 << area(holes) * SCALING_FACTOR * SCALING_FACTOR << " mm2, filled solid";
+        clip_collection(region->fills, holes, get_extents(holes));
+        const ExPolygons fill_area = intersection_ex(offset_ex(holes, float(scale_(0.5 * spacing))), slices);
+        std::unique_ptr<Fill> filler(Fill::new_from_type(ipMonotonic));
+        filler->angle        = float((layer_idx % 2 == 0 ? 45. : 135.) * M_PI / 180.);
+        filler->spacing      = spacing;
+        filler->bounding_box = get_extents(fill_area);
+        FillParams params;
+        params.density = 1.f;
+        auto coll      = std::make_unique<ExtrusionEntityCollection>();
+        for (const ExPolygon &ex : fill_area) {
+            Surface   srf(stInternalSolid, ex);
+            Polylines lines;
+            try {
+                lines = filler->fill_surface(&srf, params);
+            } catch (const std::exception &ex_) {
+                BOOST_LOG_TRIVIAL(warning) << "Curved tops: solid infill in a hole under the block failed: " << ex_.what();
+                continue;
+            }
+            for (Polyline &pl : lines)
+                if (pl.size() >= 2) {
+                    ExtrusionPath path(erSolidInfill, flow.mm3_per_mm(), float(flow.width()), float(layer.height));
+                    path.polyline = std::move(pl);
+                    coll->entities.push_back(new ExtrusionPath(std::move(path)));
+                }
+        }
+        if (!coll->entities.empty()) {
+            region->fills.entities.push_back(coll.release());
+            ++added;
+        }
+    }
+    return added;
+}
+
 // Owner, P5 (rim gap, steeper dome): the planar layers right under the curved block must be solid. With partial curving
 // the plateau at the cut lies deep inside the part, where the slicer laid sparse infill, so the lowest curved layer printed
 // onto sparse lines (the curved layers above the cut were the part's only top shell); with whole curving the same happens
@@ -1636,6 +1716,7 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
                 ++added;
             }
         }
+        added += fill_holes_under_curved_block(*layer, under, idx[j]);
     }
     return added;
 }
