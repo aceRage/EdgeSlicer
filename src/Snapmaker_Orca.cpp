@@ -2923,7 +2923,7 @@ int CLI::run(int argc, char **argv)
             load_filaments_config.push_back(std::move(config));
             load_filaments_index.push_back(current_index);
 
-            load_filaments_set.emplace(config_name);
+            load_filaments_set.emplace(cli_filament_identity(config_name, cli_filament_colour_of(load_filaments_config.back())));
 
             BOOST_LOG_TRIVIAL(info) << boost::format("loaded filament %1% from file %2%, type %3%, name %4%, inherits %5%")%(index+1) %file %config_from %config_name % inherits;
         }
@@ -2936,7 +2936,7 @@ int CLI::run(int argc, char **argv)
                 load_filaments_index.push_back(current_index);
                 load_filaments_inherit.push_back(default_filament_inherit);
 
-                load_filaments_set.emplace(default_load_fila_name);
+                load_filaments_set.emplace(cli_filament_identity(default_load_fila_name, cli_filament_colour_of(load_filaments_config.back())));
             }
             continue;
         }
@@ -2946,8 +2946,20 @@ int CLI::run(int argc, char **argv)
 
     if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
     {
-        disable_wipe_tower_after_mapping = true;
-        BOOST_LOG_TRIVIAL(info) << boost::format("map all the filaments to the same one, load_filament_count %1%")%load_filament_count;
+        // Same preset name does not mean the same filament: several "Generic PLA"
+        // configs can carry different colours. Only map them to one filament (and
+        // disable the prime tower) when the effective colours are also the same.
+        // Check the loaded filament configs first, then the project config from
+        // the 3MF (Snapmaker/OrcaSlicer #1190).
+        const std::set<std::string> filament_color_set =
+            cli_distinct_filament_colours(load_filaments_config, &m_print_config);
+        if (cli_should_disable_wipe_tower_after_mapping(is_bbl_3mf, load_filament_count, load_filaments_set.size(),
+                                                        filament_color_set.size())) {
+            disable_wipe_tower_after_mapping = true;
+            BOOST_LOG_TRIVIAL(info) << boost::format("map all the filaments to the same one, load_filament_count %1%")%load_filament_count;
+        } else {
+            BOOST_LOG_TRIVIAL(info) << boost::format("filaments share one preset name but have %1% distinct colours, keeping prime tower enabled")%filament_color_set.size();
+        }
     }
 
     //load system config if needed

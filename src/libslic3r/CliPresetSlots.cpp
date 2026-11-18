@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
 
 namespace Slic3r {
 
@@ -73,6 +74,56 @@ void cli_set_filament_preset_value(DynamicPrintConfig &config, const std::string
     dst->set_at(src, filament_idx, from);
     if (filament_count > filament_idx && dst->size() > filament_count)
         dst->resize(filament_count);
+}
+
+std::string cli_filament_identity(const std::string &name, const std::string &colour)
+{
+    std::string key = name;
+    key.push_back('\x1f');
+    key += colour;
+    return key;
+}
+
+static void add_filament_colours(const DynamicPrintConfig &config, std::set<std::string> &out)
+{
+    const ConfigOptionStrings *opt = config.option<ConfigOptionStrings>("filament_colour");
+    if (opt == nullptr)
+        return;
+    for (const std::string &color : opt->values) {
+        if (!color.empty())
+            out.emplace(color);
+    }
+}
+
+std::string cli_filament_colour_of(const DynamicPrintConfig &config)
+{
+    const ConfigOptionStrings *opt = config.option<ConfigOptionStrings>("filament_colour");
+    if (opt == nullptr)
+        return std::string();
+    for (const std::string &color : opt->values) {
+        if (!color.empty())
+            return color;
+    }
+    return std::string();
+}
+
+std::set<std::string> cli_distinct_filament_colours(const std::vector<DynamicPrintConfig> &filament_configs,
+                                                    const DynamicPrintConfig              *project_config)
+{
+    std::set<std::string> colours;
+    for (const DynamicPrintConfig &cfg : filament_configs)
+        add_filament_colours(cfg, colours);
+    if (colours.size() <= 1 && project_config != nullptr)
+        add_filament_colours(*project_config, colours);
+    return colours;
+}
+
+bool cli_should_disable_wipe_tower_after_mapping(bool   is_bbl_3mf,
+                                                 int    load_filament_count,
+                                                 size_t distinct_identities,
+                                                 size_t distinct_colours)
+{
+    return is_bbl_3mf && load_filament_count > 0 && distinct_identities == 1 && distinct_colours <= 1;
 }
 
 } // namespace Slic3r

@@ -3,6 +3,7 @@
 #include "libslic3r/CliPresetSlots.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -184,4 +185,89 @@ TEST_CASE("A preset given to the CLI falls back to its first value as the applic
         REQUIRE(!opt->is_nil(0));
         CHECK_THAT(opt->get_at(0), Catch::Matchers::WithinRel(0.8, 1e-9));
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// CLI load_filaments_set identity (Snapmaker/OrcaSlicer #1190): same preset name with different
+// colours must stay distinct, or disable_wipe_tower_after_mapping turns the prime tower off.
+
+namespace {
+
+DynamicPrintConfig colour_config(std::initializer_list<std::string> colours)
+{
+    DynamicPrintConfig config;
+    auto              *opt = new ConfigOptionStrings();
+    opt->values.assign(colours);
+    config.set_key_value("filament_colour", opt);
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("CLI filament identity keys on name and colour", "[CLI][Config][Regression]")
+{
+    CHECK(cli_filament_identity("Generic PLA", "#FF0000") != cli_filament_identity("Generic PLA", "#00FF00"));
+    CHECK(cli_filament_identity("Generic PLA", "#FF0000") == cli_filament_identity("Generic PLA", "#FF0000"));
+    CHECK(cli_filament_identity("Generic PLA", "") != cli_filament_identity("Generic PETG", ""));
+}
+
+TEST_CASE("CLI filament colour helper takes the first non-empty value", "[CLI][Config][Regression]")
+{
+    CHECK(cli_filament_colour_of(colour_config({"#FF0000"})) == "#FF0000");
+    CHECK(cli_filament_colour_of(colour_config({"", "#00FF00"})) == "#00FF00");
+    CHECK(cli_filament_colour_of(colour_config({""})).empty());
+    CHECK(cli_filament_colour_of(DynamicPrintConfig()).empty());
+}
+
+TEST_CASE("CLI load_filaments_set keeps same-named filaments of different colours distinct", "[CLI][Config][Regression]")
+{
+    const std::vector<DynamicPrintConfig> filaments{
+        colour_config({"#FF0000"}), colour_config({"#00FF00"}), colour_config({"#0000FF"}), colour_config({"#FFFFFF"})};
+    std::set<std::string> identities;
+    for (const DynamicPrintConfig &cfg : filaments)
+        identities.emplace(cli_filament_identity("Generic PLA", cli_filament_colour_of(cfg)));
+
+    REQUIRE(identities.size() == 4);
+    CHECK_FALSE(cli_should_disable_wipe_tower_after_mapping(true, 4, identities.size(),
+                                                            cli_distinct_filament_colours(filaments, nullptr).size()));
+}
+
+TEST_CASE("CLI maps same-named same-colour filaments to one and would disable the prime tower", "[CLI][Config][Regression]")
+{
+    const std::vector<DynamicPrintConfig> filaments{colour_config({"#FFFFFF"}), colour_config({"#FFFFFF"}),
+                                                    colour_config({"#FFFFFF"})};
+    std::set<std::string> identities;
+    for (const DynamicPrintConfig &cfg : filaments)
+        identities.emplace(cli_filament_identity("Generic PLA", cli_filament_colour_of(cfg)));
+
+    REQUIRE(identities.size() == 1);
+    CHECK(cli_should_disable_wipe_tower_after_mapping(true, 3, identities.size(),
+                                                      cli_distinct_filament_colours(filaments, nullptr).size()));
+}
+
+TEST_CASE("CLI keeps the prime tower when same-named files have no colour but the 3MF does", "[CLI][Config][Regression]")
+{
+    const std::vector<DynamicPrintConfig> filaments{colour_config({""}), colour_config({""}), colour_config({""}),
+                                                    colour_config({""})};
+    std::set<std::string> identities;
+    for (const DynamicPrintConfig &cfg : filaments)
+        identities.emplace(cli_filament_identity("Generic PLA", cli_filament_colour_of(cfg)));
+    REQUIRE(identities.size() == 1);
+
+    DynamicPrintConfig project;
+    auto              *opt = new ConfigOptionStrings();
+    opt->values            = {"#FF0000", "#00FF00", "#0000FF", "#FFFFFF"};
+    project.set_key_value("filament_colour", opt);
+
+    const std::set<std::string> colours = cli_distinct_filament_colours(filaments, &project);
+    REQUIRE(colours.size() == 4);
+    CHECK_FALSE(cli_should_disable_wipe_tower_after_mapping(true, 4, identities.size(), colours.size()));
+}
+
+TEST_CASE("CLI wipe-tower mapping gate ignores non-project files and empty loads", "[CLI][Config][Regression]")
+{
+    CHECK_FALSE(cli_should_disable_wipe_tower_after_mapping(false, 4, 1, 1));
+    CHECK_FALSE(cli_should_disable_wipe_tower_after_mapping(true, 0, 1, 1));
+    CHECK_FALSE(cli_should_disable_wipe_tower_after_mapping(true, 4, 2, 1));
+    CHECK(cli_should_disable_wipe_tower_after_mapping(true, 4, 1, 0));
 }
