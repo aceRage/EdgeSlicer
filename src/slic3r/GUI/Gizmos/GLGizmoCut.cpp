@@ -3210,7 +3210,7 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     // stroke's end - sits within Extension of the line, the extended surface ran
     // through it and the boolean cut a slot into the neighbour. Each entry below
     // is the distance from one rail's base point along its extension direction to
-    // the first mesh hit (infinity when there is none), minus a small margin, so
+    // the first face it goes into from outside (infinity when there is none), minus a small margin, so
     // the cutter can clamp the outward rail per sample instead of trusting the
     // slider value everywhere.
     //
@@ -3227,16 +3227,12 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     const std::vector<DrawCutSample>& p = m_draw_stroke.path();
     const auto& em = m_draw_raycaster->get_aabb_mesh();
 
-    // The origin starts 0.05 mm along the cast direction so the facet the stroke
-    // was drawn on cannot be the first hit; the same 0.05 mm comes back out of
-    // the reported distance, and a further 0.1 mm margin keeps grazing
-    // self-intersections (a curved wall the ray clips on its own way out) from
-    // zeroing the clamp.
+    // Only a face the ray goes INTO from outside stops it - see
+    // draw_cut_extension_clearance(). A line drawn on a flat face lies in that face's
+    // plane, so stopping at the first face of any kind clamped the extension at the
+    // face's own edge and the cut ended on the part's side wall.
     auto clearance_along = [&em](const Vec3d& from, const Vec3d& dir) -> double {
-        const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
-        const auto  hit = em.query_ray_hit(from + 0.05 * d, d);
-        const double t  = hit.is_hit() ? hit.distance() + 0.05 : std::numeric_limits<double>::max();
-        return std::max(0.0, t - 0.1);
+        return draw_cut_extension_clearance(em, from, dir);
     };
 
     const size_t n = p.size();
@@ -3552,11 +3548,12 @@ void GLGizmoCut3D::commit_draw_points()
     // would corrupt undo. Undo still works - the entry pushed before the edit holds the
     // chain as it was, ranges and all - it just makes the edited line one link.
     //
-    // Editing is only reachable on a VALID stroke, which means a CLOSED chain, so the
-    // closed flag is restored unconditionally. (set_samples() refuses to call a chain
-    // of fewer than MinChainSamples closed, which is the guard against an edit that
-    // deletes its way down to a triangle.)
-    m_draw_chain.set_samples(m_draw_points, /*closed*/ true);
+    // Editing is reachable on any VALID stroke: a CLOSED chain or one the user finished
+    // OPEN with "Cut along the line". The edit keeps whichever it was - an open line
+    // whose point is moved stays an open line, it does not become a loop.
+    // (set_samples() refuses to call a chain of fewer than MinChainSamples closed or
+    // finished, which is the guard against an edit that deletes its way down to a dab.)
+    draw_cut_chain_set_edited(m_draw_chain, m_draw_points);
     refresh_draw_stroke();
 }
 
