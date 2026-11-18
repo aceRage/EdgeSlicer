@@ -1,6 +1,7 @@
 #include "Search.hpp"
 
 #include <vector>
+#include <map>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
@@ -19,6 +20,7 @@
 #include "GUI_App.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
+#include "I18N.hpp"
 
 #define FTS_FUZZY_MATCH_IMPLEMENTATION
 #include "fts_fuzzy_match.h"
@@ -86,11 +88,38 @@ void change_opt_key(std::string &opt_key, DynamicPrintConfig *config, int &cnt)
 
 static std::string get_key(const std::string &opt_key, Preset::Type type) { return std::to_string(int(type)) + ";" + opt_key; }
 
+// EdgeSlicer, Fine detail P1 (D5): settings renamed to say what they do stay findable by their old (upstream) label,
+// which the search shows after the new one in brackets.
+static const char *search_alias_label(const std::string &opt_key)
+{
+    static const std::map<std::string, const char *> aliases{
+        { "min_feature_size", L("Minimum feature size") },
+        { "min_bead_width", L("Minimum wall width") },
+        { "initial_layer_min_bead_width", L("First layer minimum wall width") },
+        { "wall_transition_length", L("Wall transition length") },
+        { "wall_transition_angle", L("Wall transitioning threshold angle") },
+        { "wall_transition_filter_deviation", L("Wall transitioning filter margin") },
+        { "wall_distribution_count", L("Wall distribution count") },
+        { "min_length_factor", L("Minimum wall length") },
+    };
+    const auto it = aliases.find(opt_key);
+    return it == aliases.end() ? nullptr : it->second;
+}
+
 void OptionsSearcher::append_options(DynamicPrintConfig *config, Preset::Type type, ConfigOptionMode mode)
 {
     auto emplace = [this, type](const std::string key, const wxString &label) {
         const GroupAndCategory &gc = groups_and_categories[key];
         if (gc.group.IsEmpty() || gc.category.IsEmpty()) return;
+        // EdgeSlicer: "Thinnest line (Minimum wall width)", in English and translated.
+        const std::string opt_key = key.substr(key.find(';') + 1);
+        if (const char *alias = search_alias_label(opt_key.substr(0, opt_key.find('#')))) {
+            const wxString en    = label + " (" + wxString::FromUTF8(alias) + ")";
+            const wxString local = _(label) + " (" + _(alias) + ")";
+            options.emplace_back(Option{boost::nowide::widen(key), type, en.ToStdWstring(), local.ToStdWstring(), gc.group.ToStdWstring(),
+                                        _(gc.group).ToStdWstring(), gc.category.ToStdWstring(), GUI::Tab::translate_category(gc.category, type).ToStdWstring()});
+            return;
+        }
 
         wxString suffix;
         wxString suffix_local;

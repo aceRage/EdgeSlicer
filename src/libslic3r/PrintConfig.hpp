@@ -474,6 +474,17 @@ enum class PerimeterGeneratorType
     Arachne
 };
 
+// EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, P2): how thin a line the walls may use for
+// features narrower than a wall. Off is the walls as they always were; the floors of the named levels are in
+// FineDetail.hpp. Custom takes thin_feature_line_width / thin_feature_min_size as set.
+enum class FineDetailLevel
+{
+    Off,
+    Balanced,
+    FineText,
+    Custom
+};
+
 // Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
 // reorder). Cyclic uses a fixed ascending filament sequence each layer so extra toolchanges give
 // the previous colour more time to cool. There is no third "Minimum flush" enum value in Orca;
@@ -1119,6 +1130,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SideScrapeFace)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FineDetailLevel)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
@@ -1816,6 +1828,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_feature_size))
     ((ConfigOptionPercent,            initial_layer_min_bead_width))
     ((ConfigOptionPercent,            min_bead_width))
+    // EdgeSlicer (Fine detail P2, Cura's separate minimums): the line widths that decide when one wall line
+    // splits into two (odd) and when a centre line is added between two (even). 0 = min_bead_width, as before.
+    ((ConfigOptionPercent,            min_odd_wall_line_width))
+    ((ConfigOptionPercent,            min_even_wall_line_width))
 
     // Orca
     ((ConfigOptionFloat,              wall_maximum_resolution))
@@ -2026,6 +2042,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.
     ((ConfigOptionBool, detect_thin_wall))
+    // EdgeSlicer, Fine detail (P2): region keys, so a modifier can carry them. See FineDetail.hpp.
+    ((ConfigOptionEnum<FineDetailLevel>, fine_detail))
+    ((ConfigOptionPercent, thin_feature_line_width))
+    ((ConfigOptionPercent, thin_feature_min_size))
+    ((ConfigOptionFloat, fine_detail_speed))
     // Ultra: offset layers (interlocked half-layer-shifted odd walls)
     ((ConfigOptionBool, offset_layers))
     ((ConfigOptionFloatOrPercent, top_surface_line_width))

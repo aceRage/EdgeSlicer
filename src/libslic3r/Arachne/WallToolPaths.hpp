@@ -43,9 +43,27 @@ public:
     // OrcaSlicer #11925: user-set Arachne simplification; the defaults are the former constants.
     coord_t wall_maximum_resolution = meshfix_maximum_resolution();
     coord_t wall_maximum_deviation  = meshfix_maximum_deviation();
+
+    // EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, C1). min_bead_width used to do three jobs:
+    // the width thin features are widened to, the 1 -> 2 split and the add-a-centre-line threshold. These split
+    // them apart. All four are in mm and 0 means "min_bead_width / min_feature_size", which is what every caller
+    // that does not set them (the concentric fills, curved tops) gets: the walls exactly as before.
+    // thin_bead_width:   the narrowest line a thin feature is printed with (WideningBeadingStrategy's output).
+    //                    WallToolPaths keeps it at or below min_bead_width and never narrower than the layer is tall.
+    // thin_feature_size: features thinner than this get no line (Widening's input); kept at or below min_feature_size.
+    // min_odd_wall_width / min_even_wall_width: Cura's separate minimums, used for the split / add thresholds.
+    float   thin_bead_width{0.f};
+    float   thin_feature_size{0.f};
+    float   min_odd_wall_width{0.f};
+    float   min_even_wall_width{0.f};
 };
 
-WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config);
+// EdgeSlicer, Fine detail: `region_config` carries the region's Fine detail level (a modifier can set it). nullptr, as
+// the three-argument calls pass, leaves the thin-feature fields at 0, i.e. the walls as before. The odd / even minimums
+// are object keys and are read either way. On the first layer neither applies: initial_layer_min_bead_width does all
+// the jobs there, as it always did.
+WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                                      const PrintRegionConfig *region_config = nullptr);
 
 class WallToolPaths
 {
@@ -145,6 +163,10 @@ private:
     bool print_thin_walls; //<! Whether to enable the widening beading meta-strategy for thin features
     coord_t min_feature_size; //<! The minimum size of the features that can be widened by the widening beading meta-strategy. Features thinner than that will not be printed
     coord_t min_bead_width;  //<! The minimum bead size to use when widening thin model features with the widening beading meta-strategy
+    coord_t thin_bead_width;   //<! EdgeSlicer: Widening's output width (min_bead_width unless Fine detail lowers it)
+    coord_t thin_feature_size; //<! EdgeSlicer: Widening's input width (min_feature_size unless Fine detail lowers it)
+    coord_t min_odd_wall_width;  //<! EdgeSlicer: the split threshold's minimum (min_bead_width unless set)
+    coord_t min_even_wall_width; //<! EdgeSlicer: the add threshold's minimum (min_bead_width unless set)
     double small_area_length; //<! The length of the small features which are to be filtered out, this is squared into a surface
     coord_t wall_transition_filter_deviation; //!< The allowed line width deviation induced by filtering
     bool toolpaths_generated; //<! Are the toolpaths generated

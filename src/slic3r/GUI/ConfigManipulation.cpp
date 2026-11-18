@@ -500,6 +500,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            ! config->opt_bool("enable_support") &&
            config->opt_int("enforce_support_layers") == 0 &&
            ! config->opt_bool("detect_thin_wall") &&
+           // EdgeSlicer: Fine detail detects thin walls on Classic, which open the spiral's single wall.
+           (! config->has("fine_detail") || config->opt_enum<FineDetailLevel>("fine_detail") == FineDetailLevel::Off) &&
            ! config->opt_bool("overhang_reverse") &&
            // Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
            (! config->has("stabilizer_supports") || config->opt_enum<StabilizerMode>("stabilizer_supports") == smOff) &&
@@ -516,6 +518,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("enable_support", new ConfigOptionBool(false));
             new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
             new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+            if (new_conf.has("fine_detail"))
+                new_conf.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
             if (new_conf.has("stabilizer_supports"))
                 new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
@@ -1420,9 +1424,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
-        "wall_maximum_resolution", "wall_maximum_deviation"})
+        "wall_maximum_resolution", "wall_maximum_deviation", "min_odd_wall_line_width", "min_even_wall_line_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
+    // EdgeSlicer, Fine detail: the level works on both generators (on Classic it detects thin walls); its two floors
+    // are Arachne's, and the floors and the speed only act while a level is chosen.
+    if (config->has("fine_detail")) {
+        const bool fine_detail_on = config->opt_enum<FineDetailLevel>("fine_detail") != FineDetailLevel::Off;
+        for (auto el : { "thin_feature_line_width", "thin_feature_min_size" }) {
+            toggle_line(el, have_arachne);
+            toggle_field(el, fine_detail_on);
+        }
+        toggle_field("fine_detail_speed", fine_detail_on);
+    }
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");
