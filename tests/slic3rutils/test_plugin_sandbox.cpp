@@ -2078,7 +2078,8 @@ TEST_CASE("AppContainer fail-closes fs_readwrite when WRITE_OWNER is missing", "
 
 TEST_CASE("AppContainer hosted run succeeds when data_dir has no WRITE_OWNER", "[PluginSandbox][windows][acl][Python]")
 {
-    const auto probe = plugin_ipc::probe_os_sandbox();
+    const bool modify_only = GENERATE(false, true);
+    const auto probe       = plugin_ipc::probe_os_sandbox();
     if (!probe.appcontainer)
         SKIP("AppContainer unavailable: " + probe.reason);
     if (!plugin_ipc::helper_exists())
@@ -2088,8 +2089,11 @@ TEST_CASE("AppContainer hosted run succeeds when data_dir has no WRITE_OWNER", "
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
-    ScopedDataDir data("plugin-sandbox-nowo-host");
-    REQUIRE(restrict_dacl_dac_without_write_owner(data.dir.string()));
+    ScopedDataDir data(modify_only ? "plugin-sandbox-nowo-host-m" : "plugin-sandbox-nowo-host");
+    if (modify_only)
+        REQUIRE(restrict_dacl_to_modify(data.dir.string()));
+    else
+        REQUIRE(restrict_dacl_dac_without_write_owner(data.dir.string()));
 
     write_plugin(data, "Sandbox_NoWO", R"PY(# /// script
 # requires-python = ">=3.12"
@@ -2119,6 +2123,12 @@ class Pkg(orca.base):
     CHECK(completion.error.empty());
     CHECK(completion.result.message == "nowo-ok");
     plugin_ipc::PluginHostClient::instance().shutdown();
+    const fs::path host_log = data.dir / "plugin_host" / "edge-plugin-host.log";
+    {
+        boost::system::error_code ec;
+        REQUIRE((fs::exists(host_log, ec) && !ec));
+    }
+    CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(host_log.string()));
     {
         boost::system::error_code ec;
         fs::remove_all(data.dir, ec);

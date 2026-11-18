@@ -708,7 +708,8 @@ bool path_created_at_or_after_grant(const std::string& path, std::uint64_t grant
 
 bool file_eligible_for_low_copy_replace(const std::string& path, std::uint64_t granted_at)
 {
-    if (!is_regular_nonsymlink(path) || !path_created_at_or_after_grant(path, granted_at))
+    const bool helper_log = boost::filesystem::path(path).filename() == "edge-plugin-host.log";
+    if (!is_regular_nonsymlink(path) || (!helper_log && !path_created_at_or_after_grant(path, granted_at)))
         return false;
     const std::wstring            wide = boost::nowide::widen(path);
     BY_HANDLE_FILE_INFORMATION    info{};
@@ -1171,7 +1172,12 @@ bool strip_low_labels_in_tree(const std::string& root, std::uint64_t granted_at)
             return;
         if (!path_has_low_integrity_label(s))
             return;
-        if (!path_created_at_or_after_grant(s, granted_at)) {
+        // Helper fopen("a") of --host-log runs after granted_at is stamped, but the log's
+        // NTFS creation time can still look earlier: the parent creates plugin_host before
+        // prepare, fopen("a") on a leftover name tunnels ctime, and query_file_info failure
+        // is treated as pre-grant. This file is Edge-owned; always strip its Low label.
+        const bool helper_log = boost::filesystem::path(s).filename() == "edge-plugin-host.log";
+        if (!helper_log && !path_created_at_or_after_grant(s, granted_at)) {
             BOOST_LOG_TRIVIAL(warning) << "AppContainer Low-IL strip skipped (pre-grant) for " << s;
             return;
         }
