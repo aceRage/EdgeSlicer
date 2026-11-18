@@ -148,9 +148,6 @@ public:
         int  new_nozzle         = -1;
         int  old_extruder       = -1;    // logical extruder of the outgoing filament (hotend_cooling_rate index)
         int  old_physical_extruder = -1; // T of the pre-cool M104
-        // User-provided so `plan_toolchange(... = NozzleChangePlan())` is valid while WipeTower is
-        // still incomplete (GCC/Clang reject an implicit default ctor that uses these NSDMIs).
-        NozzleChangePlan() {}
     };
 
 	struct ToolChangeResult
