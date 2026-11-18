@@ -8640,10 +8640,10 @@ msgstr ""
 "Voreinstellungen, die von anderen Voreinstellungen geerbt wurden, können "
 "nicht gelöscht werden!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
-msgstr[0] "Die folgenden Profile erben dieses Profil."
-msgstr[1] "Das folgende Profil erbt dieses Profil."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
+msgstr[0] "Das folgende Profil erbt dieses Profil."
+msgstr[1] "Die folgenden Profile erben dieses Profil."
 
 #. TRN  Remove/Delete
 #, boost-format
