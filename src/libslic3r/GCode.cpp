@@ -3368,7 +3368,7 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
             // Review M2: each object's tolerance in force, capped by the head's printed record as the planner had it.
             for (const PrintObject *object : curved_objects) {
                 const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
-                tol = std::min(tol, curved_tops_nozzle_tolerance(object->config(), curved_tops_head_limits(print.config(), dev), dev).used);
+                tol = std::min(tol, curved_tops_nozzle_tolerance(object->config(), curved_tops_head_limits(print, dev), dev).used);
             }
             if (tol > 0. && tol < std::numeric_limits<double>::max()) {
                 params.nozzle_contact_tolerance = tol + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM;
@@ -3401,14 +3401,18 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
                                        "%3% mm); no other head part touches in those moves.")),
                                    mm(report.tolerated_max_depth), report.tolerated_moves,
                                    mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
-        const double verified = head->curved_tops_verified_for(printer_model) ? head->curved_tops_verified->nozzle_contact_mm : 0.;
+        // Curved tops on any printer: a head with the user's values carries the user's own record, never the file's.
+        const double verified = head->user_values ? head->user_nozzle_contact_mm :
+                                head->curved_tops_verified_for(printer_model) ? head->curved_tops_verified->nozzle_contact_mm : 0.;
+        const std::string verified_on = head->user_values ? _(L("your value in the printer settings")) :
+                                        head->curved_tops_verified ? head->curved_tops_verified->on : std::string();
         // Never silent (review M2): with no record (developer override only) or beyond it, say so.
         if (verified <= 0.)
             tolerated += " " + _(L("No nozzle contact has been printed with this print head yet (developer override). Watch the first print."));
         else if (double(report.tolerated_max_depth) > verified + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM)
             tolerated += " " + Slic3r::format(_(L("That is deeper than has been printed on this printer so far (%1% mm, %2%). Watch the "
                                                   "first print.")),
-                                              mm(verified), head->curved_tops_verified->on);
+                                              mm(verified), verified_on);
         BOOST_LOG_TRIVIAL(info) << "Curved tops head check: " << report.tolerated_moves << " moves with nozzle contact within the tolerance, deepest "
                                 << report.tolerated_max_depth << " mm";
     }

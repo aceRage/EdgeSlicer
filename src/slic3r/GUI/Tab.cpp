@@ -7536,6 +7536,13 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("extruder_clearance_height_to_rod");
         optgroup->append_single_option_line("extruder_clearance_height_to_lid");
 
+        // EdgeSlicer, curved tops on any printer (tests/design_curved_tops_any_printer.md, 5.1): the print head values the
+        // curved-tops planner and the head contact check need on a printer EdgeSlicer has no checked head data for.
+        optgroup = page->new_optgroup(L("Head clearance"), "param_extruder_clearence");
+        optgroup->append_single_option_line("head_nozzle_protrusion");
+        optgroup->append_single_option_line("head_max_surface_angle");
+        optgroup->append_single_option_line("head_nozzle_contact_record");
+
         optgroup = page->new_optgroup(L("Adaptive bed mesh"), "param_adaptive_mesh");
         optgroup->append_single_option_line("bed_mesh_min", "adaptive-bed-mesh");
         optgroup->append_single_option_line("bed_mesh_max", "adaptive-bed-mesh");

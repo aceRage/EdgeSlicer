@@ -122,6 +122,9 @@
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
+#include "libslic3r/HeadClearance.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
@@ -29337,6 +29340,8 @@ bool Plater::guard_before_slice_plate()
     sync_flow_ratio_zero_notification();
     sync_cold_plate_notification();
     check_seq_print_caution(false);
+    if (!confirm_curved_tops_head_before_slice())
+        return false;
     return confirm_filament_temp_mixing_before_slice();
 }
 
@@ -29346,7 +29351,79 @@ bool Plater::guard_before_slice_all()
         return false;
     sync_flow_ratio_zero_notification();
     check_seq_print_caution(true);
+    if (!confirm_curved_tops_head_before_slice())
+        return false;
     return confirm_filament_temp_mixing_before_slice_all();
+}
+
+// EdgeSlicer, curved tops on any printer (tests/design_curved_tops_any_printer.md, 3.4 and D3). A printer whose head
+// values no curved print has checked (an EdgeSlicer estimate, or the nozzle protrusion the user entered) runs curved
+// tops only once the user accepted that risk. Asked here, when the user presses Slice, once per printer preset and
+// head values (a changed value asks again). The answer is kept in the app settings, never in a preset, a project or
+// the G-code, so a downloaded project cannot carry someone else's acceptance. Without it the slicer prints the tops
+// flat and says why; the head contact check runs either way.
+bool Plater::confirm_curved_tops_head_before_slice()
+{
+    const DynamicPrintConfig &full = wxGetApp().preset_bundle->full_config();
+    auto curved_on = [](const DynamicPrintConfig &cfg) {
+        const ConfigOptionBool *opt = cfg.option<ConfigOptionBool>("curved_tops_enabled");
+        return opt != nullptr && opt->value;
+    };
+    bool on = curved_on(full);
+    for (const ModelObject *mo : p->model.objects) {
+        if (on)
+            break;
+        if (mo == nullptr)
+            continue;
+        on = curved_on(mo->config.get());
+        for (const ModelVolume *mv : mo->volumes)
+            on = on || (mv != nullptr && curved_on(mv->config.get()));
+        for (const auto &range : mo->layer_config_ranges)
+            on = on || curved_on(range.second.get());
+    }
+    if (!on)
+        return true;
+
+    PrintConfig printer;
+    printer.apply(full, true);
+    const ConfigOptionString *preset_opt = full.option<ConfigOptionString>("printer_settings_id");
+    const std::string         preset     = preset_opt != nullptr ? preset_opt->value : std::string();
+    const CurvedTopsHeadLimits limits     = curved_tops_head_limits(printer, CurvedTopsDevOverrides(), preset);
+    // Nothing to accept: verified, already accepted, or refused for another reason (no values at all: the slicing warning
+    // says where to enter them).
+    if (!limits.known || !limits.needs_acknowledgement || limits.acknowledged || limits.acknowledgement_key.empty())
+        return true;
+
+    const double lowest = limits.head ? limits.head->lowest_box_z() : 0.;
+    const ConfigOptionFloat *angle_opt = full.option<ConfigOptionFloat>("curved_tops_max_angle");
+    const double             angle     = curved_tops_effective_max_angle(angle_opt != nullptr ? angle_opt->value : 15., limits);
+    auto mm = [](double v) { return wxString::FromUTF8(float_to_string_decimal_point(v, 2)); };
+    const wxString printer_name = wxString::FromUTF8(preset.empty() ? printer.printer_model.value : preset);
+    const wxString what = limits.user_values ? _L("your own values from the printer settings") : _L("an EdgeSlicer estimate");
+    wxString msg = _L("Curved tops is experimental on this printer.") + "\n\n" +
+                   wxString::Format(_L("The print head clearance for %s is %s and has not been checked on a real print. If it is "
+                                       "wrong, the silicone sock, a fan duct, the bed probe or a second nozzle can hit the part."),
+                                    printer_name, what) +
+                   "\n\n" +
+                   wxString::Format(_L("Nozzle stands %s mm below the lowest head part; curved surfaces may rise %s mm, slope up to %s degrees."),
+                                    mm(lowest), mm(limits.allowed_rise_mm), wxString::FromUTF8(float_to_string_decimal_point(angle, 1))) +
+                   "\n\n" +
+                   _L("The head contact check still runs on every slice and stops the export when it finds a contact. Watch the "
+                      "first print. The values are in Printer settings > Basic information > Head clearance.") +
+                   "\n\n" + _L("This is asked once for this printer preset and these values; changing a value asks again.");
+    MessageDialog dlg(this, msg, _L("Curved tops on an unverified print head"), wxICON_WARNING | wxOK | wxCANCEL);
+    dlg.SetButtonLabel(wxID_OK, _L("I understand the risk, continue"));
+    dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+
+    const std::string today = wxDateTime::Now().FormatISOCombined(' ').ToStdString();
+    wxGetApp().app_config->set(CURVED_TOPS_ACK_SECTION, limits.acknowledgement_key, today);
+    add_curved_tops_acknowledgement(limits.acknowledgement_key);
+    BOOST_LOG_TRIVIAL(warning) << "Curved tops: the user accepted unverified head values (" << limits.acknowledgement_key << ")";
+    // Plates planned before the acceptance printed their tops flat: plan them again.
+    invalidate_slices_for_developer_mode();
+    return true;
 }
 
 bool Plater::confirm_filament_temp_mixing_before_slice()

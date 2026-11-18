@@ -798,6 +798,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "extruder_clearance_max_radius",
         "farthest_point_timelapse",
         "nozzle_height",
+        // EdgeSlicer, curved tops on any printer: the user's head values. The planner's use is in the guard
+        // record (curved_tops_guard_inputs), which re-plans the block when it changes; the head check reads them at export.
+        "head_nozzle_protrusion",
+        "head_max_surface_angle",
+        "head_nozzle_contact_record",
         "extruder_colour",
         "extruder_offset",
         "filament_flow_ratio",
