@@ -275,22 +275,24 @@ TEST_CASE("AMS match: before/after table of one filament and two trays", "[.ams_
     std::cout << "cases " << cases << ", changed " << changed << ", CIEDE2000 sides with the new pick in " << judge_sides_with_fix << "\n";
 }
 
-TEST_CASE("AMS blacklist: Bambu Lab's PET-CF and PA6-CF are prohibited in the AMS", "[AmsMatch][AmsBlacklist]")
+TEST_CASE("AMS blacklist: Bambu Lab's PET-CF and PA6-CF in an AMS are a warning, send allowed", "[AmsMatch][AmsBlacklist]")
 {
     const nlohmann::json list = nlohmann::json::parse(R"({"blacklist":[
         {"vendor":"Third Party","type":"TPU","action":"prohibition","description":"TPU: not supported"},
         {"vendor":"Bambulab","type":"TPU","action":"prohibition","description":"TPU: not supported"},
         {"vendor":"Third Party","type":"PVA","action":"warning","description":"PVA: flexible"},
         {"vendor":"Third Party","type":"PLA-CF","action":"warning","description":"CF/GF: hard and brittle"},
-        {"vendor":"Bambulab","type":"PET-CF","action":"prohibition","description":"Bambu PET-CF/PA6-CF: not supported"},
-        {"vendor":"Bambulab","type":"PA6-CF","action":"prohibition","description":"Bambu PET-CF/PA6-CF: not supported"}]})");
+        {"vendor":"Bambulab","type":"PET-CF","action":"warning","description":"Bambu PET-CF/PA6-CF: the filament may break in the bent PTFE tube of an AMS"},
+        {"vendor":"Bambulab","type":"PA6-CF","action":"warning","description":"Bambu PET-CF/PA6-CF: the filament may break in the bent PTFE tube of an AMS"}]})");
 
     for (const char* type : {"PET-CF", "PA6-CF"}) {
         INFO(type);
         const AmsMatch::BlacklistHit hit = AmsMatch::check_blacklist(list, "Bambu Lab", type, false);
         CHECK(hit.in_blacklist);
-        CHECK(hit.action == "prohibition");
-        CHECK(hit.description == "Bambu PET-CF/PA6-CF: not supported");
+        // Warn only (owner, 2026-11-18): the send dialog lists a warning to confirm; it never blocks a send or a mapping.
+        CHECK(hit.action == "warning");
+        CHECK(hit.action != "prohibition");
+        CHECK(hit.description == "Bambu PET-CF/PA6-CF: the filament may break in the bent PTFE tube of an AMS");
         std::string action;
         CHECK_FALSE(main_in_blacklist(list, "Bambu Lab", type, action)); // main: "bambu lab" != "bambulab"
     }

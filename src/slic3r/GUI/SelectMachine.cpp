@@ -2285,7 +2285,7 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         DeviceManager::check_filaments_in_blacklist(filament_brand, filament_type, in_blacklist, action, info);
         
-        // The prohibitions are about feeding through an AMS (TPU, Bambu PET-CF/PA6-CF); a two-extruder
+        // The prohibitions are about feeding through an AMS (TPU; Bambu PET-CF/PA6-CF only warn); a two-extruder
         // job's filament on an external spool holder does not go through one (BambuStudio scopes
         // these blacklist entries to "slot": "ams").
         if (in_blacklist && action == "prohibition" && BambuSendMapping::is_external_spool(m_ams_mapping_result[i]))
