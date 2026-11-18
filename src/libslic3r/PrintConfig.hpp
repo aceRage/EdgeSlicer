@@ -448,6 +448,11 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
+// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp).
+enum CurvedTopsPattern {
+    ctpMonotonic, ctpConcentric
+};
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -1102,6 +1107,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
@@ -1665,6 +1671,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                curved_tops_enabled))
     ((ConfigOptionInt,                 curved_tops_layers))
     ((ConfigOptionFloat,               curved_tops_max_angle))
+    // EdgeSlicer, curved tops P4.
+    ((ConfigOptionFloat,               curved_tops_nozzle_tolerance))
+    ((ConfigOptionEnum<CurvedTopsPattern>, curved_tops_pattern))
     // EdgeSlicer, curved tops P3: developer overrides (Developer mode only, see CurvedTops.hpp).
     ((ConfigOptionFloat,               curved_tops_dev_angle_ceiling))
     ((ConfigOptionFloat,               curved_tops_dev_head_lowest_part))
@@ -1686,6 +1695,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                curved_tops_dev_allow_variable_layer_height))
     ((ConfigOptionBool,                curved_tops_dev_allow_tall_skirt))
     ((ConfigOptionBool,                curved_tops_dev_allow_unverified_head))
+    ((ConfigOptionBool,                curved_tops_dev_nozzle_tolerance_unrecorded))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))

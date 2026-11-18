@@ -466,6 +466,12 @@ static const t_config_enum_values s_keys_map_DraftShield = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(DraftShield)
 
+static const t_config_enum_values s_keys_map_CurvedTopsPattern = {
+    { "monotonic",  ctpMonotonic },
+    { "concentric", ctpConcentric }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CurvedTopsPattern)
+
 static const t_config_enum_values s_keys_map_StabilizerMode = {
     { "off",    smOff    },
     { "auto",   smAuto   },
@@ -6116,6 +6122,47 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(15));
 
+    // EdgeSlicer, curved tops P4. 0.4 mm: a third below the deepest nozzle contact printed cleanly so far
+    // (0.61 mm, Elegoo Centauri Carbon, PLA, 2026-11-17).
+    def = this->add("curved_tops_nozzle_tolerance", coFloat);
+    def->label    = L("Nozzle contact tolerance");
+    def->category = L("Quality");
+    def->tooltip  = L("How deep the hot nozzle (its tip and the cone just above it, nothing else of the print head) may "
+                      "pass through material that is already printed while it lays the curved layers. The lowest curved "
+                      "layers run below the top of the flat layers beside the curved surface, so the nozzle grazes "
+                      "them; in PLA up to about 0.6 mm printed cleanly. Within this tolerance such contact is allowed "
+                      "and reported; deeper, or by any other head part (sock, heater block, fan duct), the G-code is "
+                      "not exported. 0 = no nozzle contact allowed.\n"
+                      "Capped by what has been printed with the printer's print head: never more than the deepest nozzle "
+                      "contact its head data records from a clean print (0.61 mm on the Elegoo Centauri Carbon, 0.44 mm on "
+                      "the Bambu Lab X1 Carbon), and not applied at all on a print head with no such print recorded. The "
+                      "slicing summary says when the value is capped or not applied.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->max      = 1.0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
+    def = this->add("curved_tops_pattern", coEnum);
+    def->label    = L("Curved tops pattern");
+    def->category = L("Quality");
+    def->tooltip  = L("How the curved layers are filled inside their wall loop.\n"
+                      "Monotonic: straight lines, crossing direction every layer, always laid next to the line before "
+                      "in one direction.\n"
+                      "Concentric: loops following the outline of the curved surface inward, with variable line "
+                      "width in the middle so the centre is neither left open nor over-filled.\n"
+                      "The curved layers make their own paths: one wall loop (outer wall line width) and this fill (top "
+                      "surface line width), with their own gap fill. They do not follow the top surface pattern, the wall "
+                      "and top wall counts, \"Only one wall on top surfaces\", the wall generator or the gap fill setting, "
+                      "and they are not ironed. The flow ratios (print, filament, top surface) apply as usual.");
+    def->enum_keys_map = &ConfigOptionEnum<CurvedTopsPattern>::get_enum_values();
+    def->enum_values.push_back("monotonic");
+    def->enum_values.push_back("concentric");
+    def->enum_labels.push_back(L("Monotonic"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<CurvedTopsPattern>(ctpMonotonic));
+
     // EdgeSlicer, curved tops P3: developer overrides. Shown only in Developer mode (comDevelop) and
     // ignored by the slicer unless Developer mode is on (CurvedTops.hpp, curved_tops_developer_mode()).
     // Every default is today's built-in value, so a key left at its default overrides nothing.
@@ -6185,8 +6232,10 @@ void PrintConfigDef::init_fff_params()
                "the head's reach."));
     dev_bool("curved_tops_dev_allow_material_beside", L("Allow material beside the surface"),
              L("DEVELOPER OVERRIDE. Material next to the curved surface no longer raises where the curved layers start or "
-               "refuses the top: the surface is curved over the whole allowed rise anyway. The lowest curved layers then pass "
-               "through the walls beside the surface, which are already printed to full height: expect nozzle contact."));
+               "refuses the top: the surface is curved over the whole allowed rise anyway. Without it the lowest curved "
+               "layers already pass through the flat material beside the surface by up to the nozzle contact tolerance, so "
+               "this only matters beyond that tolerance. They then pass deeper through the walls beside the surface, which "
+               "are already printed to full height: expect nozzle contact that the head check reports."));
     dev_bool("curved_tops_dev_allow_z_contouring", L("Allow Z contouring on the same object"),
              L("DEVELOPER OVERRIDE. Curve the top even when Z contouring is on for the object."));
     dev_bool("curved_tops_dev_allow_raft", L("Allow a raft"), L("DEVELOPER OVERRIDE. Curve the top even when the object has a raft."));
@@ -6197,6 +6246,10 @@ void PrintConfigDef::init_fff_params()
     dev_bool("curved_tops_dev_allow_unverified_head", L("Allow unverified or missing head data"),
              L("DEVELOPER OVERRIDE. Curve the top on a printer whose head data no curved print has checked, or that has no head "
                "data at all (then set the lowest head part above the tip; the head check cannot run and says so)."));
+    dev_bool("curved_tops_dev_nozzle_tolerance_unrecorded", L("Apply the nozzle tolerance without a printed record"),
+             L("DEVELOPER OVERRIDE. Apply the nozzle contact tolerance as set, even on a print head whose data records no "
+               "nozzle contact print, or above the depth it records. Use it to print the contact test that establishes such a "
+               "record."));
 
     def = this->add("layer_change_gcode", coString);
     def->label = L("Layer change G-code");

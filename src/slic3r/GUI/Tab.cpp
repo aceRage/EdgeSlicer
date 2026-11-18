@@ -3538,6 +3538,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("curved_tops_enabled");
         optgroup->append_single_option_line("curved_tops_layers");
         optgroup->append_single_option_line("curved_tops_max_angle");
+        optgroup->append_single_option_line("curved_tops_nozzle_tolerance");
+        optgroup->append_single_option_line("curved_tops_pattern");
 
         // EdgeSlicer, curved tops P3: developer overrides. Every line is comDevelop, so the whole group
         // shows only in Developer mode; the slicer ignores the values outside it (CurvedTops.hpp).
@@ -3550,7 +3552,7 @@ void TabPrint::build()
                                  "curved_tops_dev_allow_supports_in_reach", "curved_tops_dev_allow_material_beside",
                                  "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
                                  "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
-                                 "curved_tops_dev_allow_unverified_head" })
+                                 "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
             optgroup->append_single_option_line(key);
 
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
