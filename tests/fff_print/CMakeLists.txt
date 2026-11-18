@@ -12,6 +12,8 @@ add_executable(${_TEST_NAME}_tests
 	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
 	test_min_layer_time_pause.cpp
+	test_fine_detail_print.cpp
+	test_thin_feature_notice.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp
@@ -34,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_custom_gcode_placeholders.cpp
 	test_exclude_object_tolerance.cpp
 	test_gcode_file_header.cpp
+	test_tower_labels_and_order.cpp
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
@@ -49,6 +52,10 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_rack_slots_gcode.cpp
 	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
+	test_bbs_tower_ramming.cpp
+	test_bbs_tower_h3c_parity.cpp
+	test_bbs_tower_leftovers.cpp
+	test_alm_tower.cpp
 	test_mixed_sublayer_slice.cpp
 	test_bs29_keys.cpp
 	test_polyholes.cpp
@@ -62,10 +69,12 @@ add_executable(${_TEST_NAME}_tests
 	test_tree_support_fixes.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
+	test_support_interface_temperature.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
+	test_curved_tops.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
 	test_counterbore_bridging.cpp

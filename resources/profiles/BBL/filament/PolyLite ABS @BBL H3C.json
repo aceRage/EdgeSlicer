@@ -1,0 +1,25 @@
+{
+    "type": "filament",
+    "name": "PolyLite ABS @BBL H3C",
+    "inherits": "Generic ABS @BBL H3C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM04_57",
+    "filament_id": "GFB60",
+    "instantiation": "true",
+    "filament_density": [
+        "1.03"
+    ],
+    "filament_flow_ratio": [
+        "0.95",
+        "0.95"
+    ],
+    "filament_prime_volume": [
+        "30"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H3C 0.4 nozzle"
+    ]
+}

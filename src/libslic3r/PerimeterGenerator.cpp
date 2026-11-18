@@ -9,6 +9,8 @@
 #include "ShortestPath.hpp"
 #include "VariableWidth.hpp"
 #include "Arachne/WallToolPaths.hpp"
+#include "FineDetail.hpp"
+#include "ThinFeatures.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "ExPolygonCollection.hpp"
 #include "Geometry.hpp"
@@ -1688,6 +1690,38 @@ static void defer_unsupported_loops(const PerimeterGenerator &perimeter_generato
             loop->print_after_infill = true;
 }
 
+// EdgeSlicer, thin feature notice. Does Fine text lower either width of the thin-feature rule on this layer? Fine detail
+// does not act on the first layer (make_paths_params), so there it never does.
+bool PerimeterGenerator::fine_text_prints_thinner(coord_t bead_width_0, coord_t bead_width_x) const
+{
+    if (this->layer_id <= 0)
+        return false;
+    PrintRegionConfig fine = *this->config;
+    fine.fine_detail.value = FineDetailLevel::FineText;
+    const Arachne::WideningLimits now  = Arachne::widening_limits(Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config),
+                                                                  bead_width_0, bead_width_x, layer_height);
+    const Arachne::WideningLimits text = Arachne::widening_limits(Arachne::make_paths_params(this->layer_id, *object_config, *print_config, &fine),
+                                                                  bead_width_0, bead_width_x, layer_height);
+    return text.input_width < now.input_width || text.output_width < now.output_width;
+}
+
+void PerimeterGenerator::observe_thin_features(const ExPolygons &outline, const ThinFeatureLimits &limits, int hint,
+                                               coord_t bead_width_0, coord_t bead_width_x) const
+{
+    if (this->thin_features == nullptr)
+        return;
+    ThinFeatureLayer &layer  = *this->thin_features;
+    const size_t      before = layer.skipped.size() + layer.widened.size();
+    find_thin_features(outline, limits, layer);
+    if (layer.skipped.size() + layer.widened.size() == before)
+        return;
+    if (hint == 2) {
+        layer.can_print_thinner          = true;
+        layer.classic_without_thin_walls = true;
+    } else if (hint == 1 && this->fine_text_prints_thinner(bead_width_0, bead_width_x))
+        layer.can_print_thinner = true;
+}
+
 void PerimeterGenerator::process_classic()
 {
     group_region_by_fuzzify(*this);
@@ -1821,7 +1855,8 @@ void PerimeterGenerator::process_classic()
                 ExPolygons offsets_with_smaller_width;
                 if (i == 0) {
                     // look for thin walls
-                    if (this->config->detect_thin_wall) {
+                    // EdgeSlicer, Fine detail D4 (a): a region with Fine detail on detects thin walls too.
+                    if (FineDetail::classic_thin_walls(*this->config)) {
                         // the minimum thickness of a single loop is:
                         // ext_width/2 + ext_spacing/2 + spacing/2 + width/2
                         offsets = offset2_ex(last,
@@ -1837,6 +1872,9 @@ void PerimeterGenerator::process_classic()
                         // the maximum thickness of our thin wall area is equal to the minimum thickness of a single loop
                         for (ExPolygon &ex : expp)
                             ex.medial_axis(min_width, ext_perimeter_width + ext_perimeter_spacing2, &thin_walls);
+                        // EdgeSlicer, thin feature notice: thin-wall lines follow the feature down to nozzle / 3.
+                        if (this->thin_features != nullptr)
+                            this->observe_thin_features(last, ThinFeatureLimits{ min_width, 0, 2 * ext_perimeter_width }, 0, 0, 0);
                     } else {
                         coord_t ext_perimeter_smaller_width = this->smaller_ext_perimeter_flow.scaled_width();
                         for (const ExPolygon& expolygon : last) {
@@ -1849,11 +1887,17 @@ void PerimeterGenerator::process_classic()
                             if (offset_result.empty() &&
                                 expolygon.area() < (double)(ext_perimeter_width + ext_min_spacing_smaller) * scale_(narrow_loop_length_threshold)) {
                                 // BBS: for narrow external loop, use smaller line width
+                                // EdgeSlicer, thin feature notice: a narrow island prints from the smaller width up.
+                                if (this->thin_features != nullptr)
+                                    this->observe_thin_features(ExPolygons{ expolygon }, ThinFeatureLimits{ ext_perimeter_smaller_width, 0, 2 * ext_perimeter_width }, 2, 0, 0);
                                 ExPolygons temp_result = offset_ex(expolygon, -float(ext_perimeter_smaller_width / 2.));
                                 offsets_with_smaller_width.insert(offsets_with_smaller_width.end(), temp_result.begin(), temp_result.end());
                             }
                             else {
                                 //BBS: for not narrow loop, use normal external perimeter line width
+                                // EdgeSlicer, thin feature notice: the full external line has to fit.
+                                if (this->thin_features != nullptr)
+                                    this->observe_thin_features(ExPolygons{ expolygon }, ThinFeatureLimits{ ext_perimeter_width, 0, 2 * ext_perimeter_width }, 2, 0, 0);
                                 ExPolygons temp_result = offset_ex(expolygon, -float(ext_perimeter_width / 2.));
                                 offsets.insert(offsets.end(), temp_result.begin(), temp_result.end());
                             }
@@ -2961,7 +3005,24 @@ void PerimeterGenerator::process_arachne()
     // topmost and first layers - sees the same answer.
     const bool only_one_wall_top         = this->config->only_one_wall_top && has_top_shell_layers(*this->config);
     const bool only_one_wall_first_layer = this->config->only_one_wall_first_layer && has_bottom_shell_layers(*this->config);
+
+    // EdgeSlicer, thin feature notice: what Arachne can not follow on this layer, in the model's own widths (observation
+    // only). A feature of model width w reaches Arachne as w less the shrink below, so it gets no line under
+    // input_width + shrink, and the line printed for the thinnest ones is output_width + the line's own overhang.
+    ThinFeatureLimits thin_limits;
+    const bool        observe_thin = this->thin_features != nullptr && this->config->wall_loops > 0;
+    if (observe_thin) {
+        const bool   precise = config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter;
+        const double shrink  = precise ? double(ext_perimeter_width - ext_perimeter_spacing) : 0.5 * double(ext_perimeter_width - ext_perimeter_spacing);
+        const Arachne::WideningLimits widening = Arachne::widening_limits(
+            Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config), ext_perimeter_spacing, perimeter_spacing, layer_height);
+        thin_limits.skip_width = widening.input_width + coord_t(std::lround(2. * shrink));
+        thin_limits.line_width = scaled<coord_t>(Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(widening.output_width), float(layer_height)));
+        thin_limits.min_length = 2 * ext_perimeter_width;
+    }
     for (const Surface& surface : all_surfaces) {
+        if (observe_thin)
+            this->observe_thin_features(ExPolygons{ surface.expolygon }, thin_limits, 1, ext_perimeter_spacing, perimeter_spacing);
         coord_t bead_width_0 = ext_perimeter_spacing;
         // detect how many perimeters must be generated for this island
         int loop_number = this->config->wall_loops + surface.extra_perimeters - 1; // 0-indexed loops
@@ -2985,7 +3046,8 @@ void PerimeterGenerator::process_arachne()
                        apply_precise_outer_wall? -float(ext_perimeter_width - ext_perimeter_spacing )
                                                  : -float(ext_perimeter_width / 2. - ext_perimeter_spacing / 2.));
         
-        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config);
+        // EdgeSlicer, Fine detail: the region config carries the level, so a modifier can set it.
+        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config);
         // Set params is_top_or_bottom_layer for adjusting short-wall removal sensitivity.
         input_params.is_top_or_bottom_layer = (is_bottom_layer || is_topmost_layer) ? true : false;
 
@@ -3461,7 +3523,10 @@ ExPolygons PerimeterGenerator::printable_slices(const ExPolygons &slices) const
     double min_width = *std::min_element(print_config->nozzle_diameter.values.begin(),
                                          print_config->nozzle_diameter.values.end()) / 3.;
     if (object_config->wall_generator.value == PerimeterGeneratorType::Arachne) {
-        const double min_feature_size = Arachne::make_paths_params(layer_id, *object_config, *print_config).min_feature_size;
+        // EdgeSlicer, Fine detail: the region's limit, which Fine text lowers (resolves low, as above).
+        const Arachne::WallToolPathsParams params = Arachne::make_paths_params(layer_id, *object_config, *print_config, config);
+        const double min_feature_size = params.thin_feature_size > 0.f ?
+            FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size) : params.min_feature_size;
         // Spiral vase can put a classic layer under an Arachne one, so there both limits apply.
         min_width = print_config->spiral_mode ? std::min(min_width, min_feature_size) : min_feature_size;
     }

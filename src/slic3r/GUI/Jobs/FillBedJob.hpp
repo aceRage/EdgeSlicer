@@ -22,6 +22,7 @@ class FillBedJob : public Job
     ArrangePolygons m_locked;;
 
     Points m_bedpts;
+    ExtruderAreas m_reach_areas; // EdgeSlicer: "Avoid nozzle reach zones" (empty when off)
 
     arrangement::ArrangeParams params;
 

@@ -5615,6 +5615,12 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
     } else if (!preset.empty() && NozzleInfo::diameter_known(obj->m_extder_data.extders.front().current_nozzle_diameter)) {
         reported.assign(preset.size(), obj->m_extder_data.extders.front().current_nozzle_diameter);
+    } else if (!preset.empty() && obj->has_nozzle_rack()) {
+        // Owner bug 2026-11-13: the H3C mounts no nozzle between prints (its extruder's hnow names none of the reported
+        // nozzles, which all sit in the rack), so the extruder's size comes from the rack's first usable position.
+        const std::vector<double> sizes = reported_sync_nozzle_sizes(DualNozzle::nozzle_report_state(obj), 1);
+        if (!sizes.empty() && sizes.front() > 0.)
+            reported.assign(preset.size(), sizes.front());
     }
     if (std::none_of(reported.begin(), reported.end(), [](double d) { return d > 0.; })) {
         MessageDialog dlg(wxGetApp().mainframe, _L("The printer did not report its nozzle sizes."), _L("Sync nozzle sizes"), wxOK);
@@ -5632,7 +5638,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
     // (printer_state() reports no nozzles on a single-extruder one), so an H3C sync left its nine slots as they were.
     wxString rack_note;
     if (obj->has_nozzle_rack()) {
-        const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(DualNozzle::nozzle_report_state(obj), preset.size());
+        const DualNozzleSync::PrinterState          rack_state = DualNozzle::nozzle_report_state(obj);
+        const std::vector<std::vector<RackNozzle>> layout     = reported_rack_nozzles(rack_state, preset.size());
+        const std::vector<double>                  mounted    = reported_extruder_nozzle_sizes(rack_state, preset.size());
         std::vector<std::string>                   current(preset.size());
         for (size_t e = 0; e < preset.size(); ++e)
             current[e] = bundle->rack_nozzle_override(e);
@@ -5647,7 +5655,9 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         }
         for (size_t e = 0; e < texts.size(); ++e)
             if (!texts[e].empty())
-                rack_note += "\n" + wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e]));
+                rack_note += "\n" + (e < mounted.size() && mounted[e] > 0. ?
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e])) :
+                                         wxString::Format(_L("Rack of extruder %d: %s mm (slots in rack order)."), int(e + 1), from_u8(texts[e])));
     }
     if (changed) {
         on_nozzle_sizes_changed();
@@ -18921,6 +18931,12 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingInvalidPrintSpeed) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
+                // EdgeSlicer, curved tops P3: a head contact downgraded to a warning by a developer override, or a curved
+                // top that could not be checked at all, must not look like the ordinary warnings next to it. The same
+                // message type also carries the harmless "no head contact found", which is NON_CRITICAL.
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingCurvedTopsHeadCheck &&
+                    warning.level == PrintStateBase::WarningLevel::CRITICAL)
+                    notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);
                 add_warning(warning, object_id.id);
             }
@@ -20245,9 +20261,9 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     auto orig = this->partplate_list.get_curr_plate()->get_origin();
     Vec2d orig2d = { orig[0], orig[1] };
 
-    BBoxData data;
     for (auto obj : objects)
     {
+        BBoxData data;
         // Ultra (H2C nozzle rack): PrintObject::get_first_layer_bbox already returns plate-relative
         // coordinates, so subtracting the plate origin here shifted every object bbox in
         // Metadata/plate_N.json by exactly one plate origin (measured on the user's plate 5:
@@ -20269,15 +20285,11 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
         auto   wt_corners = print->first_layer_wipe_tower_corners();
         // when loading gcode.3mf, wipe tower info may not be correct
         if (!wt_corners.empty()) {
-            BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-            auto        bb        = unscaled(bb_scaled);
-            bb.min -= orig2d;
-            bb.max -= orig2d;
-            bbox_all.merge(bb);
-            data.name = "wipe_tower";
-            data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-            data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
-            id_bboxes.emplace_back(data);
+            // Its own entry: it used to reuse the last object's, area and layer height included.
+            BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, partplate_list.get_curr_plate()->get_index(),
+                                                             float(print->config().initial_layer_print_height.value));
+            bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
+            id_bboxes.emplace_back(std::move(data));
         }
     }
 
@@ -21896,6 +21908,16 @@ bool Plater::is_active_project() const
     return shown == nullptr || shown == this;
 }
 
+void Plater::invalidate_slices_for_developer_mode()
+{
+    p->partplate_list.invalid_all_slice_result();
+    if (is_active_project()) {
+        post_slice_state_change_update();
+        schedule_background_process();
+    } else
+        p->update_while_hidden = true;
+}
+
 void Plater::on_project_hidden()
 {
     // A re-apply scheduled just before the switch would apply the next project's presets to this one: it waits.
@@ -23508,6 +23530,7 @@ void Plater::calib_VFA(const Calib_Params& params)
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     if (params.nozzle_based_resize) {
         print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
@@ -23572,6 +23595,7 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23635,6 +23659,7 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23706,6 +23731,7 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));

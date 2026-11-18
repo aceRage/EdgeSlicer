@@ -6,8 +6,10 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "test_data.hpp"
 
+#include <cmath>
 #include <map>
 #include <regex>
 #include <set>
@@ -252,4 +254,132 @@ TEST_CASE("A filament assigned to the 0.6 tool slices for that tool", "[NozzlePr
     unassigned.option<ConfigOptionStrings>("nozzle_process_presets", true)->values = { "", "p06" };
     REQUIRE(fill_nozzle_process_slots(unassigned, { nullptr, &p06 }));
     CHECK(widths_per_tool(slice(unassigned)).at(0).count("0.62") == 0);
+}
+
+// ==== Painted regions take the painted filament's nozzle width ======================================================
+
+namespace {
+
+// One 20 mm cube on filament 1 with every facet painted filament 2.
+void add_painted_cube(Model &model)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "painted-cube.stl";
+    ModelVolume *volume = object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    volume->config.set("extruder", 1);
+    TriangleSelector selector(volume->mesh());
+    for (int facet = 0; facet < int(volume->mesh().its.indices.size()); ++ facet)
+        selector.set_facet(facet, EnforcerBlockerType(2));
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+}
+
+DynamicPrintConfig process_widths(double width)
+{
+    DynamicPrintConfig p;
+    for (const char *key : { "line_width", "outer_wall_line_width", "inner_wall_line_width", "sparse_infill_line_width",
+                             "internal_solid_infill_line_width", "top_surface_line_width" })
+        p.set_key_value(key, new ConfigOptionFloatOrPercent(width, false));
+    return p;
+}
+
+// Per tool, every (;WIDTH, ;HEIGHT) pair an extruding move prints with, bridges left out (a thick bridge is round).
+std::map<int, std::set<std::pair<double, double>>> width_height_per_tool(const std::string &gcode)
+{
+    std::map<int, std::set<std::pair<double, double>>> out;
+    std::istringstream                                 in(gcode);
+    std::string                                        line;
+    int                                                tool   = 0;
+    double                                             width  = 0.;
+    double                                             height = 0.;
+    bool                                               bridge = false;
+    static const std::regex                            tool_re(R"(^T([0-9]+)\b)");
+    static const std::regex                            width_re(R"(^;WIDTH:([0-9.]+))");
+    static const std::regex                            height_re(R"(^;HEIGHT:([0-9.]+))");
+    static const std::regex                            type_re(R"(^;TYPE:(.*)$)");
+    static const std::regex                            e_re(R"(\bE[0-9.]+)");
+    while (std::getline(in, line)) {
+        if (! line.empty() && line.back() == '\r')
+            line.pop_back();
+        std::smatch m;
+        if (std::regex_search(line, m, tool_re))
+            tool = std::stoi(m[1].str());
+        else if (std::regex_search(line, m, width_re))
+            width = std::round(std::stod(m[1].str()) * 1000.) / 1000.;
+        else if (std::regex_search(line, m, height_re))
+            height = std::round(std::stod(m[1].str()) * 1000.) / 1000.;
+        else if (std::regex_search(line, m, type_re))
+            bridge = m[1].str() == "Bridge" || m[1].str() == "Internal Bridge";
+        else if (! bridge && line.compare(0, 2, "G1") == 0 && line.find(" X") != std::string::npos && std::regex_search(line, e_re))
+            out[tool].insert({ width, height });
+    }
+    return out;
+}
+
+} // namespace
+
+// The owner's H3C hand test (2026-11-16): a model on the 0.2 nozzle painted with a filament on the 0.8, each nozzle
+// with a process of its own, sliced at 0.1. The painted region was copied from the base region's config, whose widths
+// had been stamped for filament 1, so the 0.8 printed the 0.2's 0.22 mm lines. On a 0.4 mm AdaptiveLayerMerge slab
+// that line is narrower than it is tall, and Flow::with_spacing() threw "Invalid spacing". Main has the same fault.
+TEST_CASE("A painted region prints the painted filament's nozzle widths", "[NozzleProcess][Widths][Paint]")
+{
+    DynamicPrintConfig config = two_tool_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter", "0.2,0.8" },
+        { "layer_height", "0.1" },
+        { "initial_layer_print_height", "0.1" },
+        { "min_layer_height", "0.04,0.16" },
+        { "max_layer_height", "0.14,0.56" },
+        { "line_width", "0.42" },
+        { "outer_wall_line_width", "0.42" },
+        { "inner_wall_line_width", "0.42" },
+        { "sparse_infill_line_width", "0.45" },
+        { "internal_solid_infill_line_width", "0.42" },
+        { "top_surface_line_width", "0.42" },
+        { "initial_layer_line_width", "0" },
+        { "wall_generator", "classic" },
+        { "brim_type", "no_brim" },
+        { "skirt_loops", "0" },
+    });
+    config.option<ConfigOptionStrings>("nozzle_process_presets", true)->values = { "p02", "p08" };
+    const DynamicPrintConfig p02 = process_widths(0.22);
+    const DynamicPrintConfig p08 = process_widths(0.82);
+    REQUIRE(fill_nozzle_process_slots(config, { &p02, &p08 }));
+
+    Print print;
+    Model model;
+    add_painted_cube(model);
+    print.apply(model, config);
+
+    // Filament 1's roles at the 0.2's width, the painted filament 2's at the 0.8's.
+    const PrintObject *object        = print.objects().front();
+    bool               painted_found = false;
+    auto               width_for     = [](int filament) { return filament == 2 ? 0.82 : 0.22; };
+    for (size_t idx = 0; idx < object->num_printing_regions(); ++ idx) {
+        const PrintRegionConfig &region = object->printing_region(idx).config();
+        INFO("region " << idx << " walls on filament " << region.wall_filament.value);
+        painted_found |= region.wall_filament.value == 2;
+        CHECK(region.outer_wall_line_width.value == Approx(width_for(region.wall_filament.value)));
+        CHECK(region.inner_wall_line_width.value == Approx(width_for(region.wall_filament.value)));
+        CHECK(region.internal_solid_infill_line_width.value == Approx(width_for(region.solid_infill_filament.value)));
+        CHECK(region.top_surface_line_width.value == Approx(width_for(region.solid_infill_filament.value)));
+        CHECK(region.sparse_infill_line_width.value == Approx(width_for(region.sparse_infill_filament.value)));
+    }
+    REQUIRE(painted_found);
+
+    print.validate();
+    print.set_status_silent();
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::gcode(print));
+    const auto per_tool = width_height_per_tool(gcode);
+    REQUIRE(per_tool.count(1) == 1);
+    for (const auto &[tool, pairs] : per_tool)
+        for (const auto &[width, height] : pairs) {
+            INFO("T" << tool << " width " << width << " height " << height);
+            CHECK(width >= height); // never a line narrower than it is tall
+            if (tool == 1)
+                CHECK(width > 0.5); // the 0.8 never prints the 0.2's line
+        }
 }

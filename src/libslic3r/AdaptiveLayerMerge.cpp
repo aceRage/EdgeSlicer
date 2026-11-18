@@ -476,6 +476,36 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
     return out.min_height <= out.max_height + EPSILON ? out : window;
 }
 
+bool rack_nozzle_layer_height_limits(const PrintConfig &print_config, const std::vector<unsigned int> &used_filaments,
+                                     RackLayerHeightLimit &out)
+{
+    unsigned int finest          = 0;
+    double       finest_diameter = 0.;
+    for (unsigned int filament : used_filaments) {
+        const double d = filament == 0 ? 0. : nozzle_diameter_for_filament(print_config, filament);
+        if (d > EPSILON && (finest == 0 || d < finest_diameter - EPSILON)) {
+            finest          = filament;
+            finest_diameter = d;
+        }
+    }
+    if (finest == 0)
+        return false;
+    const size_t extruder = physical_extruder_for_filament(print_config, finest);
+    if (extruder < print_config.nozzle_diameter.values.size() &&
+        std::abs(print_config.nozzle_diameter.values[extruder] - finest_diameter) < EPSILON)
+        return false; // the mounted nozzle: the preset's own limits apply
+    std::vector<unsigned int> used_0based;
+    for (unsigned int filament : used_filaments)
+        if (filament > 0)
+            used_0based.push_back(filament - 1);
+    const AdaptiveLayerHeightRange range = adaptive_layer_height_range_for_nozzle(print_config, finest, used_0based);
+    out.min_height      = range.min_height;
+    out.max_height      = range.max_height;
+    out.nozzle_diameter = finest_diameter;
+    out.filament_id     = finest;
+    return true;
+}
+
 AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
                                                       double min_nozzle_diameter, double base_layer_height)
 {

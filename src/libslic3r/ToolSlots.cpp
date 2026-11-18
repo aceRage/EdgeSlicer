@@ -914,6 +914,66 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
     return 0;
 }
 
+std::vector<int> split_rack_slots(const ConfigBase &config, size_t extruder)
+{
+    std::vector<int> out;
+    // Only a single extruder with a declared rack (the H3C; NozzleProcess single_extruder_nozzle_rack()).
+    if (extruder != 0 || floats_of(config, "nozzle_diameter").size() != 1 || config.option("extruder_max_nozzle_count") == nullptr ||
+        rack_slot_count(config, extruder) == 0)
+        return out;
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    if (extruder >= racks.size())
+        return out;
+    const std::vector<RackNozzle> &rack = racks[extruder];
+    NozzleVolumeType               base = extruder_volume_type(config, extruder);
+    if (base == nvtHybrid)
+        base = nvtStandard;
+    std::vector<bool> split(rack.size(), false);
+    for (size_t k = 0; k < rack.size(); ++k)
+        split[k] = rack[k].volume_type != base;
+    for (int pin : ints_of(config, "filament_rack_nozzle_slot"))
+        if (pin > 0 && size_t(pin) <= rack.size())
+            split[size_t(pin - 1)] = true;
+    for (size_t k = 0; k < rack.size(); ++k)
+        if (split[k])
+            out.push_back(int(k) + 1);
+    return out;
+}
+
+int filament_split_rack_slot(const ConfigBase &config, unsigned int filament_id)
+{
+    filament_id = nozzle_filament_of_impl(config, filament_id);
+    if (filament_id == 0)
+        return 0;
+    const size_t           e     = physical_extruder_of(config, filament_id);
+    const std::vector<int> slots = split_rack_slots(config, e);
+    if (slots.empty())
+        return 0;
+    if (const int pin = filament_rack_slot_pin(config, filament_id); pin > 0)
+        return std::find(slots.begin(), slots.end(), pin) != slots.end() ? pin : 0;
+    // Unpinned: the slot of the nozzle type it needs, when that type is split off.
+    const std::vector<std::vector<RackNozzle>> racks    = extruder_rack_nozzles(config);
+    const std::vector<double>                  diameter = floats_of(config, "filament_diameter");
+    NozzleVolumeType                           wanted   = nvtStandard;
+    if (filament_id <= diameter.size() && diameter[filament_id - 1] > 2.5)
+        wanted = nvtTPU285;
+    else if (filament_flow_mode(config, filament_id - 1) == int(fvtHighFlow))
+        wanted = nvtHighFlow;
+    else
+        return 0;
+    const std::vector<int> pins = ints_of(config, "filament_rack_nozzle_slot");
+    int                    any  = 0;
+    for (int k : slots) {
+        if (racks[e][size_t(k - 1)].volume_type != wanted)
+            continue;
+        if (std::find(pins.begin(), pins.end(), k) == pins.end())
+            return k;
+        if (any == 0)
+            any = k;
+    }
+    return any;
+}
+
 int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
@@ -1059,9 +1119,24 @@ std::vector<std::string> rack_override_from_reported(const std::vector<std::vect
             bare = nvtStandard;
         std::string text;
         size_t      written = 0;
-        for (const RackNozzle &n : mounted_then_rack[e]) {
+        // A gap (diameter 0: a position of a positional rack the printer did not report) keeps the slot the project has
+        // there, else takes the first reported size, so the nozzles after it stay at their positions.
+        const std::vector<RackNozzle> have  = e < current.size() ? parse_rack_nozzles(current[e]) : std::vector<RackNozzle>();
+        const auto                    first = std::find_if(mounted_then_rack[e].begin(), mounted_then_rack[e].end(),
+                                                           [](const RackNozzle &n) { return n.diameter > 0.; });
+        if (first == mounted_then_rack[e].end())
+            continue;
+        for (RackNozzle n : mounted_then_rack[e]) {
             if (written == size_t(slots))
                 break; // more nozzles than the printer profile has slots: the rack cannot list them
+            if (!(n.diameter > 0.)) {
+                if (written < have.size()) {
+                    n = have[written];
+                } else {
+                    n              = RackNozzle{};
+                    n.diameter     = first->diameter;
+                }
+            }
             const NozzleVolumeType type = n.volume_given && n.volume_type != nvtHybrid ? n.volume_type : bare;
             text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(n.diameter);
             if (type != bare)

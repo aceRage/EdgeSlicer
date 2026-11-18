@@ -10,11 +10,31 @@
 #include <wx/checkbox.h>
 #include <wx/msgdlg.h>
 
+#include <vector>
+
 #include "Widgets/SpinInput.hpp"
 
 #include "RammingChart.hpp"
 class Button;
 class Label;
+
+namespace Slic3r { namespace GUI { namespace FlushVolumes {
+// The arithmetic of the "Flushing volumes" dialog, kept apart from its widgets so it can be tested.
+// The stored matrix is row-major from -> to: matrix[n * from + to]. A box shows the stored volume times
+// the multiplier, cut to a whole number, so what a box shows cannot be divided back into the stored volume.
+
+// What a box shows for a stored volume under the multiplier.
+int shown_volume(float stored, float multiplier);
+// The stored volume for a box that now shows `shown`. A box still showing what the stored volume shows was
+// not edited, so the stored volume is kept; an edited box stores what was typed over the multiplier. With
+// a multiplier of 0 every volume shows as 0 and nothing typed can be stored, so the stored volume is kept.
+float stored_volume(float stored, int shown, float multiplier);
+// The matrix to save from the stored matrix and what the boxes show (both from -> to, row-major).
+std::vector<float> read_back_matrix(const std::vector<float>& stored, const std::vector<int>& shown, float multiplier);
+// Whether the box flushing `from` out for `to` shows a volume outside the suggested range. The least flush
+// belongs to the filament flushed out (as for Re-calculate and get_min_flush_volumes).
+bool volume_out_of_range(int shown, size_t from, size_t to, const std::vector<int>& min_flush_volumes, int max_flush_volume);
+}}} // namespace Slic3r::GUI::FlushVolumes
 
 
 class RammingPanel : public wxPanel {

@@ -23,6 +23,7 @@
 #include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
+#include "ThinFeatures.hpp"
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -777,8 +778,31 @@ public:
     size_t get_id() const { return m_id; }
     void set_id(size_t id) { m_id = id; }
 
+    // ZAA (Z contouring): whether posContouring contours this object at all (some region has
+    // zaa_enabled and no guard forbids it). Public for the G-code head clearance check.
+    bool need_z_contouring() const;
+
+    // EdgeSlicer, curved tops (CurvedTops.cpp). apply_curved_tops() cuts the planar perimeters and fills
+    // under a curved block; only the perimeter step brings them back. clipped: they are cut now (reset
+    // when the walls are regenerated). guard inputs: every value a curved-tops guard read on the last
+    // run (curved_tops_guard_inputs()); Print::apply() regenerates the walls when they change.
+    // Both are written by the slicing thread under the print's state mutex (the setters lock it) and
+    // read by Print::apply(), which holds that mutex; the getters do not lock (call them from apply()
+    // or with the slicing stopped).
+    bool               curved_tops_clipped() const { return m_curved_tops_clipped; }
+    // EdgeSlicer, thin feature notice: what the last wall step skipped or widened (ThinFeatures.hpp).
+    const ThinFeatureSummary &thin_feature_summary() const { return m_thin_feature_summary; }
+    void               set_curved_tops_clipped(bool clipped);
+    const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
+    void               set_curved_tops_guard_inputs_used(std::string inputs);
+    // Curved tops on (P2): Print::process() runs posContouring after posSupportMaterial for this object,
+    // so the block is planned against the final support layers; a change to the supports re-plans it
+    // (invalidate_step). False for every object without curved tops: their step order is unchanged.
+    bool               curved_tops_after_support() const { return m_config.curved_tops_enabled.value && !m_instances.empty(); }
+
   private:
     // to be called from Print only.
+    friend struct CurvedTopsTestAccess;
     friend class Print;
     // Test entry point to compute_adaptive_merge_groups(), so a unit test can re-plan a sliced object.
     friend struct AdaptiveMergePlanAccess;
@@ -820,7 +844,6 @@ private:
     void ironing();
     // ZAA (Z contouring), posContouring: runs after ironing, before path simplification.
     void contour_z();
-    bool need_z_contouring() const;
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
@@ -882,6 +905,11 @@ private:
     std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // The slice-time Local-Z plan, kept while adapt_local_z_ratio_plan_to_merge_bands() has replaced it.
     std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
+    // EdgeSlicer, curved tops: see curved_tops_clipped().
+    bool                                    m_curved_tops_clipped { false };
+    // EdgeSlicer, thin feature notice: written by make_perimeters() after its parallel loop.
+    ThinFeatureSummary                      m_thin_feature_summary;
+    std::string                             m_curved_tops_guard_inputs;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -1219,6 +1247,42 @@ enum FilamentTempType {
     HighLowCompatible,
     Undefine
 };
+
+// EdgeSlicer: support interface temperature (support_interface_nozzle_temperature, an object setting).
+// The temperature belongs to the filament for the whole plate: a filament that prints nothing but
+// support (interface and possibly support body) prints at the set temperature on every layer, the first
+// one included (owner decisions D3/D4, 2026-11-14). Every reader of the filament's temperature (tool
+// change heat-up and pre-heat, prime tower, ooze/standby, the layer 1 -> 2 switch, placeholders such as
+// temperature[] / first_layer_temperature[], the estimator) then sees one value, so no extra waits or
+// mid-layer reheats are introduced. A filament that also prints part of a model keeps its own
+// temperatures (ignored, with a warning).
+struct SupportInterfaceTemperatures
+{
+    enum class Ignored { NoInterfaceFilament, FilamentMatching, PrintsModel, Conflict };
+    struct IgnoredEntry
+    {
+        Ignored      reason;
+        int          filament;    // 0-based, -1 when there is none
+        int          temperature; // the value that was not used
+        std::string  object;      // object name
+        bool operator==(const IgnoredEntry &rhs) const
+        {
+            return reason == rhs.reason && filament == rhs.filament && temperature == rhs.temperature && object == rhs.object;
+        }
+    };
+    // Filament (0-based) -> nozzle temperature it prints at.
+    std::map<unsigned int, int> temperatures;
+    std::vector<IgnoredEntry>   ignored;
+
+    bool empty() const { return temperatures.empty() && ignored.empty(); }
+    bool operator==(const SupportInterfaceTemperatures &rhs) const { return temperatures == rhs.temperatures && ignored == rhs.ignored; }
+    bool operator!=(const SupportInterfaceTemperatures &rhs) const { return !(*this == rhs); }
+};
+
+// Writes `temperatures` into nozzle_temperature and nozzle_temperature_initial_layer of `config` at each
+// filament's flow-variant slot (the one get_value_at(config, ..., Filament, id) reads).
+void apply_support_interface_temperatures(ConfigBase &config, const std::map<unsigned int, int> &temperatures);
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -1292,6 +1356,12 @@ public:
     // Computed on demand: usage type is config-derived (real); physical/flow unprintables are stubbed empty
     // (the config subsystem they need is not ported).
     std::vector<FilamentUsageType> get_filament_usage_type() const;
+    // EdgeSlicer: support interface temperatures, resolved at the end of apply() (see SupportInterfaceTemperatures).
+    const SupportInterfaceTemperatures &support_interface_temperatures() const { return m_support_interface_temperatures; }
+    SupportInterfaceTemperatures        resolve_support_interface_temperatures() const;
+    // config() with the support interface temperatures written in; config() itself when there are none.
+    // `storage` holds the copy.
+    const PrintConfig &config_with_interface_temperatures(PrintConfig &storage) const;
     std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
     std::map<int, std::set<NozzleVolumeType>> get_filament_unprintable_flow(const std::vector<unsigned int>& used_filaments) const;
 
@@ -1447,6 +1517,12 @@ public:
 
     // Wipe tower support.
     bool                        has_wipe_tower() const;
+    // Orca: has_wipe_tower() only says the prime tower is enabled for a plate that may change filaments.
+    // This says the plate prints a tower whatever slicing finds; when false, whether it does depends on
+    // the support that slicing generates.
+    bool                        wipe_tower_certain_before_slicing() const;
+    // Orca: the layering a prime tower needs, all objects sharing their layers. Empty if they do.
+    StringObjectException       validate_wipe_tower_layering() const;
     // Orca #15146: the error validate() reports, last, for a prime tower whose estimated body leaves the
     // bed shape (a delta or custom bed's missing corner); empty when it fits or there is no tower.
     std::string                 prime_tower_off_bed_error() const;
@@ -1601,6 +1677,8 @@ private:
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
+    // EdgeSlicer: support_interface_nozzle_temperature resolved per filament (apply()).
+    SupportInterfaceTemperatures                            m_support_interface_temperatures;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
     // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
@@ -1745,6 +1823,8 @@ struct CompactedTowerClearance
     double far_clearance;
     // The object sits within the toolhead radius, so the head body limits it rather than the rod.
     bool   near_body;
+    // The object sits within the nozzle cone, so it may not rise above the tower at all.
+    bool   near_nozzle;
     // Horizontal clearance this particular object has to keep from the tower: the full toolhead
     // radius once it rises past the nozzle cone, the bare cone while it stays below. It is what the
     // error message quotes and what the plater grows the object outline by.
