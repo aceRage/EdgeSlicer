@@ -3356,6 +3356,21 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
         params.extrusion_surface_slope_min_layer = last_layer;
         // P3: the nearest head box over the block's layer, measured only (the summary and the log say it).
         params.measure_clearance_from_layer = last_layer;
+        // P4: the nozzle (tip and flank, nothing else) may pass through printed material on the block's layer
+        // up to the smallest tolerance of the curved objects. Never on a plate that also has Z contouring:
+        // its check keeps exactly its own numbers.
+        if (!contoured) {
+            double tol = std::numeric_limits<double>::max();
+            // Review M2: each object's tolerance in force, capped by the head's printed record as the planner had it.
+            for (const PrintObject *object : curved_objects) {
+                const CurvedTopsDevOverrides dev = curved_tops_dev_overrides(object->config());
+                tol = std::min(tol, curved_tops_nozzle_tolerance(object->config(), curved_tops_head_limits(print.config(), dev), dev).used);
+            }
+            if (tol > 0. && tol < std::numeric_limits<double>::max()) {
+                params.nozzle_contact_tolerance = tol + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM;
+                params.nozzle_contact_min_layer = last_layer;
+            }
+        }
     }
     const auto                t0     = std::chrono::steady_clock::now();
     const HeadCollisionReport report = check_head_collisions(result.moves, *head, params,
@@ -3374,10 +3389,30 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
         BOOST_LOG_TRIVIAL(info) << "Curved tops head check: hits " << report.hit_moves << ", deepest " << report.max_depth
                                 << " mm, min box clearance " << report.min_box_clearance << " mm (" << report.min_box_clearance_part << ")";
     }
+    // P4: nozzle contacts within the nozzle contact tolerance, said as information (with how they compare to
+    // what has been printed on this printer, when its head file records that).
+    std::string tolerated;
+    if (report.tolerated_moves > 0) {
+        tolerated = Slic3r::format(_(L("The nozzle passes up to %1% mm through printed material in %2% moves (nozzle contact tolerance "
+                                       "%3% mm); no other head part touches in those moves.")),
+                                   mm(report.tolerated_max_depth), report.tolerated_moves,
+                                   mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
+        const double verified = head->curved_tops_verified_for(printer_model) ? head->curved_tops_verified->nozzle_contact_mm : 0.;
+        // Never silent (review M2): with no record (developer override only) or beyond it, say so.
+        if (verified <= 0.)
+            tolerated += " " + _(L("No nozzle contact has been printed with this print head yet (developer override). Watch the first print."));
+        else if (double(report.tolerated_max_depth) > verified + CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM)
+            tolerated += " " + Slic3r::format(_(L("That is deeper than has been printed on this printer so far (%1% mm, %2%). Watch the "
+                                                  "first print.")),
+                                              mm(verified), head->curved_tops_verified->on);
+        BOOST_LOG_TRIVIAL(info) << "Curved tops head check: " << report.tolerated_moves << " moves with nozzle contact within the tolerance, deepest "
+                                << report.tolerated_max_depth << " mm";
+    }
     if (report.hit_moves == 0) {
-        if (any_dev)
+        if (any_dev || !tolerated.empty())
             print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                                          _(L("Curved tops head check (developer overrides active): no head contact found.")) +
+                                          (any_dev ? _(L("Curved tops head check (developer overrides active):")) : _(L("Curved tops head check:"))) +
+                                              " " + (tolerated.empty() ? _(L("no head contact found.")) : tolerated) +
                                               (nearest.empty() ? std::string() : " " + nearest),
                                           PrintStateBase::SlicingCurvedTopsHeadCheck);
         return;
@@ -3404,6 +3439,8 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
             msg += "\n" + _(L("By head part:")) + " " + by_part + ".";
             msg += "\n" + (other_parts.empty() ? _(L("Only the nozzle tip touched; no other head part did.")) :
                                                  _(L("NOT ONLY THE NOZZLE TIP: other head parts touched too:")) + " " + other_parts + ".");
+            if (!tolerated.empty())
+                msg += "\n" + _(L("Besides those:")) + " " + tolerated;
             const size_t shown_dev = std::min<size_t>(report.hits.size(), 5);
             for (size_t i = 0; i < shown_dev; ++i) {
                 const HeadCollisionHit &h = report.hits[i];
@@ -3428,6 +3465,13 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
                                          report.hit_moves, mm(report.max_depth), names, head->name);
         if (!head->calibrated)
             err += " " + _(L("The head model is an estimate, not a measurement."));
+        // P4: what the error counts, and what was tolerated besides.
+        if (params.nozzle_contact_tolerance > 0.)
+            err += " " + Slic3r::format(_(L("These are contacts deeper than the nozzle contact tolerance (%1% mm) or by a head part other "
+                                            "than the nozzle.")),
+                                        mm(params.nozzle_contact_tolerance - CURVED_TOPS_NOZZLE_TOLERANCE_SLACK_MM));
+        if (!tolerated.empty())
+            err += " " + _(L("Besides those:")) + " " + tolerated;
         const size_t shown_err = std::min<size_t>(report.hits.size(), 3);
         for (size_t i = 0; i < shown_err; ++i) {
             const HeadCollisionHit &h = report.hits[i];
@@ -3436,7 +3480,8 @@ static void check_head_clearance(Print &print, const GCodeProcessorResult &resul
                                          h.part == "nozzle" ? _(L("nozzle")) : h.part,
                                          h.travel ? _(L("travel")) : _(L("extrusion")), mm(h.depth));
         }
-        err += "\n" + _(L("The G-code was not exported. Turn curved tops off for this object, or lower its maximum angle."));
+        err += "\n" + _(L("The G-code was not exported. Turn curved tops off for this object, or lower its maximum angle or its number "
+                          "of curved layers."));
         throw Slic3r::SlicingError(err, curved_objects.front()->id().id);
     }
 

@@ -1993,7 +1993,11 @@ bool PrintObject::invalidate_state_by_config_options(
             // EdgeSlicer, curved tops P3: the developer overrides. What they change is in the guard record
             // (curved_tops_guard_inputs), which Print::apply() compares and which re-plans the block when it
             // differs; with Developer mode off they are ignored and change nothing but the config block.
-            || opt_key.rfind("curved_tops_dev_", 0) == 0) {
+            || opt_key.rfind("curved_tops_dev_", 0) == 0
+            // EdgeSlicer, curved tops P4: the same for the nozzle contact tolerance and the pattern (both in the
+            // guard record; the head check reads the tolerance at export).
+            || opt_key == "curved_tops_nozzle_tolerance"
+            || opt_key == "curved_tops_pattern") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"

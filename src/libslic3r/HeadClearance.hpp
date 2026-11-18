@@ -52,6 +52,9 @@ struct HeadClearanceCurvedTopsVerified
     std::vector<std::string> printer_models;
     double                   rise_mm { 0. };
     double                   angle_deg { 0. };
+    // Curved tops P4 (optional "verified_nozzle_contact_mm"): the deepest the hot nozzle has passed through
+    // printed material on such a print with no visible sign of contact (0 = not recorded).
+    double                   nozzle_contact_mm { 0. };
     std::string              on;   // date, as written in the file
     std::string              note;
 };

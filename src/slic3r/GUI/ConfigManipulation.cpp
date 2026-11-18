@@ -1195,7 +1195,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     // EdgeSlicer: curved tops (experimental) detail settings.
     bool has_curved_tops = config->opt_bool("curved_tops_enabled");
-    for (auto el : {"curved_tops_layers", "curved_tops_max_angle"})
+    for (auto el : {"curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern"})
         toggle_line(el, has_curved_tops);
     // Curved tops P3: the developer overrides (their lines are comDevelop and need Developer mode on too).
     for (auto el : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",
@@ -1205,7 +1205,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                      "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
                      "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
                      "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
-                     "curved_tops_dev_allow_unverified_head" })
+                     "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
         // Shown exactly when the overrides can act (GUI_App::update_mode() sets the slicer's gate the same way).
         toggle_line(el, has_curved_tops && GUI::wxGetApp().curved_tops_developer_lines_shown());
 
