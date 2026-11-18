@@ -1711,3 +1711,70 @@ TEST_CASE("The ram leaves a pressure advance the slicer does not set alone", "[W
     REQUIRE(out.find("; CP TOOLCHANGE UNLOAD") != std::string::npos);
     CHECK(m900_values(out).empty());
 }
+
+// Orca #17439, adapted: Edge validates the tower against each nozzle's ExtruderAreas rather than
+// Orca's get_shared_poly. Areas that share nothing used to leave an inverted AABB / a crash; they
+// now refuse the tower instead of asking the user to move it.
+
+// Two nozzles over a 200 mm bed, nozzle 1 reaching x up to `left_max` and nozzle 2 x from `right_min`,
+// with a cube in each nozzle's area and, when `filaments` is 2, a prime tower at (30, 150).
+static StringObjectException validate_on_two_nozzle_areas(double left_max, double right_min, unsigned int filaments)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(filaments);
+    config.option<ConfigOptionFloats>("filament_diameter")->values.assign(filaments, 1.75);
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    config.option<ConfigOptionStrings>("filament_colour")->values.assign(filaments, "#FF0000");
+    if (filaments > 1)
+        config.option<ConfigOptionStrings>("filament_colour")->values[1] = "#00FF00";
+    config.option<ConfigOptionInts>("printer_extruder_id", true)->values         = { 1, 2 };
+    config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values = { "Direct Drive Standard", "Direct Drive Standard" };
+    config.option<ConfigOptionBool>("enable_prime_tower")->value                 = filaments > 1;
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value     = false;
+    config.option<ConfigOptionString>("layer_change_gcode")->value               = "G92 E0";
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                    = { 30. };
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                    = { 150. };
+    config.option<ConfigOptionPoints>("printable_area")->values = { { 0., 0. }, { 200., 0. }, { 200., 200. }, { 0., 200. } };
+    config.set_deserialize_strict({
+        { "filament_map_mode", "Manual" },
+        { "filament_map",      filaments == 2 ? "1,2" : "1" },
+        { "brim_type",         "no_brim" },
+        { "skirt_loops",       "0" },
+    });
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(std::vector<Vec2ds>{
+        { { 0., 0. }, { left_max, 0. }, { left_max, 200. }, { 0., 200. } },
+        { { right_min, 0. }, { 200., 0. }, { 200., 200. }, { right_min, 200. } } }));
+
+    Model model;
+    auto add_cube = [&](double x, int filament) {
+        ModelObject *object = model.add_object();
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(x, 20., 0.));
+        object->ensure_on_bed();
+        object->config.set("extruder", filament);
+    };
+    add_cube(20., 1);
+    if (filaments == 2)
+        add_cube(std::min(180., right_min + 20.), 2);
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower() == (filaments == 2));
+    return print.validate();
+}
+
+TEST_CASE("A prime tower is rejected when the extruders share no printable area", "[WipeTower]")
+{
+    SECTION("areas that overlap under the tower accept it") {
+        CHECK(validate_on_two_nozzle_areas(150., 10., 2).string.empty());
+    }
+    SECTION("areas that only touch leave the tower nowhere to go") {
+        const std::string error = validate_on_two_nozzle_areas(100., 100., 2).string;
+        CHECK_THAT(error, Catch::Matchers::Contains("share no common area"));
+        CHECK_THAT(error, !Catch::Matchers::Contains("Move the prime tower"));
+    }
+    SECTION("one filament inside its nozzle's area needs no tower and is accepted") {
+        CHECK(validate_on_two_nozzle_areas(100., 100., 1).string.empty());
+    }
+}

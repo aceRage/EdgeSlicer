@@ -166,6 +166,11 @@ BoundingBoxf shared_printable_box(const ConfigBase &config)
             const BoundingBoxf g(group);
             box.min = box.min.cwiseMax(g.min);
             box.max = box.max.cwiseMin(g.max);
+            // No overlap: an inverted AABB is not a place the tower can sit (Orca #17439).
+            if (box.min.x() >= box.max.x() || box.min.y() >= box.max.y()) {
+                box.reset();
+                break;
+            }
         }
     return box;
 }

@@ -2586,6 +2586,9 @@ static std::string prime_tower_reach_error(const Print &print, bool grouping_don
     const Polygons tower = grown_by(estimated_prime_tower_outline(print), side_scrape_ring_beyond_brim(print));
     if (tower.empty())
         return {};
+    // Moving the tower does not help when no area is reached by every nozzle (Orca #17439).
+    if (areas.shared.empty())
+        return L("The extruder printable areas share no common area, so the prime tower cannot be printed.");
 
     // Filaments (0-based) per nozzle (0-based) that print on the tower.
     std::vector<std::vector<unsigned int>> filaments_of(areas.count());
@@ -2727,7 +2730,11 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         const ExtruderAreas areas = print.get_extruder_areas();
         if (areas.multi() && areas.has_exclusive_regions()) {
             const ExtruderAreas world = translate_extruder_areas(areas, Vec2d(plate_origin(0), plate_origin(1)));
-            if (!footprint_within(convex_hulls_temp, world.shared)) {
+            if (world.shared.empty()) {
+                if (!warning->string.empty() && warning->string.back() != '\n')
+                    warning->string += "\n";
+                warning->string += L("The extruder printable areas share no common area, so the prime tower cannot be printed.\n");
+            } else if (!footprint_within(convex_hulls_temp, world.shared)) {
                 if (!warning->string.empty() && warning->string.back() != '\n')
                     warning->string += "\n";
                 warning->string += L("Prime Tower") + L(" is outside the area both nozzles can reach, so the nozzle that cannot reach it cannot purge into it. Move it into the middle of the plate.\n");
