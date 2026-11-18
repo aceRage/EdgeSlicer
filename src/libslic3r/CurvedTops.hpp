@@ -324,7 +324,7 @@ static constexpr double CURVED_TOPS_GAP_ATTACH_SPACINGS = 2.0;
 // The connecting piece's flow, as a fraction of the fill's (it runs over beads already laid).
 static constexpr double CURVED_TOPS_GAP_CONNECTOR_FLOW = 0.15;
 // A gap bead printed on its own is at least this long.
-static constexpr double CURVED_TOPS_GAP_MIN_ISOLATED_MM = 1.0;
+static constexpr double CURVED_TOPS_GAP_MIN_ISOLATED_MM = 0.5;
 std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
                                                         const Flow &solid_flow, int k, const PrintConfig &pcfg,
                                                         const PrintObjectConfig &ocfg, bool *failed = nullptr,

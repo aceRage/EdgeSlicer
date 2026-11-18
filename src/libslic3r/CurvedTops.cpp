@@ -1088,11 +1088,10 @@ double bead_mm3(const std::vector<CurvedTopsFillPath> &bead)
 
 // Owner, after printing P5 (2026-11-17): short gap-fill beads printed on their own were dabs - a tiny extrusion with a
 // retract, lift and drop before it and a retract and lift after it, with no room to spread or wipe. So each gap bead is
-// placed after the path before it, nearest end first:
-//  - an end within CURVED_TOPS_GAP_ATTACH_SPACINGS line spacings of where that path ends is joined to it in one motion:
+// placed, longest first, at the nearest end or start of a run of paths printed without a travel:
+//  - a bead end within CURVED_TOPS_GAP_ATTACH_SPACINGS line spacings of it is joined to that run in one motion, through
 //    a short connecting piece at CURVED_TOPS_GAP_CONNECTOR_FLOW of the fill's flow (an extrusion, so the move stays at
-//    the surface and its contact with the beads beside it is judged as for any bead), then the bead; the bead is then
-//    where the next one is looked for from, so beads along a spine chain up;
+//    the surface and its contact with the beads beside it is judged as for any bead); beads along a spine chain up;
 //  - otherwise it is printed on its own only when it is at least CURVED_TOPS_GAP_MIN_ISOLATED_MM long; a shorter one is
 //    left out (a hole under the nozzle's size is better than a blob).
 void place_gap_beads(std::vector<CurvedTopsFillPath> &out, std::vector<std::vector<CurvedTopsFillPath>> beads, const Flow &solid_flow,
@@ -1102,59 +1101,88 @@ void place_gap_beads(std::vector<CurvedTopsFillPath> &out, std::vector<std::vect
     st.candidates = beads.size();
     for (const std::vector<CurvedTopsFillPath> &b : beads)
         st.candidate_mm3 += bead_mm3(b);
-    const double      attach  = scale_(CURVED_TOPS_GAP_ATTACH_SPACINGS * solid_flow.spacing());
-    const double      h       = solid_flow.height();
-    const double      c_mm3   = CURVED_TOPS_GAP_CONNECTOR_FLOW * solid_flow.mm3_per_mm();
-    std::vector<bool> used(beads.size(), false);
-    bool              has_cur = !out.empty() && !out.back().points.empty();
-    Point             cur     = has_cur ? out.back().points.back() : Point(0, 0);
-    for (size_t round = 0; round < beads.size(); ++round) {
-        size_t best = beads.size();
-        bool   rev  = false;
-        double bd   = std::numeric_limits<double>::max();
-        for (size_t i = 0; i < beads.size(); ++i) {
-            if (used[i])
-                continue;
-            for (int end = 0; end < 2; ++end) {
-                const Point  e = end == 0 ? beads[i].front().points.front() : beads[i].back().points.back();
-                const double d = has_cur ? (e - cur).cast<double>().norm() : 0.;
+    const double attach = scale_(CURVED_TOPS_GAP_ATTACH_SPACINGS * solid_flow.spacing());
+    const double h      = solid_flow.height();
+    const double c_mm3  = CURVED_TOPS_GAP_CONNECTOR_FLOW * solid_flow.mm3_per_mm();
+    const auto connector = [&](const Point &a, const Point &b) {
+        CurvedTopsFillPath c{ Points{ a, b }, float(c_mm3 / h + h * (1. - 0.25 * PI)), c_mm3, false, true };
+        st.kept_mm3 += unscale<double>(Polyline(c.points).length()) * c_mm3;
+        return c;
+    };
+    // The paths so far as runs: pieces sharing their end points, printed without a travel. A bead joins the end or the
+    // start of any run (the innermost loop's seam, the spiral's end in the middle, a bead placed before it).
+    std::vector<std::vector<CurvedTopsFillPath>> runs;
+    for (CurvedTopsFillPath &p : out) {
+        if (p.points.empty())
+            continue;
+        if (runs.empty() || runs.back().back().points.back() != p.points.front())
+            runs.emplace_back();
+        runs.back().push_back(std::move(p));
+    }
+    out.clear();
+    // Longest beads first, so short ones can join the end of a bead placed before them.
+    std::vector<size_t> order(beads.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&beads](size_t a, size_t b) { return bead_length_mm(beads[a]) > bead_length_mm(beads[b]); });
+    for (const size_t bi : order) {
+        std::vector<CurvedTopsFillPath> &b = beads[bi];
+        if (b.empty())
+            continue;
+        const Point bf = b.front().points.front(), bb = b.back().points.back();
+        double      bd = std::numeric_limits<double>::max();
+        size_t      br = runs.size();
+        bool        at_end = true, rev = false;
+        for (size_t r = 0; r < runs.size(); ++r) {
+            const Point re = runs[r].back().points.back(), rs = runs[r].front().points.front();
+            const auto  consider = [&](const Point &a, const Point &e, bool end, bool reverse) {
+                const double d = (a - e).cast<double>().norm();
                 if (d < bd) {
-                    bd   = d;
-                    best = i;
-                    rev  = end == 1;
+                    bd     = d;
+                    br     = r;
+                    at_end = end;
+                    rev    = reverse;
                 }
-            }
+            };
+            consider(re, bf, true, false);  // run end -> bead as it is
+            consider(re, bb, true, true);   // run end -> bead reversed
+            consider(rs, bb, false, false); // bead as it is -> run start
+            consider(rs, bf, false, true);  // bead reversed -> run start
         }
-        if (best == beads.size())
-            break;
-        used[best] = true;
-        std::vector<CurvedTopsFillPath> &b = beads[best];
         if (rev) {
             std::reverse(b.begin(), b.end());
             for (CurvedTopsFillPath &p : b)
                 std::reverse(p.points.begin(), p.points.end());
         }
         const double len = bead_length_mm(b);
-        if (has_cur && bd <= attach) {
-            if (b.front().points.front() != cur) {
-                CurvedTopsFillPath c{ Points{ cur, b.front().points.front() }, float(c_mm3 / h + h * (1. - 0.25 * PI)), c_mm3, false, true };
-                st.kept_mm3 += unscale<double>(Polyline(c.points).length()) * c_mm3;
-                out.push_back(std::move(c));
+        if (br < runs.size() && bd <= attach) {
+            std::vector<CurvedTopsFillPath> &run = runs[br];
+            st.kept_mm3 += bead_mm3(b);
+            if (at_end) {
+                if (run.back().points.back() != b.front().points.front())
+                    run.push_back(connector(run.back().points.back(), b.front().points.front()));
+                for (CurvedTopsFillPath &p : b)
+                    run.push_back(std::move(p));
+            } else {
+                std::vector<CurvedTopsFillPath> joined = std::move(b);
+                if (joined.back().points.back() != run.front().points.front())
+                    joined.push_back(connector(joined.back().points.back(), run.front().points.front()));
+                for (CurvedTopsFillPath &p : run)
+                    joined.push_back(std::move(p));
+                run = std::move(joined);
             }
             ++st.attached;
         } else if (len >= CURVED_TOPS_GAP_MIN_ISOLATED_MM) {
             ++st.isolated;
             st.shortest_isolated_mm = st.shortest_isolated_mm > 0. ? std::min(st.shortest_isolated_mm, len) : len;
-        } else {
+            st.kept_mm3 += bead_mm3(b);
+            runs.push_back(std::move(b));
+        } else
             ++st.dropped;
-            continue;
-        }
-        st.kept_mm3 += bead_mm3(b);
-        for (CurvedTopsFillPath &p : b)
-            out.push_back(std::move(p));
-        cur     = out.back().points.back();
-        has_cur = true;
     }
+    for (std::vector<CurvedTopsFillPath> &run : runs)
+        for (CurvedTopsFillPath &p : run)
+            out.push_back(std::move(p));
     if (stats != nullptr) {
         stats->candidates += st.candidates;
         stats->candidate_mm3 += st.candidate_mm3;
@@ -1283,12 +1311,37 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
     const double max_width = 2. * solid_flow.spacing();
     // Each gap bead as its pieces (one per width), in order.
     std::vector<std::vector<CurvedTopsFillPath>> beads;
-    ThickPolylines gaps;
     for (ExPolygon &gap : uncovered_by(fp, out, h, min_width)) {
-        const size_t before = gaps.size();
+        ThickPolylines gaps;
         gap.douglas_peucker(scale_(0.0125));
         gap.medial_axis(scale_(min_width), scale_(max_width), &gaps);
-        if (gaps.size() == before) {
+        if (!gaps.empty()) {
+            // Variable-width beads along the axis. P5 (owner, dabs): together never more than the gap's own volume (the
+            // round ends of short beads spread past the axis's ends).
+            const size_t first = beads.size();
+            double       vol   = 0.;
+            for (const ThickPolyline &tp : gaps) {
+                if (tp.length() < scale_(0.2))
+                    continue;
+                const ExtrusionMultiPath mp = thick_polyline_to_multi_path(tp, erGapFill, solid_flow, scaled<float>(0.05),
+                                                                           float(SCALED_EPSILON));
+                std::vector<CurvedTopsFillPath> bead;
+                for (const ExtrusionPath &p : mp.paths)
+                    if (p.polyline.points.size() >= 2)
+                        bead.push_back({ p.polyline.points, p.width, p.mm3_per_mm, false, true });
+                if (!bead.empty()) {
+                    vol += bead_mm3(bead);
+                    beads.push_back(std::move(bead));
+                }
+            }
+            const double room = gap.area() * SCALING_FACTOR * SCALING_FACTOR * h;
+            if (vol > room && vol > 0.)
+                for (size_t i = first; i < beads.size(); ++i)
+                    for (CurvedTopsFillPath &p : beads[i])
+                        p.mm3_per_mm *= room / vol;
+            continue;
+        }
+        {
             // A compact hole with no axis (a dome's apex inside the innermost ring): one short line through it.
             const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
             if (gap_mm2 < 0.05 || gap_mm2 > 1.0)
@@ -1315,17 +1368,6 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
             beads.push_back({ { Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
                                 solid_flow.mm3_per_mm(), false, true } });
         }
-    }
-    for (const ThickPolyline &tp : gaps) {
-        if (tp.length() < scale_(0.2))
-            continue;
-        const ExtrusionMultiPath mp = thick_polyline_to_multi_path(tp, erGapFill, solid_flow, scaled<float>(0.05), float(SCALED_EPSILON));
-        std::vector<CurvedTopsFillPath> bead;
-        for (const ExtrusionPath &p : mp.paths)
-            if (p.polyline.points.size() >= 2)
-                bead.push_back({ p.polyline.points, p.width, p.mm3_per_mm, false, true });
-        if (!bead.empty())
-            beads.push_back(std::move(bead));
     }
     place_gap_beads(out, std::move(beads), solid_flow, stats);
     return out;
