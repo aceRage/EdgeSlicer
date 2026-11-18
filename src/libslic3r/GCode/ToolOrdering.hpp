@@ -219,6 +219,29 @@ private:
     WipingExtrusions m_wiping_extrusions;
 };
 
+// Collision-free cache key for the flush-volume tool order of a layer.
+// Snap/Orca packed the filament set and the previous tool into one integer with the previous-tool
+// bit starting at offset 16. Edge stored that in a uint32_t, so `1 << (16 + id)` is undefined for
+// id >= 16 and filament 17 (index 16) shares a bit with "previous tool was 1". Keep the two parts
+// as a sorted filament list plus a separate previous-tool id so they cannot overlap, and so
+// MAXIMUM_FILAMENT_NUMBER (64) is in range. Exposed for unit testing.
+struct FlushOrderCacheKey {
+    std::vector<unsigned int> filaments;        // sorted unique 0-based ids on the layer
+    unsigned int              initial_extruder{~0u}; // ~0u if the layer has no predecessor
+
+    bool operator<(const FlushOrderCacheKey &rhs) const
+    {
+        if (initial_extruder != rhs.initial_extruder)
+            return initial_extruder < rhs.initial_extruder;
+        return filaments < rhs.filaments;
+    }
+
+    bool operator==(const FlushOrderCacheKey &rhs) const
+    {
+        return initial_extruder == rhs.initial_extruder && filaments == rhs.filaments;
+    }
+};
+
 class ToolOrdering
 {
 public:
@@ -337,7 +360,9 @@ private:
     std::vector<unsigned int>  m_all_printing_extruders;
     // Map: extruder_id -> print_z of the last layer it is used on
     std::map<unsigned int, coordf_t> m_last_layer_per_extruder;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> m_tool_order_cache;
+    // Flush-volume tool-order cache. Key is the layer's filament set plus the
+    // tool that was active before the layer; see FlushOrderCacheKey.
+    std::map<FlushOrderCacheKey, std::vector<uint8_t>> m_tool_order_cache;
     const DynamicPrintConfig*  m_print_full_config = nullptr;
     const PrintConfig*         m_print_config_ptr = nullptr;
     const PrintObject*         m_print_object_ptr = nullptr;
@@ -355,6 +380,9 @@ private:
     float                       m_mixed_layer_height_b    = 0.f;
     float                       m_mixed_base_layer_height = 0.2f;
 };
+
+FlushOrderCacheKey make_flush_order_cache_key(const std::vector<unsigned int> &extruders,
+                                              std::optional<unsigned int>      initial_extruder_id);
 
 // Parse the user defined cyclic toolchange sequence ("3,2 , 1 , 4") into 0-based filament indices.
 // Out-of-range entries, duplicates and non-numeric tokens are dropped, so a partially valid string
