@@ -185,6 +185,12 @@ To minimize the visibility of potential over-extrusion at the start of an extern
 
 This is useful when printing with [Outer/Inner](quality_settings_wall_and_surfaces#outerinner) or [Inner/Outer/Inner](quality_settings_wall_and_surfaces#innerouterinner) wall print order, as in these modes, it is more likely an external perimeter is printed immediately after a de-retraction move, which would cause slight extrusion variance at the start of a seam.
 
+### Retract after outer wall
+
+Always retract when the nozzle leaves an outer wall, even if the travel is shorter than the travel distance threshold.
+
+Without a retraction, a very short travel, for example to gap infill inside a thin wall, can drag the end of the outer wall inward and leave a visible dent at the seam. This option is off by default.
+
 ## Tips
 
 With seams being inevitable when 3D printing using FFF, there are two distinct approaches on how to deal with them:

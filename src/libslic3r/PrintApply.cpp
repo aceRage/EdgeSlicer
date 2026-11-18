@@ -1,3 +1,4 @@
+#include "CurvedTops.hpp"
 #include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
@@ -1017,6 +1018,8 @@ bool verify_update_print_object_regions(
             // Orca #17314: an explicitly chosen sparse infill filament is kept; painting then only colors the surfaces.
             if (paint_sparse_infill && !has_explicit_sparse_infill_filament(layer_range, region.parent, default_region_config))
                 cfg.sparse_infill_filament.value = region.extruder_id;
+            // Per-nozzle process: as generate_print_object_regions() does, a painted role takes its own nozzle's width.
+            restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -1367,6 +1370,9 @@ static PrintObjectRegions* generate_print_object_regions(
                         paint_this_sparse ? painted_extruder_id : cfg.sparse_infill_filament.value;
                     if (paint_this_sparse)
                         cfg.sparse_infill_filament.value = painted_extruder_id;
+                    // Per-nozzle process: the parent's widths were stamped for the parent's filaments; a role the
+                    // paint moved to another nozzle takes that nozzle's width (no-op without per-nozzle processes).
+                    restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
@@ -1818,6 +1824,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // The following call may stop the background processing.
     if (! print_diff.empty())
         update_apply_status(this->invalidate_state_by_config_options(new_full_config, print_diff));
+    // Bambu Studio 2.9.1: the Type 1 tower's first layer purges at initial_layer_flow_ratio (here the region option
+    // bottom_solid_infill_flow_ratio, otherwise read at G-code export only), so the tower is generated again.
+    if (std::find(region_diff.begin(), region_diff.end(), "bottom_solid_infill_flow_ratio") != region_diff.end())
+        update_apply_status(this->invalidate_step(psWipeTower));
 
     // Apply variables to placeholder parser. The placeholder parser is used by G-code export,
     // which should be stopped if print_diff is not empty.
@@ -2555,6 +2565,56 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             m_default_region_config.apply_only(after, keys, true);
             m_full_print_config.apply_only(after, keys, true);
         }
+    }
+
+    // EdgeSlicer: support interface temperatures (support_interface_nozzle_temperature). They depend on the
+    // objects' support settings and on which filaments print model parts, all final here. The tower and the
+    // G-code read them; a change re-runs both (the object option alone only invalidates psGCodeExport).
+    {
+        SupportInterfaceTemperatures resolved = this->resolve_support_interface_temperatures();
+        if (resolved != m_support_interface_temperatures) {
+            // Only the ignored list (warnings, read by validate()) changing needs no step re-run.
+            if (resolved.temperatures != m_support_interface_temperatures.temperatures)
+                update_apply_status(this->invalidate_steps({psWipeTower, psGCodeExport}));
+            m_support_interface_temperatures = std::move(resolved);
+        }
+    }
+
+    // EdgeSlicer, curved tops (review finding a): the guards in apply_curved_tops() read settings of
+    // the print, the object and the other objects (supports, skirt, sequence, filaments, copies...)
+    // whose change does not by itself re-run posContouring, and a block already cut the planar walls
+    // under it. When anything a guard read differs from the last run, or a run was left unfinished
+    // over cut walls (a cancel), regenerate the object's walls: posPerimeters invalidates the fills
+    // and posContouring after it, so the block is planned again on uncut layers. Objects without
+    // curved tops on are not looked at, so a print without the feature invalidates exactly as before.
+    // Review r2: the record holds verdicts, not counts, and an object that was refused (walls not cut,
+    // so its G-code is already the planar one) and is still refused by a setting is left alone: adding
+    // a part to a plate where every part is refused re-slices nothing. (Its refusal text may then name
+    // the earlier reason until the object is sliced again.) The record is read under the state mutex
+    // this function holds; the slicing thread writes it under the same mutex.
+    int multi_filament = -1; // computed once, for the first object that needs it
+    for (PrintObject *object : m_objects) {
+        if (!object->config().curved_tops_enabled.value)
+            continue;
+        const bool unfinished = object->curved_tops_clipped() && !object->is_step_done_unguarded(posContouring);
+        bool       regenerate = unfinished;
+        if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
+            if (multi_filament < 0)
+                multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
+            const std::string now = curved_tops_guard_inputs(*object, multi_filament);
+            if (object->curved_tops_guard_inputs_used() != now) {
+                // P3: a change of the developer overrides (or of Developer mode) always re-plans, so the
+                // warning that lists them is never stale; without overrides both tails are empty.
+                const auto dev_tail = [](const std::string &record) {
+                    const size_t pos = record.find(";dev=");
+                    return pos == std::string::npos ? std::string() : record.substr(pos);
+                };
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament) ||
+                             dev_tail(object->curved_tops_guard_inputs_used()) != dev_tail(now);
+            }
+        }
+        if (regenerate)
+            update_apply_status(object->invalidate_step(posPerimeters));
     }
 
     // Update SlicingParameters for each object where the SlicingParameters is not valid.

@@ -9,6 +9,9 @@
     "fan_max_speed": [
         "30"
     ],
+    "filament_adhesiveness_category": [
+        "706"
+    ],
     "filament_cost": [
         "29.98"
     ],

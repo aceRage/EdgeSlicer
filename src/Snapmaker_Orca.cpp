@@ -65,6 +65,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -2178,6 +2179,15 @@ int CLI::run(int argc, char **argv)
     if (normative_check_option)
         normative_check = normative_check_option->value;
 
+    // EdgeSlicer, curved tops P3: the CLI has no Developer mode; --curved-tops-dev-overrides stands in
+    // for it. Off unless given, so a project's curved_tops_dev_* values are ignored by default.
+    {
+        const ConfigOptionBool *dev_option = m_config.option<ConfigOptionBool>("curved_tops_dev_overrides");
+        Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
+        if (dev_option != nullptr && dev_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+    }
+
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");
     if (uptodate_option)
         up_config_to_date = uptodate_option->value;
@@ -4028,6 +4038,14 @@ int CLI::run(int argc, char **argv)
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     m_print_config.apply(m_extra_config, true);
+    // A project the CLI exports must say these values differ from the presets, or the GUI puts
+    // them back to the system preset's on open (record_cli_overrides_as_different).
+    {
+        const size_t recorded = record_cli_overrides_as_different(m_print_config, m_extra_config, Preset::print_options(),
+                                                                  Preset::filament_options(), Preset::printer_options());
+        if (recorded > 0)
+            BOOST_LOG_TRIVIAL(info) << "command line settings recorded as different from the presets: " << recorded;
+    }
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
 
@@ -6831,7 +6849,8 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -7677,18 +7696,14 @@ int CLI::run(int argc, char **argv)
             }
             // add wipe tower bounding box
             if (print->has_wipe_tower()) {
-                BBoxData data;
                 auto   wt_corners = print->first_layer_wipe_tower_corners();
                 // when loading gcode.3mf, wipe tower info may not be correct
                 if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
-                    bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    // Numbered by the plate being exported (the current plate is not it here), its
+                    // area and layer height set rather than left as the stack held them.
+                    BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, part_plate->get_index(),
+                                                                     float(print->config().initial_layer_print_height.value));
+                    bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
                     id_bboxes.emplace_back(std::move(data));
                 }
             }

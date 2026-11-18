@@ -5841,6 +5841,7 @@ std::string HubServer::state_for_phone()
             p["id"]    = h.value("id", "");
             p["alias"] = h.value("alias", "");
             p["rkind"] = h.value("rkind", "");
+            p["rcam"]  = h.value("rcam", ""); // the camera type picked on the PC (no address): words the phone's "No video" hint
             p["rname"] = h.value("rname", "");
             p["rurl"]  = h.value("rurl", "");
             if (!u1_h264_url(h).empty()) {

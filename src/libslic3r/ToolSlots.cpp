@@ -914,6 +914,66 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
     return 0;
 }
 
+std::vector<int> split_rack_slots(const ConfigBase &config, size_t extruder)
+{
+    std::vector<int> out;
+    // Only a single extruder with a declared rack (the H3C; NozzleProcess single_extruder_nozzle_rack()).
+    if (extruder != 0 || floats_of(config, "nozzle_diameter").size() != 1 || config.option("extruder_max_nozzle_count") == nullptr ||
+        rack_slot_count(config, extruder) == 0)
+        return out;
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    if (extruder >= racks.size())
+        return out;
+    const std::vector<RackNozzle> &rack = racks[extruder];
+    NozzleVolumeType               base = extruder_volume_type(config, extruder);
+    if (base == nvtHybrid)
+        base = nvtStandard;
+    std::vector<bool> split(rack.size(), false);
+    for (size_t k = 0; k < rack.size(); ++k)
+        split[k] = rack[k].volume_type != base;
+    for (int pin : ints_of(config, "filament_rack_nozzle_slot"))
+        if (pin > 0 && size_t(pin) <= rack.size())
+            split[size_t(pin - 1)] = true;
+    for (size_t k = 0; k < rack.size(); ++k)
+        if (split[k])
+            out.push_back(int(k) + 1);
+    return out;
+}
+
+int filament_split_rack_slot(const ConfigBase &config, unsigned int filament_id)
+{
+    filament_id = nozzle_filament_of_impl(config, filament_id);
+    if (filament_id == 0)
+        return 0;
+    const size_t           e     = physical_extruder_of(config, filament_id);
+    const std::vector<int> slots = split_rack_slots(config, e);
+    if (slots.empty())
+        return 0;
+    if (const int pin = filament_rack_slot_pin(config, filament_id); pin > 0)
+        return std::find(slots.begin(), slots.end(), pin) != slots.end() ? pin : 0;
+    // Unpinned: the slot of the nozzle type it needs, when that type is split off.
+    const std::vector<std::vector<RackNozzle>> racks    = extruder_rack_nozzles(config);
+    const std::vector<double>                  diameter = floats_of(config, "filament_diameter");
+    NozzleVolumeType                           wanted   = nvtStandard;
+    if (filament_id <= diameter.size() && diameter[filament_id - 1] > 2.5)
+        wanted = nvtTPU285;
+    else if (filament_flow_mode(config, filament_id - 1) == int(fvtHighFlow))
+        wanted = nvtHighFlow;
+    else
+        return 0;
+    const std::vector<int> pins = ints_of(config, "filament_rack_nozzle_slot");
+    int                    any  = 0;
+    for (int k : slots) {
+        if (racks[e][size_t(k - 1)].volume_type != wanted)
+            continue;
+        if (std::find(pins.begin(), pins.end(), k) == pins.end())
+            return k;
+        if (any == 0)
+            any = k;
+    }
+    return any;
+}
+
 int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);

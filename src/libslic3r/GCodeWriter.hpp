@@ -168,7 +168,8 @@ public:
     void        extrude_to_xyz(std::string &out, const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
-    std::string unretract();
+    // Bambu Studio 2.9.1 unretract(extra_retract): `extra` mm more, only when something is unretracted.
+    std::string unretract(double extra = 0.);
     std::string lift(LiftType lift_type = LiftType::NormalLift, bool spiral_vase = false);
     std::string unlift();
     const Vec3d& get_position() const { return m_pos; }
@@ -183,6 +184,8 @@ public:
     // travel's feedrate, else empty. For G-code that follows a Z move and moves without an F word of its own.
     std::string restore_uncapped_z_feedrate() const;
     double      get_zhop() const { return m_lifted; }
+    // EdgeSlicer, curved tops: forget a z-hop lift() asked for but no travel has made yet.
+    void        cancel_pending_lift() { m_to_lift = 0.; }
     // Edge (min_layer_time_pause): G-code that parks the head at `park` (bed coordinates) and brings it back,
     // returned as {there, back} so the caller can put the dwell between them. `there` retracts (unless the
     // filament already is), lifts to at least `clearance` above the layer (never above `max_z` when it is

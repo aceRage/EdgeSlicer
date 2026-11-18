@@ -501,6 +501,19 @@ TEST_CASE("Moves in a part go round its top surfaces on a layer with supports", 
         // A routed move may run along the edge of a top surface, a quarter of a millimetre inside it. Half a
         // millimetre inside it is across it.
         const ExPolygons across = offset_ex(top, -float(scaled<double>(0.5)));
+        // A travel that stays inside the layer's slices, a little in from their edge, is not planned at all (the routing
+        // is for a travel that leaves them, as one across the slot does), so it is no move for this test. Whether the
+        // layer has such a move over the top surface depends on the order the part is printed in, and clang's order does.
+        double external_width = 0.;
+        size_t regions        = 0;
+        for (const LayerRegion *region : layer->regions())
+            if (!region->slices.empty()) {
+                external_width += region->flow(frExternalPerimeter).scaled_width();
+                ++regions;
+            }
+        REQUIRE(regions > 0);
+        const ExPolygons inside_layer = offset_ex(layer->lslices, -float(external_width / double(regions) * 0.6));
+        REQUIRE(!inside_layer.empty());
         std::pair<size_t, size_t> counts{0, 0};
         for (const Hop &hop : hops_of(moves_of(gcode))) {
             if (std::abs(hop.z - floor_top) > 1e-4 || hop.points.empty() || hop.from_type.rfind("Support", 0) == 0 ||
@@ -508,6 +521,8 @@ TEST_CASE("Moves in a part go round its top surfaces on a layer with supports", 
                 continue;
             // From one line of the top surface to the next is a move inside the top surface, not round it.
             if (hop.from_type == "Top surface" && hop.to_type == "Top surface")
+                continue;
+            if (diff_pl(Polylines{in_object(hop, shift, true)}, inside_layer).empty())
                 continue;
             const Polyline way = in_object(hop, shift);
             if (holds(across, way.points.front()) || holds(across, way.points.back()) || !crosses(in_object(hop, shift, true), across))

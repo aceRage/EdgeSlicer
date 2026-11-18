@@ -2072,6 +2072,22 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
 
     WipeTower::ToolChangeResult result = construct_tcr(writer, false, old_tool, false);
     result.purge_volume                = wipe_volume;
+    // The gap get_all_wall_skip_points() cut into this layer's wall for this tool change: level with
+    // it, a line in from the block's start on the gap's side (the column the block's first moves take),
+    // in the frame the writer emits (as start_pos). Not for the Local-Z changes, which have no gap of
+    // their own.
+    if (m_use_gap_wall && tool_change != nullptr && m_layer_info != m_plan.end()) {
+        const auto  &changes  = m_layer_info->tool_changes;
+        const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+        if (!changes.empty() && tool_change >= changes.data() && tool_change < changes.data() + changes.size() &&
+            layer_id < m_wall_skip_points.size() && size_t(tool_change - changes.data()) < m_wall_skip_points[layer_id].size()) {
+            const Vec2f &gap = m_wall_skip_points[layer_id][size_t(tool_change - changes.data())];
+            const float  in  = initial_position.x() + m_perimeter_width;
+            const float  x   = gap.x() < m_wipe_tower_width / 2.f ? in : m_wipe_tower_width - in;
+            result.gap_entry     = writer.rotate(Vec2f(x, gap.y()));
+            result.has_gap_entry = true;
+        }
+    }
     return result;
 }
 
@@ -2971,7 +2987,11 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
             // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
+            // With sparse layers skipped G-code leaves out every layer but the first and those with a tool
+            // change (WipeTowerIntegration::tool_change), so count only those.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx, [this](size_t idx) {
+                return ! m_sparse_layers_skipped || idx == m_first_layer_idx || ! m_plan[idx].tool_changes.empty();
+            });
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative
@@ -3616,6 +3636,9 @@ void WipeTower2::interface_before_wipe(WipeTowerWriter2 &writer, const WipeTower
     if (m_interface.temp && fp.interface_temperature != fp.temperature &&
         !(m_wait_for_temp_on_wipe_tower && fp.interface_temperature > 0))
         writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, -1, "tower interface temperature"));
+    // Orca #12266: the normal temperature goes back on now, without a wait, so the nozzle cools during the purge.
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && m_interface.cooldown_during_tower)
+        writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, false, -1, "tower interface cool down during tower"));
 
     const Vec2f start  = writer.pos();
     bool        primed = false;
@@ -3650,7 +3673,7 @@ void WipeTower2::interface_after_wipe(WipeTowerWriter2 &writer, const WipeTowerI
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     // Back to the normal temperature; wait only if that means heating up.
-    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && !m_interface.cooldown_during_tower)
         writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, fp.temperature > fp.interface_temperature, -1,
                                                    "tower interface done, normal temperature"));
 }
@@ -3724,7 +3747,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
         // Orca #15035: like WipeTower::plan_tower_new(), extend the ribs instead of the tower when the
         // tower is smaller than the height-based stability minimum (what WipeTower::rib_footprint_side()
         // and so the pre-slice footprint estimate already assume).
-        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height);
+        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height, true);
         if (m_wipe_tower_depth + EPSILON < min_depth)
             m_rib_length = std::max(m_rib_length, min_depth * float(std::sqrt(2.f)));
     }

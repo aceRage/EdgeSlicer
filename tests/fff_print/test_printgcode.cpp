@@ -365,6 +365,77 @@ TEST_CASE("BBL time_lapse_gcode is emitted once per layer", "[PrintGCode][Timela
     }
 }
 
+// Bambu Lab A1 (i3, traditional timelapse) with a Bambu (Type1) tower: on a layer with a tower the
+// photo is taken before the tower's tool change. Above the tower's top there is nothing for the
+// tower to print, and those layers must take their photo as a single-colour layer does. They were
+// still marked as tower layers (the gap filling that keeps tower layers within max_layer_height
+// reached past the top), so they waited for tower work that never came and had no photo at all.
+TEST_CASE("A1 timelapse photo on every layer above the tower's top", "[PrintGCode][Timelapse][WipeTower]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({
+        { "printer_structure",          "i3" },
+        { "wipe_tower_type",            "type1" },
+        { "timelapse_type",             "0" },
+        { "time_lapse_gcode",           ";TEST_TIMELAPSE layer={layer_num}" },
+        { "layer_change_gcode",         ";TEST_LAYER_CHANGE [layer_num]" },
+        { "machine_start_gcode",        "" },
+        { "machine_end_gcode",          "" },
+        { "brim_type",                  "no_brim" },
+        { "skirt_loops",                0 },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "max_layer_height",           "0.28,0.28" },
+    });
+    // A 20 mm cube in filament 1 and a 4 mm one in filament 2: the second colour ends at 4 mm.
+    Print print;
+    Model model;
+    ModelObject *tall = model.add_object();
+    tall->name        = "tall.stl";
+    tall->add_volume(mesh(TestMesh::cube_20x20x20));
+    tall->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    tall->ensure_on_bed();
+    ModelObject *low = model.add_object();
+    low->name        = "low.stl";
+    TriangleMesh low_mesh = mesh(TestMesh::cube_20x20x20);
+    low_mesh.scale(Vec3f(1.f, 1.f, 0.2f));
+    low->add_volume(low_mesh);
+    low->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    low->ensure_on_bed();
+    low->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.has_wipe_tower());
+    const std::string gcode = Test::gcode(print);
+
+    // The tower stops part way up.
+    const size_t tower_layers = print.wipe_tower_data().tool_changes.size();
+    REQUIRE(tower_layers > 0);
+    REQUIRE(tower_layers < 50);
+
+    size_t layers = 0;
+    for (size_t pos = gcode.find("\n;TEST_LAYER_CHANGE "); pos != std::string::npos; pos = gcode.find("\n;TEST_LAYER_CHANGE ", pos + 1))
+        ++layers;
+    REQUIRE(layers == 100);
+    for (size_t layer = 0; layer < layers; ++layer) {
+        CAPTURE(layer);
+        const std::string photo = "\n;TEST_TIMELAPSE layer=" + std::to_string(layer) + "\n";
+        const size_t      first = gcode.find(photo);
+        CHECK(first != std::string::npos);
+        if (first != std::string::npos)
+            CHECK(gcode.find(photo, first + 1) == std::string::npos);
+    }
+}
+
 // Orca #15986 / Edge flow variants: pressure_advance is stored per Standard/High-Flow column,
 // so filament id is not the array index once a filament declares both variants. Filament 2 is
 // High-Flow with Standard=0.02 and High-Flow=0.05; raw get_at(1) reads the Standard slot.

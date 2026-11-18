@@ -1385,6 +1385,69 @@ ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector
     return vol;
 }
 
+// Split to Fit P2: moved here from GLGizmoCut3D::get_connector_mesh() (the Plug / Dowel / Snap part)
+// and GLGizmoCut3D::apply_cut_connectors(), unchanged, so the planner and the tests bake connectors
+// without the GUI. The gizmo calls both.
+indexed_triangle_set cut_connector_unit_mesh(const CutConnectorAttributes& attributes, float snap_space_proportion,
+                                             float snap_bulge_proportion)
+{
+    int sectorCount{ 1 };
+    switch (CutConnectorShape(attributes.shape)) {
+    case CutConnectorShape::Triangle: sectorCount = 3; break;
+    case CutConnectorShape::Square:   sectorCount = 4; break;
+    case CutConnectorShape::Circle:   sectorCount = 360; break;
+    case CutConnectorShape::Hexagon:  sectorCount = 6; break;
+    default: break;
+    }
+
+    if (attributes.type == CutConnectorType::Snap)
+        return its_make_snap(1.0, 1.0, snap_space_proportion, snap_bulge_proportion);
+    if (attributes.style == CutConnectorStyle::Prism)
+        return its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
+    if (attributes.type == CutConnectorType::Plug)
+        return its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
+    return its_make_frustum_dowel(1.0, 1.0, sectorCount);
+}
+
+void bake_cut_connectors(ModelObject* mo, const std::string& connector_name, float snap_space_proportion, float snap_bulge_proportion)
+{
+    if (mo == nullptr || mo->cut_connectors.empty())
+        return;
+
+    using namespace Geometry;
+
+    size_t connector_id = mo->cut_id.connectors_cnt();
+    for (const CutConnector& connector : mo->cut_connectors) {
+        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::PushFit) {
+            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::TacJoint) {
+            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
+            continue;
+        }
+        TriangleMesh mesh = TriangleMesh(cut_connector_unit_mesh(connector.attribs, snap_space_proportion, snap_bulge_proportion));
+        // Mesh will be centered when loading.
+        ModelVolume* new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
+
+        // Transform the new modifier to be aligned inside the instance
+        new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                                       rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
+                                       scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+
+        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
+        new_volume->name     = connector_name + "-" + std::to_string(++connector_id);
+    }
+    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
+
+    // delete all connectors
+    mo->cut_connectors.clear();
+}
+
 static bool has_tac_joint(const ModelObject* object)
 {
     return std::any_of(object->volumes.begin(), object->volumes.end(),

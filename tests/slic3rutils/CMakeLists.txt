@@ -96,6 +96,7 @@ add_executable(${_TEST_NAME}_tests
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp
     plate_recentre_tests.cpp
+    plate_arrange_overflow_tests.cpp
     bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
@@ -165,6 +166,7 @@ add_executable(${_TEST_NAME}_tests
     slice_v1_tests.cpp
     paint_v1_tests.cpp
     mixed_sublayer_ui_tests.cpp
+    flushing_volumes_dialog_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -213,12 +215,9 @@ if (wxWidgets_FOUND)
     target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE ${wxWidgets_DEFINITIONS})
 endif ()
-# chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
-# slice_v1_tests.cpp compares the /result producer with the JSON fixtures next to it.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICE_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/slice_v1")
-# paint_v1_tests.cpp compares the paint_v1 producers with the fixtures next to it (PAINT_V1_WRITE_FIXTURES=1 rewrites them).
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE PAINT_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/paint_v1")
+# SLIC3R_TEST_RESOURCES_DIR (the shipped resources/), SLICE_V1_FIXTURES_DIR and PAINT_V1_FIXTURES_DIR
+# (the JSON fixtures next to slice_v1_tests.cpp / paint_v1_tests.cpp) come from tests/edge_test_paths.hpp
+# through test_common, not from -D values: see tests/CMakeLists.txt.
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

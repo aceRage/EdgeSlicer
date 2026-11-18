@@ -1840,6 +1840,8 @@ void GLCanvas3D::load_arrange_settings()
     load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff_seq_print.allow_multi_materials_on_same_plate);
     load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff.avoid_extrusion_cali_region);
     load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff_seq_print.avoid_extrusion_cali_region);
+    load_bool("avoid_nozzle_reach_zones",            m_arrange_settings_fff.avoid_nozzle_reach_zones);
+    load_bool("avoid_nozzle_reach_zones",            m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones);
 
     //BBS: add specific arrange settings
     m_arrange_settings_fff_seq_print.is_seq_print = true;
@@ -8191,6 +8193,25 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         settings_out.avoid_extrusion_cali_region = false;
     }
 
+    // EdgeSlicer: only on printers with strips of the bed one nozzle alone reaches (H2D, H2C, X2D).
+    // Not cleared elsewhere: the stored choice comes back with such a printer, and arrange reads
+    // it only when the printer has the strips.
+    if (ptech == ptFFF) {
+        const ExtruderAreas &reach_areas = wxGetApp().plater()->get_partplate_list().get_extruder_areas();
+        if (reach_areas.multi() && reach_areas.has_exclusive_regions()) {
+            if (imgui->bbl_checkbox(_L("Avoid nozzle reach zones"), settings_out.avoid_nozzle_reach_zones)) {
+                appcfg->set("arrange", "avoid_nozzle_reach_zones", settings_out.avoid_nozzle_reach_zones);
+                // One stored value for both FFF modes, like the calibration-region option.
+                m_arrange_settings_fff.avoid_nozzle_reach_zones          = settings_out.avoid_nozzle_reach_zones;
+                m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones = settings_out.avoid_nozzle_reach_zones;
+            }
+            if (ImGui::IsItemHovered())
+                imgui->tooltip(_L("Keep arranged objects out of the hatched strips that only one nozzle can reach, "
+                                  "so every object can be printed with either nozzle."),
+                               imgui->scaled(20.f));
+        }
+    }
+
     // Align to Y axis. Only enable this option when auto rotation not enabled
     {
         if (settings_out.enable_rotation) {  // do not allow align to Y axis if rotation is enabled
@@ -8228,6 +8249,9 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         appcfg->erase("arrange", rot_key);
         appcfg->erase("arrange", multi_material_key);
         appcfg->erase("arrange", avoid_extrusion_key);
+        appcfg->erase("arrange", "avoid_nozzle_reach_zones");
+        m_arrange_settings_fff.avoid_nozzle_reach_zones          = false;
+        m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones = false;
     }
     ImGui::PopStyleVar(1);
     imgui->end();

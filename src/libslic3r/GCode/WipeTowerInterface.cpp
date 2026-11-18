@@ -97,6 +97,7 @@ Settings Settings::from_config(const ConfigBase &config)
     s.extra_prime = opt_bool(config, "wipe_tower_interface_extra_prime");
     if (const ConfigOption *opt = option_of(config, "wipe_tower_interface_trigger"); opt != nullptr)
         s.trigger = opt->getInt();
+    s.cooldown_during_tower = opt_bool(config, "enable_tower_interface_cooldown_during_tower");
     return s;
 }
 
@@ -108,6 +109,14 @@ FilamentKind filament_kind(const ConfigBase &config, unsigned int filament)
     if (const auto *support = dynamic_cast<const ConfigOptionBools *>(option_of(config, "filament_is_support")); support != nullptr && ! support->values.empty())
         kind.is_support = support->get_at(filament);
     return kind;
+}
+
+bool bambu_features_supported(const ConfigBase &config)
+{
+    if (opt_bool(config, "handle_hotend_as_extruder"))
+        return true;
+    const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(option_of(config, "nozzle_diameter"));
+    return nozzles != nullptr && nozzles->values.size() > 1;
 }
 
 float run_in_distance(const ConfigBase &config, unsigned int filament)

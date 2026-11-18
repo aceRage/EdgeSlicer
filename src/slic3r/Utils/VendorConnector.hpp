@@ -75,6 +75,9 @@ struct Spec
     // Download (optional): a path template on the item and file ("{id}", "{sub.id}") whose JSON
     // response has the file's URL at download_url_path; or a field of the file with its URL.
     std::string download_path;
+    // How the download endpoint is called: "GET" (default) or "POST" (an empty body). The direct link
+    // of a file, once the endpoint has answered with it, is always fetched with GET.
+    std::string download_method { "GET" };
     std::string download_url_path;
     std::string download_direct_field;
     bool        downloads_limited { false }; // the vendor counts downloads: ask before each
@@ -99,6 +102,13 @@ constexpr int CSV_MAX_RECORDS_CAP = 1000000;
 // with a message for the user when it cannot be used. Unknown keys are ignored.
 Spec           spec_from_json(const nlohmann::json& j);
 nlohmann::json spec_to_json(const Spec& spec); // never holds a secret
+// What is wrong with the placeholders of the spec's templates, for the user; "" when nothing. The
+// download path takes only {id} {name} {sub.id} {sub.name} {sub.variant} (anything else would be filled
+// with nothing and call the wrong address). The page URL template is filled from the raw item, so any
+// item field is valid there; only an empty {} , an unclosed { or a {sub.*} (no file there) is wrong.
+// spec_from_json() does not throw for this, so a connector saved earlier still loads (the app shows
+// the message beside it); saving and importing refuse a spec that has a problem.
+std::string template_problems(const Spec& spec);
 // A fresh id for a new connector from its name and a random suffix.
 std::string make_id(const std::string& name, uint32_t random);
 
@@ -114,6 +124,12 @@ struct Request
     // Optional: a successful (2xx) body goes here in pieces instead of into Response::body, so a big
     // file never sits in memory. false stops the transfer.
     std::function<bool(const char* data, size_t size)> sink;
+    // Optional, with a sink: called once, before the first piece of a 2xx body goes to the sink, with
+    // the status and the response headers (names lower-cased), so the sink can tell what is coming.
+    std::function<void(int status, const std::map<std::string, std::string>& headers)> on_head;
+    // "GET" or "POST". A POST is sent with an empty body (Content-Length: 0). Only the download
+    // endpoint is ever a POST; every other request is a GET.
+    std::string method { "GET" };
 };
 struct Response
 {
@@ -126,12 +142,14 @@ struct Response
 // go to another site.
 using HttpFn = std::function<Response(const Request&)>;
 
-// GET `url` through `http`, following up to `max_redirects` redirects. With `credentials`, the
+// Fetch `url` through `http` with `method` ("GET", or "POST" with an empty body), following up to
+// `max_redirects` redirects (after a 301, 302 or 303 the next hop is a GET; after a 307 or 308 it keeps
+// the method). With `credentials`, the
 // connector's credentials are added to each request for the API's own origin (scheme, host and port
 // of base_url) and to no other: a redirect to another site gets a bare request. A redirect to an
 // address that is_allowed_url() refuses, or too many of them, ends with an error (status 0).
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
-               const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5);
+               const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5, const std::string& method = "GET");
 
 // ---- Importing a connector somebody shared (a file, a pasted text, a link) ----
 // A connector that came from outside is checked more strictly than one the user typed: it is always
@@ -282,8 +300,38 @@ bool build_download_request(const Spec& spec, const Secrets& secrets, const Item
                             bool& is_direct);
 // The same address without credentials ("" when there is no way to download), for fetch().
 std::string download_url(const Spec& spec, const Item& item, const SubItem* sub, bool& is_direct);
+// The request carries spec.download_method when it is not direct.
 // The file URL in the download endpoint's answer, or "" with `error` set.
 std::string resolve_download(const Spec& spec, const Secrets& secrets, const Response& response, std::string& error);
+
+// What a download endpoint answered. The answer is judged by its Content-Type (with no Content-Type or
+// text/plain, by its first character):
+//   JSON (application/json, +json)  -> Link: the file's address at download_url_path (a spec with no
+//                                      download_url_path has nowhere to read it: an error);
+//   a web page (text/html)          -> Failed (never saved as a model);
+//   anything else                   -> File: the answer IS the file, streamed to write_file as it arrives.
+// Redirects are followed by fetch(), so a redirect to the file ends as a File.
+struct EndpointResult
+{
+    enum class Kind { Failed, Link, File };
+    Kind        kind { Kind::Failed };
+    std::string error;        // Failed: for the user (status and content type included), never a secret
+    std::string link;         // Link: the file's address
+    std::string file_name;    // File: the name in Content-Disposition, "" when there is none
+    int         status { 0 };
+    std::string content_type; // as sent
+    int64_t     size { 0 };   // bytes of the answer
+};
+// Calls the endpoint `url` (spec.download_method) through `http`. For a File answer begin_file(name) is
+// called before the first byte (false = could not open it: nothing is read on); write_file gets the
+// body in pieces (false stops). `http` must call Request::on_head (when set) before the first piece of
+// a 2xx body it hands to Request::sink; a 2xx body returned in Response::body is handled as well.
+// Logs one info line: status, content type, size and the final host.
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string& name)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file);
+// The file name in a Content-Disposition value (filename*= preferred), without any folder, "" if none.
+std::string content_disposition_name(const std::string& value);
 
 // Request plumbing, exposed for the tests.
 Request     authorize(const Spec& spec, const Secrets& secrets, const std::string& url);
