@@ -1558,7 +1558,7 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
     const PrintRegionConfig &rcfg  = object.layers().back()->regions().front()->region().config();
     const int n_top   = std::max(rcfg.top_shell_layers.value, int(std::ceil(rcfg.top_shell_thickness.value / h - EPSILON)));
     const int n_solid = std::max(2, n_top - n_layers);
-    BOOST_LOG_TRIVIAL(info) << "Curved tops: solid under the block: " << n_solid << " layers, cover " << area(cover) * SCALING_FACTOR * SCALING_FACTOR
+    BOOST_LOG_TRIVIAL(debug) << "Curved tops: solid under the block: " << n_solid << " layers, cover " << area(cover) * SCALING_FACTOR * SCALING_FACTOR
                             << " mm2, partial " << partial << ", cut " << cut;
     std::vector<size_t> idx;
     std::vector<float>  za, zb;
@@ -1599,7 +1599,7 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
                 std::ostringstream types;
                 for (const auto &[t, a] : by_type)
                     types << " " << t << ":" << a;
-                BOOST_LOG_TRIVIAL(info) << "Curved tops: under the block, layer Z " << z << ": under " << area(under) * SCALING_FACTOR * SCALING_FACTOR
+                BOOST_LOG_TRIVIAL(debug) << "Curved tops: under the block, layer Z " << z << ": under " << area(under) * SCALING_FACTOR * SCALING_FACTOR
                                          << " mm2, fill surfaces by type" << types.str() << ", sparse " << area(sparse) * SCALING_FACTOR * SCALING_FACTOR
                                          << " mm2, replaced " << area(solid) * SCALING_FACTOR * SCALING_FACTOR << " mm2, fills "
                                          << region->fills.entities.size();
