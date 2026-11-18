@@ -4049,12 +4049,19 @@ void MachineObject::parse_ams_report(const json& jj, bool key_field_only)
     }
 }
 
+// A printer's report as the trace log shows it. The answer to get_access_code carries the
+// printer's LAN access code ("system": {"access_code": ...}): that one goes through the scrubber.
+static std::string report_for_trace_log(const std::string& report)
+{
+    return report.find("access_code") == std::string::npos ? report : NetworkAgent::body_for_log(report, 0);
+}
+
 int MachineObject::parse_json(std::string payload, bool key_field_only)
 {
     // The full status JSON (several KB per push, per printer) is trace-only: at info it made up ~90% of a day's log.
     // Set Preferences > Log level to "trace" to get it back. The per-message flush is only paid when it is wanted.
     if (get_logging_level() >= 5) {
-        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << payload;
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << report_for_trace_log(payload);
         flush_logs();
     }
 
@@ -4237,7 +4244,7 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
         else
             last_utc_time = last_update_time;
 
-        BOOST_LOG_TRIVIAL(trace) << "parse_json: dev_id=" << dev_id << ", playload=" << j.dump(4);
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: dev_id=" << dev_id << ", playload=" << report_for_trace_log(j.dump(4));
 
         // Parse version info first, as if version arrive or change, 'print' need parse again with new compatible settings
         try {
