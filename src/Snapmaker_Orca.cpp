@@ -88,6 +88,7 @@ using namespace nlohmann;
 #include "libslic3r/MixedFilamentCliGates.hpp"
 #include "libslic3r/CliNamedPresets.hpp"
 #include "libslic3r/CliPresetSlots.hpp"
+#include "libslic3r/CliAmfInch.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -2381,6 +2382,10 @@ int CLI::run(int argc, char **argv)
                     model = Model::read_from_step(file, strategy, nullptr, nullptr, nullptr, 0.003, 0.5, false);
                 } else {
                     model = Model::read_from_file(file, &config, &config_substitutions, strategy, &plate_data_src, &project_presets, &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
+                    // For an AMF this flag means "the file is in inches", not "Bambu 3MF".
+                    // Convert the units and clear it, otherwise the project settings that an
+                    // AMF does not have would be read (OrcaSlicer #17311).
+                    cli_apply_amf_inch_flag(file, model, is_bbl_3mf);
                     // Snapshot keys the file actually carried before create=true reads insert defaults
                     // (printer_model, printable_area, bed_exclude_area, upward_compatible_machine, …).
                     if (project_file_keys.empty() && !config.empty())
