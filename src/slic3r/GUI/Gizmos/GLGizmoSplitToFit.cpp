@@ -24,6 +24,7 @@
 
 #include <glad/gl.h>
 #include <imgui/imgui.h>
+#include <imgui/imgui_internal.h>
 
 namespace Slic3r {
 namespace GUI {
@@ -1284,7 +1285,41 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         m_imgui->text(_L("mm"));
     };
 
+    // A collapsible section (the same header the Output Log uses). Its open / closed state is kept in the
+    // app config as "split_fit_open_<id>" and read once; a missing key means the default given here.
+    auto section = [&](const char *id, const wxString &title, bool default_open) -> bool {
+        auto it = m_section_open.find(id);
+        if (it == m_section_open.end()) {
+            const std::string v = wxGetApp().app_config->get(std::string("split_fit_open_") + id);
+            it = m_section_open.emplace(id, v.empty() ? default_open : v == "1").first;
+        }
+        ImGui::SetNextItemOpen(it->second, ImGuiCond_Always);
+        const bool open = ImGui::CollapsingHeader((into_u8(title) + "##split_sec_" + id).c_str());
+        if (open != it->second) {
+            it->second = open;
+            wxGetApp().app_config->set(std::string("split_fit_open_") + id, open ? "1" : "0");
+        }
+        return open;
+    };
+
+    // ---- the body: scrolls when the panel would be taller than the 3D view; the action row below it is
+    // pinned. The body's height is the last frame's content height, held to what is left of the canvas
+    // under the panel's top (and above its bottom limit) once the action row and a margin are taken off.
+    // The first frame, before anything is measured, takes all of it; the next frame shrinks to fit.
+    const ImGuiStyle &style = ImGui::GetStyle();
+    float limit_y = float(m_parent.get_canvas_size().get_height());
+    if (bottom_limit > 0.f)
+        limit_y = std::min(limit_y, bottom_limit);
+    const float footer_h = m_footer_h > 0.f ? m_footer_h : ImGui::GetFrameHeight() * 1.6f + style.ItemSpacing.y * 3.f;
+    const float avail_h  = std::max(em * 6.f, limit_y - ImGui::GetCursorScreenPos().y - footer_h - style.WindowPadding.y - em * 0.75f);
+    const bool  scrolls  = m_body_content_h <= 0.f || m_body_content_h > avail_h;
+    const float body_h   = scrolls ? avail_h : m_body_content_h;
+    const float body_w   = std::max(em * 27.f, m_table_w) + (scrolls ? style.ScrollbarSize : 0.f);
+    ImGui::BeginChild("##split_body", ImVec2(body_w, body_h), false, ImGuiWindowFlags_NavFlattened);
+    m_table_w = 0.f;
+
     // ---- the printer --------------------------------------------------------------------------------
+    if (section("printer", _L("Printer area"), true)) {
     label(_L("Printer volume"));
     m_imgui->text(from_u8(mm_size(usable.printer_size)) + " (" + _L("current printer") + ")");
     input_mm(_L("Side margin"), "##split_margin_xy", m_options.margin_xy, 0., 100.,
@@ -1305,10 +1340,10 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         m_imgui->text(from_u8(mm_size(usable.size)));
     else
         ImGuiWrapper::text_colored(red, _L("none"));
-
-    ImGui::Separator();
+    }
 
     // ---- the grid -----------------------------------------------------------------------------------
+    if (section("grid", _L("Cut grid"), true)) {
     label(_L("Cut along"));
     static const char *axis_names[3] = { "X", "Y", "Z" };
     for (int a = 0; a < 3; ++a) {
@@ -1364,7 +1399,7 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
 
     // Planes: drag a handle in the 3D view, or a value here; a moved plane is kept where it was put
     // (orange). The plan is made again when the drag ends, not on every step of it.
-    if (!m_plan.planes.empty() && ImGui::CollapsingHeader(into_u8(_L("Plane positions")).c_str())) {
+    if (!m_plan.planes.empty() && section("planes", _L("Plane positions"), false)) {
         for (size_t pi = 0; pi < m_plan.planes.size(); ++pi) {
             const SplitPlane &pl  = m_plan.planes[pi];
             float             pos = float(shown_pos(pi));
@@ -1405,11 +1440,11 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
             changed = true;
         }
     }
-
-    ImGui::Separator();
+    }
 
     // ---- dowels (P2) --------------------------------------------------------------------------------
     SplitDowelOptions &dw = m_options.dowels;
+    if (section("dowels", _L("Dowels"), true)) {
     if (m_imgui->bbl_checkbox(_L("Add dowels"), dw.enabled))
         changed = true;
     if (ImGui::IsItemHovered())
@@ -1511,11 +1546,11 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
             ImGui::PopTextWrapPos();
         }
     }
-
-    ImGui::Separator();
+    }
 
     // ---- labels (P5) --------------------------------------------------------------------------------
     SplitLabelOptions &lb = m_options.labels;
+    if (section("labels", _L("Labels and small pieces"), false)) {
     if (m_imgui->bbl_checkbox(_L("Label the cut faces"), lb.enabled))
         changed = true;
     if (ImGui::IsItemHovered())
@@ -1570,10 +1605,10 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         ImGui::SameLine();
         m_imgui->text(_L("cm3"));
     }
-
-    ImGui::Separator();
+    }
 
     // ---- what Apply does with the parts (P4): no new plan needed, read at Apply -----------------------
+    if (section("after", _L("After splitting"), false)) {
     if (m_imgui->bbl_checkbox(_L("Lay parts on a cut face"), m_options.lay_flat))
         m_parent.set_as_dirty();
     if (ImGui::IsItemHovered())
@@ -1587,6 +1622,7 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
         m_imgui->tooltip(_L("Arrange the pieces that broke off a section (the parts ending in _b, _c, ...) on plates of their own "
                             "instead of in the gaps between the main parts. Dowels always get plates of their own."),
                          wrap_w);
+    }
 
     ImGui::Separator();
 
@@ -1669,8 +1705,7 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
     // ---- the Output Log: the parts table and the warnings, collapsed by default --------------------
     const bool log_has_content = m_plan.valid || !m_plan.warnings.empty();
     if (log_has_content) {
-        ImGui::SetNextItemOpen(m_output_log_open, ImGuiCond_Always);
-        m_output_log_open = ImGui::CollapsingHeader((into_u8(_L("Output Log")) + "##split_output_log").c_str());
+        m_output_log_open = section("log", _L("Output Log"), false);
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(_L("Every part with its size, and every warning. Click a warning to see where it is."), wrap_w);
     }
@@ -1684,7 +1719,10 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
             name_w = std::max(name_w, ImGui::CalcTextSize(p.name.c_str()).x + em);
         const float size_x = name_w, fit_x = size_x + em * 9.f, holes_x = fit_x + em * 5.5f;
         const float faces_x = m_plan.dowel_options.enabled ? holes_x + em * 4.5f : holes_x;
-        ImGui::BeginChild("##split_parts", ImVec2(std::max(em * 26.f, faces_x + em * 10.f), list_h), true, ImGuiWindowFlags_HorizontalScrollbar);
+        // The body is at least as wide as this table (measured now, used by the next frame).
+        const float table_w = std::max(em * 26.f, faces_x + em * 10.f);
+        m_table_w = table_w + em;
+        ImGui::BeginChild("##split_parts", ImVec2(table_w, list_h), true, ImGuiWindowFlags_HorizontalScrollbar);
         for (const SplitPiece &p : m_plan.pieces) {
             const ImVec4 text_col = p.discarded ? grey : ImGui::GetStyleColorVec4(ImGuiCol_Text);
             ImGuiWrapper::text_colored(text_col, from_u8(p.name.empty() ? mo->name : p.name));
@@ -1755,9 +1793,17 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
     if (clicked != nullptr)
         show_warning(*clicked);
 
+    // The content height of the body, for the next frame (the same measure ImGui sizes a window by).
+    {
+        const ImGuiWindow *bw = ImGui::GetCurrentWindow();
+        m_body_content_h      = std::max(0.f, bw->DC.CursorMaxPos.y - bw->DC.CursorStartPos.y) + 2.f;
+    }
+    ImGui::EndChild();
+
     ImGui::Separator();
 
-    // ---- actions ------------------------------------------------------------------------------------
+    // ---- actions: pinned under the scrolling body ------------------------------------------------
+    const float footer_y0 = ImGui::GetCursorPosY();
     if (m_imgui->button(_L("Reset"), _L("Back to the default margins, axes, layout and dowels"))) {
         reset_options();
         changed = true;
@@ -1768,6 +1814,7 @@ void GLGizmoSplitToFit::on_render_input_window(float x, float y, float bottom_li
     m_imgui->disabled_begin(!can_apply);
     const bool apply_now = m_imgui->button(_L("Apply"), _L("Cut the object into these parts and arrange them over the plates"));
     m_imgui->disabled_end();
+    m_footer_h = ImGui::GetCursorPosY() - footer_y0 + ImGui::GetStyle().ItemSpacing.y + 1.f;
 
     GizmoImguiEnd();
     ImGuiWrapper::pop_toolbar_style();
