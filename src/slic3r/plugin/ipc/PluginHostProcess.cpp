@@ -7,6 +7,7 @@
 
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -598,11 +599,19 @@ void close_host(SpawnedHost& host)
 {
     host.channel.close();
     if (host.process) {
-        ::WaitForSingleObject(static_cast<HANDLE>(host.process), 2000);
-        DWORD code = 0;
+        // Label restore copy-replaces plugin_host\edge-plugin-host.log. The helper keeps
+        // that FILE* open; MoveFileEx then fails with Access is denied (5). Wait until
+        // the process has actually exited (TerminateProcess is asynchronous) before strip.
+        constexpr DWORD k_host_exit_wait_ms = 15000;
+        ::WaitForSingleObject(static_cast<HANDLE>(host.process), k_host_exit_wait_ms);
+        DWORD code = STILL_ACTIVE;
         if (::GetExitCodeProcess(static_cast<HANDLE>(host.process), &code)) {
-            host.last_wait_status = static_cast<int>(code);
-            host.wait_reaped      = true;
+            if (code == STILL_ACTIVE)
+                BOOST_LOG_TRIVIAL(warning) << "plugin host still running after " << k_host_exit_wait_ms << " ms close wait";
+            else {
+                host.last_wait_status = static_cast<int>(code);
+                host.wait_reaped      = true;
+            }
         }
         ::CloseHandle(static_cast<HANDLE>(host.process));
         host.process = nullptr;
