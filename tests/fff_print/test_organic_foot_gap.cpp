@@ -228,7 +228,7 @@ void report(const std::string &what, const FootGap &gap)
 // is not printed (it only seeds the interface layers above it): on the foot's own layer it lifts
 // the foot by a layer. The foot's lowest printed layer has to keep the configured bottom Z gap, no
 // less (support fused to the part) and no more, with and without bottom interface layers.
-TEST_CASE("Organic tree support feet carried down keep the configured bottom Z gap", "[TreeSupport][OrganicFootGap]")
+TEST_CASE("Organic tree support feet carried down keep the configured bottom Z gap", "[TreeSupport][OrganicFootGap][slow]")
 {
     for (const int bottom_interface_layers : { 0, 2 })
         for (const double bottom_z : { 0.2, 0.4 }) {
@@ -255,4 +255,31 @@ TEST_CASE("Organic tree support feet carried down keep the configured bottom Z g
                 CHECK(gap.at(gap_layers) > 0.6 * gap.on_part());
             }
         }
+}
+
+// Bottom Z distance 0 (three shipped processes set it): z_distance_bottom_layers is 0, so the
+// collision of the foot's layer holds only that part layer, and with bottom interface layers the
+// unprinted bottom contact seed is put one layer below the foot, where the part may be. Nothing may
+// be printed inside the part, and the feet stand right on it.
+TEST_CASE("Organic tree support feet carried down at bottom Z distance 0", "[TreeSupport][OrganicFootGap][slow]")
+{
+    for (const int bottom_interface_layers : { 0, 2 }) {
+        const DynamicPrintConfig config = organic_config(bottom_interface_layers, 0.);
+        std::ostringstream name;
+        name << "interface bottom layers " << bottom_interface_layers << ", bottom Z 0";
+        const std::vector<std::pair<std::string, FootGap>> parts {
+            { "ramp 35", slice_ramp(35., config) },
+            { "ramp 45", slice_ramp(45., config) },
+            { "benchy", slice_benchy(config) },
+        };
+        for (const auto &[part, gap] : parts) {
+            report(part + ", " + name.str(), gap);
+            INFO(part << ", " << name.str() << ": " << gap.str());
+            REQUIRE(gap.total_length > 1000.);
+            CHECK(gap.in_part == 0.);
+            // The feet on the part stand on it (no gap), not a layer above it.
+            CHECK(gap.at(0) > 0.);
+            CHECK(gap.at(0) > gap.at(1));
+        }
+    }
 }
