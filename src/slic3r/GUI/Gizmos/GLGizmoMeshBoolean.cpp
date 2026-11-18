@@ -459,8 +459,6 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     if (m_src.volume_idx < 0 || m_tool.volume_idx < 0)
         return;
 
-    wxGetApp().plater()->take_snapshot("Mesh Boolean");
-
     std::string suffix;
     switch (m_operation_mode)
     {
@@ -474,14 +472,22 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         suffix = "intersection";
         break;
     }
-    // The new volume replaces the source volume in its slot (libslic3r, unit-tested).
-    ModelVolume* new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix);
+    ModelVolume* new_volume = nullptr;
+    {
+        // One undo step for the boolean and the tool part's deletion: TakeSnapshot holds
+        // back the "Delete part" snapshot the object list would take in between, which
+        // made the first undo bring the tool part back over the result.
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Mesh Boolean");
 
-    if (delete_input) {
-        std::vector<ItemForDelete> items;
-        auto obj_idx = m_parent.get_selection().get_object_idx();
-        items.emplace_back(ItemType::itVolume, obj_idx, m_tool.volume_idx);
-        wxGetApp().obj_list()->delete_from_model_and_list(items);
+        // The new volume replaces the source volume in its slot (libslic3r, unit-tested).
+        new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix);
+
+        if (delete_input) {
+            std::vector<ItemForDelete> items;
+            auto obj_idx = m_parent.get_selection().get_object_idx();
+            items.emplace_back(ItemType::itVolume, obj_idx, m_tool.volume_idx);
+            wxGetApp().obj_list()->delete_from_model_and_list(items);
+        }
     }
 
     //bool sinking = curr_model_object->bounding_box().min.z() < SINKING_Z_THRESHOLD;
