@@ -533,6 +533,10 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         if (pos + 1 == custom_gcode.size())
             break;
         from_pos = pos + 1;
+        // The tool number follows the whole prefix: "T", but also "M135 T", "M108 T" or the manual
+        // change's "; MANUAL_TOOL_CHANGE T". Read from pos + 1, a prefix longer than one character
+        // was never found to name the tool, and the change was written a second time after it.
+        const size_t number_pos = pos + tch_prefix.size();
         // only whitespace is allowed before the command
         while (--pos < custom_gcode.size() && custom_gcode[pos] != '\n') {
             if (!std::isspace(custom_gcode[pos]))
@@ -540,7 +544,7 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
         }
         {
             // we should also check that the extruder changes to what was expected
-            std::istringstream ss(custom_gcode.substr(from_pos, std::string::npos));
+            std::istringstream ss(custom_gcode.substr(number_pos, std::string::npos));
             unsigned           num = 0;
             if (ss >> num)
                 ok = (num == next_extruder);
@@ -5444,7 +5448,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     } else {
                         file.write(this->retract());
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z));
+                    // m_max_layer_z is the top of the layers without the Z offset, which every layer is
+                    // printed with (change_layer): with an offset above 0 the nozzle went down into the
+                    // copy just finished.
+                    file.write(m_writer.travel_to_z(m_max_layer_z + m_config.z_offset.value));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
@@ -6759,32 +6766,28 @@ void GCode::_print_first_layer_extruder_temperatures(
             if (active_temp > 0)
                 file.write(m_writer.set_temperature(active_temp, wait, active_tool));
         } else {
-            // Set temperatures of all the printing extruders.
-            bool is_active   = true;
-            int  target_temp = -1;
-            int  target_tool = -1;
+            // Set temperatures of all the printing extruders, the first printing one last. Every other tool was set
+            // only with ooze prevention (to standby): without it only the highest-numbered tool was, so the tool
+            // that prints first could start cold.
+            int target_temp = -1;
             for (unsigned int tool_id : print.extruders()) {
-                is_active = true;
-                int temp  = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
-                                         ConfigFlowDomain::Filament, tool_id);
-                if (print.config().ooze_prevention.value && tool_id != first_printing_extruder_id) {
-                    is_active = false;
+                int temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer,
+                                        ConfigFlowDomain::Filament, tool_id);
+                if (tool_id == first_printing_extruder_id) {
+                    target_temp = temp;
+                    continue;
+                }
+                if (print.config().ooze_prevention.value) {
                     if (print.config().idle_temperature.get_at(tool_id) == 0)
                         temp += print.config().standby_temperature_delta.value;
                     else
                         temp = print.config().idle_temperature.get_at(tool_id);
                 }
-                if (temp > 0) {
-                    if (is_active) {
-                        target_temp = temp;
-                        target_tool = tool_id;
-                    } else
-                        file.write(m_writer.set_temperature(temp, wait, tool_id));
-                }
+                if (temp > 0)
+                    file.write(m_writer.set_temperature(temp, wait, tool_id));
             }
-            if (target_temp != -1 && target_tool != -1) {
-                file.write(m_writer.set_temperature(target_temp, wait, target_tool));
-            }
+            if (target_temp > 0)
+                file.write(m_writer.set_temperature(target_temp, wait, first_printing_extruder_id));
         }
     }
 }

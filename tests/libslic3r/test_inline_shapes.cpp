@@ -16,6 +16,7 @@
 #include <libslic3r/FontFallback.hpp>
 #include <libslic3r/InlineShapes.hpp>
 #include <libslic3r/UntrustedInput.hpp>
+#include <libslic3r/Utils.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -894,6 +895,26 @@ TEST_CASE("Font fallback: real fonts, primary and bundled symbol font", "[FontFa
         }
         CHECK(total >= 100);
     }
+}
+
+// The Emboss tool's last resort when no installed font loads was resources/fonts/NotoSans-Regular.ttf, which is not
+// shipped, so a style with a path to a missing file was all it had. It is now a shipped font with its licence.
+TEST_CASE("Font fallback: the Emboss tool's text font ships, with its licence, and draws Latin", "[FontFallback]")
+{
+    const std::string previous = resources_dir();
+    set_resources_dir(resources_path());
+    const std::string path = bundled_text_font_path();
+    set_resources_dir(previous);
+    REQUIRE(boost::filesystem::exists(path));
+    CHECK(boost::filesystem::exists(boost::filesystem::path(path).parent_path() / "OFL.txt"));
+    std::unique_ptr<Emboss::FontFile> font = Emboss::create_font_file(path.c_str());
+    REQUIRE(font != nullptr);
+    GlyphCoverage covers = make_font_coverage(*font);
+    std::string missing;
+    for (uint32_t c = 0x21; c < 0x7F; ++c)
+        if (!covers(c))
+            missing += char(c);
+    CHECK(missing.empty());
 }
 
 TEST_CASE("Font fallback: the bundled font ships with its licence", "[FontFallback]")

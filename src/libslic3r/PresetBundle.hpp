@@ -188,13 +188,22 @@ public:
     // BBS Load user presets
     PresetsConfigSubstitutions load_user_presets(std::string user, ForwardCompatibilitySubstitutionRule rule);
     PresetsConfigSubstitutions load_user_presets(AppConfig &config, std::map<std::string, std::map<std::string, std::string>>& my_presets, ForwardCompatibilitySubstitutionRule rule);
-    PresetsConfigSubstitutions import_presets(std::vector<std::string> &files, std::function<int(std::string const &)> override_confirm, ForwardCompatibilitySubstitutionRule rule);
+    // What import_presets() left out besides the presets the user chose not to overwrite.
+    struct PresetImportReport
+    {
+        std::vector<std::string> bad_version;    // files whose "version" cannot be read
+        std::vector<std::string> missing_parent; // presets whose "inherits" names a preset not found
+    };
+    PresetsConfigSubstitutions import_presets(std::vector<std::string> &files, std::function<int(std::string const &)> override_confirm, ForwardCompatibilitySubstitutionRule rule,
+                                              PresetImportReport *report = nullptr);
+    enum class PresetImportSkip { None, BadVersion, MissingParent };
     bool                       import_json_presets(PresetsConfigSubstitutions &            substitutions,
                                                    std::string &                           file,
                                                    std::function<int(std::string const &)> override_confirm,
                                                    ForwardCompatibilitySubstitutionRule    rule,
                                                    int &                                   overwrite,
-                                                   std::vector<std::string> &              result);
+                                                   std::vector<std::string> &              result,
+                                                   PresetImportSkip *skipped = nullptr);
     void save_user_presets(AppConfig& config, std::vector<std::string>& need_to_delete_list);
     void remove_users_preset(AppConfig &config, std::map<std::string, std::map<std::string, std::string>> * my_presets = nullptr);
     void update_user_presets_directory(const std::string preset_folder);
