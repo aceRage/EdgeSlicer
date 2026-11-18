@@ -468,7 +468,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(DraftShield)
 
 static const t_config_enum_values s_keys_map_CurvedTopsPattern = {
     { "monotonic",  ctpMonotonic },
-    { "concentric", ctpConcentric }
+    { "concentric", ctpConcentric },
+    { "spiral",     ctpSpiral }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CurvedTopsPattern)
 
@@ -6162,6 +6163,9 @@ void PrintConfigDef::init_fff_params()
                       "in one direction.\n"
                       "Concentric: loops following the outline of the curved surface inward, with variable line "
                       "width in the middle so the centre is neither left open nor over-filled.\n"
+                      "Spiral: the same loops joined into one continuous path that runs inward from the wall loop, "
+                      "moving from one loop to the next a little at a time: no seam on every loop and no lift between "
+                      "loops (a part that splits into several gets one spiral each).\n"
                       "The curved layers make their own paths: one wall loop (outer wall line width) and this fill (top "
                       "surface line width), with their own gap fill. They do not follow the top surface pattern, the wall "
                       "and top wall counts, \"Only one wall on top surfaces\", the wall generator or the gap fill setting, "
@@ -6169,8 +6173,10 @@ void PrintConfigDef::init_fff_params()
     def->enum_keys_map = &ConfigOptionEnum<CurvedTopsPattern>::get_enum_values();
     def->enum_values.push_back("monotonic");
     def->enum_values.push_back("concentric");
+    def->enum_values.push_back("spiral");
     def->enum_labels.push_back(L("Monotonic"));
     def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Spiral"));
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<CurvedTopsPattern>(ctpMonotonic));
 

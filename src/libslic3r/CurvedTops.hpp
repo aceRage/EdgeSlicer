@@ -266,7 +266,12 @@ struct CurvedTopsFillPath
     float  width { 0.f };
     double mm3_per_mm { 0. };
     bool   wall { false }; // the layer's wall loop (curved_tops_layer_paths)
+    bool   gap { false };  // P5: a gap-fill bead (curved_tops_layer_paths)
 };
+
+// P5: how many paths of a layer start somewhere else than where the path before ended (each one is a retract, a lift
+// to the safe Z, a level travel and a drop in the curved block). The first path counts.
+size_t curved_tops_path_starts(const std::vector<CurvedTopsFillPath> &paths);
 
 // The fill of curved layer k (0 = lowest) inside `area` (the region inside the wall loop, as the planar
 // solid fill would get it), for the pattern:
@@ -275,20 +280,57 @@ struct CurvedTopsFillPath
 //  - Concentric: loops following the outline inward (Arachne, variable width where the loops close up),
 //    each closed loop starting at a seam spread along its length from layer to layer and loop to loop (see
 //    curved_tops_seam_index), so the starts do not line up; a hole Arachne leaves in the middle (the apex
-//    of a dome) that is too small for a loop gets one short line through it.
+//    of a dome) that is too small for a loop gets one short line through it;
+//  - Spiral (P5): the same insets of the outline, taken at one line spacing each, joined into one continuous
+//    path running inward (see curved_tops_layer_paths for why inward): over each turn the path moves from one
+//    inset to the next a little at a time, so there is no seam and no step between the rings. Where the insets
+//    split (a narrow neck) or a hole's insets meet the outline's, the spiral ends and each part gets its own.
+//    Here (no wall loop to lead in from) each spiral starts with a full turn on its outer inset.
 // pcfg / ocfg: for the Arachne parameters (nozzle diameter). *failed (when given) is set when the filler threw
 // or left a region of more than 1 mm2 with no path at all: the caller must not print that layer half built.
 std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
                                                  const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed = nullptr);
 
 // Every path of curved layer k over the patch part `fp`: the wall loop (seams spread along it), the fill of the
-// region inside it in the pattern (curved_tops_fill), then (Concentric only) gap fill: variable-width beads along the medial axis
+// region inside it in the pattern (curved_tops_fill), then gap fill: variable-width beads along the medial axis
 // of whatever the two leave open that is at least curved_tops_min_gap_width() wide (the spine of a narrowing
 // limb, wedges at sharp loop corners, the strip between wall and fill), and one short line through a compact
 // hole with no axis (a dome's apex). *failed as for curved_tops_fill.
+// Spiral: each wall loop leads straight into the spiral inside it (one path, no travel between them): the spiral's
+// first turn starts where the wall loop ends and runs from the wall to the first inset with its flow rising from
+// nothing, the turns follow, and the last turn runs on the innermost inset with its flow falling to nothing, so
+// both ends neither overlap nor leave a gap. Inward because the curved tops are domes and ridges: the nozzle then
+// moves from the low edge up, the bead it lays next to is the one just laid below it, and the end point lies in
+// the middle, where the centre's gap fill covers it, rather than at the patch edge.
+// Gap fill (P5): Concentric and Spiral always; Monotonic only with a nozzle contact tolerance in force
+// (nozzle_tolerance > 0): its beads squeezed into the wedges at the line ends touch the neighbouring lines by about
+// 0.1 mm, which only the tolerance allows (with none, the strict head check refuses them; P4's behaviour is kept). With a
+// tolerance the Monotonic lines also reach CURVED_TOPS_MONOTONIC_OVERLAP of a spacing over the wall loop's inner edge.
+// Gap beads are joined to the path before them where they start near its end, and a bead that would print on its own
+// is left out below CURVED_TOPS_GAP_MIN_ISOLATED_MM (owner, P5 prints: isolated short beads were dabs).
+// *stats (when given) adds up what the gap fill did.
+struct CurvedTopsGapStats
+{
+    size_t candidates { 0 };            // gap beads found
+    double candidate_mm3 { 0. };        // their volume
+    size_t attached { 0 };              // printed in one motion with the path before them (no travel)
+    size_t isolated { 0 };              // printed on their own (a travel before them)
+    size_t dropped { 0 };               // too short to print on their own: left out
+    double kept_mm3 { 0. };             // volume printed, connecting pieces included
+    double shortest_isolated_mm { 0. }; // the shortest bead printed on its own (0: none)
+};
+// A gap bead starting within this many line spacings of where the path before it ends is joined to it.
+static constexpr double CURVED_TOPS_GAP_ATTACH_SPACINGS = 2.0;
+// The connecting piece's flow, as a fraction of the fill's (it runs over beads already laid).
+static constexpr double CURVED_TOPS_GAP_CONNECTOR_FLOW = 0.15;
+// A gap bead printed on its own is at least this long.
+static constexpr double CURVED_TOPS_GAP_MIN_ISOLATED_MM = 0.5;
 std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
                                                         const Flow &solid_flow, int k, const PrintConfig &pcfg,
-                                                        const PrintObjectConfig &ocfg, bool *failed = nullptr);
+                                                        const PrintObjectConfig &ocfg, bool *failed = nullptr,
+                                                        double nozzle_tolerance = 0., CurvedTopsGapStats *stats = nullptr);
+// P5: with a nozzle contact tolerance in force, the Monotonic fill overlaps the wall loop by this fraction of a spacing.
+static constexpr double CURVED_TOPS_MONOTONIC_OVERLAP = 0.25;
 // Narrowest gap a bead is laid in: a quarter of the nozzle diameter.
 double curved_tops_min_gap_width(const PrintConfig &pcfg);
 // The area (mm2) of `fp` the paths leave open, slivers narrower than min_width not counted (each path covers its
