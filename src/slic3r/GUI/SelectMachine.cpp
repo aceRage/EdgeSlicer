@@ -980,7 +980,7 @@ void SelectMachineDialog::update_select_layout(MachineObject *obj)
         }
     }
 
-    if (obj && (obj->is_support_timelapse || bbl_caps_fallback) && is_show_timelapse()) {
+    if (obj && (obj->is_support_timelapse || bbl_caps_fallback)) {
         select_timelapse->Show();
         update_timelapse_enable_status();
     } else {
@@ -2205,9 +2205,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2271,9 +2272,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2283,7 +2285,7 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         DeviceManager::check_filaments_in_blacklist(filament_brand, filament_type, in_blacklist, action, info);
         
-        // The prohibitions are about feeding through an AMS (TPU, Bambu PET-CF/PA6-CF); a two-extruder
+        // The prohibitions are about feeding through an AMS (TPU; Bambu PET-CF/PA6-CF only warn); a two-extruder
         // job's filament on an external spool holder does not go through one (BambuStudio scopes
         // these blacklist entries to "slot": "ams").
         if (in_blacklist && action == "prohibition" && BambuSendMapping::is_external_spool(m_ams_mapping_result[i]))
@@ -3587,49 +3589,6 @@ void SelectMachineDialog::update_timelapse_enable_status()
 }
 
 
-bool SelectMachineDialog::is_show_timelapse()
-{
-    auto compare_version = [](const std::string &version1, const std::string &version2) -> bool {
-        int i = 0, j = 0;
-        int max_size = std::max(version1.size(), version2.size());
-        while (i < max_size || j < max_size) {
-            int v1 = 0, v2 = 0;
-            while (i < version1.size() && version1[i] != '.') v1 = 10 * v1 + (version1[i++] - '0');
-            while (j < version2.size() && version2[j] != '.') v2 = 10 * v2 + (version2[j++] - '0');
-            if (v1 > v2) return true;
-            if (v1 < v2) return false;
-            ++i;
-            ++j;
-        }
-        return false;
-    };
-
-    std::string standard_version = "2.2.0";
-    PartPlate *plate      = m_plater->get_partplate_list().get_curr_plate();
-    fs::path   gcode_path = plate->get_tmp_gcode_path();
-
-    std::string   line;
-    std::ifstream gcode_file;
-    gcode_file.open(gcode_path.string());
-    if (gcode_file.fail()) {
-    } else {
-        bool is_version = false;
-        while (gcode_file >> line) {
-            if (is_version) {
-                if (compare_version(standard_version, line)) {
-                    gcode_file.close();
-                    return false;
-                }
-                break;
-            }
-            if (line == "Snapmaker Orca")
-                is_version = true;
-        }
-    }
-    gcode_file.close();
-    return true;
-}
-
 void SelectMachineDialog::reset_ams_material()
 {
     MaterialHash::iterator iter = m_materialList.begin();
@@ -3977,7 +3936,8 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots());
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }
@@ -4403,7 +4363,8 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots());
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }

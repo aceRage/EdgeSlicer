@@ -1226,15 +1226,21 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(AppConfig &          
 
 PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string> &              files,
                                                         std::function<int(std::string const &)> override_confirm,
-                                                        ForwardCompatibilitySubstitutionRule    rule)
+                                                        ForwardCompatibilitySubstitutionRule    rule,
+                                                        PresetImportReport *                    report)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " entry";
     PresetsConfigSubstitutions substitutions;
     int overwrite = 0;
     std::vector<std::string>   result;
+    // The JSON files given and those extracted from bundles are imported together at the end, in passes: a
+    // preset whose parent is another preset of the import (later in the archive, or in another file) waits
+    // for a pass after its parent's. Imported in archive order, it used to be skipped.
+    std::vector<std::string> json_files;
+    std::vector<fs::path>    temp_folders;
     for (auto &file : files) {
         if (Slic3r::is_json_file(file)) {
-            import_json_presets(substitutions, file, override_confirm, rule, overwrite, result);
+            json_files.push_back(file);
         }
         // Determine if it is a preset bundle
         if (boost::iends_with(file, ".orca_printer") || boost::iends_with(file, ".orca_filament") || boost::iends_with(file, ".zip")) {
@@ -1274,7 +1280,8 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (zipFile != nullptr)
                     std::fclose(zipFile);
                 fs::remove_all(temp_folder, ec);
-                return substitutions;
+                // The files gathered so far are imported below; this one is left out.
+                continue;
             } else {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Success to initialize reader ZIP archive";
             }
@@ -1308,15 +1315,43 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                     if (MZ_FALSE == status) {
                         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Failed to open target file: " << target_file_path;
                     } else {
-                        bool is_success = import_json_presets(substitutions, target_file_path, override_confirm, rule, overwrite, result);
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " import target file: " << target_file_path << " import result" << is_success;
+                        json_files.push_back(target_file_path);
                     }
                 }
             }
             fclose(zipFile);
-            if (fs::exists(temp_folder)) fs::remove_all(temp_folder, ec);
-            if (ec) BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " remove directory failed: " << ec.message();
+            temp_folders.push_back(temp_folder);
         }
+    }
+
+    std::vector<std::string> pending = std::move(json_files);
+    while (!pending.empty()) {
+        std::vector<std::string> deferred;
+        for (std::string &file : pending) {
+            PresetImportSkip skipped = PresetImportSkip::None;
+            bool is_success = import_json_presets(substitutions, file, override_confirm, rule, overwrite, result, &skipped);
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " import target file: " << file << " import result" << is_success;
+            if (skipped == PresetImportSkip::MissingParent)
+                deferred.push_back(file);
+            else if (skipped == PresetImportSkip::BadVersion && report != nullptr)
+                report->bad_version.push_back(file);
+        }
+        if (deferred.size() == pending.size()) {
+            // No parent turned up in this pass: these cannot be imported.
+            for (const std::string &file : deferred) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " can not find the inherit preset of " << file << ", not imported";
+                if (report != nullptr)
+                    report->missing_parent.push_back(file);
+            }
+            break;
+        }
+        pending = std::move(deferred);
+    }
+
+    for (const fs::path &temp_folder : temp_folders) {
+        boost::system::error_code ec;
+        if (fs::exists(temp_folder)) fs::remove_all(temp_folder, ec);
+        if (ec) BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " remove directory failed: " << ec.message();
     }
     files = result;
     return substitutions;
@@ -1327,7 +1362,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
                                        std::function<int(std::string const &)> override_confirm,
                                        ForwardCompatibilitySubstitutionRule    rule,
                                        int &                                   overwrite,
-                                       std::vector<std::string> &              result)
+                                       std::vector<std::string> &              result,
+                                       PresetImportSkip *                      skipped)
 {
     try {
         DynamicPrintConfig config;
@@ -1341,7 +1377,12 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         if (untrusted_config_filter)
             untrusted_config_filter(name.empty() ? file : name, config);
         boost::optional<Semver>            version              = Semver::parse(version_str);
-        if (!version) return false;
+        if (!version) {
+            // Skipped as before, now with a word in the log and a count in the import's result.
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" %1% (%2%) not imported: its version \"%3%\" cannot be read") % name % file % version_str;
+            if (skipped) *skipped = PresetImportSkip::BadVersion;
+            return false;
+        }
 
         PresetCollection *collection = nullptr;
         if (config.has("printer_settings_id"))
@@ -1359,6 +1400,25 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset name escapes the preset directory, not loading: " << name;
             return false;
         }
+        Preset *           inherit_preset  = nullptr;
+        ConfigOption *     inherits_config = config.option(BBL_JSON_KEY_INHERITS);
+        std::string        inherits_value;
+        if (inherits_config) {
+            ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
+            inherits_value                 = option_str->value;
+            inherit_preset                 = collection->find_preset2(inherits_value);
+        }
+        if (!inherit_preset) {
+            // We support custom root preset now
+            auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
+            if (inherits_config2 && !inherits_config2->value.empty()) {
+                // Not now: the parent may be another preset of this import, imported in a later pass (import_presets).
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", can not find inherit preset for user preset %1% yet") % name;
+                if (skipped) *skipped = PresetImportSkip::MissingParent;
+                return false;
+            }
+        }
+
         if (overwrite == 0) overwrite = 1;
         if (auto p = collection->find_preset(name, false)) {
             if (p->is_default || p->is_system) {
@@ -1373,24 +1433,9 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         }
 
         DynamicPrintConfig new_config;
-        Preset *           inherit_preset  = nullptr;
-        ConfigOption *     inherits_config = config.option(BBL_JSON_KEY_INHERITS);
-        std::string        inherits_value;
-        if (inherits_config) {
-            ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
-            inherits_value                 = option_str->value;
-            inherit_preset                 = collection->find_preset2(inherits_value);
-        }
         if (inherit_preset) {
             new_config = inherit_preset->config;
         } else {
-            // We support custom root preset now
-            auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
-            if (inherits_config2 && !inherits_config2->value.empty()) {
-                // we should skip this preset here
-                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", can not find inherit preset for user preset %1%, just skip") % name;
-                return false;
-            }
             // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
             const Preset &default_preset = collection->default_preset_for(config);
             new_config                   = default_preset.config;
@@ -3279,10 +3324,19 @@ DynamicPrintConfig PresetBundle::nozzle_tool_config() const
                              "single_extruder_multi_material", "extruder_max_nozzle_count" })
         if (const ConfigOption *opt = printer.option(key))
             out.set_key_value(key, opt->clone());
-    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override" })
+    // H3C slot process groups: the per-slot nozzle types of the default rack (the TPU285 slot) and the filaments' slot pins decide
+    // which rack slots are tools of their own (split_rack_slots).
+    if (const ConfigOption *opt = printer.option("default_nozzle_volume_type"))
+        out.set_key_value("default_nozzle_volume_type", opt->clone());
+    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override", "filament_rack_nozzle_slot", "nozzle_volume_type" })
         if (const ConfigOption *opt = this->project_config.option(key))
             out.set_key_value(key, opt->clone());
     return out;
+}
+
+std::vector<int> PresetBundle::nozzle_split_rack_slots(size_t extruder) const
+{
+    return split_rack_slots(this->nozzle_tool_config(), extruder);
 }
 
 size_t PresetBundle::nozzle_tool_count() const
@@ -3311,6 +3365,7 @@ PresetBundle::NozzleToolRef PresetBundle::nozzle_tool_ref(size_t tool) const
         ref.slot     = entry.slot;
         ref.diameter = entry.diameter;
         ref.id       = nozzle_tool_entry_id(entry);
+        ref.rack_slot = entry.rack_slot;
     }
     return ref;
 }
@@ -3344,6 +3399,8 @@ std::string PresetBundle::nozzle_tool_name(size_t tool) const
     if (!ref.valid)
         return std::string();
     const DynamicPrintConfig cfg = this->nozzle_tool_config();
+    if (ref.rack_slot > 0)
+        return rack_slot_name(cfg, ref.extruder, ref.rack_slot);
     return ref.slot > 0 ? rack_size_name(cfg, ref.extruder, ref.diameter) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
 }
 
@@ -3506,9 +3563,7 @@ bool PresetBundle::prune_nozzle_processes()
         bool               dropped = false;
         for (auto it = edits.begin(); it != edits.end();) {
             const int e = nozzle_tool_id_extruder(it->first);
-            size_t    se = 0;
-            double    sd = 0.;
-            const bool slot_id = parse_nozzle_size_group_id(it->first, se, sd);
+            const bool slot_id = is_nozzle_rack_tool_id(it->first); // P9 size tools, H3C slot tools
             if ((e >= 0 && size_t(e) >= selection.size()) || (slot_id && this->nozzle_tool_index(it->first) < 0) ||
                 dropped_slot_ids.count(it->first) > 0) {
                 it      = edits.erase(it);
@@ -4461,6 +4516,20 @@ DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filamen
     std::string print_inherits = plate_preset.inherits();
     inherits                     .emplace_back(print_inherits);
     const Preset* print_parent_preset =  this->prints.get_preset_parent(plate_preset);
+    // A system process has no "inherits", so get_preset_parent() finds no parent for it and an
+    // edited system process was saved with no "different_settings_to_system" entry. On open,
+    // load_external_preset() then put every changed value back to the system preset's (hand
+    // test 2026-11-15, PR #1021). Before Per-nozzle process P8 this was get_selected_preset_parent(),
+    // which is the system preset itself for a system selection (and the default preset for a user
+    // preset of its own); keep that reference. While a tool's profile is shown, the selected preset
+    // is the tool's, so the plate's own stored preset is the reference.
+    if (print_parent_preset == nullptr && plate_preset.inherits().empty()) {
+        if (m_tool_view.extruder < 0) {
+            print_parent_preset = this->prints.get_selected_preset_parent();
+        } else if (const Preset *stored = this->prints.find_preset(plate_preset.name, false); stored != nullptr && stored->is_system) {
+            print_parent_preset = stored;
+        }
+    }
     if (print_parent_preset) {
         std::vector<std::string> dirty_options = this->prints.dirty_options_without_option_list(&plate_preset, print_parent_preset, ignore_settings_list, false);
         if (!dirty_options.empty()) {
@@ -5357,8 +5426,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
 
-    // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
-    // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
+    // The bundled vendor presets keep the shipped meaning of Bambu Studio's prime_tower_skip_points:
+    // see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
 
     // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;
@@ -6373,6 +6442,12 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     if (num_filaments != old_number_of_filaments) {
         // First verify if purging volumes presets for each extruder matches number of extruders
         std::vector<double>& filaments = this->project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values;
+        // A deleted filament takes its own pair of volumes and its own row and column of the matrix
+        // along, not the last ones.
+        const size_t deleted = (deleting_filament && old_number_of_filaments == num_filaments + 1 && to_delete_filament_id < old_number_of_filaments) ?
+            to_delete_filament_id : size_t(-1);
+        if (deleted != size_t(-1) && filaments.size() == 2 * old_number_of_filaments)
+            filaments.erase(filaments.begin() + 2 * deleted, filaments.begin() + 2 * deleted + 2);
         while (filaments.size() < 2* num_filaments) {
             filaments.push_back(filaments.size()>1 ? filaments[0] : 140.);  // copy the values from the first extruder
             filaments.push_back(filaments.size()>1 ? filaments[1] : 140.);
@@ -6385,9 +6460,11 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
         std::vector<double> new_matrix;
         for (unsigned int i=0;i< num_filaments;++i)
             for (unsigned int j=0;j< num_filaments;++j) {
+                const size_t old_i = i >= deleted ? i + 1 : i;
+                const size_t old_j = j >= deleted ? j + 1 : j;
                 // append the value for this pair from the old matrix (if it's there):
-                if (i < old_number_of_filaments && j < old_number_of_filaments)
-                    new_matrix.push_back(old_matrix[i* old_number_of_filaments + j]);
+                if (old_i < old_number_of_filaments && old_j < old_number_of_filaments)
+                    new_matrix.push_back(old_matrix[old_i * old_number_of_filaments + old_j]);
                 else
                     new_matrix.push_back( i == j ? 0. : filaments[2 * i] + filaments[2 * j + 1]); // so it matches new extruder volumes
             }

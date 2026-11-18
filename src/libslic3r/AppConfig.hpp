@@ -153,6 +153,9 @@ struct BBLocalMachine
     bool operator!=(const BBLocalMachine& other) const { return !operator==(other); }
 };
 
+// The paths of the "recent_projects" section, ordered by their numeric keys ("01".."99", "100"...).
+std::vector<std::string> recent_projects_in_order(const std::map<std::string, std::string> &by_key);
+
 class AppConfig
 {
 public:

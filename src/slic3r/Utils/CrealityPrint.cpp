@@ -89,7 +89,7 @@ bool CrealityPrint::test(wxString& msg) const
     const char* name = get_name();
     auto url = make_url("info");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % Http::url_for_log(url);
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -161,7 +161,7 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
             }
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % url % error %
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % Http::url_for_log(url) % error %
                                             status % body;
             error_fn(format_error(body, error, status));
             res = false;

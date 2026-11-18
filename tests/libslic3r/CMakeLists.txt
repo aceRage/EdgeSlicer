@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_model_rotate_center.cpp
+	test_orient.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
@@ -26,9 +27,14 @@ add_executable(${_TEST_NAME}_tests
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_arrange_seq_print.cpp
+	test_arrange_scoring.cpp
 	test_arrange_compacted_tower.cpp
+	test_arrange_results.cpp
+	test_arrange_exclusion.cpp
+	test_arrange_nozzle_reach.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
+	test_appconfig_recent_projects.cpp
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
@@ -53,6 +59,7 @@ add_executable(${_TEST_NAME}_tests
 	test_color_split.cpp
 	test_code_emboss.cpp
 	test_emboss_bend.cpp
+	test_svg_surface_modifier.cpp
 	test_inline_shapes.cpp
 	test_inline_text.cpp
 	test_simple_shape.cpp
@@ -71,6 +78,7 @@ add_executable(${_TEST_NAME}_tests
 	test_config_range.cpp
 	test_support_interface_settings.cpp
 	test_contour_z.cpp
+	test_head_clearance.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp
 	test_edgegrid.cpp
@@ -80,9 +88,12 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_paint.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
+	test_cut_mesh_caps.cpp
+	test_cut_halves.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
+	test_filament_delete.cpp
 	test_default_bed_type.cpp
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
@@ -98,6 +109,7 @@ add_executable(${_TEST_NAME}_tests
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
+	test_sliced_plate_metadata.cpp
 	test_bambu_extruder_map.cpp
 	test_bambu_dual_nozzle_sync.cpp
 	test_bambu_idle_precool.cpp
@@ -128,6 +140,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2d_byobject_toolchange.cpp
 	test_h2d_timelapse.cpp
 	test_extruder_areas.cpp
+	test_split_to_volume.cpp
 	test_by_object_max_clearance.cpp
 	test_filament_map_reapply.cpp
 	test_h2_preload_filaments.cpp
@@ -136,6 +149,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_output.cpp
+	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp
@@ -155,6 +169,7 @@ add_executable(${_TEST_NAME}_tests
 	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
+	test_gcode_template_lint.cpp
 	test_polygon.cpp
 	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
@@ -176,11 +191,14 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
 	test_process_preset_export.cpp
+	test_preset_import_order.cpp
 	test_preset_manager_model.cpp
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_state.cpp
+	test_preset_printer_own_presets.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
@@ -192,6 +210,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stl.cpp
 	test_support_set.cpp
 	test_support_interlock.cpp
+	test_startup_sound.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
@@ -213,7 +232,11 @@ add_executable(${_TEST_NAME}_tests
     test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_tower_alm.cpp
     test_bbl_rib_tower.cpp
+    test_prime_tower_defaults.cpp
+    test_fine_detail.cpp
+    test_thin_features.cpp
     test_bbl_h3c.cpp
     test_bs29_keys_import.cpp
     test_tower_interface.cpp
@@ -247,7 +270,7 @@ add_executable(${_TEST_NAME}_tests
 	)
 
 if (TARGET OpenVDB::openvdb)
-    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp test_voxel_remesh.cpp)
 endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)

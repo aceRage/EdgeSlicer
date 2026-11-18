@@ -563,6 +563,8 @@ public:
         bool  enable_rotation    = false;
         bool  allow_multi_materials_on_same_plate = true;
         bool  avoid_extrusion_cali_region = true;
+        // EdgeSlicer: keep objects out of the strips only one nozzle reaches (H2D / H2C / X2D).
+        bool  avoid_nozzle_reach_zones = false;
         //BBS: add more arrangeSettings
         bool is_seq_print        = false;
         bool  align_to_y_axis    = false;
