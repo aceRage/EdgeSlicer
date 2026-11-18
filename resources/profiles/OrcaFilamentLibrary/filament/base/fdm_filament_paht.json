@@ -4,6 +4,9 @@
 	"inherits": "fdm_filament_common",
 	"from": "system",
 	"instantiation": "false",
+	"filament_adhesiveness_category": [
+		"400"
+	],
 	"filament_max_volumetric_speed": [
 		"12"
 	],

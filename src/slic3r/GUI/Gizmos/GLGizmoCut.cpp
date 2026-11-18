@@ -3210,7 +3210,7 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     // stroke's end - sits within Extension of the line, the extended surface ran
     // through it and the boolean cut a slot into the neighbour. Each entry below
     // is the distance from one rail's base point along its extension direction to
-    // the first mesh hit (infinity when there is none), minus a small margin, so
+    // the first face it goes into from outside (infinity when there is none), minus a small margin, so
     // the cutter can clamp the outward rail per sample instead of trusting the
     // slider value everywhere.
     //
@@ -3227,16 +3227,12 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     const std::vector<DrawCutSample>& p = m_draw_stroke.path();
     const auto& em = m_draw_raycaster->get_aabb_mesh();
 
-    // The origin starts 0.05 mm along the cast direction so the facet the stroke
-    // was drawn on cannot be the first hit; the same 0.05 mm comes back out of
-    // the reported distance, and a further 0.1 mm margin keeps grazing
-    // self-intersections (a curved wall the ray clips on its own way out) from
-    // zeroing the clamp.
+    // Only a face the ray goes INTO from outside stops it - see
+    // draw_cut_extension_clearance(). A line drawn on a flat face lies in that face's
+    // plane, so stopping at the first face of any kind clamped the extension at the
+    // face's own edge and the cut ended on the part's side wall.
     auto clearance_along = [&em](const Vec3d& from, const Vec3d& dir) -> double {
-        const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
-        const auto  hit = em.query_ray_hit(from + 0.05 * d, d);
-        const double t  = hit.is_hit() ? hit.distance() + 0.05 : std::numeric_limits<double>::max();
-        return std::max(0.0, t - 0.1);
+        return draw_cut_extension_clearance(em, from, dir);
     };
 
     const size_t n = p.size();
@@ -3552,11 +3548,12 @@ void GLGizmoCut3D::commit_draw_points()
     // would corrupt undo. Undo still works - the entry pushed before the edit holds the
     // chain as it was, ranges and all - it just makes the edited line one link.
     //
-    // Editing is only reachable on a VALID stroke, which means a CLOSED chain, so the
-    // closed flag is restored unconditionally. (set_samples() refuses to call a chain
-    // of fewer than MinChainSamples closed, which is the guard against an edit that
-    // deletes its way down to a triangle.)
-    m_draw_chain.set_samples(m_draw_points, /*closed*/ true);
+    // Editing is reachable on any VALID stroke: a CLOSED chain or one the user finished
+    // OPEN with "Cut along the line". The edit keeps whichever it was - an open line
+    // whose point is moved stays an open line, it does not become a loop.
+    // (set_samples() refuses to call a chain of fewer than MinChainSamples closed or
+    // finished, which is the guard against an edit that deletes its way down to a dab.)
+    draw_cut_chain_set_edited(m_draw_chain, m_draw_points);
     refresh_draw_stroke();
 }
 
@@ -9189,6 +9186,11 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             perform_cut(m_parent.get_selection());
     m_imgui->disabled_end();
 
+    // Split to Fit (D1): the whole object cut into parts that fit the printer, in its own gizmo.
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Split to fit..."), _L("Cut the whole object into parts that each fit the printer")))
+        wxGetApp().CallAfter([this]() { m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::SplitToFit); });
+
     ImGui::PopStyleVar(2);
 }
 
@@ -9301,6 +9303,10 @@ void GLGizmoCut3D::render_input_window_warning() const
 
 void GLGizmoCut3D::render_input_window_warning_lines() const
 {
+    if (const auto* si = m_c ? m_c->selection_info() : nullptr)
+        if (const ModelObject* mo = si->model_object())
+            if (const std::string flexi_error = flexi_connectors_error(mo->cut_connectors); !flexi_error.empty())
+                m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(flexi_error));
     if (const auto* si = m_c ? m_c->selection_info() : nullptr)
         if (const ModelObject* mo = si->model_object())
             for (const CutConnector& c : mo->cut_connectors)
@@ -9829,9 +9835,12 @@ bool GLGizmoCut3D::can_perform_cut() const
     if (! m_invalid_connectors_idxs.empty() || (!m_keep_upper && !m_keep_lower) || m_connectors_editing)
         return false;
 
-    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why).
+    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why), and
+    // so does a Flexi joint with another Flexi joint or connector beside it.
     if (m_c->selection_info() != nullptr)
-        if (const ModelObject* mo = m_c->selection_info()->model_object())
+        if (const ModelObject* mo = m_c->selection_info()->model_object()) {
+            if (!flexi_connectors_error(mo->cut_connectors).empty())
+                return false;
             for (const CutConnector& c : mo->cut_connectors) {
                 if (c.attribs.type == CutConnectorType::PushFit && !pushfit_validate(c.pushfit, double(flexi_nozzle_diameter())).empty())
                     return false;
@@ -9845,6 +9854,7 @@ bool GLGizmoCut3D::can_perform_cut() const
                         return false;
                 }
             }
+        }
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         return has_valid_groove();
@@ -11695,24 +11705,6 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
     if (connector_attributes.type == CutConnectorType::TacJoint)
         return tac_joint_connector_mesh(m_tac_joint);
 
-    int   sectorCount{ 1 };
-    switch (CutConnectorShape(connector_attributes.shape)) {
-    case CutConnectorShape::Triangle:
-        sectorCount = 3;
-        break;
-    case CutConnectorShape::Square:
-        sectorCount = 4;
-        break;
-    case CutConnectorShape::Circle:
-        sectorCount = 360;
-        break;
-    case CutConnectorShape::Hexagon:
-        sectorCount = 6;
-        break;
-    default:
-        break;
-    }
-
     if (connector_attributes.type == CutConnectorType::FlexiJoint) {
         // The flexi bodies are generated in millimetres; normalize them by the same
         // (radius, radius, height) the renderer/raycaster/bbox checks scale connectors by.
@@ -11733,49 +11725,17 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
         return connector_mesh;
     }
 
-    if (connector_attributes.type == CutConnectorType::Snap)
-        connector_mesh = its_make_snap(1.0, 1.0, m_snap_space_proportion, m_snap_bulge_proportion);
-    else if (connector_attributes.style == CutConnectorStyle::Prism)
-        connector_mesh = its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
-    else if (connector_attributes.type == CutConnectorType::Plug)
-        connector_mesh = its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
-    else
-        connector_mesh = its_make_frustum_dowel(1.0, 1.0, sectorCount);
+    // Plug / Dowel / Snap: the shared libslic3r mesh (Split to Fit P2 moved it there, unchanged).
+    connector_mesh = cut_connector_unit_mesh(connector_attributes, m_snap_space_proportion, m_snap_bulge_proportion);
 
     return connector_mesh;
 }
 
 void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& connector_name)
 {
-    if (mo->cut_connectors.empty())
-        return;
-
-    using namespace Geometry;
-
-    size_t connector_id = mo->cut_id.connectors_cnt();
-    for (const CutConnector& connector : mo->cut_connectors) {
-        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
-            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
-            continue;
-        }
-        if (connector.attribs.type == CutConnectorType::PushFit) {
-            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
-            continue;
-        }
-        if (connector.attribs.type == CutConnectorType::TacJoint) {
-            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
-            continue;
-        }
-        // Placed as the gizmo draws it: see add_cut_connector_volume().
-        ModelVolume* new_volume = add_cut_connector_volume(*mo, get_connector_mesh(connector.attribs), connector);
-
-        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
-        new_volume->name = connector_name + "-" + std::to_string(++connector_id);
-    }
-    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
-
-    // delete all connectors
-    mo->cut_connectors.clear();
+    // Split to Fit P2: the baking lives in libslic3r now (bake_cut_connectors), moved unchanged, so
+    // the grid split and the tests run it headless.
+    bake_cut_connectors(mo, connector_name, m_snap_space_proportion, m_snap_bulge_proportion);
 }
 
 

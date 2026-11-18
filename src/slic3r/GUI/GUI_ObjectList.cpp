@@ -46,6 +46,8 @@
 #include "QuadRemeshDialog.hpp"
 // RE-EDITABLE CUTS: edit_cut() arms the Cut gizmo with a stored recipe.
 #include "Gizmos/GLGizmoCut.hpp"
+#include "Gizmos/GLGizmoSVG.hpp" // remake an SVG / text after a type change
+#include "libslic3r/EmbossPlacement.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -3391,22 +3393,24 @@ void ObjectList::boolean()
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
-    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -1, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
+    // The parts in the object's own coordinates: combine_mesh_fff() applies no instance's
+    // matrix for an id that is neither -1 (every copy merged into one mesh) nor a copy's.
+    // The copies are kept as copies below; merged, they became one body of one copy.
+    TriangleMesh mesh = Plater::combine_mesh_fff(*object, -2, [this](const std::string& msg) {return wxGetApp().notification_manager()->push_plater_error_notification(msg); });
 
-    // add mesh to model as a new object, keep the original object's name and config
+    // add mesh to model as a new object, keep the original object's name, config and copies
     Model* model = object->get_model();
     ModelObject* new_object = model->add_object();
     new_object->name = object->name;
     new_object->config.assign_config(object->config);
+    // Centred on its own volume, whose offset keeps it where the parts were in the object.
+    new_object->add_volume(mesh);
+    for (const ModelInstance* instance : object->instances)
+        new_object->add_instance(*instance);
     if (new_object->instances.empty())
         new_object->add_instance();
-    ModelVolume* new_volume = new_object->add_volume(mesh);
 
-    // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();
-    new_object->center_around_origin();
-    new_object->translate_instances(-new_object->origin_translation);
-    new_object->origin_translation = Vec3d::Zero();
 
     // BBS: notify it before move
     notify_instance_updated(m_objects->size() - 1);
@@ -3455,10 +3459,7 @@ DynamicPrintConfig ObjectList::get_default_layer_config(const int obj_idx)
                             object(obj_idx)->config.opt_float("layer_height") :
                             wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
     config.set_key_value("layer_height",new ConfigOptionFloat(layer_height));
-    // BBS
-    int extruder = object(obj_idx)->config.has("extruder") ?
-        object(obj_idx)->config.opt_int("extruder") :
-        wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("extruder");
+    // BBS: a new range follows the object's filament (0 = inherit).
     config.set_key_value("extruder",    new ConfigOptionInt(0));
 
     return config;
@@ -6042,6 +6043,9 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
 
     std::set<const ModelVolume*> changed_volumes;
     std::set<int>                touched_objects;
+    // Edge: text and SVG volumes that moved to the other side of the surface (part <-> modifier or
+    // negative volume) get their mesh made again, as the Text / SVG tool does on its own type change.
+    std::vector<ObjectID>        remake_emboss;
     for (const auto& sel : volumes) {
         const ModelVolumeType target   = effective_new_type(sel.volume);
         const ModelVolumeType old_type = sel.volume->type();
@@ -6053,6 +6057,8 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
             continue;
 
         sel.volume->set_type(target);
+        if (sel.volume->emboss_shape.has_value() && Slic3r::Emboss::type_change_needs_new_mesh(old_type, target))
+            remake_emboss.push_back(sel.volume->id());
 
         if (precise_seam_group_changed(old_type, target))
             move_volume_to_end((*m_objects)[sel.object_idx], sel.volume);
@@ -6075,6 +6081,13 @@ void ObjectList::set_volume_type(ModelVolumeType new_type, bool preserve_ps_subt
         SetSelections(new_selection);
         m_prevent_list_events = false;
     }
+
+    for (const ObjectID &id : remake_emboss)
+        for (const ModelObject *object : *m_objects)
+            for (const ModelVolume *volume : object->volumes)
+                if (volume->id() == id && !GLGizmoSVG::remake_after_type_change(*volume))
+                    BOOST_LOG_TRIVIAL(info) << "Change part type: the embossed mesh of \"" << volume->name
+                                            << "\" is kept as it was (edit it in its tool to remake it)";
 }
 
 void ObjectList::last_volume_is_deleted(const int obj_idx)
@@ -6483,12 +6496,10 @@ void ObjectList::repair_by_remesh()
 
     size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
     auto remesh_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
-        RemeshOptions o = opts;
-        // An untouched voxel field means "auto", and auto is per part - so a
-        // multi-part selection still gets each part's own scale-appropriate value
-        // rather than the first part's.
-        if (std::abs(o.voxel_size - auto_voxel) < 1e-9)
-            o.voxel_size = 0.;
+        // An untouched voxel field means "auto" (the dialog gives voxel_size 0), and auto
+        // is per part - so a multi-part selection still gets each part's own
+        // scale-appropriate value rather than the first part's.
+        const RemeshOptions &o = opts;
         RemeshReport rep;
         indexed_triangle_set its = remesh_with_options(mv.mesh().its, o, &remesh_by_voxels,
                                                        volume_bed_direction(mo, mv), &rep);
@@ -7452,7 +7463,13 @@ void ObjectList::OnEditingStarted(wxDataViewEvent &event)
 
         get_selected_item_indexes(obj_idx, vol_idx, item);
         //wxGetApp().plater()->PopupObjectTable(obj_idx, vol_idx, mouse_pos);
-        dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
+        // The row's own settings, as list_manipulation() picks them: a plate's, a height range's, a part's or an object's.
+        if (m_objects_model->GetItemType(item) & itPlate)
+            dynamic_cast<TabPrintPlate*>(wxGetApp().get_plate_tab())->reset_model_config();
+        else if (m_objects_model->GetItemType(item) & itLayer)
+            dynamic_cast<TabPrintLayer*>(wxGetApp().get_layer_tab())->reset_model_config();
+        else if (item.IsOk())
+            dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
         return;
     }
 #ifdef __WXOSX__

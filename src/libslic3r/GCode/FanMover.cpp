@@ -1,6 +1,7 @@
 #include "FanMover.hpp"
 
 #include "GCodeReader.hpp"
+#include "../Geometry/ArcWelder.hpp"
 
 #include <iomanip>
 /*
@@ -254,6 +255,41 @@ bool parse_number(const std::string_view sv, int& out)
     }
 }
 
+// EDGE: the length of a G2/G3 arc from where the reader is: its turn about its centre (I and J, or R) and
+// any rise. An arc that ends where it starts is a whole turn (a spiral lift). As GCodeProcessor::process_G2_G3
+// reads arcs, so the fan is moved by the time the print takes.
+static double arc_length(const GCodeReader &reader, const GCodeReader::GCodeLine &line, bool clockwise)
+{
+    const Vec2d start(reader.x(), reader.y());
+    const Vec2d end(line.has(X) ? line.x() : reader.x(), line.has(Y) ? line.y() : reader.y());
+    const double dz = line.dist_Z(reader);
+    const bool   full_turn = std::abs(end.x() - start.x()) < EPSILON && std::abs(end.y() - start.y()) < EPSILON;
+    Vec2d center;
+    float r = 0.f;
+    if (line.has_value('R', r)) {
+        if (r == 0.f || full_turn)
+            return std::abs(dz); // no centre can be found
+        center = Geometry::ArcWelder::arc_center(start, end, double(r), !clockwise);
+    } else if (line.has(I) || line.has(J)) {
+        center = start + Vec2d(line.has(I) ? line.i() : 0., line.has(J) ? line.j() : 0.);
+    } else {
+        return std::abs(dz);
+    }
+    const Vec2d  from  = start - center;
+    const Vec2d  to    = end - center;
+    double       angle = 2. * PI;
+    if (!full_turn) {
+        // The counter-clockwise turn from `from` to `to`, then the other way round for G2.
+        angle = std::atan2(from.x() * to.y() - from.y() * to.x(), from.dot(to));
+        if (angle < 0.)
+            angle += 2. * PI;
+        if (clockwise)
+            angle = 2. * PI - angle;
+    }
+    const double along = angle * from.norm();
+    return std::sqrt(along * along + dz * dz);
+}
+
 //FIXME: add other firmware
 // or just create that damn new gcode writer arch
 void FanMover::_process_T(const std::string_view command)
@@ -301,6 +337,12 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                     dist = std::sqrt(dist);
                     time = dist / m_current_speed;
                 }
+            } else if (::atoi(&cmd[1]) == 2 || ::atoi(&cmd[1]) == 3) {
+                // EDGE: an arc takes time too. Counted as none, a fan command after arcs (arc fitting, spiral
+                // lift) was moved back by fan_speedup_time plus the time of every arc on the way.
+                const double dist = arc_length(reader, line, ::atoi(&cmd[1]) == 2);
+                if (dist > 0)
+                    time = dist / m_current_speed;
             }
             break;
         }

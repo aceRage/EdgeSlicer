@@ -220,6 +220,52 @@ SCENARIO("Config ini load/save interface", "[Config]") {
     }
 }
 
+TEST_CASE("A string list item holding a semicolon reads back as one item", "[Config][Escape]")
+{
+    // ';' separates the items, so an item holding one must be quoted. Before the fix an item
+    // was quoted only for a space, tab, quote, backslash or line break, so "a;b" came back as
+    // "a" and "b".
+    const std::vector<std::string> cases[] = {
+        {"PLA;HS", "PETG"},              // a filament or preset name with no space
+        {"M106 S255", "M107;fan off"},   // a one-line G-code snippet with no space before ';'
+        {"a;b;c"},                       // a single item
+        {"", "x;y", ""},                 // empty items around it
+    };
+    for (const std::vector<std::string> &in : cases) {
+        const std::string        stored = escape_strings_cstyle(in);
+        std::vector<std::string> out;
+        REQUIRE(unescape_strings_cstyle(stored, out));
+        CHECK(out == in);
+    }
+    CHECK(escape_strings_cstyle({"PLA;HS", "PETG"}) == "\"PLA;HS\";PETG");
+}
+
+TEST_CASE("different_settings_to_system keeps one entry per preset through a G-code header", "[Config][Escape]")
+{
+    // Each entry is itself a ';'-joined key list (print, filaments..., printer). The G-code header
+    // and the .ini export write the list with serialize(); importing the config reads it back.
+    DynamicPrintConfig cfg;
+    auto *opt   = cfg.option<ConfigOptionStrings>("different_settings_to_system", true);
+    opt->values = {"brim_type;enable_support;initial_layer_print_height", "", "machine_start_gcode;z_hop"};
+
+    DynamicPrintConfig loaded;
+    loaded.load_from_ini_string_commented("; different_settings_to_system = " + opt->serialize() + "\n",
+                                          ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(loaded.option<ConfigOptionStrings>("different_settings_to_system")->values == opt->values);
+}
+
+TEST_CASE("String lists written before the semicolon fix read the same as before", "[Config][Escape]")
+{
+    // Older versions left such items unquoted, so their files hold the items split apart; the
+    // reader is unchanged and reads them exactly as it always did.
+    std::vector<std::string> out;
+    REQUIRE(unescape_strings_cstyle("brim_type;enable_support;;\"Generic PLA @System\";z_hop", out));
+    CHECK(out == std::vector<std::string>{"brim_type", "enable_support", "", "Generic PLA @System", "z_hop"});
+    out.clear();
+    REQUIRE(unescape_strings_cstyle("\"M107\\nG92 E0\";\"say \\\"hi\\\"\"", out));
+    CHECK(out == std::vector<std::string>{"M107\nG92 E0", "say \"hi\""});
+}
+
 SCENARIO("DynamicPrintConfig serialization", "[Config]") {
     WHEN("DynamicPrintConfig is serialized and deserialized") {
         FullPrintConfig full_print_config;
@@ -597,6 +643,43 @@ TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option 
     for (const std::string &d : duplicates)
         UNSCOPED_INFO(d);
     CHECK(duplicates.empty());
+}
+
+// The same key registered twice in ONE ConfigDef: ConfigDef::add asserts on it, so a Debug build
+// stopped at startup ("preset_names", then "outer_wall_acceleration", "retract_lift_above" and
+// "retract_lift_below" were each added twice in PrintConfigDef). A Release build skips the assert;
+// there each add() takes a new serialization ordinal for the same map entry, so
+// by_serialization_key_ordinal holds one more entry than options per duplicate. The second
+// registration's values were the ones in force, and stay so.
+TEST_CASE("No ConfigDef registers the same option key twice in itself", "[Config][ConfigDefs]")
+{
+    struct Source { const char *name; const ConfigDef *def; };
+    const Source sources[] = {
+        { "print_config_def",         &print_config_def },
+        { "cli_actions_config_def",   &cli_actions_config_def },
+        { "cli_transform_config_def", &cli_transform_config_def },
+        { "cli_misc_config_def",      &cli_misc_config_def },
+    };
+    for (const Source &src : sources) {
+        INFO(src.name);
+        CHECK(src.def->by_serialization_key_ordinal.size() == src.def->options.size());
+    }
+    const ConfigOptionDef *def = print_config_def.get("preset_names");
+    REQUIRE(def != nullptr);
+    CHECK(def->mode == comAdvanced);
+    CHECK(def->tooltip == "Names of presets related to the physical printer.");
+
+    def = print_config_def.get("outer_wall_acceleration");
+    REQUIRE(def != nullptr);
+    CHECK(def->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{500.});
+    CHECK(def->min == 0.);
+    for (const char *key : {"retract_lift_above", "retract_lift_below"}) {
+        INFO(key);
+        def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->label.rfind("Only lift Z", 0) == 0);
+        CHECK(def->min == 0.);
+    }
 }
 
 // CLI --uptodate_settings / --downward_check (Snapmaker_Orca.cpp) call
@@ -1137,6 +1220,38 @@ TEST_CASE("fill_missing_project_keys skips keys handle_legacy drops on load", "[
     REQUIRE_FALSE(project.has("silent_mode"));
     REQUIRE(fill_missing_project_keys(project, system, Preset::print_options()) == 1);
     REQUIRE_THAT(project.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.2, 1e-9));
+}
+
+TEST_CASE("Per-filament text lists a project leaves out read as their fallback", "[Config][CLI]")
+{
+    // A Bambu A1 mini project without filament_ids crashed --slice --export-3mf: the plate data
+    // read filament_ids->get_at(id) on the empty list.
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FFFFFF", "#202020"};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "");
+    CHECK(cfg.filament_string_at("filament_colour", 1, "#FFFFFF") == "#202020");
+    // Past the end reads the first entry, as get_at() does.
+    CHECK(cfg.filament_string_at("filament_colour", 5, "#FFFFFF") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("filament_colour", 0, "#000000") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("not_an_option", 0, "fallback") == "fallback");
+
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values = {"GFA00", "GFS00"};
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "GFS00");
+}
+
+TEST_CASE("A support filament's type reads without filament_ids", "[Config][CLI]")
+{
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_type", true)->values  = {"PLA", "PA"};
+    cfg.option<ConfigOptionBools>("filament_is_support", true)->values = {false, true};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    std::string shown;
+    CHECK(cfg.get_filament_type(shown, 0) == "PLA");
+    CHECK(cfg.get_filament_type(shown, 1) == "PA-S");
+    CHECK(shown == "Sup.PA");
 }
 
 TEST_CASE("missing_project_keys is empty when the project already has every listed key", "[Config][CLI]")
@@ -1942,4 +2057,48 @@ TEST_CASE("An empty list applied by index replaces the target list", "[Config][R
 
     edited.apply_only(saved, {"filament_ids#0"});
     CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
+}
+
+TEST_CASE("The chamber temperature key the settings page checks exists", "[Config][Regression]")
+{
+    // ConfigManipulation::check_chamber_temperature and TabFilament asked for "chamber_temperatures" (Bambu
+    // Studio's name), which this config does not have, so the safe-temperature warning never ran.
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.has("chamber_temperature"));
+    CHECK_FALSE(config.has("chamber_temperatures"));
+    REQUIRE(config.option<ConfigOptionInts>("chamber_temperature") != nullptr);
+}
+
+TEST_CASE("CLI command-line settings are recorded in the slot of their preset type", "[Config][ProjectPreset]")
+{
+    DynamicPrintConfig project;
+    // [process, filament 1, filament 2, printer]; the process already lists one change.
+    project.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "wall_loops", "", "", "" }));
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("top_shell_layers", new ConfigOptionInt(9));            // process
+    overrides.set_key_value("wall_loops", new ConfigOptionInt(4));                 // process, already listed
+    overrides.set_key_value("nozzle_temperature", new ConfigOptionInts({ 215 }));   // filament
+    overrides.set_key_value("retraction_length", new ConfigOptionFloats({ 0.5 }));  // printer
+    overrides.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "x" }));
+
+    CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 4);
+    const std::vector<std::string> &slots = project.option<ConfigOptionStrings>("different_settings_to_system")->values;
+    REQUIRE(slots.size() == 4);
+    auto keys = [](const std::string &slot) {
+        std::vector<std::string> out;
+        unescape_strings_cstyle(slot, out);
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    CHECK(keys(slots[0]) == std::vector<std::string>{ "top_shell_layers", "wall_loops" });
+    CHECK(keys(slots[1]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[2]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[3]) == std::vector<std::string>{ "retraction_length" });
+
+    // Nothing to record into: left alone.
+    DynamicPrintConfig bare;
+    CHECK(record_cli_overrides_as_different(bare, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 0);
+    CHECK_FALSE(bare.has("different_settings_to_system"));
 }

@@ -97,6 +97,10 @@ struct NozzleChip
 };
 // The chip of the selector tool (extruder, size): the non-empty tiles of `extruder` with that size.
 NozzleChip nozzle_chip_for(const std::vector<NozzleStripTile> &tiles, size_t extruder, double diameter);
+// H3C slot process groups: the chip of a slot tool (`rack_slot` > 0: that tile only), or of a size group without the slots split
+// off it (`split`, split_rack_slots).
+NozzleChip nozzle_chip_for(const std::vector<NozzleStripTile> &tiles, size_t extruder, double diameter, int rack_slot,
+                           const std::vector<int> &split);
 
 // A set of edits in the project keys. Starts as the input; nozzle_strip_edit_* change it.
 struct NozzleStripEdit

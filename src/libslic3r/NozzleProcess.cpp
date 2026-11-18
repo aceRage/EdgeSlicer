@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -54,6 +55,15 @@ static bool has_several_process_extruders(const ConfigBase &printer_config)
     return semm == nullptr || !semm->value;
 }
 
+bool single_extruder_nozzle_rack(const ConfigBase &printer_config)
+{
+    // Bambu Studio 2.9.1 is_single_ext_multi_nozzle() (the H3C): one nozzle_diameter and a rack of two or more positions. The
+    // rack count must be declared (extruder_has_nozzle_rack() reads a config without the key as "any").
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
+    return nozzles != nullptr && nozzles->size() == 1 && printer_config.option("extruder_max_nozzle_count") != nullptr &&
+           extruder_has_nozzle_rack(printer_config, 0);
+}
+
 bool supports_nozzle_processes(const ConfigBase &printer_config)
 {
     if (has_several_process_extruders(printer_config))
@@ -61,9 +71,12 @@ bool supports_nozzle_processes(const ConfigBase &printer_config)
     // H3C (owner report 2026-11-06): one extruder whose nozzle rack holds nozzles of more than one size. Each other size of the
     // rack is a tool of its own (P9 size tools, "T1:0.8"), as the H2C's right rack sizes are, so filaments pinned to the 0.6 /
     // 0.8 rack nozzles print with a process made for that size. single_extruder_multi_material (set on the H3C: one nozzle at a
-    // time, fed from the AMS) does not rule it out, the rack still holds several nozzles. A rack of one size adds nothing.
-    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
-    return nozzles != nullptr && nozzles->size() == 1 && !nozzle_slot_tools(printer_config).empty();
+    // time, fed from the AMS) does not rule it out, the rack still holds several nozzles.
+    // Owner report 2026-11-14: a rack of one size (the stock nine 0.4) showed no per-nozzle process at all. The rack's hotends are
+    // the H3C's tools (handle_hotend_as_extruder), so the per-nozzle system is on for any single-extruder rack: the selector reads
+    // "Plate | 0.4 Std 1-9" (one tool per size of the rack) and grows a chip per size as soon as the rack mixes sizes. With
+    // every tool following the plate's process nothing reaches the slicing config (fill_nozzle_process_slots has no source).
+    return single_extruder_nozzle_rack(printer_config);
 }
 
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config)
@@ -244,6 +257,8 @@ bool zero_width_is_line_width(const std::string &width_key)
 
 size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
+    // A mixed filament prints through its components' nozzle (nozzle_filament_of, ToolSlots.hpp).
+    filament_id = nozzle_filament_of(config, filament_id);
     const auto *nozzles   = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
     const auto *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
     const auto *fmap      = dynamic_cast<const ConfigOptionInts *>(config.option("filament_map"));
@@ -367,23 +382,59 @@ void layer_height_limits_for_nozzles(const ConfigBase &printer_config, const std
     max_layer_height = maxs->get_at(size_t(smallest));
 }
 
-void stamp_nozzle_line_widths(PrintRegionConfig &c)
+namespace {
+struct RoleWidth
 {
-    // The filament of each role, as PrintRegion::extruder() resolves it.
+    ConfigOptionFloatOrPercent         *width;
+    const ConfigOptionFloatsOrPercents *array;
+    int                                 filament;
+};
+// Every role width of a region, the per-nozzle array it is stamped from and the filament that prints the role, as
+// PrintRegion::extruder() resolves it. stamp_nozzle_line_widths() and restamp_painted_nozzle_line_widths() walk the
+// same list, so they never disagree on a role's filament.
+std::vector<RoleWidth> role_widths(PrintRegionConfig &c)
+{
     const int wall   = c.wall_filament.value;
     const int outer  = c.outer_wall_filament.value > 0 ? c.outer_wall_filament.value : wall;
     const int sparse = c.sparse_infill_filament.value;
     const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? sparse : c.solid_infill_filament.value;
-    stamp_width(c.outer_wall_line_width, c.nozzle_outer_wall_line_width, outer);
-    stamp_width(c.inner_wall_line_width, c.nozzle_inner_wall_line_width, wall);
-    stamp_width(c.sparse_infill_line_width, c.nozzle_sparse_infill_line_width, sparse);
-    stamp_width(c.internal_solid_infill_line_width, c.nozzle_internal_solid_infill_line_width, solid);
-    stamp_width(c.top_surface_line_width, c.nozzle_top_surface_line_width, c.solid_infill_filament.value);
-    // P5: the locked-zag skin and skeleton are sparse infill.
-    stamp_width(c.skin_infill_line_width, c.nozzle_skin_infill_line_width, sparse);
-    stamp_width(c.skeleton_infill_line_width, c.nozzle_skeleton_infill_line_width, sparse);
-    // P6: bridges are solid infill (LayerRegion::bridging_flow takes the solid infill filament's nozzle).
-    stamp_width(c.bridge_line_width, c.nozzle_bridge_line_width, solid);
+    return {
+        { &c.outer_wall_line_width, &c.nozzle_outer_wall_line_width, outer },
+        { &c.inner_wall_line_width, &c.nozzle_inner_wall_line_width, wall },
+        { &c.sparse_infill_line_width, &c.nozzle_sparse_infill_line_width, sparse },
+        { &c.internal_solid_infill_line_width, &c.nozzle_internal_solid_infill_line_width, solid },
+        { &c.top_surface_line_width, &c.nozzle_top_surface_line_width, c.solid_infill_filament.value },
+        // P5: the locked-zag skin and skeleton are sparse infill.
+        { &c.skin_infill_line_width, &c.nozzle_skin_infill_line_width, sparse },
+        { &c.skeleton_infill_line_width, &c.nozzle_skeleton_infill_line_width, sparse },
+        // P6: bridges are solid infill (LayerRegion::bridging_flow takes the solid infill filament's nozzle).
+        { &c.bridge_line_width, &c.nozzle_bridge_line_width, solid },
+    };
+}
+} // namespace
+
+void stamp_nozzle_line_widths(PrintRegionConfig &c)
+{
+    for (const RoleWidth &role : role_widths(c))
+        stamp_width(*role.width, *role.array, role.filament);
+}
+
+void restamp_painted_nozzle_line_widths(PrintRegionConfig &painted, const PrintRegionConfig &parent)
+{
+    PrintRegionConfig            parent_copy = parent;
+    const std::vector<RoleWidth> before      = role_widths(parent_copy);
+    const std::vector<RoleWidth> after       = role_widths(painted);
+    for (size_t i = 0; i < after.size(); ++ i) {
+        if (after[i].filament == before[i].filament)
+            continue;
+        // Only a width the parent's nozzle process gave it follows the paint to the new filament's nozzle. A width set
+        // on the object, part, modifier or layer range (region_config_from_model_volume() puts those back over the
+        // stamp) is not the array's value for the parent's filament, and it still wins.
+        const FloatOrPercent *stamped = nozzle_width_at(*before[i].array, before[i].filament);
+        if (stamped == nullptr || before[i].width->value != stamped->value || before[i].width->percent != stamped->percent)
+            continue;
+        stamp_width(*after[i].width, *after[i].array, after[i].filament);
+    }
 }
 
 void stamp_nozzle_line_widths(PrintObjectConfig &c)
@@ -626,6 +677,40 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("nozzle_filament_tool", new ConfigOptionStrings(std::move(tools)));
     }
     return true;
+}
+
+bool extend_nozzle_filament_values_to_mixed(DynamicPrintConfig &config)
+{
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    if (count == 0)
+        return false;
+    // The physical filament each mixed filament reads its entries from, in virtual id order.
+    std::vector<unsigned int> sources;
+    for (unsigned int v = unsigned(count) + 1;; ++v) {
+        const unsigned int f = nozzle_filament_of(config, v);
+        if (f == v || f == 0 || f > count)
+            break;
+        sources.push_back(f);
+    }
+    if (sources.empty())
+        return false;
+    bool changed = false;
+    auto extend  = [&](const std::string &key) {
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(config.optptr(key));
+        if (opt == nullptr || opt->size() != count)
+            return;
+        std::unique_ptr<ConfigOption> src(opt->clone());
+        for (size_t k = 0; k < sources.size(); ++k)
+            opt->set_at(src.get(), count + k, sources[k] - 1);
+        changed = true;
+    };
+    for (const auto &entry : nozzle_line_width_keys())
+        extend(entry.first);
+    for (const char *key : { "nozzle_initial_layer_line_width", "nozzle_line_width", "nozzle_region_values", "nozzle_layer_height",
+                             "nozzle_filament_process_slot" })
+        extend(key);
+    return changed;
 }
 
 bool realign_nozzle_filament_values(DynamicPrintConfig &config)
@@ -1365,6 +1450,35 @@ bool parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double 
     return true;
 }
 
+std::string nozzle_rack_slot_tool_id(size_t extruder, int slot) { return nozzle_tool_id(extruder) + "." + std::to_string(slot); }
+
+bool parse_nozzle_rack_slot_tool_id(const std::string &id, size_t &extruder, int &slot)
+{
+    const size_t dot = id.find('.');
+    if (dot == std::string::npos || dot + 1 >= id.size() || id.find(':') != std::string::npos)
+        return false;
+    const int e = nozzle_tool_id_extruder(id.substr(0, dot));
+    if (e < 0)
+        return false;
+    const std::string word = id.substr(dot + 1);
+    if (word.size() > 3 || !std::all_of(word.begin(), word.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        return false;
+    const int k = std::atoi(word.c_str());
+    if (k < 1)
+        return false;
+    extruder = size_t(e);
+    slot     = k;
+    return true;
+}
+
+bool is_nozzle_rack_tool_id(const std::string &id)
+{
+    size_t e = 0;
+    double d = 0.;
+    int    k = 0;
+    return parse_nozzle_size_group_id(id, e, d) || parse_nozzle_rack_slot_tool_id(id, e, k);
+}
+
 std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config)
 {
     std::vector<NozzleToolEntry> out;
@@ -1374,14 +1488,23 @@ std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_confi
         out.push_back({ e, 0, nozzles[e] });
         if (rack_slot_count(printer_config, e) == 0)
             continue;
-        // The rack's other sizes, in rack order, each once.
+        // H3C: slots split off their size group (pinned, or of another nozzle type). Empty elsewhere.
+        const std::vector<int> split = split_rack_slots(printer_config, e);
+        // The rack's other sizes, in rack order, each once (sizes held only by split slots have no group of their own).
         std::vector<double> sizes;
-        for (const RackNozzle &nozzle : racks[e])
+        for (size_t k = 0; k < racks[e].size(); ++k) {
+            const RackNozzle &nozzle = racks[e][k];
+            if (std::find(split.begin(), split.end(), int(k) + 1) != split.end())
+                continue;
             if (!same_nozzle_diameter(nozzle.diameter, nozzles[e]) &&
                 std::none_of(sizes.begin(), sizes.end(), [&nozzle](double d) { return same_nozzle_diameter(d, nozzle.diameter); }))
                 sizes.push_back(nozzle.diameter);
-        for (size_t k = 0; k < sizes.size(); ++k)
-            out.push_back({ e, int(k) + 1, sizes[k] });
+        }
+        int next = 1;
+        for (double d : sizes)
+            out.push_back({ e, next++, d, 0 });
+        for (int k : split)
+            out.push_back({ e, next++, racks[e][size_t(k - 1)].diameter, k });
     }
     return out;
 }
@@ -1397,11 +1520,15 @@ std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config)
 
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry)
 {
+    if (entry.rack_slot > 0)
+        return nozzle_rack_slot_tool_id(entry.extruder, entry.rack_slot);
     return entry.slot > 0 ? nozzle_size_group_id(entry.extruder, entry.diameter) : nozzle_tool_id(entry.extruder);
 }
 
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry)
 {
+    if (entry.rack_slot > 0)
+        return rack_slot_name(config, entry.extruder, entry.rack_slot);
     return entry.slot > 0 ? rack_size_name(config, entry.extruder, entry.diameter) : nozzle_tool_name(config, entry.extruder);
 }
 
@@ -1411,6 +1538,10 @@ std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int fila
     const size_t       e = nozzle_for_filament(config, f);
     if (rack_slot_count(config, e) == 0)
         return std::string();
+    // H3C slot process groups: a filament on a split slot (its pin, or the TPU285 slot for a 2.85 mm filament) prints with that
+    // slot's tool.
+    if (const int k = filament_split_rack_slot(config, f); k > 0)
+        return nozzle_rack_slot_tool_id(e, k);
     const std::vector<double> nozzles = effective_nozzle_diameters(config);
     const double              d       = nozzle_diameter_for_filament(config, f);
     if (e >= nozzles.size() || same_nozzle_diameter(d, nozzles[e]))
@@ -1420,8 +1551,13 @@ std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int fila
 
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id)
 {
-    const size_t e = nozzle_for_filament(config, std::max(filament_id, 1u));
-    if (!nozzle_filament_group_id(config, filament_id).empty())
+    const size_t      e  = nozzle_for_filament(config, std::max(filament_id, 1u));
+    const std::string id = nozzle_filament_group_id(config, filament_id);
+    size_t            se = 0;
+    int               sk = 0;
+    if (parse_nozzle_rack_slot_tool_id(id, se, sk))
+        return rack_slot_name(config, se, sk);
+    if (!id.empty())
         return rack_size_name(config, e, nozzle_diameter_for_filament(config, std::max(filament_id, 1u)));
     return nozzle_tool_name(config, e);
 }
@@ -1445,9 +1581,7 @@ std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &c
             std::string name = entry.substr(nl + 1);
             boost::algorithm::trim(id);
             boost::algorithm::trim_right(name);
-            size_t e = 0;
-            double d = 0.;
-            if (!name.empty() && parse_nozzle_size_group_id(id, e, d))
+            if (!name.empty() && is_nozzle_rack_tool_id(id))
                 out[id] = name;
         }
     return out;
@@ -1702,6 +1836,7 @@ bool fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<con
 
 double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
+    filament_id = nozzle_filament_of(config, filament_id);
     const auto *heights = dynamic_cast<const ConfigOptionFloatsOrPercents *>(config.option("nozzle_layer_height"));
     if (heights == nullptr || filament_id < 1 || filament_id > heights->values.size())
         return 0.;

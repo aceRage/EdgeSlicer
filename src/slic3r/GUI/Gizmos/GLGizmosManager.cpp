@@ -27,6 +27,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSculpt.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoSplitToFit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
@@ -76,9 +77,19 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
                 out.push_back(i);
     }
     else {
-        for (size_t i = 0; i < m_gizmos.size(); ++i)
+        // Split to Fit P4: its button sits right after Cut's. Only the toolbar ORDER changes: its EType
+        // stays last, so m_gizmos, the sprite ids and icon texture rows, the shortcut lookup and every
+        // index by EType are unchanged. Everything that maps a toolbar slot to a gizmo goes through
+        // this list (mouse hit test, drawing, the arrow, lookup by icon name).
+        const bool split_fit_known = size_t(SplitToFit) < m_gizmos.size();
+        for (size_t i = 0; i < m_gizmos.size(); ++i) {
+            if (split_fit_known && i == size_t(SplitToFit))
+                continue;
             if (m_gizmos[i]->is_selectable())
                 out.push_back(i);
+            if (split_fit_known && i == size_t(Cut) && m_gizmos[SplitToFit]->is_selectable())
+                out.push_back(size_t(SplitToFit));
+        }
     }
     return out;
 }
@@ -195,6 +206,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::CadFillet):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg");
             break;
+        case (EType::SplitToFit):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg");
+            break;
         }
 
     }
@@ -242,6 +256,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
     m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
     m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
+    m_gizmos.emplace_back(new GLGizmoSplitToFit(m_parent, m_is_dark ? "toolbar_split_fit_dark.svg" : "toolbar_split_fit.svg", EType::SplitToFit));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -1637,6 +1652,8 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Edit";
     case GLGizmosManager::EType::CadFillet:
         return "CAD Fillet";
+    case GLGizmosManager::EType::SplitToFit:
+        return "Split to Fit";
     case GLGizmosManager::EType::TextureDisplacement:
         return "Texture Displacement";
     default:

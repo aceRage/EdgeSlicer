@@ -873,12 +873,26 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                                           const Transform3d& cut_matrix = Transform3d::Identity(),
                                           bool place_on_cut = false, bool flip = false)
 {
-    // Reset instance transformation except offset and Z-rotation
+    // Reset instance transformation except offset and Z-rotation.
+    // The halves' meshes already carry the cut instance's rotation, scale and mirroring. Any other
+    // instance keeps only what it had on top of the cut one, or its copy would show that one's
+    // rotation twice and lose its own scale.
+    const Transformation src_trafo = src_instance_idx < object->instances.size() ?
+                                         object->instances[src_instance_idx]->get_transformation() : Transformation();
+    const Transform3d    src_linear = src_trafo.get_matrix_no_offset();
+    const Transform3d    src_inv    = std::abs(src_linear.matrix().determinant()) > 1e-12 ? src_linear.inverse() : Transform3d::Identity();
+    const double         src_rot_z  = src_trafo.get_rotation().z();
 
     for (size_t i = 0; i < object->instances.size(); ++i) {
         auto& obj_instance = object->instances[i];
         const double rot_z = obj_instance->get_rotation().z();
-        
+
+        if (!flip && !place_on_cut && i != src_instance_idx) {
+            obj_instance->set_transformation(Transformation(translation_transform(obj_instance->get_offset()) *
+                                                            obj_instance->get_transformation().get_matrix_no_offset() * src_inv));
+            continue;
+        }
+
         Transformation inst_trafo = Transformation(obj_instance->get_transformation().get_matrix_no_scaling_factor());
         // add respect to mirroring
         if (obj_instance->is_left_handed())
@@ -887,11 +901,7 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
         obj_instance->set_transformation(inst_trafo);
 
         Vec3d rotation = Vec3d::Zero();
-        if (!flip && !place_on_cut) {
-            if ( i != src_instance_idx)
-            rotation[Z] = rot_z;
-        }
-        else {
+        if (flip || place_on_cut) {
             Transform3d rotation_matrix = Transform3d::Identity();
             if (flip)
                 rotation_matrix = rotation_transform(PI * Vec3d::UnitX());
@@ -900,13 +910,37 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                 rotation_matrix = rotation_matrix * Transformation(cut_matrix).get_rotation_matrix().inverse();
 
             if (i != src_instance_idx)
-                rotation_matrix = rotation_transform(rot_z * Vec3d::UnitZ()) * rotation_matrix;
+                rotation_matrix = rotation_transform((rot_z - src_rot_z) * Vec3d::UnitZ()) * rotation_matrix;
 
             rotation = Transformation(rotation_matrix).get_rotation();
         }
 
         obj_instance->set_rotation(rotation);
     }
+}
+
+// The upper half of a flat horizontal cut goes onto the bed by its own lowest point, so its height
+// ranges move down by as much as that point is above the old object's bottom; a range wholly below
+// it no longer has anything to apply to. Only this plain case: the half is neither flipped nor laid
+// on its cut, and the source does not sink below the bed.
+static void shift_upper_layer_ranges(ModelObject* upper, size_t instance, const Transform3d& cut_matrix, const BoundingBoxf3& src_bb)
+{
+    if (upper->layer_config_ranges.empty() || upper->volumes.empty() || instance >= upper->instances.size() || !src_bb.defined ||
+        src_bb.min.z() < -EPSILON)
+        return;
+    if ((Transformation(cut_matrix).get_rotation_matrix() * Vec3d::UnitZ() - Vec3d::UnitZ()).norm() > EPSILON)
+        return;
+    const BoundingBoxf3 upper_bb = upper->instance_bounding_box(instance);
+    if (!upper_bb.defined)
+        return;
+    const double shift = upper_bb.min.z() - src_bb.min.z();
+    if (shift <= EPSILON)
+        return;
+    t_layer_config_ranges shifted;
+    for (auto& [range, config] : upper->layer_config_ranges)
+        if (range.second > shift + EPSILON)
+            shifted[{ std::max(0., range.first - shift), range.second - shift }] = std::move(config);
+    upper->layer_config_ranges = std::move(shifted);
 }
 
 
@@ -992,7 +1026,9 @@ void Cut::post_process(ModelObject* object, ModelObjectPtrs& cut_object_ptrs, bo
 {
     if (!object) return;
 
-    if (keep && !object->volumes.empty()) {
+    // A side with no part to print (a plane just above or below the parts, with a modifier
+    // reaching across it) is not a result: delete_extra_modifiers() would leave it empty.
+    if (keep && std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* v) { return v->is_model_part(); })) {
         reset_instance_transformation(object, m_instance, m_cut_matrix, place_on_cut, flip);
         cut_object_ptrs.push_back(object);
     }
@@ -1331,6 +1367,24 @@ bool has_flexi_joint(const ModelObject* mo)
     return false;
 }
 
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors)
+{
+    if (flexi_joints == 0 || (flexi_joints == 1 && other_connectors == 0))
+        return {};
+    return L("Only one Flexi joint can be made in a cut, with no other connectors. Remove the others to cut.");
+}
+
+std::string flexi_connectors_error(const CutConnectors& connectors)
+{
+    size_t flexi = 0, other = 0;
+    for (const CutConnector& c : connectors)
+        if (is_flexi_connector_type(c.attribs.type))
+            ++ flexi;
+        else if (!is_tac_joint_connector_type(c.attribs.type))
+            ++ other;
+    return flexi_connectors_error(flexi, other);
+}
+
 ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
 {
     using namespace Geometry;
@@ -1385,6 +1439,64 @@ ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector
     return vol;
 }
 
+// Split to Fit P2: moved here from GLGizmoCut3D::get_connector_mesh() (the Plug / Dowel / Snap part)
+// and GLGizmoCut3D::apply_cut_connectors(), unchanged, so the planner and the tests bake connectors
+// without the GUI. The gizmo calls both.
+indexed_triangle_set cut_connector_unit_mesh(const CutConnectorAttributes& attributes, float snap_space_proportion,
+                                             float snap_bulge_proportion)
+{
+    int sectorCount{ 1 };
+    switch (CutConnectorShape(attributes.shape)) {
+    case CutConnectorShape::Triangle: sectorCount = 3; break;
+    case CutConnectorShape::Square:   sectorCount = 4; break;
+    case CutConnectorShape::Circle:   sectorCount = 360; break;
+    case CutConnectorShape::Hexagon:  sectorCount = 6; break;
+    default: break;
+    }
+
+    if (attributes.type == CutConnectorType::Snap)
+        return its_make_snap(1.0, 1.0, snap_space_proportion, snap_bulge_proportion);
+    if (attributes.style == CutConnectorStyle::Prism)
+        return its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
+    if (attributes.type == CutConnectorType::Plug)
+        return its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
+    return its_make_frustum_dowel(1.0, 1.0, sectorCount);
+}
+
+void bake_cut_connectors(ModelObject* mo, const std::string& connector_name, float snap_space_proportion, float snap_bulge_proportion)
+{
+    if (mo == nullptr || mo->cut_connectors.empty())
+        return;
+
+    using namespace Geometry;
+
+    size_t connector_id = mo->cut_id.connectors_cnt();
+    for (const CutConnector& connector : mo->cut_connectors) {
+        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::PushFit) {
+            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::TacJoint) {
+            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
+            continue;
+        }
+        // Placed as the gizmo draws it (centred on its height only): see add_cut_connector_volume().
+        ModelVolume* new_volume = add_cut_connector_volume(
+            *mo, cut_connector_unit_mesh(connector.attribs, snap_space_proportion, snap_bulge_proportion), connector);
+
+        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
+        new_volume->name     = connector_name + "-" + std::to_string(++connector_id);
+    }
+    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
+
+    // delete all connectors
+    mo->cut_connectors.clear();
+}
+
 static bool has_tac_joint(const ModelObject* object)
 {
     return std::any_of(object->volumes.begin(), object->volumes.end(),
@@ -1410,6 +1522,21 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 
     ModelObject* mo = m_model.objects.front();
 
+    // One Flexi joint per cut and nothing beside it: the cut below makes one joint and has no
+    // place for any other connector. Refused before anything is changed, as the gizmo refuses it
+    // before the click.
+    {
+        size_t flexi = 0, other = 0;
+        for (const ModelVolume* v : mo->volumes)
+            if (is_unprocessed_flexi_volume(v))
+                ++ flexi;
+            else if (v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_tac_joint())
+                ++ other;
+        const std::string error = flexi_connectors_error(flexi, other);
+        if (!error.empty())
+            throw std::invalid_argument(error);
+    }
+
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
 
     const SavedPaintings saved_paintings = save_paintings(mo);
@@ -1424,23 +1551,18 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // Phase 1: exactly one joint per cut. Extra joints are ignored with a warning.
+    // Exactly one joint per cut, checked above.
     FlexiJointParams params;
     Transform3d      joint_matrix = Transform3d::Identity();
     ModelVolume*     first_solid  = nullptr;
-    int              joints       = 0;
     for (ModelVolume* v : mo->volumes) {
         if (is_unprocessed_flexi_volume(v)) {
-            if (++ joints == 1) {
-                params       = v->cut_info.flexi;
-                joint_matrix = inverse_cut_matrix * v->get_matrix();
-            }
+            params       = v->cut_info.flexi;
+            joint_matrix = inverse_cut_matrix * v->get_matrix();
             v->cut_info.set_processed();
         } else if (v->is_model_part() && !v->mesh().empty() && first_solid == nullptr)
             first_solid = v;
     }
-    if (joints > 1)
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
 
     // PHASE 3: the kerf ADDS to the joint's own gap, in the params, BEFORE anything
     // is generated. flexi_effective_gap() sets where the two flat faces go, and
@@ -1495,7 +1617,13 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     TriangleMesh lower_mesh(std::move(lower_its));
     TriangleMesh upper_mesh(std::move(upper_its));
 
-    bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
+    // A joint needs material on both sides of it. `out` is handed to m_model before a refusal so
+    // it is freed with the rest.
+    if (lower_mesh.empty() || upper_mesh.empty()) {
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: the cut leaves nothing on one side of it."));
+    }
+    bool boolean_ok = true;
 
     // Union each segment's own joint body into it, then subtract the OTHER side's body
     // inflated by the clearance. For the revolved kinds the lower relief list is empty and
@@ -1526,8 +1654,14 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
             if (!flexi_boolean(upper_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
         }
 
-    if (!boolean_ok)
-        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut falls back to two plain halves";
+    // A failed boolean refuses the cut. Going on would give halves with the joint partly made (a
+    // body joined to one half with no room cut for it in the other) or not made at all, and the
+    // person would not know.
+    if (!boolean_ok) {
+        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut is refused";
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: joining it to the halves failed. Try another size or position."));
+    }
 
     add_cut_volume(upper_mesh, out, first_solid, m_cut_matrix, "_A");
     if (!lower_mesh.empty()) {
@@ -2158,6 +2292,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
 
+        if (upper && !m_attributes.has(ModelObjectCutAttribute::PlaceOnCutUpper) && !m_attributes.has(ModelObjectCutAttribute::FlipUpper) &&
+            size_t(m_instance) < m_src_bboxes.size())
+            shift_upper_layer_ranges(upper, m_instance, m_cut_matrix, m_src_bboxes[m_instance]);
     }
     if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
         add_separate_parts(dowels, cut_object_ptrs);

@@ -111,6 +111,8 @@ set(lisbslic3r_sources
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
     Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseSurfaceColours.cpp
+    Showcase/ShowcaseSurfaceColours.hpp
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
@@ -160,6 +162,9 @@ set(lisbslic3r_sources
     BuildVolume.hpp
     ExtruderAreas.cpp
     ExtruderAreas.hpp
+    SplitLabels.cpp
+    SplitToVolume.cpp
+    SplitToVolume.hpp
     calib.cpp
     calib.hpp
     Circle.cpp
@@ -238,6 +243,10 @@ set(lisbslic3r_sources
     ExtrusionEntityCollection.hpp
     ContourZ.cpp
     ContourZ.hpp
+    CurvedTops.cpp
+    CurvedTops.hpp
+    HeadClearance.cpp
+    HeadClearance.hpp
     ExtrusionEntity.cpp
     ExtrusionEntity.hpp
     ExtrusionSimulator.cpp
@@ -371,6 +380,8 @@ set(lisbslic3r_sources
     GCode/AvoidCrossingPerimeters.hpp
     GCode/ConflictChecker.cpp
     GCode/ConflictChecker.hpp
+    GCode/HeadCollisionCheck.cpp
+    GCode/HeadCollisionCheck.hpp
     GCode/CoolingBuffer.cpp
     GCode/CoolingBuffer.hpp
     GCode.cpp
@@ -400,6 +411,8 @@ set(lisbslic3r_sources
     GCode/PrintExtents.cpp
     GCode/PrintExtents.hpp
     GCodeReader.cpp
+    GCodeTemplateLint.cpp
+    GCodeTemplateLint.hpp
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
@@ -421,6 +434,8 @@ set(lisbslic3r_sources
     GCode/WipePathHelpers.hpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
+    GCode/StartupSound.cpp
+    GCode/StartupSound.hpp
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/ToolOrdering.cpp
@@ -497,6 +512,8 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     MixedSublayer.cpp
     MixedSublayer.hpp
+    CliNamedPresets.cpp
+    CliNamedPresets.hpp
     CliPresetSlots.cpp
     CliPresetSlots.hpp
     CliOutput.cpp
@@ -546,6 +563,12 @@ set(lisbslic3r_sources
     FilamentSyncMatch.hpp
     PlateBedTypes.cpp
     PlateBedTypes.hpp
+    PrimeTowerDefaults.cpp
+    PrimeTowerDefaults.hpp
+    FineDetail.cpp
+    FineDetail.hpp
+    ThinFeatures.cpp
+    ThinFeatures.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp

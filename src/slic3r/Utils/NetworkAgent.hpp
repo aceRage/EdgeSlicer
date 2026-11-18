@@ -241,6 +241,10 @@ public:
     // the call carried is cut out by value, then the text is scrubbed (tokens, e-mail, account
     // and user values) and cut to max_len. Public for the unit test.
     static std::string login_failure_body_for_log(const std::string& body, const std::string& credential, size_t max_len = 300);
+    // What the other calls log of a response body or a message that can carry secrets (the
+    // account's printer list holds each printer's LAN access code as "dev_access_code"; the
+    // sign-in data holds the tokens): the same scrubber, no credential to cut by value.
+    static std::string body_for_log(const std::string& body, size_t max_len = 2000);
     int track_enable(bool enable);
     int track_remove_files();
     int track_event(std::string evt_key, std::string content);
