@@ -161,6 +161,23 @@ ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, 
 // generic connector radius/height scaling to these reference meshes.
 ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
 
+// The unit mesh of a plain connector - Plug, Dowel or Snap - before it is scaled by (radius,
+// radius, height): a prism or a frustum with the shape's number of sides, or the snap. Moved out
+// of GLGizmoCut3D::get_connector_mesh() (Split to Fit P2) so connectors can be baked headless;
+// the gizmo still builds its Flexi, Pin and TAC previews itself and calls this for the rest.
+indexed_triangle_set cut_connector_unit_mesh(const CutConnectorAttributes& attributes,
+                                             float snap_space_proportion = 0.3f, float snap_bulge_proportion = 0.15f);
+
+// Turn mo->cut_connectors into connector volumes, ready for a Cut: a NEGATIVE_VOLUME per Plug /
+// Dowel / Snap (cut_connector_unit_mesh() at pos * rotation_m * z_angle, scaled by radius, radius,
+// height), and the Flexi / Pin / TAC volumes from add_*_volume(). Names are `connector_name`-<n>
+// (the TAC Joint's "TAC Joint-<n>"), numbered on from mo->cut_id's connector count, which grows by
+// the number baked; mo->cut_connectors is cleared. Moved verbatim from
+// GLGizmoCut3D::apply_cut_connectors() (Split to Fit P2), which now calls it, so the Cut tool's
+// output is unchanged. The snap proportions are the gizmo's (its defaults here).
+void bake_cut_connectors(ModelObject* mo, const std::string& connector_name,
+                         float snap_space_proportion = 0.3f, float snap_bulge_proportion = 0.15f);
+
 // A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
 // from its object frame to the frame the halves' meshes are built in (the source object's frame
 // with the instance's rotation and scale applied, no offset). The assembled pose (C1) and the pin

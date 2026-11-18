@@ -78,17 +78,21 @@ double Extruder::retract(double length, double restart_extra)
     }
 }
 
-double Extruder::unretract()
+double Extruder::unretract(double extra)
 {
     // BBS
     if (m_share_extruder) {
         double dE = m_share_retracted + m_restart_extra;
+        if (dE != 0.)
+            dE += extra;
         this->extrude(dE);
         m_share_retracted     = 0.;
         m_restart_extra = 0.;
         return dE;
     } else {
         double dE = m_retracted + m_restart_extra;
+        if (dE != 0.)
+            dE += extra;
         this->extrude(dE);
         m_retracted     = 0.;
         m_restart_extra = 0.;

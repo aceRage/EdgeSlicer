@@ -1990,3 +1990,37 @@ TEST_CASE("The chamber temperature key the settings page checks exists", "[Confi
     CHECK_FALSE(config.has("chamber_temperatures"));
     REQUIRE(config.option<ConfigOptionInts>("chamber_temperature") != nullptr);
 }
+
+TEST_CASE("CLI command-line settings are recorded in the slot of their preset type", "[Config][ProjectPreset]")
+{
+    DynamicPrintConfig project;
+    // [process, filament 1, filament 2, printer]; the process already lists one change.
+    project.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "wall_loops", "", "", "" }));
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("top_shell_layers", new ConfigOptionInt(9));            // process
+    overrides.set_key_value("wall_loops", new ConfigOptionInt(4));                 // process, already listed
+    overrides.set_key_value("nozzle_temperature", new ConfigOptionInts({ 215 }));   // filament
+    overrides.set_key_value("retraction_length", new ConfigOptionFloats({ 0.5 }));  // printer
+    overrides.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "x" }));
+
+    CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 4);
+    const std::vector<std::string> &slots = project.option<ConfigOptionStrings>("different_settings_to_system")->values;
+    REQUIRE(slots.size() == 4);
+    auto keys = [](const std::string &slot) {
+        std::vector<std::string> out;
+        unescape_strings_cstyle(slot, out);
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    CHECK(keys(slots[0]) == std::vector<std::string>{ "top_shell_layers", "wall_loops" });
+    CHECK(keys(slots[1]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[2]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[3]) == std::vector<std::string>{ "retraction_length" });
+
+    // Nothing to record into: left alone.
+    DynamicPrintConfig bare;
+    CHECK(record_cli_overrides_as_different(bare, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 0);
+    CHECK_FALSE(bare.has("different_settings_to_system"));
+}

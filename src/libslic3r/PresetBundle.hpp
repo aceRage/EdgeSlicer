@@ -733,9 +733,12 @@ public:
         size_t      extruder{ 0 };
         int         slot{ 0 };      // 1-based rack slot, 0 = the extruder itself
         double      diameter{ 0. };
-        std::string id;             // "T2" or "T2.3"
+        std::string id;             // "T2", "T2:0.6" or (H3C) "T1.9"
+        int         rack_slot{ 0 }; // H3C: the 1-based rack slot of a slot tool ("T1.9"), 0 = a size group or the extruder
     };
     NozzleToolRef               nozzle_tool_ref(size_t tool) const;
+    // H3C slot process groups: the rack slots of `extruder` that are tools of their own (split_rack_slots, ToolSlots.hpp).
+    std::vector<int>            nozzle_split_rack_slots(size_t extruder) const;
     size_t                      nozzle_tool_count() const;
     // The tool of an id ("T2", "T2.3"), -1 when the printer has no such tool.
     int                         nozzle_tool_index(const std::string &id) const;

@@ -433,6 +433,10 @@ public:
     // slice and preview; a slice running on it goes on, and what would touch the window or the app-global presets (the
     // slice / export completion handling, a scheduled re-apply of the presets) waits until it is shown again.
     void on_project_hidden();
+    // Curved tops P3: Developer mode changed. Every plate's slice result is invalid (a curved block planned with
+    // or without the developer overrides must be planned again before it can be exported or sent); a hidden
+    // project re-applies when it is shown, the shown one now.
+    void invalidate_slices_for_developer_mode();
     void on_project_shown();
     // Why the active project cannot be switched away from right now (a job holds the plate, a print or send is being
     // prepared, a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool

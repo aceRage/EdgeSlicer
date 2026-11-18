@@ -3279,10 +3279,19 @@ DynamicPrintConfig PresetBundle::nozzle_tool_config() const
                              "single_extruder_multi_material", "extruder_max_nozzle_count" })
         if (const ConfigOption *opt = printer.option(key))
             out.set_key_value(key, opt->clone());
-    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override" })
+    // H3C slot process groups: the per-slot nozzle types of the default rack (the TPU285 slot) and the filaments' slot pins decide
+    // which rack slots are tools of their own (split_rack_slots).
+    if (const ConfigOption *opt = printer.option("default_nozzle_volume_type"))
+        out.set_key_value("default_nozzle_volume_type", opt->clone());
+    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override", "filament_rack_nozzle_slot", "nozzle_volume_type" })
         if (const ConfigOption *opt = this->project_config.option(key))
             out.set_key_value(key, opt->clone());
     return out;
+}
+
+std::vector<int> PresetBundle::nozzle_split_rack_slots(size_t extruder) const
+{
+    return split_rack_slots(this->nozzle_tool_config(), extruder);
 }
 
 size_t PresetBundle::nozzle_tool_count() const
@@ -3311,6 +3320,7 @@ PresetBundle::NozzleToolRef PresetBundle::nozzle_tool_ref(size_t tool) const
         ref.slot     = entry.slot;
         ref.diameter = entry.diameter;
         ref.id       = nozzle_tool_entry_id(entry);
+        ref.rack_slot = entry.rack_slot;
     }
     return ref;
 }
@@ -3344,6 +3354,8 @@ std::string PresetBundle::nozzle_tool_name(size_t tool) const
     if (!ref.valid)
         return std::string();
     const DynamicPrintConfig cfg = this->nozzle_tool_config();
+    if (ref.rack_slot > 0)
+        return rack_slot_name(cfg, ref.extruder, ref.rack_slot);
     return ref.slot > 0 ? rack_size_name(cfg, ref.extruder, ref.diameter) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
 }
 
@@ -3506,9 +3518,7 @@ bool PresetBundle::prune_nozzle_processes()
         bool               dropped = false;
         for (auto it = edits.begin(); it != edits.end();) {
             const int e = nozzle_tool_id_extruder(it->first);
-            size_t    se = 0;
-            double    sd = 0.;
-            const bool slot_id = parse_nozzle_size_group_id(it->first, se, sd);
+            const bool slot_id = is_nozzle_rack_tool_id(it->first); // P9 size tools, H3C slot tools
             if ((e >= 0 && size_t(e) >= selection.size()) || (slot_id && this->nozzle_tool_index(it->first) < 0) ||
                 dropped_slot_ids.count(it->first) > 0) {
                 it      = edits.erase(it);
@@ -4461,6 +4471,20 @@ DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filamen
     std::string print_inherits = plate_preset.inherits();
     inherits                     .emplace_back(print_inherits);
     const Preset* print_parent_preset =  this->prints.get_preset_parent(plate_preset);
+    // A system process has no "inherits", so get_preset_parent() finds no parent for it and an
+    // edited system process was saved with no "different_settings_to_system" entry. On open,
+    // load_external_preset() then put every changed value back to the system preset's (hand
+    // test 2026-11-15, PR #1021). Before Per-nozzle process P8 this was get_selected_preset_parent(),
+    // which is the system preset itself for a system selection (and the default preset for a user
+    // preset of its own); keep that reference. While a tool's profile is shown, the selected preset
+    // is the tool's, so the plate's own stored preset is the reference.
+    if (print_parent_preset == nullptr && plate_preset.inherits().empty()) {
+        if (m_tool_view.extruder < 0) {
+            print_parent_preset = this->prints.get_selected_preset_parent();
+        } else if (const Preset *stored = this->prints.find_preset(plate_preset.name, false); stored != nullptr && stored->is_system) {
+            print_parent_preset = stored;
+        }
+    }
     if (print_parent_preset) {
         std::vector<std::string> dirty_options = this->prints.dirty_options_without_option_list(&plate_preset, print_parent_preset, ignore_settings_list, false);
         if (!dirty_options.empty()) {
@@ -5357,8 +5381,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
 
-    // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
-    // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
+    // The bundled vendor presets keep the shipped meaning of Bambu Studio's prime_tower_skip_points:
+    // see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
 
     // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;

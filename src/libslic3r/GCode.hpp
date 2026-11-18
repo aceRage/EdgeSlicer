@@ -78,10 +78,15 @@ public:
     // height; empty where the line was laid flat. The wipe keeps to these heights, as the line was laid, rather
     // than ploughing back through it at the height it ended at.
     std::vector<double> heights;
+    // EdgeSlicer, curved tops: the stored path is a curved-tops line. The wipe back along it is held to
+    // the curved paths' speed cap (CURVED_TOPS_MAX_SPEED_MM_S), like the line itself. False otherwise.
+    bool curved_top { false };
+    // Curved tops P3: the wipe's cap, mm/s (CURVED_TOPS_MAX_SPEED_MM_S unless a developer override set one).
+    double curved_wipe_speed_cap { 40.0 };
 
     Wipe() : enable(false) {}
     bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); this->heights.clear(); }
+    void reset_path() { this->path = Polyline(); this->heights.clear(); this->curved_top = false; this->curved_wipe_speed_cap = 40.0; }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
     // Orca: rebuild the stored path while deduplicating shared path boundaries.
@@ -192,7 +197,7 @@ private:
     Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx,
                                             const Vec2f &outward) const;
     BoundingBox printer_travel_bounds(GCode &gcodegen) const;
-    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
+    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos, const Point &gap_entry_pos) const;
     // The current tower layer's z in the G-code frame, where a joined layer prints its purges.
     double joined_tower_z() const { return m_tool_changes[m_layer_idx].front().print_z + m_z_offset; }
 
@@ -353,9 +358,16 @@ public:
     void            apply_print_config(const PrintConfig &print_config);
 
     std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
+    // EdgeSlicer, curved tops: retract (and wipe) where the nozzle is, lift straight up to
+    // safe_z, travel level at safe_z. The caller descends. See GCode.cpp.
+    std::string     curved_tops_travel_to(const Point& point, ExtrusionRole role, const std::string& comment, double safe_z);
+    // EdgeSlicer, curved tops: after the last path of a curved block, retract (and wipe) where the
+    // nozzle is and lift straight up to safe_z before anything else can move the head (design R5).
+    std::string     curved_tops_exit_lift(ExtrusionRole role, double safe_z);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
-    std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
+    // extra: Bambu Studio's extra_retract, filament pushed on top of the unretract (nothing when nothing is retracted).
+    std::string     unretract(double extra = 0.) { return m_writer.unlift() + m_writer.unretract(extra); }
     // Orca #15144: defer_temp_wait (wait_for_temp_on_wipe_tower) raises the new filament's target ahead
     // of the tool change and leaves the blocking wait to the wipe tower.
     std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false, bool defer_temp_wait = false);
@@ -898,6 +910,8 @@ private:
     // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
     // Returns false (and leaves volume alone) when old and new share an extruder.
     bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
+    // hotend_as_extruder (H3C): the flush into the next filament's own rack hotend (0 when it is empty or holds it).
+    float hotend_flush_volume(int new_filament_id) const;
 
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS

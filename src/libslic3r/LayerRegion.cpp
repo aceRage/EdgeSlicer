@@ -323,6 +323,12 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         this->layer()->object()->layer_count()
     );
     
+    // EdgeSlicer, thin feature notice: this call's record; kept only if it found something.
+    ThinFeatureLayer thin_found;
+    thin_found.layer_id = int(this->layer()->id());
+    thin_found.print_z  = this->layer()->print_z;
+    g.thin_features     = &thin_found;
+
     // Paint Depth (F3 fix-wave): give the top-surface/one-wall-top detection the same
     // interface_shells treatment PrintObject::has_bounded_paint_depth() already gets at
     // its own two read sites, so a bounded painted object's color-region boundary counts
@@ -369,6 +375,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    if (!thin_found.empty())
+        this->thin_feature_layers.push_back(std::move(thin_found));
 }
 
 #if 1
