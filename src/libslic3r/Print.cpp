@@ -3412,7 +3412,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     // H2 preload: the pre-changes purge into the prime tower, so refuse the combination up front
     // rather than silently doing nothing. Points the user at enable_prime_tower.
-    if (m_config.preload_all_filaments.value && !m_config.enable_prime_tower.value)
+    // Not for a plate printed in one filament: there is nothing to preload, and normalize_fdm_2 turns the
+    // tower off for it, so the check refused every such plate, asking for the tower the user had enabled.
+    if (m_config.preload_all_filaments.value && !m_config.enable_prime_tower.value && extruders.size() > 1)
         return {L("\"Preload all filaments\" requires the prime tower: every filament is loaded and purged into it "
                   "on the first layer. Enable the prime tower, or turn \"Preload all filaments\" off."),
                 nullptr, "enable_prime_tower"};
