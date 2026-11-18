@@ -123,6 +123,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/CurvedTops.hpp"
+#include "libslic3r/HeadClearance.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/PrintConfig.hpp"
