@@ -33,6 +33,7 @@ struct indexed_triangle_set;
 
 namespace Slic3r {
 
+class Print;
 class PrintObject;
 class TriangleMesh;
 struct HeadClearance;
@@ -55,6 +56,25 @@ static constexpr double CURVED_TOPS_LAND_TOLERANCE_MM   = 0.1;
 static constexpr double CURVED_TOPS_REACH_MARGIN_MM     = 0.5;
 // Travels in and out of the block run this far above the highest curved point.
 static constexpr double CURVED_TOPS_SAFE_LIFT_MM        = 1.0;
+// Curved tops on any printer: the head's slope limit when the user entered the nozzle protrusion on a printer
+// with no head file and left the max surface angle automatic (design 2.2: "otherwise 10 deg").
+static constexpr double CURVED_TOPS_USER_AUTO_ANGLE_DEG = 10.0;
+
+// Curved tops on any printer (design 3.4, D3): the user accepts the risk of head values that no curved print has
+// checked (an EdgeSlicer estimate, or their own nozzle protrusion) once per printer preset and head values. The
+// acceptance is kept by the app (app settings, never a preset, a project or G-code) and handed to the slicer here;
+// the key says what was accepted (curved_tops_acknowledgement_key), so a changed value asks again. The CLI has
+// --curved-tops-accept-unverified instead (set_curved_tops_accept_unverified). Thread safe.
+// App settings section the GUI keeps the accepted keys in (key = the acknowledgement key, value = when).
+static constexpr const char *CURVED_TOPS_ACK_SECTION = "curved_tops_acknowledged";
+void set_curved_tops_acknowledgements(const std::vector<std::string> &keys);
+void add_curved_tops_acknowledgement(const std::string &key);
+bool curved_tops_acknowledged(const std::string &key);
+void set_curved_tops_accept_unverified(bool on);
+bool curved_tops_accept_unverified();
+// "<printer preset>|<printer model>|<head id>|lowest <mm>|rise <mm>|angle <deg>|contact <mm>": the head values in force
+// for this printer config (resolved head, user values). Empty when there is no head at all.
+std::string curved_tops_acknowledgement_key(const PrintConfig &config, const std::string &printer_preset);
 
 // P3: developer overrides (curved_tops_dev_* process keys). They exist so the owner can find the real
 // limits by test prints; they act only while the app's Developer mode is on (the GUI sets it from the
@@ -142,6 +162,13 @@ struct CurvedTopsHeadLimits
     // Where the numbers come from, for messages; why not usable, when not.
     std::string source;
     std::string refusal;
+    // Curved tops on any printer: the head carries the user's own values (printer settings).
+    bool        user_values { false };
+    // The numbers are usable but no curved print checked them: curved tops runs only once the user accepted that
+    // (acknowledged), or with the developer override.
+    bool        needs_acknowledgement { false };
+    bool        acknowledged { false };
+    std::string acknowledgement_key;
     // The numbers the limits were derived with (built-in, or developer overrides).
     double      angle_ceiling_deg { CURVED_TOPS_MAX_ANGLE_CEILING };
     double      clearance_margin_mm { CURVED_TOPS_CLEARANCE_MARGIN_MM };
@@ -150,10 +177,17 @@ struct CurvedTopsHeadLimits
 // The limits for a head on a printer model (head may be null: no data). `dev` (default: none) may
 // widen them: angle ceiling, lowest head part, margins, a head nobody verified or no head data at all
 // (then the lowest head part override is required).
+// `acknowledged`: the user accepted the risk of a head no curved print has checked (see above).
 CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model,
-                                             const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides());
-// Same, through resolve_head_clearance().
-CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides());
+                                             const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides(), bool acknowledged = false);
+// Same, through resolve_head_clearance() (file and user values), acknowledged when the key for (config, printer_preset)
+// was accepted or the CLI accepts every unverified head.
+CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides(),
+                                             const std::string &printer_preset = std::string());
+// Same, for a print: its printer preset name comes from the full config (printer_settings_id).
+CurvedTopsHeadLimits curved_tops_head_limits(const Print &print, const CurvedTopsDevOverrides &dev = CurvedTopsDevOverrides());
+// The printer preset name a print was configured with (printer_settings_id; empty when unknown).
+std::string curved_tops_printer_preset(const Print &print);
 
 // The user's maximum angle, limited by the head and the absolute ceiling (head.angle_ceiling_deg).
 double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head);

@@ -248,9 +248,76 @@ HeadClearancePtrs shipped_head_clearances()
     return heads;
 }
 
+HeadUserValues head_user_values(const PrintConfig &config)
+{
+    HeadUserValues v;
+    auto finite = [](double x) { return std::isfinite(x) ? x : 0.; };
+    v.nozzle_protrusion_mm  = std::max(0., finite(config.head_nozzle_protrusion.value));
+    v.max_surface_angle_deg = std::max(0., finite(config.head_max_surface_angle.value));
+    v.nozzle_contact_mm     = std::clamp(finite(config.head_nozzle_contact_record.value), 0., 1.);
+    double r = finite(config.extruder_clearance_max_radius.value);
+    if (!(r > 0.))
+        r = finite(config.extruder_clearance_radius.value);
+    v.head_radius_mm = r > 0. ? r : 40.;
+    return v;
+}
+
+HeadClearancePtr head_with_user_values(const HeadClearancePtr &file, const std::string &printer_model, const HeadUserValues &values)
+{
+    if (!values.any())
+        return file;
+    const double P = values.nozzle_protrusion_mm;
+    // The user's own head body: from the protrusion upward, as wide as the clearance radius. Measured (the user's number).
+    const double     R = std::max(values.head_radius_mm, 5.);
+    HeadClearanceBox user_box;
+    user_box.name      = "print head body (your nozzle protrusion)";
+    user_box.min       = Vec3d(-R, -R, P);
+    user_box.max       = Vec3d(R, R, P + 100.);
+    user_box.estimated = false;
+
+    auto head = std::make_shared<HeadClearance>();
+    if (file) {
+        *head        = *file;
+        head->id     = file->id + "+user";
+        head->name   = file->name + ", with your nozzle protrusion";
+        head->source = file->source + " Nozzle protrusion from the printer settings (the user's value).";
+        bool lower_than_all = true;
+        for (HeadClearanceBox &b : head->boxes) {
+            if (b.estimated && b.min.z() < P) {
+                // An estimate below the user's measurement: the measurement wins. Keep the box's own height.
+                const double height = std::max(b.max.z() - b.min.z(), 0.1);
+                b.min.z()           = P;
+                b.max.z()           = std::max(b.max.z(), P + height);
+            }
+            if (b.min.z() <= P)
+                lower_than_all = false;
+        }
+        if (lower_than_all)
+            head->boxes.insert(head->boxes.begin(), user_box);
+    } else {
+        head->id     = "user-head";
+        head->name   = "your head values for " + (printer_model.empty() ? std::string("this printer") : printer_model);
+        head->source = "Printer settings: nozzle protrusion entered by the user; generic nozzle outline.";
+        if (!printer_model.empty())
+            head->printer_models = { printer_model };
+        // A generic brass nozzle (the estimate the Centauri Carbon and U1 files use too).
+        head->nozzle_profile   = { { 0.0, 0.5 }, { 1.0, 1.3 }, { 2.0, 2.1 }, { 4.0, 3.5 } };
+        head->nozzle_estimated = true;
+        head->boxes            = { user_box };
+        head->generic_nozzle   = true;
+    }
+    head->calibrated = false;
+    head->curved_tops_verified.reset();
+    head->user_values                = true;
+    head->user_nozzle_protrusion_mm  = P;
+    head->user_max_surface_angle_deg = values.max_surface_angle_deg;
+    head->user_nozzle_contact_mm     = values.nozzle_contact_mm;
+    return head;
+}
+
 HeadClearancePtr resolve_head_clearance(const std::string &printer_model, const HeadClearancePtrs &heads)
 {
-    // Source 1 (printer preset values) arrives with P2. Source 2: the first file listing the model.
+    // Source 1 (printer preset values) is applied by the PrintConfig overloads. Source 2: the first file listing the model.
     for (const HeadClearancePtr &h : heads)
         if (h && h->matches_printer_model(printer_model))
             return h;
@@ -263,9 +330,15 @@ HeadClearancePtr resolve_head_clearance(const std::string &printer_model)
     return resolve_head_clearance(printer_model, shipped_head_clearances());
 }
 
+HeadClearancePtr resolve_head_clearance(const PrintConfig &config, const HeadClearancePtrs &heads)
+{
+    return head_with_user_values(resolve_head_clearance(config.printer_model.value, heads), config.printer_model.value,
+                                 head_user_values(config));
+}
+
 HeadClearancePtr resolve_head_clearance(const PrintConfig &config)
 {
-    return resolve_head_clearance(config.printer_model.value);
+    return resolve_head_clearance(config, shipped_head_clearances());
 }
 
 std::shared_ptr<const HeadClearance> head_clearance_for_printer_model(const std::string &printer_model)

@@ -2560,6 +2560,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // by-object collision and arrange keep extruder_clearance_radius.
     ((ConfigOptionFloat,              extruder_clearance_max_radius))
     ((ConfigOptionFloat,              nozzle_height))
+    // EdgeSlicer, curved tops on any printer: the user's own print head values (HeadClearance.hpp, HeadUserValues).
+    ((ConfigOptionFloat,              head_nozzle_protrusion))
+    ((ConfigOptionFloat,              head_max_surface_angle))
+    ((ConfigOptionFloat,              head_nozzle_contact_record))
     ((ConfigOptionStrings,            extruder_colour))
     ((ConfigOptionPoints,             extruder_offset))
     ((ConfigOptionBools,              reduce_fan_stop_start_freq))

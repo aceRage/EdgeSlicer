@@ -864,6 +864,9 @@ public:
     /// @brief Show confirmation dialog for allowed high/low temperature mixing before slice.
     /// @return True if slicing can proceed; false if blocked or user cancelled.
     bool confirm_filament_temp_mixing_before_slice();
+    // EdgeSlicer, curved tops on any printer (design 3.4): once per printer preset and head values, the user accepts
+    // head values no curved print has checked. False = the user cancelled the slice.
+    bool confirm_curved_tops_head_before_slice();
     /// @brief Confirm warning-level high/low temperature material mixing before slicing all plates.
     /// @return True if slice-all can continue; otherwise false.
     bool confirm_filament_temp_mixing_before_slice_all();

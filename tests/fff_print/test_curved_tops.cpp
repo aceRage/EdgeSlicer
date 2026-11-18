@@ -37,6 +37,8 @@
 #include "libslic3r/ContourZ.hpp"
 #include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Semver.hpp"
 #include "libslic3r/HeadClearance.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -3940,4 +3942,343 @@ TEST_CASE("Curved tops P5: gap-fill beads are judged by the head check, and left
     }
     boost::system::error_code ec;
     boost::filesystem::remove_all(dir, ec);
+}
+
+// ---- Curved tops on any printer (tests/design_curved_tops_any_printer.md, 2 and 3.4) ----
+//
+// A printer EdgeSlicer has no checked head data for runs curved tops once the user entered the nozzle protrusion
+// (printer settings, head_nozzle_protrusion) and accepted the risk once (app settings; the CLI's
+// --curved-tops-accept-unverified). Without values: refused, the message says where to enter them. The head
+// contact check runs on the user's head as on a shipped one. Printers with a checked head file are unchanged.
+
+namespace {
+
+// Clears the acceptances (and the CLI's accept-all) for the life of the guard, and again after it.
+struct AcknowledgementGuard
+{
+    AcknowledgementGuard()
+    {
+        set_curved_tops_acknowledgements({});
+        set_curved_tops_accept_unverified(false);
+    }
+    ~AcknowledgementGuard()
+    {
+        set_curved_tops_acknowledgements({});
+        set_curved_tops_accept_unverified(false);
+    }
+};
+
+std::string export_error_of(Print &print)
+{
+    std::string error;
+    try {
+        Test::gcode(print);
+    } catch (const Slic3r::SlicingError &ex) {
+        error = ex.what();
+    }
+    return error;
+}
+
+// The puck on `extra`, with the acceptance for exactly this config given before slicing when `accept`.
+void slice_puck_accepted(Print &print, Model &model, const ConfigItems &extra, bool accept, const TriangleMesh &mesh = make_capped_puck(15., 4., 1.2))
+{
+    Test::init_print(std::vector<TriangleMesh>{ mesh }, print, model, puck_config(true, extra));
+    if (accept) {
+        const CurvedTopsHeadLimits limits = curved_tops_head_limits(print);
+        REQUIRE_FALSE(limits.acknowledgement_key.empty());
+        add_curved_tops_acknowledgement(limits.acknowledgement_key);
+    }
+    print.process();
+}
+
+const ConfigItems voron_head = { { "printer_model", "Voron 2.4 350" }, { "head_nozzle_protrusion", "2.5" } };
+
+} // namespace
+
+TEST_CASE("Curved tops any printer: the user's head values build or adjust the head", "[CurvedTops][CurvedTopsAnyPrinter]")
+{
+    const ResourcesDirGuard resources;
+    HeadUserValues v;
+    v.nozzle_protrusion_mm = 2.5;
+    v.head_radius_mm       = 30.;
+
+    SECTION("no values: nothing changes")
+    {
+        const HeadClearancePtr x1 = resolve_head_clearance("Bambu Lab X1 Carbon");
+        REQUIRE(x1 != nullptr);
+        CHECK(head_with_user_values(x1, "Bambu Lab X1 Carbon", HeadUserValues()) == x1);
+        CHECK(head_with_user_values(nullptr, "Voron 2.4 350", HeadUserValues()) == nullptr);
+        PrintConfig cfg;
+        cfg.printer_model.value = "Bambu Lab X1 Carbon";
+        CHECK(resolve_head_clearance(cfg) == x1);
+        cfg.printer_model.value = "Voron 2.4 350";
+        CHECK(resolve_head_clearance(cfg) == nullptr);
+    }
+    SECTION("no head file: a generic nozzle and one box from the protrusion up")
+    {
+        const HeadClearancePtr h = head_with_user_values(nullptr, "Voron 2.4 350", v);
+        REQUIRE(h != nullptr);
+        CHECK(h->user_values);
+        CHECK(h->generic_nozzle);
+        CHECK_FALSE(h->curved_tops_verified);
+        REQUIRE(h->boxes.size() == 1);
+        CHECK_THAT(h->lowest_box_z(), WithinAbs(2.5, 1e-9));
+        CHECK_FALSE(h->boxes.front().estimated);
+        CHECK_THAT(h->boxes.front().max.x(), WithinAbs(30., 1e-9));
+        CHECK(h->matches_printer_model("Voron 2.4 350"));
+    }
+    SECTION("an estimated file: estimated boxes below the protrusion are raised to it, the printed record is dropped")
+    {
+        const HeadClearancePtr u1 = resolve_head_clearance("Snapmaker U1");
+        REQUIRE(u1 != nullptr);
+        CHECK_THAT(u1->lowest_box_z(), WithinAbs(4.0, 1e-9));
+        // Lower than every box: the user's box is added.
+        HeadUserValues low = v;
+        low.nozzle_protrusion_mm = 3.0;
+        const HeadClearancePtr u1_low = head_with_user_values(u1, "Snapmaker U1", low);
+        CHECK_THAT(u1_low->lowest_box_z(), WithinAbs(3.0, 1e-9));
+        CHECK(u1_low->boxes.size() == u1->boxes.size() + 1);
+        // Higher than the estimated sock: the estimate is raised.
+        HeadUserValues high = v;
+        high.nozzle_protrusion_mm = 4.5;
+        const HeadClearancePtr u1_high = head_with_user_values(u1, "Snapmaker U1", high);
+        CHECK_THAT(u1_high->lowest_box_z(), WithinAbs(4.5, 1e-9));
+        CHECK(u1_high->boxes.size() == u1->boxes.size());
+
+        const HeadClearancePtr x1c = resolve_head_clearance("Bambu Lab X1 Carbon");
+        const HeadClearancePtr x1u = head_with_user_values(x1c, "Bambu Lab X1 Carbon", v);
+        CHECK(x1c->curved_tops_verified);
+        CHECK_FALSE(x1u->curved_tops_verified);
+        CHECK_FALSE(x1u->curved_tops_verified_for("Bambu Lab X1 Carbon"));
+        CHECK(x1u->id != x1c->id);
+    }
+    SECTION("a measured box below the protrusion is kept: of two measured numbers the lower wins")
+    {
+        auto file = std::make_shared<HeadClearance>();
+        file->id             = "measured";
+        file->printer_models = { "Test" };
+        file->nozzle_profile = { { 0.0, 0.5 }, { 1.0, 1.3 } };
+        HeadClearanceBox b;
+        b.min       = Vec3d(-5, -5, 2.0);
+        b.max       = Vec3d(5, 5, 10);
+        b.estimated = false;
+        file->boxes = { b };
+        const HeadClearancePtr h = head_with_user_values(file, "Test", v);
+        CHECK_THAT(h->lowest_box_z(), WithinAbs(2.0, 1e-9));
+    }
+}
+
+TEST_CASE("Curved tops any printer: an unknown printer without values is refused and told where to enter them", "[CurvedTops][CurvedTopsAnyPrinter]")
+{
+    const ResourcesDirGuard    resources;
+    const AcknowledgementGuard acks;
+    // Even with the CLI's acceptance: there are no values to accept.
+    set_curved_tops_accept_unverified(GENERATE(false, true));
+    check_refused_like_off({ { "printer_model", "Voron 2.4 350" } }, 1, "Printer settings > Basic information > Head clearance");
+
+    PrintConfig cfg;
+    cfg.printer_model.value = "Voron 2.4 350";
+    const CurvedTopsHeadLimits limits = curved_tops_head_limits(cfg);
+    CHECK_FALSE(limits.known);
+    CHECK_FALSE(limits.usable);
+    CHECK(limits.acknowledgement_key.empty());
+    CHECK(limits.refusal.find("Nozzle protrusion") != std::string::npos);
+}
+
+TEST_CASE("Curved tops any printer: values without the acceptance are refused, with it the top curves", "[CurvedTops][CurvedTopsAnyPrinter]")
+{
+    const ResourcesDirGuard    resources;
+    const AcknowledgementGuard acks;
+
+    SECTION("not accepted: refused, output = feature off, the message says how to accept")
+    {
+        check_refused_like_off(voron_head, 1, "--curved-tops-accept-unverified");
+        check_refused_like_off(voron_head, 1, "have not been checked by a curved print");
+    }
+    SECTION("accepted for these values: curved, checked, summarised")
+    {
+        Print print;
+        Model model;
+        slice_puck_accepted(print, model, voron_head, true);
+        REQUIRE(top_block(print));
+        const std::string summary = object_warning(*print.objects().front(), PrintStateBase::SlicingCurvedTopsSummary);
+        INFO("summary: " << summary);
+        CHECK(summary.find("of 2.00 mm allowed") != std::string::npos);
+        CHECK(summary.find("risk accepted") != std::string::npos);
+        CHECK(curved_tops_unavailable_warning(*print.objects().front()).empty());
+        CHECK(export_error_of(print).empty());
+        // Automatic angle on a generic nozzle outline: 10 degrees.
+        const CurvedTopsHeadLimits limits = curved_tops_head_limits(print);
+        CHECK(limits.usable);
+        CHECK(limits.user_values);
+        CHECK_THAT(limits.max_slope_deg, WithinAbs(CURVED_TOPS_USER_AUTO_ANGLE_DEG, 1e-9));
+    }
+    SECTION("the CLI's acceptance stands in for the app's")
+    {
+        set_curved_tops_accept_unverified(true);
+        Print print;
+        Model model;
+        slice_puck_accepted(print, model, voron_head, false);
+        CHECK(top_block(print));
+        CHECK(export_error_of(print).empty());
+    }
+    SECTION("a changed value asks again")
+    {
+        Print print;
+        Model model;
+        Test::init_print(std::vector<TriangleMesh>{ make_capped_puck(15., 4., 1.2) }, print, model, puck_config(true, voron_head));
+        const std::string accepted = curved_tops_head_limits(print).acknowledgement_key;
+        add_curved_tops_acknowledgement(accepted);
+        ConfigItems changed = voron_head;
+        changed.push_back({ "head_nozzle_protrusion", "3" });
+        Print print2;
+        Model model2;
+        slice_puck_accepted(print2, model2, changed, false);
+        CHECK(curved_tops_head_limits(print2).acknowledgement_key != accepted);
+        CHECK_FALSE(top_block(print2));
+        CHECK(curved_tops_unavailable_warning(*print2.objects().front()).find("not been accepted") != std::string::npos);
+    }
+    SECTION("the user's angle and contact record act; the contact record defaults to strict")
+    {
+        PrintConfig cfg;
+        cfg.printer_model.value          = "Voron 2.4 350";
+        cfg.head_nozzle_protrusion.value = 2.5;
+        CurvedTopsHeadLimits limits      = curved_tops_head_limits(cfg);
+        PrintObjectConfig    ocfg;
+        ocfg.curved_tops_nozzle_tolerance.value = 0.4;
+        CHECK_THAT(curved_tops_nozzle_tolerance(ocfg, limits, CurvedTopsDevOverrides()).used, WithinAbs(0., 1e-9));
+        cfg.head_nozzle_contact_record.value = 0.3;
+        cfg.head_max_surface_angle.value     = 14.;
+        limits = curved_tops_head_limits(cfg);
+        CHECK_THAT(curved_tops_nozzle_tolerance(ocfg, limits, CurvedTopsDevOverrides()).used, WithinAbs(0.3, 1e-9));
+        CHECK_THAT(limits.max_slope_deg, WithinAbs(14., 1e-9));
+        // Never above the ceiling.
+        cfg.head_max_surface_angle.value = 30.;
+        CHECK_THAT(curved_tops_head_limits(cfg).max_slope_deg, WithinAbs(CURVED_TOPS_MAX_ANGLE_CEILING, 1e-9));
+    }
+}
+
+TEST_CASE("Curved tops any printer: a contact with the user's head stops the export", "[CurvedTops][CurvedTopsAnyPrinter]")
+{
+    const ResourcesDirGuard    resources;
+    const AcknowledgementGuard acks;
+    // The pin of "a pin beside a whole curved top ... is stopped by the head check", on an unknown printer with the
+    // user's values (the same generic nozzle outline as the Centauri Carbon file, the same allowed rise).
+    TriangleMesh puck = make_capped_puck(15., 4., 1.2);
+    TriangleMesh pin(its_make_cube(0.9, 0.9, 5.0));
+    pin.translate(15.6f, -0.45f, 0.f);
+    puck.merge(pin);
+    Print print;
+    Model model;
+    ConfigItems extra = voron_head;
+    extra.push_back({ "head_max_surface_angle", "15" });
+    extra.push_back({ "curved_tops_nozzle_tolerance", "0" });
+    slice_puck_accepted(print, model, extra, true, puck);
+    REQUIRE(top_block(print));
+    const std::string error = export_error_of(print);
+    INFO("error: " << error);
+    CHECK(error.find("Curved tops:") != std::string::npos);
+    CHECK(error.find("The G-code was not exported") != std::string::npos);
+}
+
+TEST_CASE("Curved tops any printer: an estimated head file runs once accepted, a verified one needs nothing", "[CurvedTops][CurvedTopsAnyPrinter]")
+{
+    const ResourcesDirGuard    resources;
+    const AcknowledgementGuard acks;
+    SECTION("Snapmaker U1, estimated file, no values: refused, then curved once accepted")
+    {
+        check_refused_like_off({ { "printer_model", "Snapmaker U1" } }, 1, "is an estimate that no curved print has checked yet");
+        Print print;
+        Model model;
+        slice_puck_accepted(print, model, { { "printer_model", "Snapmaker U1" } }, true);
+        CHECK(top_block(print));
+        CHECK(export_error_of(print).empty());
+    }
+    SECTION("X1 Carbon and Centauri Carbon: verified, nothing to accept, the same G-code whatever was accepted")
+    {
+        const std::string printer_model = GENERATE(std::string("Elegoo Centauri Carbon"), std::string("Bambu Lab X1 Carbon"));
+        INFO("printer_model = " << printer_model);
+        PrintConfig cfg;
+        cfg.printer_model.value = printer_model;
+        const CurvedTopsHeadLimits limits = curved_tops_head_limits(cfg);
+        CHECK(limits.usable);
+        CHECK_FALSE(limits.needs_acknowledgement);
+        CHECK_FALSE(limits.user_values);
+
+        Print plain;
+        Model plain_model;
+        slice_puck(plain, plain_model, true, { { "printer_model", printer_model } });
+        set_curved_tops_accept_unverified(true);
+        Print accepting;
+        Model accepting_model;
+        slice_puck(accepting, accepting_model, true, { { "printer_model", printer_model } });
+        REQUIRE(top_block(plain));
+        CHECK(gcode_without_curved_tops_key(Test::gcode(plain)) == gcode_without_curved_tops_key(Test::gcode(accepting)));
+    }
+    SECTION("X1 Carbon with a value of the user's: the file's record no longer applies, so it asks")
+    {
+        PrintConfig cfg;
+        cfg.printer_model.value          = "Bambu Lab X1 Carbon";
+        cfg.head_nozzle_protrusion.value = 3.0;
+        const CurvedTopsHeadLimits limits = curved_tops_head_limits(cfg);
+        CHECK_FALSE(limits.usable);
+        CHECK(limits.needs_acknowledgement);
+        CHECK_THAT(limits.verified_rise_mm, WithinAbs(0., 1e-9));
+        CHECK_THAT(limits.verified_nozzle_contact_mm, WithinAbs(0., 1e-9));
+        // The file's sock (estimated, 2.5 mm) is raised to the user's 3 mm.
+        CHECK_THAT(limits.allowed_rise_mm, WithinAbs(2.5, 1e-9));
+    }
+}
+
+TEST_CASE("Curved tops any printer: the head values travel with the project, the acceptance does not", "[CurvedTops][CurvedTopsAnyPrinter][3mf]")
+{
+    DynamicPrintConfig config = puck_config(true, { { "printer_model", "Voron 2.4 350" },
+                                                    { "head_nozzle_protrusion", "2.3" },
+                                                    { "head_max_surface_angle", "12" },
+                                                    { "head_nozzle_contact_record", "0.25" } });
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_capped_puck(15., 4., 1.2));
+    object->add_instance();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() /
+                                             boost::filesystem::unique_path("curvedtops_anyprinter_%%%%-%%%%");
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string path = (tmp_root / "head_values.3mf").string();
+
+    PlateData *plate   = new PlateData();
+    plate->plate_index = 0;
+    plate->objects_and_instances.emplace_back(0, 0);
+    StoreParams sp;
+    sp.path            = path.c_str();
+    sp.model           = &model;
+    sp.config          = &config;
+    sp.plate_data_list = { plate };
+    sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored  = store_bbs_3mf(sp);
+    delete plate;
+    REQUIRE(stored);
+
+    Model                     loaded_model;
+    DynamicPrintConfig        loaded_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    version;
+    const bool loaded = load_bbs_3mf(path.c_str(), &loaded_config, &ctxt, &loaded_model, &plates, &presets, &is_bbl_3mf, &version,
+                                     nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+    REQUIRE(loaded);
+    CHECK_THAT(loaded_config.opt_float("head_nozzle_protrusion"), WithinAbs(2.3, 1e-9));
+    CHECK_THAT(loaded_config.opt_float("head_max_surface_angle"), WithinAbs(12., 1e-9));
+    CHECK_THAT(loaded_config.opt_float("head_nozzle_contact_record"), WithinAbs(0.25, 1e-9));
+    CHECK(loaded_config.opt_bool("curved_tops_enabled"));
+    // Nothing of the acceptance is a config key: the CLI flag is not a print setting.
+    CHECK_FALSE(loaded_config.has("curved_tops_accept_unverified"));
+    CHECK(print_config_def.get("curved_tops_accept_unverified") == nullptr);
+    release_PlateData_list(plates);
+
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(tmp_root, ec);
 }

@@ -2648,6 +2648,52 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloat(2.5));
 
+    // EdgeSlicer, curved tops on any printer (tests/design_curved_tops_any_printer.md, 2.2 and 5.1). The user's own
+    // print head values; read by the curved-tops planner and the head contact check (HeadClearance.cpp,
+    // head_with_user_values). They act only when the nozzle protrusion is above 0.
+    def = this->add("head_nozzle_protrusion", coFloat);
+    def->label    = L("Nozzle protrusion");
+    def->tooltip  = L("How far the nozzle tip stands below the lowest other part that moves with the print head. Curved tops "
+                      "needs it on a printer EdgeSlicer has no checked head data for: a curved surface may rise at most this "
+                      "much less 0.5 mm. 0 = not entered (curved tops then uses EdgeSlicer's own data for this printer, if "
+                      "there is any).\n"
+                      "The lowest part is often not the silicone sock. Check each of: the sock or heater block, the part-cooling "
+                      "fan duct outlets, the bed probe (a stowed BLTouch pin, an inductive probe or a scanner), a second nozzle "
+                      "on the same carriage, nozzle wiper arms, lights, a camera.\n"
+                      "How to measure: home the printer with the heaters off and lower the nozzle until it just rests on the "
+                      "bed (or on a sheet of paper). Then find the thickest feeler gauge or drill shank that still slides under "
+                      "each of those parts. Enter the smallest of them. If unsure, enter less, not more.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->max      = 20;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("head_max_surface_angle", coFloat);
+    def->label    = L("Max surface angle");
+    def->tooltip  = L("Steepest surface slope the nozzle may follow on curved tops without its side touching the print. "
+                      "0 = automatic: from EdgeSlicer's head data for this printer, otherwise 10 degrees. Never more than 20 "
+                      "degrees is used, and never more than the curved tops max angle of the process. Used only when the "
+                      "nozzle protrusion is entered.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min      = 0;
+    def->max      = 30;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("head_nozzle_contact_record", coFloat);
+    def->label    = L("Nozzle contact printed cleanly");
+    def->tooltip  = L("The deepest the hot nozzle has passed through already printed material on a curved tops print with "
+                      "these head values on this printer, with no visible mark. It caps the process setting \"Nozzle contact "
+                      "tolerance\". 0 = no such print yet: the nozzle may not touch printed material at all (strict), which "
+                      "is the safe start. Raise it only after a print showed it, using the depth the slicing summary reported "
+                      "for that print. Used only when the nozzle protrusion is entered.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->max      = 1;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def          = this->add("bed_mesh_min", coPoint);
     def->label   = L("Bed mesh min");
     def->tooltip = L(
@@ -6102,9 +6148,11 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Quality");
     def->tooltip  = L("EXPERIMENTAL. Print the last top layers of gently curved top surfaces as non-planar layers "
                       "that follow the surface, instead of a staircase of flat layers.\n"
-                      "For now only available on the Elegoo Centauri Carbon and the Bambu Lab X1 Carbon, the printers "
-                      "whose print head clearance is known. On any other printer the top layers stay flat and a "
-                      "slicing warning says so.\n"
+                      "Needs the print head's clearance for the printer. It has been checked by a print on the Elegoo "
+                      "Centauri Carbon and the Bambu Lab X1 Carbon. On any other printer, enter the nozzle protrusion in "
+                      "Printer settings > Basic information > Head clearance (EdgeSlicer's own estimate is used where it has "
+                      "one), then press Slice and accept the risk once for that printer. Without values the top layers stay "
+                      "flat and a slicing warning says so.\n"
                       "Only surfaces flatter than the maximum angle are bent. A surface taller than the print "
                       "head's nozzle clearance is curved over its upper part and printed flat below it. "
                       "Supports are allowed as long as they stay out of the print head's way near the curved "
@@ -14020,6 +14068,16 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->label = L("Curved tops developer overrides");
     def->tooltip = L("Let the curved_tops_dev_* settings act, as Developer mode does in the app. Off by default: the "
                      "overrides a project or preset carries are then ignored.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // EdgeSlicer, curved tops on any printer: the CLI's stand-in for the app's one-time "I understand the risk".
+    def = this->add("curved_tops_accept_unverified", coBool);
+    def->label = L("Curved tops: accept unverified head values");
+    def->tooltip = L("Let curved tops run on a printer whose print head values no curved print has checked (an EdgeSlicer "
+                     "estimate, or the nozzle protrusion entered in the printer settings), as accepting the risk once does in "
+                     "the app. Off by default: such a printer then prints flat tops and says why. The head contact check still "
+                     "runs and still stops the export on a contact.");
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 

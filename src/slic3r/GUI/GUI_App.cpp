@@ -3059,6 +3059,16 @@ void GUI_App::init_app_config()
     }
     MixedFilamentManager::set_auto_generate_enabled(app_config->get_bool("auto_generate_gradients"));
     set_logging_level(Slic3r::level_string_to_boost(app_config->get("log_severity_level")));
+    // EdgeSlicer, curved tops on any printer: the head values the user accepted the risk of (Plater::
+    // confirm_curved_tops_head_before_slice), handed to the slicer.
+    {
+        std::vector<std::string> keys;
+        if (app_config->has_section(CURVED_TOPS_ACK_SECTION))
+            for (const auto &kv : app_config->get_section(CURVED_TOPS_ACK_SECTION))
+                if (!kv.second.empty())
+                    keys.push_back(kv.first);
+        set_curved_tops_acknowledgements(keys);
+    }
 
 }
 

@@ -29,6 +29,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -89,15 +91,74 @@ std::string only_on_verified_printers()
 {
     const std::string list = verified_printer_list();
     return list.empty() ? std::string() :
-                          " " + Slic3r::format(_u8L("For now curved tops runs only on the printers it has been printed on: %1%."), list);
+                          " " + Slic3r::format(_u8L("Curved tops has been checked by a print only on: %1%."), list);
 }
 
-std::atomic<bool> g_curved_tops_developer_mode { false };
+// Where the user enters their own head values (Tab.cpp, printer settings).
+std::string where_to_enter_head_values()
+{
+    return _u8L("To use curved tops on this printer, measure how far the nozzle tip stands below the lowest other part of the "
+                "print head and enter it as \"Nozzle protrusion\" in Printer settings > Basic information > Head clearance.");
+}
+
+std::string how_to_acknowledge()
+{
+    return _u8L("To use curved tops on it anyway, check the values in Printer settings > Basic information > Head clearance, "
+                "then press Slice and accept the risk once for this printer (command line: --curved-tops-accept-unverified).");
+}
+
+std::atomic<bool>     g_curved_tops_developer_mode { false };
+std::atomic<bool>     g_curved_tops_accept_unverified { false };
+std::mutex            g_curved_tops_ack_mutex;
+std::set<std::string> g_curved_tops_acks;
 
 } // namespace
 
 void set_curved_tops_developer_mode(bool on) { g_curved_tops_developer_mode.store(on); }
 bool curved_tops_developer_mode() { return g_curved_tops_developer_mode.load(); }
+
+void set_curved_tops_acknowledgements(const std::vector<std::string> &keys)
+{
+    std::lock_guard<std::mutex> lock(g_curved_tops_ack_mutex);
+    g_curved_tops_acks = std::set<std::string>(keys.begin(), keys.end());
+}
+
+void add_curved_tops_acknowledgement(const std::string &key)
+{
+    if (key.empty())
+        return;
+    std::lock_guard<std::mutex> lock(g_curved_tops_ack_mutex);
+    g_curved_tops_acks.insert(key);
+}
+
+bool curved_tops_acknowledged(const std::string &key)
+{
+    if (key.empty())
+        return false;
+    std::lock_guard<std::mutex> lock(g_curved_tops_ack_mutex);
+    return g_curved_tops_acks.count(key) > 0;
+}
+
+void set_curved_tops_accept_unverified(bool on) { g_curved_tops_accept_unverified.store(on); }
+bool curved_tops_accept_unverified() { return g_curved_tops_accept_unverified.load(); }
+
+std::string curved_tops_acknowledgement_key(const PrintConfig &config, const std::string &printer_preset)
+{
+    const HeadClearancePtr head = resolve_head_clearance(config);
+    if (!head)
+        return std::string();
+    const HeadUserValues v      = head_user_values(config);
+    const double         lowest = head->lowest_box_z();
+    return printer_preset + "|" + config.printer_model.value + "|" + head->id + "|lowest " +
+           (std::isfinite(lowest) ? mm_str(lowest) : std::string("-")) + "|protrusion " + mm_str(v.nozzle_protrusion_mm) +
+           "|angle " + deg_str(v.max_surface_angle_deg) + "|contact " + mm_str(v.nozzle_contact_mm);
+}
+
+std::string curved_tops_printer_preset(const Print &print)
+{
+    const ConfigOptionString *opt = print.full_print_config().option<ConfigOptionString>("printer_settings_id");
+    return opt != nullptr ? opt->value : std::string();
+}
 
 CurvedTopsDevOverrides curved_tops_dev_overrides(const PrintObjectConfig &config)
 {
@@ -224,15 +285,16 @@ std::string CurvedTopsDevOverrides::ignored_note() const
 }
 
 CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadClearance> &head, const std::string &printer_model,
-                                             const CurvedTopsDevOverrides &dev)
+                                             const CurvedTopsDevOverrides &dev, bool acknowledged)
 {
     CurvedTopsHeadLimits out;
     out.head                = head;
     out.angle_ceiling_deg   = dev.angle_ceiling_deg;
     out.clearance_margin_mm = dev.clearance_margin_mm;
     if (!head) {
+        // D1: no head data and no values of the user's = refused, never a generic default.
         out.refusal = Slic3r::format(_u8L("EdgeSlicer has no print head clearance data for the printer model \"%1%\"."), printer_model) +
-                      only_on_verified_printers();
+                      " " + where_to_enter_head_values() + only_on_verified_printers();
         // P3: no head data at all, curved on the developer's own numbers. The angle is then limited by
         // the ceiling only (there is no nozzle outline), and nothing can check the export.
         if (dev.active && dev.allow_unverified_head) {
@@ -250,8 +312,12 @@ CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadCle
         }
         return out;
     }
-    out.known  = true;
-    out.source = head->name + (head->calibrated ? std::string() : " (" + _u8L("an estimate, not a measurement") + ")");
+    out.known       = true;
+    out.user_values = head->user_values;
+    out.source      = head->user_values ?
+                          Slic3r::format(_u8L("%1% (nozzle protrusion %2% mm from the printer settings)"), head->name,
+                                         mm_str(head->user_nozzle_protrusion_mm)) :
+                          head->name + (head->calibrated ? std::string() : " (" + _u8L("an estimate, not a measurement") + ")");
 
     // Allowed rise: the lowest head part above the tip, less the margin.
     const double lowest = dev.head_lowest_part_mm > 0. ? dev.head_lowest_part_mm : head->lowest_box_z();
@@ -259,14 +325,28 @@ CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadCle
     // Head angle cap: the nozzle flank, less a margin, never above the ceiling.
     out.max_slope_deg = std::clamp(head->nozzle_flank_angle_deg(dev.land_tolerance_mm) - dev.flank_margin_deg, 0.,
                                    dev.angle_ceiling_deg);
+    if (head->user_values) {
+        // The user's angle, or automatic: the file's flank, or 10 degrees on a generic nozzle outline. Never above the
+        // flank's limit or the ceiling.
+        const double wanted = head->user_max_surface_angle_deg > 0. ? head->user_max_surface_angle_deg :
+                              head->generic_nozzle                 ? CURVED_TOPS_USER_AUTO_ANGLE_DEG :
+                                                                     out.max_slope_deg;
+        out.max_slope_deg = std::min(out.max_slope_deg, wanted);
+    }
 
-    const bool verified = head->curved_tops_verified_for(printer_model);
+    // A head adjusted by the user's values never carries the file's printed record (head_with_user_values drops it):
+    // that print checked other numbers. Its nozzle contact record is the user's own.
+    const bool verified = !head->user_values && head->curved_tops_verified_for(printer_model);
     if (verified) {
         out.verified_rise_mm   = head->curved_tops_verified->rise_mm;
         out.verified_angle_deg = head->curved_tops_verified->angle_deg;
         out.verified_nozzle_contact_mm = head->curved_tops_verified->nozzle_contact_mm;
         out.verified_on        = head->curved_tops_verified->on;
+    } else if (head->user_values) {
+        out.verified_nozzle_contact_mm = head->user_nozzle_contact_mm;
+        out.verified_on                = _u8L("your value in the printer settings");
     }
+    out.acknowledged = acknowledged;
 
     if (!std::isfinite(lowest))
         out.refusal = Slic3r::format(_u8L("the print head data for %1% (%2%) has no head parts above the nozzle, so the room for a curved "
@@ -279,23 +359,38 @@ CurvedTopsHeadLimits curved_tops_head_limits(const std::shared_ptr<const HeadCle
     else if (out.max_slope_deg <= 0.)
         out.refusal = Slic3r::format(_u8L("the nozzle outline in the print head data for %1% (%2%) clears no slope."), printer_model,
                                      head->name);
-    else if (!verified && !(dev.active && dev.allow_unverified_head))
-        // P1: an estimated head nobody has printed curved tops with stays refused until the
-        // acknowledgement (P2) lets the user take that risk knowingly.
-        out.refusal = Slic3r::format(_u8L("the print head data for %1% (%2%) is an estimate that no curved print has checked yet."),
-                                     printer_model, head->name) +
-                      only_on_verified_printers();
-    else {
-        out.usable = true;
+    else if (!verified && !acknowledged && !(dev.active && dev.allow_unverified_head)) {
+        // D5: an estimated head file, or the user's own values, runs only once the user accepted the risk (3.4).
+        out.needs_acknowledgement = true;
+        out.refusal = (head->user_values ?
+                           Slic3r::format(_u8L("the print head values for %1% (%2%) have not been checked by a curved print, and the "
+                                               "risk has not been accepted for this printer yet."),
+                                          printer_model, out.source) :
+                           Slic3r::format(_u8L("the print head data for %1% (%2%) is an estimate that no curved print has checked yet."),
+                                          printer_model, head->name)) +
+                      " " + how_to_acknowledge() + only_on_verified_printers();
+    } else {
+        out.usable                = true;
+        out.needs_acknowledgement = !verified;
         if (!verified)
-            out.source += ", " + _u8L("no curved print checked it (developer override)");
+            out.source += ", " + (acknowledged ? _u8L("not checked by a curved print (risk accepted)") :
+                                                 _u8L("no curved print checked it (developer override)"));
     }
     return out;
 }
 
-CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev)
+CurvedTopsHeadLimits curved_tops_head_limits(const PrintConfig &config, const CurvedTopsDevOverrides &dev, const std::string &printer_preset)
 {
-    return curved_tops_head_limits(resolve_head_clearance(config), config.printer_model.value, dev);
+    const std::string    key = curved_tops_acknowledgement_key(config, printer_preset);
+    CurvedTopsHeadLimits out = curved_tops_head_limits(resolve_head_clearance(config), config.printer_model.value, dev,
+                                                       curved_tops_accept_unverified() || curved_tops_acknowledged(key));
+    out.acknowledgement_key  = key;
+    return out;
+}
+
+CurvedTopsHeadLimits curved_tops_head_limits(const Print &print, const CurvedTopsDevOverrides &dev)
+{
+    return curved_tops_head_limits(print.config(), dev, curved_tops_printer_preset(print));
 }
 
 double curved_tops_effective_max_angle(double user_max_deg, const CurvedTopsHeadLimits &head)
@@ -1788,8 +1883,10 @@ GuardSettings guard_settings(const PrintObject &object, int multi_filament)
     const PrintObjectConfig &ocfg  = object.config();
     GuardSettings s;
     s.dev = curved_tops_dev_overrides(ocfg);
-    const CurvedTopsHeadLimits head = curved_tops_head_limits(pcfg, s.dev);
-    s.head             = (head.head ? head.head->id : std::string("-")) + "|" + pcfg.printer_model.value;
+    const CurvedTopsHeadLimits head = curved_tops_head_limits(print, s.dev);
+    // The head and every value that sets its limits (the user's head values included), and whether the risk is accepted.
+    s.head             = (head.head ? head.head->id : std::string("-")) + "|" + pcfg.printer_model.value + "|" +
+                         head.acknowledgement_key + "|" + (head.acknowledged ? "accepted" : "-");
     s.head_usable      = head.usable;
     s.not_alone        = print.objects().size() != 1 || object.instances().size() != 1;
     s.by_object        = pcfg.print_sequence.value == PrintSequence::ByObject;
@@ -1863,7 +1960,7 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     // sub-layer plans, mixed nozzle diameters, the printable height) have no override.
     const PrintConfig            &pcfg = print->config();
     const CurvedTopsDevOverrides  dev  = curved_tops_dev_overrides(ocfg);
-    const CurvedTopsHeadLimits    head = curved_tops_head_limits(pcfg, dev);
+    const CurvedTopsHeadLimits    head = curved_tops_head_limits(*print, dev);
     if (!head.usable)
         return refuse(head.refusal);
     if ((print->objects().size() != 1 || object.instances().size() != 1) && !dev.allow_multiple_objects)

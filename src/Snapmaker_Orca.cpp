@@ -2186,6 +2186,12 @@ int CLI::run(int argc, char **argv)
         Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
         if (dev_option != nullptr && dev_option->value)
             BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+        // Curved tops on any printer: the CLI's stand-in for the app's one-time acceptance of head values no curved
+        // print has checked. Never a preset or project key: a downloaded 3MF cannot carry it.
+        const ConfigOptionBool *accept_option = m_config.option<ConfigOptionBool>("curved_tops_accept_unverified");
+        Slic3r::set_curved_tops_accept_unverified(accept_option != nullptr && accept_option->value);
+        if (accept_option != nullptr && accept_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops may run on unverified print head values for this run (--curved-tops-accept-unverified)";
     }
 
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");

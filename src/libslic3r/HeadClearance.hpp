@@ -81,6 +81,19 @@ struct HeadClearance
     // Curved tops printed with this head (empty when nobody has).
     std::optional<HeadClearanceCurvedTopsVerified> curved_tops_verified;
 
+    // Curved tops on any printer: the head was built, or a shipped file adjusted, from the user's own
+    // values in the printer preset (head_nozzle_protrusion and friends, see HeadUserValues). Such a head
+    // never carries the file's printed record (curved_tops_verified is empty): the user's numbers are not
+    // what that print checked.
+    bool   user_values { false };
+    // No shipped file: the nozzle outline is a generic one, not this printer's.
+    bool   generic_nozzle { false };
+    double user_nozzle_protrusion_mm { 0. };
+    // 0 = automatic.
+    double user_max_surface_angle_deg { 0. };
+    // The deepest nozzle contact the user says printed cleanly with this head (0 = none: strict).
+    double user_nozzle_contact_mm { 0. };
+
     // Height above the tip of the nozzle's underside at horizontal distance r from the nozzle axis.
     // 0 inside the tip land; +infinity beyond the profile's largest radius.
     double nozzle_underside_at(double r) const;
@@ -110,20 +123,46 @@ using HeadClearancePtrs = std::vector<HeadClearancePtr>;
 // in file name order.
 HeadClearancePtrs shipped_head_clearances();
 
+// Curved tops on any printer (tests/design_curved_tops_any_printer.md, 2.2): the head values a user enters
+// in the printer preset. They act only when nozzle_protrusion_mm > 0.
+struct HeadUserValues
+{
+    // How far the nozzle tip stands below the lowest other part that moves with the head.
+    double nozzle_protrusion_mm { 0. };
+    // Steepest surface the nozzle may follow (0 = automatic).
+    double max_surface_angle_deg { 0. };
+    // Deepest nozzle contact printed cleanly (0 = none recorded).
+    double nozzle_contact_mm { 0. };
+    // Half the width of the head body box built when there is no head file (extruder_clearance_max_radius).
+    double head_radius_mm { 0. };
+
+    bool any() const { return nozzle_protrusion_mm > 0.; }
+};
+HeadUserValues head_user_values(const PrintConfig &config);
+
+// The head a print uses when the user entered values (values.any()):
+//  - no file: a generic nozzle outline plus one box from the protrusion upward, head_radius_mm round the nozzle;
+//  - a file: the file's head, with every estimated box that starts below the protrusion raised to it (the user's
+//    measurement beats an estimate), measured boxes kept (of two measured numbers the lower wins), and, when the
+//    user's protrusion is lower than every box, the user's box added. The file's printed record is dropped.
+// Returns `file` unchanged when !values.any().
+HeadClearancePtr head_with_user_values(const HeadClearancePtr &file, const std::string &printer_model, const HeadUserValues &values);
+
 // The ONE place that decides which head model a print uses (design: tests/design_curved_tops_any_printer.md,
 // section 2.1). The curved-tops planner, the Z contouring collision warning and the curved-tops
 // verifier all go through it.
 //
 // Sources, in order of precedence:
-//   1. user values in the printer preset - not yet: the keys come with the "any printer" phase (P2);
+//   1. user values in the printer preset (head_nozzle_protrusion > 0, see head_with_user_values());
 //   2. a head file whose printer_models lists the printer_model; when two files list it, the first in
 //      file name order (load order) wins;
 //   3. nothing: nullptr. There is no generic default; a consumer that needs a head refuses.
 HeadClearancePtr resolve_head_clearance(const std::string &printer_model, const HeadClearancePtrs &heads);
 // Same, against shipped_head_clearances().
 HeadClearancePtr resolve_head_clearance(const std::string &printer_model);
-// Same, for a print's config (its printer_model).
+// Same, for a print's config: its printer_model and the user's head values (source 1).
 HeadClearancePtr resolve_head_clearance(const PrintConfig &config);
+HeadClearancePtr resolve_head_clearance(const PrintConfig &config, const HeadClearancePtrs &heads);
 
 // Kept for older callers: resolve_head_clearance(printer_model).
 std::shared_ptr<const HeadClearance> head_clearance_for_printer_model(const std::string &printer_model);
