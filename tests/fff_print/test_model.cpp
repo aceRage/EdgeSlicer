@@ -249,6 +249,84 @@ TEST_CASE("Splitting one part leaves a flat part of the same object in place", "
     CHECK(object->volumes[2]->name == "cubes_2");
 }
 
+// Splitting a text part reset its text configuration but left its emboss shape on every piece, and a part with an
+// emboss shape and no text configuration is an SVG part (is_svg()): each piece of a split text offered the SVG tool.
+// No piece of a split text or SVG part is the shape any more.
+TEST_CASE("Splitting a text or SVG part leaves plain parts", "[Model][Regression]")
+{
+    // Two 4 mm cubes 10 mm apart, as one mesh: the pieces of a two-letter text.
+    indexed_triangle_set its   = its_make_cube(4., 4., 4.);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(its, other);
+    const bool text = GENERATE(true, false);
+
+    SECTION(text ? "a text part, split as a part" : "an SVG part, split as a part")
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->add_volume(TriangleMesh(its)); // another part, so the object is not the split part alone
+        ModelVolume *part = object->add_volume(TriangleMesh(its));
+        object->add_instance();
+        if (text)
+            part->text_configuration = TextConfiguration{};
+        part->emboss_shape = EmbossShape{};
+        REQUIRE(part->is_text() == text);
+        REQUIRE(part->is_svg() == !text);
+
+        REQUIRE(part->split(1) == 2);
+        REQUIRE(object->volumes.size() == 3);
+        for (const ModelVolume *piece : object->volumes) {
+            CHECK_FALSE(piece->is_text());
+            CHECK_FALSE(piece->is_svg());
+        }
+    }
+    SECTION(text ? "a text object, split to objects" : "an SVG object, split to objects")
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        ModelVolume *part   = object->add_volume(TriangleMesh(its));
+        object->add_instance();
+        if (text)
+            part->text_configuration = TextConfiguration{};
+        part->emboss_shape = EmbossShape{};
+
+        ModelObjectPtrs pieces;
+        object->split(&pieces);
+        REQUIRE(pieces.size() == 2);
+        for (const ModelObject *piece : pieces)
+            for (const ModelVolume *volume : piece->volumes) {
+                CHECK_FALSE(volume->is_text());
+                CHECK_FALSE(volume->is_svg());
+            }
+    }
+}
+
+// A text part of an object of several parts becomes an object of its own whole; it was left a plain part (no text
+// configuration), and its emboss shape made it an SVG part. An SVG part moved whole keeps its shape.
+TEST_CASE("Splitting an object of several parts to objects leaves no text part as an SVG part", "[Model][Regression]")
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *text   = object->add_volume(make_cube(4., 4., 4.));
+    TriangleMesh second = make_cube(4., 4., 4.);
+    second.translate(10.f, 0.f, 0.f);
+    ModelVolume *svg = object->add_volume(std::move(second));
+    object->add_instance();
+    text->text_configuration = TextConfiguration{};
+    text->emboss_shape       = EmbossShape{};
+    svg->emboss_shape        = EmbossShape{};
+
+    ModelObjectPtrs pieces;
+    object->split(&pieces);
+    REQUIRE(pieces.size() == 2);
+    REQUIRE(pieces[0]->volumes.size() == 1);
+    REQUIRE(pieces[1]->volumes.size() == 1);
+    CHECK_FALSE(pieces[0]->volumes.front()->is_text());
+    CHECK_FALSE(pieces[0]->volumes.front()->is_svg());
+    CHECK(pieces[1]->volumes.front()->is_svg());
+}
+
 // Orca #16274 (OD2): raw_indexed_triangle_set() used to leave the triangles of every part after the first
 // pointing at the first part's vertices; the per-body octrees split this mesh into connected components.
 TEST_CASE("An object's raw mesh keeps the triangles of each part on its own vertices", "[Model]")
