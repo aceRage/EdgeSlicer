@@ -2234,6 +2234,34 @@ int audit_plugin_event(PluginAuditManager& mgr, const std::string& event_name, A
 
 } // namespace PluginAuditDetail
 
+bool PluginAuditManager::sidecar_covers_path(const boost::filesystem::path& path, bool is_write) const
+{
+    const std::string plugin_key = current_plugin();
+    if (plugin_key.empty())
+        return false;
+
+    PluginInstallState state;
+    if (!PluginManager::instance().get_install_state(plugin_key, state))
+        return false;
+
+    const std::string target = path.string();
+    // Same split as decide_audited_event: a write grant never covers a read, or the reverse.
+    if (is_write)
+        return PluginAuditDetail::has_permission(AuditEventCategory::FsReadWrite, /*by_event=*/false, state.permissions.fs_readwrite,
+                                                 target);
+    return PluginAuditDetail::has_permission(AuditEventCategory::FsRead, /*by_event=*/false, state.permissions.fs_read, target);
+}
+
+AuditDecision PluginAuditManager::check_hosted_path_access(const boost::filesystem::path& candidate, bool is_write)
+{
+    const AuditDecision d = check_path_access(candidate, is_write);
+    if (d.allowed)
+        return d;
+    if (d.reason == "outside allowed root" && sidecar_covers_path(candidate, is_write))
+        return {true, ""};
+    return d;
+}
+
 bool PluginAuditManager::request_permissions(const std::string& plugin_key, const PluginPermissions& requested)
 {
     if (plugin_key.empty())

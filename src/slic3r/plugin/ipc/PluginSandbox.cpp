@@ -61,7 +61,9 @@ std::string unsandboxed_bind_hash(const std::string& plugin_key)
 
 bool is_tree_wildcard(const std::string& path)
 {
-    return path.size() >= 2 && path.compare(path.size() - 2, 2, "/*") == 0;
+    // Audit's tree_grant_root accepts "*" as the final component with either separator.
+    // A Windows-native "<dir>\*" must be the same OS tree grant as "<dir>/*".
+    return path.size() >= 2 && path.back() == '*' && (path[path.size() - 2] == '/' || path[path.size() - 2] == '\\');
 }
 
 std::string strip_tree_wildcard(std::string path)

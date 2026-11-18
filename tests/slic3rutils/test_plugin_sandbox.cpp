@@ -6,6 +6,7 @@
 #include "plugin_test_utils.hpp"
 
 #include <libslic3r/Zipper.hpp>
+#include <slic3r/plugin/PluginAuditManager.hpp>
 #include <slic3r/plugin/PluginDescriptor.hpp>
 #include <slic3r/plugin/PluginFsUtils.hpp>
 #include <slic3r/plugin/PluginManager.hpp>
@@ -1164,6 +1165,56 @@ TEST_CASE("make_sandbox_spec does not tree-grant a bare fs_readwrite directory",
     CHECK_FALSE(granted);
 }
 
+TEST_CASE("hosted audit_check honors a sidecar fs_readwrite tree grant", "[PluginSandbox][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    ScopedDataDir             data("plugin-sandbox-audit-fsrw");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-audit-fsrw-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+
+    write_plugin(data, "Audit_FsRw", R"PY(# /// script
+# requires-python = ">=3.12"
+# requires-orca-api = "1.0.0"
+#
+# [tool.orcaslicer.plugin]
+# name = "Audit FsRw"
+# type = "script"
+# ///
+print("probe")
+)PY");
+    PluginInstallState state;
+    state.installed_from           = "local";
+    state.plugin_name              = "Audit FsRw";
+    state.enabled                  = true;
+    state.permissions.fs_readwrite = {user_rw.string() + "/*"};
+    REQUIRE(write_install_state(data.plugins_dir() / "Audit_FsRw", state));
+
+    PluginManager::instance().discover_plugins(/*async=*/false, /*clear=*/true);
+    ScopedPluginAuditContext ctx("Audit_FsRw");
+    const fs::path           hosted = user_rw / "hosted.txt";
+    const AuditDecision      roots  = PluginAuditManager::instance().check_path_access(hosted, true);
+    CHECK_FALSE(roots.allowed);
+    CHECK(roots.reason == "outside allowed root");
+    const AuditDecision hosted_d = PluginAuditManager::instance().check_hosted_path_access(hosted, true);
+    INFO("check_hosted_path_access: allowed=" << hosted_d.allowed << " reason=" << hosted_d.reason);
+    CHECK(hosted_d.allowed);
+    CHECK_FALSE(PluginAuditManager::instance().check_hosted_path_access(hosted, false).allowed);
+}
+
 TEST_CASE("host log dir is plugin_host not the ACL journal sibling", "[PluginSandbox]")
 {
     ScopedDataDir           data("plugin-sandbox-log-vs-journal");
@@ -1882,23 +1933,32 @@ class Echo(orca.script.ScriptPluginCapabilityBase):
 @orca.plugin
 class Pkg(orca.base):
     def register_capabilities(self):
+        orca.request_permissions(fs_readwrite=[r'''__RW_TREE__'''])
         orca.register_capability(Echo)
 )PY";
     source = replace_all(source, "__OUT__", out_file.string());
+    source = replace_all(source, "__RW_TREE__", user_rw.string() + "/*");
     write_plugin(data, "Sandbox_FsRw", source);
-    PluginInstallState state;
-    state.installed_from             = "local";
-    state.plugin_name                = "FsRw Write";
-    state.enabled                    = true;
-    // Audit (plugin-visible policy) treats a bare directory as an exact grant; children
-    // need "<dir>/*". OS follows the same split, so the hosted write uses the tree form.
-    state.permissions.fs_readwrite   = {user_rw.string() + "/*"};
-    REQUIRE(write_install_state(data.plugins_dir() / "Sandbox_FsRw", state));
 
     PluginManager& manager = PluginManager::instance();
     manager.discover_plugins(/*async=*/false, /*clear=*/true);
+    PluginAuditManager::set_permission_message_prompt_for_testing([](const std::string&) { return true; });
     std::string error;
-    REQUIRE(load_and_wait(manager, "Sandbox_FsRw", error));
+    const bool  loaded = load_and_wait(manager, "Sandbox_FsRw", error);
+    PluginAuditManager::set_permission_message_prompt_for_testing(nullptr);
+    REQUIRE(loaded);
+    {
+        PluginInstallState loaded_state;
+        REQUIRE(manager.get_install_state("Sandbox_FsRw", loaded_state));
+        REQUIRE_FALSE(loaded_state.permissions.fs_readwrite.empty());
+        const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec("Sandbox_FsRw", {});
+        bool                          os_granted = false;
+        for (const auto& extra : spec.extra_paths) {
+            if (extra.path == user_rw.string() && extra.write && extra.low_label && extra.fail_closed_low)
+                os_granted = true;
+        }
+        REQUIRE(os_granted);
+    }
     const ScriptCompletion completion = wait_for_script(manager, "Sandbox_FsRw", "Echo");
     INFO("hosted write: " << completion.result.message << " err=" << completion.error);
     CHECK(completion.error.empty());

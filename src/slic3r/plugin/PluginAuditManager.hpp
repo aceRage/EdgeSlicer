@@ -154,9 +154,17 @@ public:
     // --- policy checks ---
     // Shared core for every audited filesystem event.  The deny checks are consulted above the
     // allowed roots, so a denied path is blocked even when it sits inside an allowed root (e.g.
-    // data_dir(), which is a global allowed root).
+    // data_dir(), which is a global allowed root). Sidecar fs_read / fs_readwrite are not
+    // consulted here: in-process audit_plugin_event falls through to decide_audited_event
+    // so a covering grant can still record a root frame.
     AuditDecision check_path_access(const boost::filesystem::path& candidate, bool is_write);
     AuditDecision check_open(const std::string& path, const std::string& mode);
+
+    // Parent handler for the helper's audit_check RPC. Denied paths stay denied. In-memory
+    // allowed roots still shortcut. A miss with "outside allowed root" then consults the
+    // sidecar the same way decide_audited_event does (fs_read vs fs_readwrite, including
+    // <dir>/*), without prompting — a grant that is not already stored is denied.
+    AuditDecision check_hosted_path_access(const boost::filesystem::path& candidate, bool is_write);
 
     // Ask the user to grant the requested permissions. The request may originate on a plugin
     // load worker, so the implementation marshals the modal dialog to the wx main thread.
@@ -259,6 +267,10 @@ private:
     // is_stdlib_file(), this query is not cached because filesystem paths may resolve through
     // symlinks that can change.
     static bool is_stdlib_path(const boost::filesystem::path& path);
+
+    // Sidecar fs_read (reads) or fs_readwrite (writes), exact and <dir>/*. A write grant
+    // never covers a read, or the reverse. Used by check_hosted_path_access.
+    bool sidecar_covers_path(const boost::filesystem::path& path, bool is_write) const;
 
     // Drops the references in `frames`, keeping the caller's error and denial state intact.
     void release_frames(std::vector<PyObject*>& frames);

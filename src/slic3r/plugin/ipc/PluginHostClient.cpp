@@ -434,7 +434,8 @@ struct PluginHostClient::Impl
                     reason  = "audit_check missing targets";
                 } else {
                     for (const std::string& target : targets) {
-                        const AuditDecision d = PluginAuditManager::instance().check_path_access(boost::filesystem::path(target), is_write);
+                        const AuditDecision d =
+                            PluginAuditManager::instance().check_hosted_path_access(boost::filesystem::path(target), is_write);
                         if (!d.allowed) {
                             allowed = false;
                             reason  = d.reason;
