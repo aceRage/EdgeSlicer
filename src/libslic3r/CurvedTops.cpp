@@ -1070,6 +1070,104 @@ ExPolygons uncovered_by(const ExPolygon &area, const std::vector<CurvedTopsFillP
     return opening_ex(diff_ex(ExPolygons{ area }, union_ex(strokes)), float(scale_(0.5 * min_width)));
 }
 
+double bead_length_mm(const std::vector<CurvedTopsFillPath> &bead)
+{
+    double len = 0.;
+    for (const CurvedTopsFillPath &p : bead)
+        len += unscale<double>(Polyline(p.points).length());
+    return len;
+}
+
+double bead_mm3(const std::vector<CurvedTopsFillPath> &bead)
+{
+    double v = 0.;
+    for (const CurvedTopsFillPath &p : bead)
+        v += unscale<double>(Polyline(p.points).length()) * p.mm3_per_mm;
+    return v;
+}
+
+// Owner, after printing P5 (2026-11-17): short gap-fill beads printed on their own were dabs - a tiny extrusion with a
+// retract, lift and drop before it and a retract and lift after it, with no room to spread or wipe. So each gap bead is
+// placed after the path before it, nearest end first:
+//  - an end within CURVED_TOPS_GAP_ATTACH_SPACINGS line spacings of where that path ends is joined to it in one motion:
+//    a short connecting piece at CURVED_TOPS_GAP_CONNECTOR_FLOW of the fill's flow (an extrusion, so the move stays at
+//    the surface and its contact with the beads beside it is judged as for any bead), then the bead; the bead is then
+//    where the next one is looked for from, so beads along a spine chain up;
+//  - otherwise it is printed on its own only when it is at least CURVED_TOPS_GAP_MIN_ISOLATED_MM long; a shorter one is
+//    left out (a hole under the nozzle's size is better than a blob).
+void place_gap_beads(std::vector<CurvedTopsFillPath> &out, std::vector<std::vector<CurvedTopsFillPath>> beads, const Flow &solid_flow,
+                     CurvedTopsGapStats *stats)
+{
+    CurvedTopsGapStats st;
+    st.candidates = beads.size();
+    for (const std::vector<CurvedTopsFillPath> &b : beads)
+        st.candidate_mm3 += bead_mm3(b);
+    const double      attach  = scale_(CURVED_TOPS_GAP_ATTACH_SPACINGS * solid_flow.spacing());
+    const double      h       = solid_flow.height();
+    const double      c_mm3   = CURVED_TOPS_GAP_CONNECTOR_FLOW * solid_flow.mm3_per_mm();
+    std::vector<bool> used(beads.size(), false);
+    bool              has_cur = !out.empty() && !out.back().points.empty();
+    Point             cur     = has_cur ? out.back().points.back() : Point(0, 0);
+    for (size_t round = 0; round < beads.size(); ++round) {
+        size_t best = beads.size();
+        bool   rev  = false;
+        double bd   = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < beads.size(); ++i) {
+            if (used[i])
+                continue;
+            for (int end = 0; end < 2; ++end) {
+                const Point  e = end == 0 ? beads[i].front().points.front() : beads[i].back().points.back();
+                const double d = has_cur ? (e - cur).cast<double>().norm() : 0.;
+                if (d < bd) {
+                    bd   = d;
+                    best = i;
+                    rev  = end == 1;
+                }
+            }
+        }
+        if (best == beads.size())
+            break;
+        used[best] = true;
+        std::vector<CurvedTopsFillPath> &b = beads[best];
+        if (rev) {
+            std::reverse(b.begin(), b.end());
+            for (CurvedTopsFillPath &p : b)
+                std::reverse(p.points.begin(), p.points.end());
+        }
+        const double len = bead_length_mm(b);
+        if (has_cur && bd <= attach) {
+            if (b.front().points.front() != cur) {
+                CurvedTopsFillPath c{ Points{ cur, b.front().points.front() }, float(c_mm3 / h + h * (1. - 0.25 * PI)), c_mm3, false, true };
+                st.kept_mm3 += unscale<double>(Polyline(c.points).length()) * c_mm3;
+                out.push_back(std::move(c));
+            }
+            ++st.attached;
+        } else if (len >= CURVED_TOPS_GAP_MIN_ISOLATED_MM) {
+            ++st.isolated;
+            st.shortest_isolated_mm = st.shortest_isolated_mm > 0. ? std::min(st.shortest_isolated_mm, len) : len;
+        } else {
+            ++st.dropped;
+            continue;
+        }
+        st.kept_mm3 += bead_mm3(b);
+        for (CurvedTopsFillPath &p : b)
+            out.push_back(std::move(p));
+        cur     = out.back().points.back();
+        has_cur = true;
+    }
+    if (stats != nullptr) {
+        stats->candidates += st.candidates;
+        stats->candidate_mm3 += st.candidate_mm3;
+        stats->attached += st.attached;
+        stats->isolated += st.isolated;
+        stats->dropped += st.dropped;
+        stats->kept_mm3 += st.kept_mm3;
+        if (st.shortest_isolated_mm > 0.)
+            stats->shortest_isolated_mm = stats->shortest_isolated_mm > 0. ? std::min(stats->shortest_isolated_mm, st.shortest_isolated_mm) :
+                                                                              st.shortest_isolated_mm;
+    }
+}
+
 } // namespace
 
 double curved_tops_min_gap_width(const PrintConfig &pcfg)
@@ -1084,7 +1182,8 @@ double curved_tops_uncovered_mm2(const ExPolygon &fp, const std::vector<CurvedTo
 
 std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
                                                         const Flow &solid_flow, int k, const PrintConfig &pcfg,
-                                                        const PrintObjectConfig &ocfg, bool *failed, double nozzle_tolerance)
+                                                        const PrintObjectConfig &ocfg, bool *failed, double nozzle_tolerance,
+                                                        CurvedTopsGapStats *stats)
 {
     std::vector<CurvedTopsFillPath> out;
     // One wall loop along the outline, each loop starting at a seam spread along its length per layer.
@@ -1182,6 +1281,8 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
     const double h         = solid_flow.height();
     const double min_width = curved_tops_min_gap_width(pcfg);
     const double max_width = 2. * solid_flow.spacing();
+    // Each gap bead as its pieces (one per width), in order.
+    std::vector<std::vector<CurvedTopsFillPath>> beads;
     ThickPolylines gaps;
     for (ExPolygon &gap : uncovered_by(fp, out, h, min_width)) {
         const size_t before = gaps.size();
@@ -1201,8 +1302,8 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
                 const double half = 0.5 * std::max(2. * std::sqrt(gap_mm2 / M_PI) - solid_flow.width(), 0.1);
                 const double mm3  = std::clamp(gap_mm2 * h / (2. * half), 0.25 * solid_flow.mm3_per_mm(), 2. * solid_flow.mm3_per_mm());
                 const Vec2d  a = c - dir * half, b = c + dir * half;
-                out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) },
-                                float(mm3 / h + h * (1. - 0.25 * PI)), mm3, false, true });
+                beads.push_back({ { Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) },
+                                    float(mm3 / h + h * (1. - 0.25 * PI)), mm3, false, true } });
                 continue;
             }
             const BoundingBox bb   = get_extents(gap);
@@ -1211,18 +1312,22 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
             const Vec2d       dir  = size.x() >= size.y() ? Vec2d(1., 0.) : Vec2d(0., 1.);
             const double      half = 0.5 * std::max(std::max(size.x(), size.y()) - solid_flow.width(), 0.1);
             const Vec2d       a = c - dir * half, b = c + dir * half;
-            out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
-                            solid_flow.mm3_per_mm(), false, true });
+            beads.push_back({ { Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
+                                solid_flow.mm3_per_mm(), false, true } });
         }
     }
     for (const ThickPolyline &tp : gaps) {
         if (tp.length() < scale_(0.2))
             continue;
         const ExtrusionMultiPath mp = thick_polyline_to_multi_path(tp, erGapFill, solid_flow, scaled<float>(0.05), float(SCALED_EPSILON));
+        std::vector<CurvedTopsFillPath> bead;
         for (const ExtrusionPath &p : mp.paths)
             if (p.polyline.points.size() >= 2)
-                out.push_back({ p.polyline.points, p.width, p.mm3_per_mm, false, true });
+                bead.push_back({ p.polyline.points, p.width, p.mm3_per_mm, false, true });
+        if (!bead.empty())
+            beads.push_back(std::move(bead));
     }
+    place_gap_beads(out, std::move(beads), solid_flow, stats);
     return out;
 }
 
@@ -1393,6 +1498,89 @@ void clip_collection(ExtrusionEntityCollection &coll, const ExPolygons &drop, co
         delete e;
     }
     coll.entities = std::move(out);
+}
+
+// Owner, P5 (rim gap, steeper dome): the planar layers right under the curved block must be solid. With partial curving
+// the plateau at the cut lies deep inside the part, where the slicer laid sparse infill, so the lowest curved layer printed
+// onto sparse lines (the curved layers above the cut were the part's only top shell); with whole curving the same happens
+// where the top shells do not reach below the clipped layers. Here, in each planar layer within n_solid layers under the
+// curved block (cover: where it prints), sparse infill is replaced by solid infill (monotonic, 45 / 135 degrees by layer,
+// the region's solid infill flow). n_solid: the region's top shell count less the curved layers, at least 2. Where the
+// layer is solid already nothing changes. Returns how many layer regions got solid infill.
+size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set &its, double ground, const ExPolygons &cover, bool partial,
+                                double cut, int n_layers, double h)
+{
+    if (cover.empty() || object.layers().empty() || object.layers().back()->regions().empty())
+        return 0;
+    const PrintRegionConfig &rcfg  = object.layers().back()->regions().front()->region().config();
+    const int n_top   = std::max(rcfg.top_shell_layers.value, int(std::ceil(rcfg.top_shell_thickness.value / h - EPSILON)));
+    const int n_solid = std::max(2, n_top - n_layers);
+    std::vector<size_t> idx;
+    std::vector<float>  za, zb;
+    for (size_t i = 1; i < object.layers().size(); ++i) {
+        const double z = object.layers()[i]->print_z;
+        idx.push_back(i);
+        za.push_back(float(z + n_layers * h + ground - 0.5 * EPSILON));
+        zb.push_back(float(z + (n_layers + n_solid) * h + ground - 0.5 * EPSILON));
+    }
+    const std::vector<ExPolygons> A = slice_mesh_ex(its, za);
+    const std::vector<ExPolygons> B = slice_mesh_ex(its, zb);
+    size_t added = 0;
+    for (size_t j = 0; j < idx.size(); ++j) {
+        Layer       *layer = object.layers()[idx[j]];
+        const double z     = layer->print_z;
+        ExPolygons   under;
+        if (partial && z <= cut + EPSILON) {
+            // The plateau's top layers.
+            if (z <= cut - n_solid * h + EPSILON)
+                continue;
+            under = diff_ex(cover, B[j]);
+        } else
+            under = diff_ex(intersection_ex(cover, A[j]), B[j]);
+        if (under.empty())
+            continue;
+        for (LayerRegion *region : layer->regions()) {
+            ExPolygons sparse;
+            for (const Surface &s : region->fill_surfaces.surfaces)
+                if (s.surface_type == stInternal)
+                    sparse.push_back(s.expolygon);
+            if (sparse.empty())
+                continue;
+            const ExPolygons solid = opening_ex(intersection_ex(under, sparse), float(scale_(0.2)));
+            if (solid.empty())
+                continue;
+            clip_collection(region->fills, solid, get_extents(solid));
+            const Flow            flow = region->flow(frSolidInfill, layer->height);
+            std::unique_ptr<Fill> filler(Fill::new_from_type(ipMonotonic));
+            filler->angle        = float((idx[j] % 2 == 0 ? 45. : 135.) * M_PI / 180.);
+            filler->spacing      = flow.spacing();
+            filler->bounding_box = get_extents(solid);
+            FillParams params;
+            params.density = 1.f;
+            auto coll      = std::make_unique<ExtrusionEntityCollection>();
+            for (const ExPolygon &ex : solid) {
+                Surface   srf(stInternalSolid, ex);
+                Polylines lines;
+                try {
+                    lines = filler->fill_surface(&srf, params);
+                } catch (const std::exception &ex_) {
+                    BOOST_LOG_TRIVIAL(warning) << "Curved tops: solid infill under the block failed: " << ex_.what();
+                    continue;
+                }
+                for (Polyline &pl : lines)
+                    if (pl.size() >= 2) {
+                        ExtrusionPath path(erSolidInfill, flow.mm3_per_mm(), float(flow.width()), float(layer->height));
+                        path.polyline = std::move(pl);
+                        coll->entities.push_back(new ExtrusionPath(std::move(path)));
+                    }
+            }
+            if (!coll->entities.empty()) {
+                region->fills.entities.push_back(coll.release());
+                ++added;
+            }
+        }
+    }
+    return added;
 }
 
 Points resample(const Points &pts)
@@ -2008,12 +2196,13 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         const ExtrusionRole fill_role = k == n_layers - 1 ? erTopSolidInfill : erSolidInfill;
         double layer_open = 0., layer_area_mm2 = 0.;
         size_t layer_starts = 0, layer_gap = 0;
+        CurvedTopsGapStats gap_stats;
         for (const ExPolygon &fp : partial ? layer_area[k] : footprint) {
             // One wall loop along the surface's outline and the fill inside it in the chosen pattern, with the
             // gaps between them filled (P4, curved_tops_layer_paths(); P5: Monotonic only with a nozzle tolerance).
             bool layer_failed = false;
             const std::vector<CurvedTopsFillPath> paths = curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg,
-                                                                                  &layer_failed, pattern_tol);
+                                                                                  &layer_failed, pattern_tol, &gap_stats);
             for (const CurvedTopsFillPath &p : paths) {
                 add_path(p.points, p.wall ? erExternalPerimeter : fill_role, p.width, p.mm3_per_mm, k);
                 layer_gap += p.gap ? 1 : 0;
@@ -2029,7 +2218,10 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
         BOOST_LOG_TRIVIAL(info) << "Curved tops: layer " << k + 1 << " of " << n_layers << ", pattern " << int(pattern) << ": open "
                                 << layer_open << " mm2 of " << layer_area_mm2 << " mm2 ("
                                 << (layer_area_mm2 > 0. ? 100. * layer_open / layer_area_mm2 : 0.) << " %), " << layer_starts
-                                << " path starts (travels), " << layer_gap << " gap-fill paths";
+                                << " path starts (travels), " << layer_gap << " gap-fill paths; gap beads " << gap_stats.candidates
+                                << " found (" << gap_stats.candidate_mm3 << " mm3), " << gap_stats.attached << " joined, "
+                                << gap_stats.isolated << " on their own, " << gap_stats.dropped << " left out, "
+                                << gap_stats.kept_mm3 << " mm3 printed, shortest on its own " << gap_stats.shortest_isolated_mm << " mm";
     }
     if (n_paths == 0 || last_samples == nullptr)
         return refuse(_u8L("no curved path could be built on its top surface."));
@@ -2061,10 +2253,17 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     }
     const std::vector<ExPolygons> above = slice_mesh_ex(its, probe_z);
     const BoundingBox             footprint_bb = get_extents(footprint);
+    // Owner, P5 (rim gap): with partial curving the curved block prints only where the surface lies at least a layer above
+    // the cut (layer_area, largest for the top curved layer). Elsewhere in the footprint - the ring where the surface lies
+    // between the cut and one layer above it - planar material above the cut is kept, as for any flat top: dropping it
+    // there left that ring printed by neither, a strip of the plateau showing all round the curved block. It stands no
+    // higher than the lowest curved bead (cut + h): the layer above it is sliced at cut + 1.5 h, where the surface is
+    // inside layer_area.
+    const ExPolygons cover = partial ? layer_area.back() : footprint;
     // From here on the planar walls and fills are cut; only the perimeter step restores them.
     object.set_curved_tops_clipped(true);
     for (size_t j = 0; j < band_layers.size(); ++j) {
-        const ExPolygons drop = diff_ex(footprint, above[j]);
+        const ExPolygons drop = partial ? intersection_ex(diff_ex(footprint, above[j]), cover) : diff_ex(footprint, above[j]);
         if (drop.empty())
             continue;
         Layer *layer = object.layers()[band_layers[j]];
@@ -2074,6 +2273,9 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
             clip_collection(region->thin_fills, drop, footprint_bb);
         }
     }
+    const size_t solid_layers_added = solid_under_curved_block(object, its, ground, cover, partial, cut, n_layers, h);
+    if (solid_layers_added > 0)
+        BOOST_LOG_TRIVIAL(info) << "Curved tops: solid infill under the curved block on " << solid_layers_added << " layer region(s)";
 
     top_region->fills.entities.push_back(conformal.release());
     top_layer->curved_tops_block     = true;

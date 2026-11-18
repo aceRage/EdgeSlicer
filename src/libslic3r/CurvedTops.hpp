@@ -306,10 +306,29 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
 // (nozzle_tolerance > 0): its beads squeezed into the wedges at the line ends touch the neighbouring lines by about
 // 0.1 mm, which only the tolerance allows (with none, the strict head check refuses them; P4's behaviour is kept). With a
 // tolerance the Monotonic lines also reach CURVED_TOPS_MONOTONIC_OVERLAP of a spacing over the wall loop's inner edge.
+// Gap beads are joined to the path before them where they start near its end, and a bead that would print on its own
+// is left out below CURVED_TOPS_GAP_MIN_ISOLATED_MM (owner, P5 prints: isolated short beads were dabs).
+// *stats (when given) adds up what the gap fill did.
+struct CurvedTopsGapStats
+{
+    size_t candidates { 0 };            // gap beads found
+    double candidate_mm3 { 0. };        // their volume
+    size_t attached { 0 };              // printed in one motion with the path before them (no travel)
+    size_t isolated { 0 };              // printed on their own (a travel before them)
+    size_t dropped { 0 };               // too short to print on their own: left out
+    double kept_mm3 { 0. };             // volume printed, connecting pieces included
+    double shortest_isolated_mm { 0. }; // the shortest bead printed on its own (0: none)
+};
+// A gap bead starting within this many line spacings of where the path before it ends is joined to it.
+static constexpr double CURVED_TOPS_GAP_ATTACH_SPACINGS = 2.0;
+// The connecting piece's flow, as a fraction of the fill's (it runs over beads already laid).
+static constexpr double CURVED_TOPS_GAP_CONNECTOR_FLOW = 0.15;
+// A gap bead printed on its own is at least this long.
+static constexpr double CURVED_TOPS_GAP_MIN_ISOLATED_MM = 1.0;
 std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
                                                         const Flow &solid_flow, int k, const PrintConfig &pcfg,
                                                         const PrintObjectConfig &ocfg, bool *failed = nullptr,
-                                                        double nozzle_tolerance = 0.);
+                                                        double nozzle_tolerance = 0., CurvedTopsGapStats *stats = nullptr);
 // P5: with a nozzle contact tolerance in force, the Monotonic fill overlaps the wall loop by this fraction of a spacing.
 static constexpr double CURVED_TOPS_MONOTONIC_OVERLAP = 0.25;
 // Narrowest gap a bead is laid in: a quarter of the nozzle diameter.

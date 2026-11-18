@@ -3401,6 +3401,192 @@ TEST_CASE("Curved tops P5: a clean head check message is only the tolerated-nozz
 
 namespace {
 
+// The join between the planar stack and the curved block (owner, P5: a steeper dome's lowest curved layer floated a layer
+// above the walls below it). On 0.2 mm cells:
+//  - planar: the highest planar extrusion top (layer print_z) in each cell, every extrusion of every layer that is not curved;
+//  - for each cell's lowest curved bead, the gap from its planned bottom (Z - h) down to the highest planar top within one
+//    cell (0.6 mm square). The lowest curved bead of a point carries 1-2 x flow down to the planar top, so it rests when
+//    that gap is at most one layer; `unsupported` counts beads with no planar material under them at all;
+//  - the curved top surface (points of the cap no steeper than `max_angle`, 0.5 mm grid): how far the highest printed top
+//    within 0.4 mm (planar layer top or curved bead) stays below the surface S there; `short_points` counts points short
+//    by more than 0.7 layer.
+struct RimJoin
+{
+    double max_gap { -1e9 };
+    Vec3d  at_gap { Vec3d::Zero() };
+    size_t beads { 0 }, unsupported { 0 }, over_gap { 0 };
+    size_t surface_points { 0 }, short_points { 0 };
+    double worst_short { 0. };
+};
+
+RimJoin rim_join(const PrintObject &object, const TriangleMesh &mesh, double h, double max_angle)
+{
+    const double cell = 0.2;
+    const auto   key  = [cell](double x, double y) { return std::make_pair(long(std::floor(x / cell)), long(std::floor(y / cell))); };
+    std::map<std::pair<long, long>, double> planar;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions()) {
+            std::vector<const ExtrusionPath *> paths;
+            std::function<void(const ExtrusionEntity *)> collect = [&](const ExtrusionEntity *e) {
+                if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+                    for (const ExtrusionEntity *child : c->entities)
+                        collect(child);
+                } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e))
+                    paths.push_back(p);
+                else if (const auto *l = dynamic_cast<const ExtrusionLoop *>(e))
+                    for (const ExtrusionPath &p : l->paths)
+                        paths.push_back(&p);
+                else if (const auto *m = dynamic_cast<const ExtrusionMultiPath *>(e))
+                    for (const ExtrusionPath &p : m->paths)
+                        paths.push_back(&p);
+            };
+            collect(&region->perimeters);
+            collect(&region->fills);
+            collect(&region->thin_fills);
+            for (const ExtrusionPath *p : paths) {
+                if (p->z_contour != nullptr && p->z_contour->curved_top)
+                    continue;
+                const Points &pts = p->polyline.points;
+                for (size_t i = 1; i < pts.size(); ++i) {
+                    const Vec2d  a = unscale(pts[i - 1]), b = unscale(pts[i]);
+                    const int    n = std::max(1, int(std::ceil((b - a).norm() / 0.05)));
+                    for (int j = 0; j <= n; ++j) {
+                        const Vec2d q = a + (b - a) * (double(j) / n);
+                        double     &t = planar.try_emplace(key(q.x(), q.y()), -1e9).first->second;
+                        t             = std::max(t, layer->print_z);
+                    }
+                }
+            }
+        }
+    const auto planar_near = [&](double x, double y, int r) {
+        const auto k  = key(x, y);
+        double     hi = -1e9;
+        for (long dx = -r; dx <= r; ++dx)
+            for (long dy = -r; dy <= r; ++dy)
+                if (auto it = planar.find({ k.first + dx, k.second + dy }); it != planar.end())
+                    hi = std::max(hi, it->second);
+        return hi;
+    };
+    const std::vector<Vec3d> curved = curved_samples(object);
+    std::map<std::pair<long, long>, Vec3d> lowest;
+    for (const Vec3d &s : curved) {
+        auto it = lowest.find(key(s.x(), s.y()));
+        if (it == lowest.end() || s.z() < it->second.z())
+            lowest[key(s.x(), s.y())] = s;
+    }
+    RimJoin out;
+    for (const auto &[k, s] : lowest) {
+        ++out.beads;
+        const double top = planar_near(s.x(), s.y(), 1);
+        if (top < -1e8) {
+            ++out.unsupported;
+            continue;
+        }
+        const double gap = s.z() - h - top;
+        out.over_gap += gap > h + 0.01 ? 1 : 0;
+        if (gap > out.max_gap) {
+            out.max_gap = gap;
+            out.at_gap  = s;
+        }
+    }
+    // The curved top surface.
+    std::map<std::pair<long, long>, double> curved_top;
+    for (const Vec3d &s : curved) {
+        double &t = curved_top.try_emplace(key(s.x(), s.y()), -1e9).first->second;
+        t         = std::max(t, s.z());
+    }
+    const sla::IndexedMesh imesh(mesh);
+    const auto surface = [&](double x, double y) {
+        const auto hit = imesh.query_ray_hit({ x, y, 50. }, { 0., 0., -1. });
+        return hit.is_hit() ? 50. - hit.distance() - imesh.ground_level() : std::numeric_limits<double>::quiet_NaN();
+    };
+    const BoundingBoxf3 bb = mesh.bounding_box();
+    for (double x = bb.min.x() + 0.25; x < bb.max.x(); x += 0.5)
+        for (double y = bb.min.y() + 0.25; y < bb.max.y(); y += 0.5) {
+            const double s = surface(x, y), sx = surface(x + 0.05, y), sy = surface(x, y + 0.05);
+            if (!std::isfinite(s) || !std::isfinite(sx) || !std::isfinite(sy))
+                continue;
+            const double slope = std::atan(std::hypot(sx - s, sy - s) / 0.05) * 180. / M_PI;
+            if (slope > max_angle)
+                continue;
+            ++out.surface_points;
+            double top = planar_near(x, y, 2);
+            const auto k = key(x, y);
+            for (long dx = -2; dx <= 2; ++dx)
+                for (long dy = -2; dy <= 2; ++dy)
+                    if (auto it = curved_top.find({ k.first + dx, k.second + dy }); it != curved_top.end())
+                        top = std::max(top, it->second);
+            const double shortfall = s - top;
+            out.worst_short = std::max(out.worst_short, shortfall);
+            out.short_points += shortfall > 0.7 * h ? 1 : 0;
+        }
+    return out;
+}
+
+// A cap of radius 15 on a 4 mm cylinder whose rim slopes `rim_deg`.
+TriangleMesh puck_with_rim(double rim_deg)
+{
+    const double r  = 15.;
+    const double rs = r / std::sin(rim_deg * M_PI / 180.);
+    return make_capped_puck(r, 4., rs - std::sqrt(rs * rs - r * r));
+}
+
+} // namespace
+
+// Owner, P5 (2026-11-17): on a steeper dome the lowest curved layer floated about a layer above the planar walls below it.
+// For caps whose rim slopes 10, 15, 20 and 30 degrees (the last two curve partly: rise or material beside), with default
+// settings and with the owner's overrides (angle ceiling and max angle 30, material beside allowed), on the Centauri Carbon:
+// every lowest curved bead rests on planar material (its planned bottom at most one layer above the planar top within 0.6
+// mm - its 1-2 x flow fills that - and none without planar material under it), and at most 1 % of the cap's surface no
+// steeper than the angle in force is printed more than 0.7 layer short (none short by more than 1.5 layers).
+TEST_CASE("Curved tops P5: the curved block rests on the planar stack along the whole rim", "[CurvedTops][CurvedTopsP5]")
+{
+    const ResourcesDirGuard resources;
+    for (const bool overrides : { false, true })
+        for (const double rim : { 10., 15., 20., 30. }) {
+            DYNAMIC_SECTION((overrides ? "overrides" : "defaults") << ", rim " << rim << " deg")
+            {
+                const DevModeGuard dev(overrides);
+                ConfigItems        items;
+                if (overrides)
+                    items = { { "curved_tops_max_angle", "30" }, { "curved_tops_dev_angle_ceiling", "30" },
+                              { "curved_tops_dev_allow_material_beside", "1" }, { "curved_tops_pattern", "spiral" } };
+                const TriangleMesh mesh = puck_with_rim(rim);
+                Print              print;
+                Model              model;
+                Test::init_print(std::vector<TriangleMesh>{ mesh }, print, model, puck_config(true, items));
+                print.process();
+                REQUIRE(top_block(print));
+                const PrintObject *object  = print.objects().front();
+                const std::string  summary = object_warning(*object, PrintStateBase::SlicingCurvedTopsSummary);
+                const RimJoin      j       = rim_join(*object, mesh, 0.2, overrides ? 30. : 15.);
+                WARN("rim join, " << (overrides ? "overrides" : "defaults") << ", rim " << rim << " deg: " << j.beads << " bead cells, max gap "
+                                  << j.max_gap << " mm at (" << j.at_gap.x() << ", " << j.at_gap.y() << ", " << j.at_gap.z() << "), "
+                                  << j.over_gap << " over a layer, " << j.unsupported << " unsupported; surface " << j.surface_points
+                                  << " points, " << j.short_points << " short by > 0.7 layer, worst " << j.worst_short << " mm. " << summary);
+                CHECK(j.unsupported == 0);
+                CHECK(j.over_gap == 0);
+                CHECK(j.max_gap <= 0.2 + 0.01);
+                CHECK(j.short_points <= j.surface_points / 100);
+                CHECK(j.worst_short <= 1.5 * 0.2);
+                std::string error;
+                try {
+                    Test::gcode(print);
+                } catch (const Slic3r::SlicingError &ex) {
+                    error = ex.what();
+                }
+                INFO("error: " << error);
+                WARN("rim join export, " << (overrides ? "overrides" : "defaults") << ", rim " << rim << " deg: "
+                                         << (error.empty() ? print_warning(print, PrintStateBase::SlicingCurvedTopsHeadCheck) : error));
+                // With material beside allowed the head check may refuse (the override says to expect nozzle contact).
+                if (!overrides)
+                    CHECK(error.empty());
+            }
+        }
+}
+
+namespace {
+
 // Lifts in the curved block: travels between its paths (each one a retract, a lift to the safe Z and a drop).
 size_t curved_block_travels(const std::string &gcode) { return check_curved_travels(gcode, 0.7, 0.2).travels; }
 
