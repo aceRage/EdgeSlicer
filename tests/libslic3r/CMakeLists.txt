@@ -186,12 +186,12 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
 	test_process_preset_export.cpp
 	test_preset_manager_model.cpp
 	test_preset_rename.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_state.cpp
-	test_preset_printer_clone_names.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
