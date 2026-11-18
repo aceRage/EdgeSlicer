@@ -448,9 +448,9 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
-// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp).
+// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp). P5 adds Spiral.
 enum CurvedTopsPattern {
-    ctpMonotonic, ctpConcentric
+    ctpMonotonic, ctpConcentric, ctpSpiral
 };
 
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the

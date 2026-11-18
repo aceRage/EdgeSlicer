@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -33,6 +34,7 @@
 
 #include <boost/log/trivial.hpp>
 
+#include "AABBTreeLines.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ContourZ.hpp"
@@ -484,6 +486,464 @@ size_t curved_tops_seam_index(const Points &loop, const Point & /* centre */, in
     return (anchor + best) % n;
 }
 
+size_t curved_tops_path_starts(const std::vector<CurvedTopsFillPath> &paths)
+{
+    size_t out = 0;
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (paths[i].points.empty() || i == 0 || paths[i - 1].points.empty() || paths[i - 1].points.back() != paths[i].points.front())
+            ++out;
+    return out;
+}
+
+// ---- P5: the Spiral pattern ----
+
+namespace {
+
+// The insets are densified to this before a spiral runs over them, so each turn moves inward in small steps.
+constexpr double SPIRAL_STEP_MM = 0.25;
+
+// A closed loop (one inset), densified, first point not repeated, with its arc length and a nearest-point index.
+// Spiral geometry is in scaled units held as doubles.
+class SpiralLoop
+{
+public:
+    explicit SpiralLoop(const Polygon &poly)
+    {
+        const double  step = scale_(SPIRAL_STEP_MM);
+        const Points &src  = poly.points;
+        for (size_t i = 0; i < src.size(); ++i) {
+            const Vec2d a = src[i].cast<double>();
+            const Vec2d b = src[(i + 1) % src.size()].cast<double>();
+            const int   n = std::max(1, int(std::ceil((b - a).norm() / step)));
+            for (int j = 0; j < n; ++j) {
+                const Vec2d q = a + (b - a) * (double(j) / double(n));
+                const Point pt(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
+                if (pts.empty() || pt != pts.back())
+                    pts.push_back(pt);
+            }
+        }
+        while (pts.size() > 1 && pts.front() == pts.back())
+            pts.pop_back();
+        cum.assign(pts.size() + 1, 0.);
+        Lines lines;
+        lines.reserve(pts.size());
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const Point &b = pts[(i + 1) % pts.size()];
+            cum[i + 1] = cum[i] + (b - pts[i]).cast<double>().norm();
+            lines.emplace_back(pts[i], b);
+        }
+        length = cum.back();
+        if (pts.size() >= 3)
+            dist = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(std::move(lines));
+    }
+    bool valid() const { return pts.size() >= 3 && length > scale_(0.05) && dist != nullptr; }
+    // The point of the loop nearest p and its arc position from pts[0].
+    void nearest(const Vec2d &p, double &arc, Vec2d &q) const
+    {
+        const auto [d, idx, np] = dist->distance_from_lines_extra<false>(Point(coord_t(std::llround(p.x())), coord_t(std::llround(p.y()))));
+        (void) d;
+        q   = np;
+        arc = idx < pts.size() ? cum[idx] + (np - pts[idx].cast<double>()).norm() : 0.;
+    }
+    // The point at arc position `arc` (wrapped round the loop).
+    Vec2d at(double arc) const
+    {
+        arc -= std::floor(arc / length) * length;
+        size_t i = size_t(std::upper_bound(cum.begin(), cum.end(), arc) - cum.begin());
+        i        = i == 0 ? 0 : std::min(i - 1, pts.size() - 1);
+        const double seg = cum[i + 1] - cum[i];
+        const Vec2d  a   = pts[i].cast<double>();
+        const Vec2d  b   = pts[(i + 1) % pts.size()].cast<double>();
+        return seg > 0. ? Vec2d(a + (b - a) * ((arc - cum[i]) / seg)) : a;
+    }
+
+    Points                                               pts;
+    std::vector<double>                                  cum;
+    double                                               length { 0. };
+    std::unique_ptr<AABBTreeLines::LinesDistancer<Line>> dist;
+};
+
+// A loop as a spiral runs it: from its start round to the start again (front == back), with the turn's progress
+// theta at each point (0 at the start, 1 back at it, never decreasing). The progress is carried from ring to ring
+// along the nearest points (spiral_step), so the turns on either side of a ring agree on it there and run one
+// spacing apart, however much shorter the inner ring is.
+struct SpiralRing
+{
+    std::vector<Vec2d>  pts;
+    std::vector<double> theta;
+};
+
+// Ring points of `loop` after arc position `start` (exclusive), in order, with their position from it.
+std::vector<std::pair<double, size_t>> spiral_vertices_after(const SpiralLoop &loop, double start)
+{
+    std::vector<std::pair<double, size_t>> out;
+    const double L = loop.length;
+    for (size_t j = 0; j < loop.pts.size(); ++j) {
+        double rel = loop.cum[j] - start;
+        rel -= std::floor(rel / L) * L;
+        if (rel > 1. && rel < L - 1.)
+            out.emplace_back(rel, j);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+SpiralRing spiral_ring_from(const SpiralLoop &loop, double start)
+{
+    SpiralRing out;
+    out.pts.push_back(loop.at(start));
+    out.theta.push_back(0.);
+    for (const auto &[rel, j] : spiral_vertices_after(loop, start)) {
+        out.pts.push_back(loop.pts[j].cast<double>());
+        out.theta.push_back(rel / loop.length);
+    }
+    out.pts.push_back(out.pts.front());
+    out.theta.push_back(1.);
+    return out;
+}
+
+// One turn from ring A to loop B: for every point of A the point of B the turn heads for (its nearest point, taken in
+// order round B from where A's start lands, so it never runs backward), and B as the next ring, its progress taken over
+// from A.
+struct SpiralStep
+{
+    std::vector<Vec2d> target;
+    SpiralRing         next;
+};
+
+SpiralStep spiral_step(const SpiralRing &A, const SpiralLoop &B)
+{
+    SpiralStep          out;
+    const size_t        n = A.pts.size();
+    const double        L = B.length;
+    std::vector<double> raw(n, 0.);
+    Vec2d               q;
+    for (size_t i = 0; i < n; ++i)
+        B.nearest(A.pts[i], raw[i], q);
+    const double        start = raw[0];
+    std::vector<double> s(n, 0.);
+    for (size_t i = 1; i < n; ++i) {
+        double rel = raw[i] - start;
+        rel -= std::floor(rel / L) * L;
+        const double c = rel + std::round((s[i - 1] - rel) / L) * L;
+        s[i]           = std::clamp(std::max(s[i - 1], c), 0., L);
+    }
+    s[n - 1] = L;
+    out.target.reserve(n);
+    for (size_t i = 0; i < n; ++i)
+        out.target.push_back(B.at(start + s[i]));
+    SpiralRing &next = out.next;
+    next.pts.push_back(B.at(start));
+    next.theta.push_back(0.);
+    size_t i = 0;
+    for (const auto &[r, j] : spiral_vertices_after(B, start)) {
+        while (i + 1 < n && s[i + 1] <= r)
+            ++i;
+        double theta = A.theta[i];
+        if (i + 1 < n && s[i + 1] > s[i])
+            theta += (A.theta[i + 1] - A.theta[i]) * std::clamp((r - s[i]) / (s[i + 1] - s[i]), 0., 1.);
+        next.pts.push_back(B.pts[j].cast<double>());
+        next.theta.push_back(std::clamp(std::max(theta, next.theta.back()), 0., 1.));
+    }
+    next.pts.push_back(next.pts.front());
+    next.theta.push_back(1.);
+    return out;
+}
+
+// Distance from ring point j along the unit vector n to the first crossing of the closed ring (front == back) other than
+// the two segments at j, at most max_len.
+double spiral_ray_hit(const std::vector<Vec2d> &ring, size_t j, const Vec2d &n, double max_len)
+{
+    const Vec2d &p    = ring[j];
+    const size_t segs = ring.size() - 1;
+    double       best = max_len;
+    for (size_t e = 0; e < segs; ++e) {
+        const Vec2d &a = ring[e];
+        const Vec2d &b = ring[e + 1];
+        if (e == j % segs || (e + 1) % segs == j % segs || (a - p).norm() < 1. || (b - p).norm() < 1.)
+            continue;
+        const Vec2d  d   = b - a;
+        const double den = n.x() * d.y() - n.y() * d.x();
+        if (std::abs(den) < 1e-12)
+            continue;
+        const Vec2d  w = a - p;
+        const double t = (w.x() * d.y() - w.y() * d.x()) / den;
+        const double u = (w.x() * n.y() - w.y() * n.x()) / den;
+        if (t > 0. && t < best && u >= 0. && u <= 1.)
+            best = t;
+    }
+    return best;
+}
+
+// A point of a spiral, with the width of the strip the bead ending there newly covers (its spacing, scaled) and
+// whether it belongs to the wall lap the spiral leads in from.
+struct SpiralVertex
+{
+    Vec2d  p;
+    double strip;
+    bool   wall;
+};
+
+// One spiral over the insets rings[0..m] of one region, outermost first, one spacing `s` apart (scaled). With `lead`
+// (a wall loop lead_distance outside rings[0], its bead lead_spacing wide) the spiral starts with the wall's lap and
+// goes on from where the lap ends; without, with a full lap on rings[0]. Then:
+//  - the first turn runs from the lap to the next ring, covering what lies between the lap's bead and the next turn's:
+//    its flow rises from nothing at the start to a whole bead at its end;
+//  - every further turn moves from its ring to the next over its whole length (by the progress theta), one spacing
+//    from the turns on either side all round;
+//  - the last turn runs on the innermost ring and moves inward by up to half a spacing (never past the ring's other
+//    side) while its flow falls to nothing, covering exactly what the turn outside it leaves.
+// The start is the layer's seam point on the first loop (curved_tops_seam_index with k and index, so it rotates from
+// layer to layer); of up to eight candidates the first whose start lands on every ring within 1.75 spacings of the
+// one before is taken (a start at the tip of a narrowing limb would cut across it from ring to ring).
+std::vector<SpiralVertex> spiral_unit(const Polygon *lead, double lead_spacing, double lead_distance, const Polygons &rings, double s,
+                                      int k, int index)
+{
+    std::vector<SpiralVertex> out;
+    std::vector<SpiralLoop>   loops;
+    loops.reserve(rings.size() + 1);
+    if (lead != nullptr)
+        loops.emplace_back(*lead);
+    for (const Polygon &ring : rings) {
+        loops.emplace_back(ring);
+        if (!loops.back().valid()) {
+            loops.pop_back();
+            break; // a ring too small to run: the spiral ends on the one before
+        }
+    }
+    if (loops.empty() || !loops.front().valid())
+        return out;
+    const bool has_lead = lead != nullptr;
+    const auto expected = [&](size_t i) { return has_lead && i == 0 ? lead_distance : s; };
+
+    const SpiralLoop &first    = loops.front();
+    double            best_arc = 0.;
+    size_t            best_bad = std::numeric_limits<size_t>::max();
+    for (int attempt = 0; attempt < 8 && best_bad > 0; ++attempt) {
+        const size_t idx = curved_tops_seam_index(first.pts, Point(0, 0), k, index + 7 * attempt);
+        const double arc = first.cum[idx];
+        Vec2d        p   = first.at(arc);
+        size_t       bad = 0;
+        for (size_t i = 0; i + 1 < loops.size(); ++i) {
+            double a;
+            Vec2d  q;
+            loops[i + 1].nearest(p, a, q);
+            bad += (q - p).norm() > 1.75 * expected(i) ? 1 : 0;
+            p = q;
+        }
+        if (bad < best_bad) {
+            best_bad = bad;
+            best_arc = arc;
+        }
+    }
+    SpiralRing   ring        = spiral_ring_from(first, best_arc);
+    const double first_strip = has_lead ? lead_spacing : s;
+    for (const Vec2d &p : ring.pts)
+        out.push_back({ p, first_strip, has_lead });
+    if (loops.size() == 1)
+        return out;
+    const double h0 = 0.5 * first_strip;
+    for (size_t i = 0; i + 1 < loops.size(); ++i) {
+        const SpiralStep step = spiral_step(ring, loops[i + 1]);
+        // Where a ring has no part opposite (the tip of a narrowing limb), the turn moves at most two spacings.
+        const double cap = 2. * expected(i);
+        for (size_t j = 1; j < ring.pts.size(); ++j) {
+            const Vec2d &a     = ring.pts[j];
+            Vec2d        v     = step.target[j] - a;
+            double       d     = v.norm();
+            const double theta = ring.theta[j];
+            if (d > cap) {
+                v *= cap / d;
+                d = cap;
+            }
+            if (i == 0) {
+                // At a corner of the lap the next ring lies farther off; the bead stays at most 1.1 spacings wide there
+                // and the gap fill takes the rest of the corner.
+                const double lo = h0;
+                const double hi = std::clamp(d - 0.5 * s + theta * s, lo, lo + 1.1 * s);
+                out.push_back({ d > 1. ? Vec2d(a + v * (0.5 * (lo + hi) / d)) : a, hi - lo, false });
+            } else
+                out.push_back({ a + v * theta, s, false });
+        }
+        ring = step.next;
+    }
+    const size_t n = ring.pts.size();
+    for (size_t j = 1; j < n; ++j) {
+        const double theta = ring.theta[j];
+        const Vec2d &a     = ring.pts[j];
+        const Vec2d  t     = ring.pts[j + 1 < n ? j + 1 : 1] - ring.pts[j - 1];
+        Vec2d        p     = a;
+        if (t.norm() > 1.) {
+            // Left of the direction of travel is inside: contours run counter-clockwise, holes clockwise.
+            const Vec2d  nrm = Vec2d(-t.y(), t.x()) / t.norm();
+            const double hit = spiral_ray_hit(ring.pts, j, nrm, s);
+            p                = a + nrm * std::min(0.5 * theta * s, 0.45 * hit);
+        }
+        out.push_back({ p, (1. - theta) * s, false });
+    }
+    return out;
+}
+
+// The spiral's points as paths: consecutive pieces sharing their end points (no travel between them), each with one
+// width: the wall lap at the wall's flow, whole turns at the fill's, the rising and falling turns in steps of under a
+// tenth of a spacing (flow from the strip each covers, as for any bead: spacing x layer height).
+void spiral_append_paths(const std::vector<SpiralVertex> &v, const Flow &wall_flow, const Flow &solid_flow,
+                         std::vector<CurvedTopsFillPath> &out)
+{
+    if (v.size() < 2)
+        return;
+    const double h   = solid_flow.height();
+    const double s   = solid_flow.scaled_spacing();
+    const double tol = 0.08 * s;
+    size_t       st  = 0;
+    while (st + 1 < v.size()) {
+        // Segment i runs from v[i] to v[i + 1] and takes v[i + 1]'s strip and wall flag.
+        const bool   wall   = v[st + 1].wall;
+        const double strip0 = v[st + 1].strip;
+        size_t       e      = st + 1;
+        while (e + 1 < v.size() && v[e + 1].wall == wall && (wall || std::abs(v[e + 1].strip - strip0) <= tol))
+            ++e;
+        double len = 0., sum = 0.;
+        Points pts;
+        pts.reserve(e - st + 1);
+        for (size_t i = st; i <= e; ++i) {
+            const Point q(coord_t(std::llround(v[i].p.x())), coord_t(std::llround(v[i].p.y())));
+            if (pts.empty() || q != pts.back())
+                pts.push_back(q);
+            if (i > st) {
+                const double l = (v[i].p - v[i - 1].p).norm();
+                len += l;
+                sum += l * v[i].strip;
+            }
+        }
+        st = e;
+        if (pts.size() < 2)
+            continue;
+        CurvedTopsFillPath p;
+        p.points = std::move(pts);
+        if (wall) {
+            p.width      = float(wall_flow.width());
+            p.mm3_per_mm = wall_flow.mm3_per_mm();
+            p.wall       = true;
+        } else {
+            const double strip = len > 0. ? sum / len : strip0;
+            if (std::abs(strip - s) <= 0.02 * s) {
+                p.width      = float(solid_flow.width());
+                p.mm3_per_mm = solid_flow.mm3_per_mm();
+            } else {
+                const double spacing = std::max(unscale<double>(strip), 0.02);
+                p.mm3_per_mm         = spacing * h;
+                p.width              = float(spacing + h * (1. - 0.25 * PI));
+            }
+        }
+        out.push_back(std::move(p));
+    }
+}
+
+// The insets of `area`, one spacing `s` apart (the first half a spacing in, so they are the beads' centre lines), as
+// the chains of rings a spiral can run through: an inset continues a chain while the inset inside it is a single piece
+// with its holes matching one to one. Where it splits (a narrow neck), or a hole's insets meet the outline's, the
+// chain ends and each piece starts its own. Each chain is the outline's rings or one hole's rings; `lead` is 0 for the
+// outline chain of the area's single first inset, h + 1 for its hole h, -1 otherwise (chains a wall loop can lead into).
+struct SpiralChain
+{
+    Polygons rings;
+    int      lead { -1 };
+};
+
+std::vector<SpiralChain> spiral_chains(const ExPolygon &area, double s)
+{
+    struct Node
+    {
+        ExPolygon        ex;
+        std::vector<int> children;
+    };
+    std::vector<Node> nodes;
+    std::vector<int>  roots, prev;
+    for (int j = 0; j < 5000; ++j) {
+        ExPolygons level = offset_ex(area, -float((0.5 + double(j)) * s));
+        if (level.empty())
+            break;
+        std::vector<int> cur;
+        for (ExPolygon &ex : level) {
+            if (ex.contour.points.size() < 3)
+                continue;
+            int parent = -1;
+            for (const int p : prev)
+                if (nodes[size_t(p)].ex.contains(ex.contour.points.front())) {
+                    parent = p;
+                    break;
+                }
+            nodes.push_back({ std::move(ex), {} });
+            const int id = int(nodes.size()) - 1;
+            if (parent >= 0)
+                nodes[size_t(parent)].children.push_back(id);
+            else
+                roots.push_back(id);
+            cur.push_back(id);
+        }
+        prev = std::move(cur);
+    }
+    // Each hole of the parent matched to the child's hole round it (the child's holes are the larger).
+    const auto match_holes = [&nodes](int parent, int child, std::vector<int> &map) {
+        const ExPolygon &P = nodes[size_t(parent)].ex;
+        const ExPolygon &C = nodes[size_t(child)].ex;
+        if (P.holes.size() != C.holes.size())
+            return false;
+        map.assign(P.holes.size(), -1);
+        std::vector<bool> used(C.holes.size(), false);
+        for (size_t h = 0; h < P.holes.size(); ++h)
+            for (size_t c = 0; c < C.holes.size(); ++c) {
+                if (used[c] || P.holes[h].points.empty())
+                    continue;
+                Polygon ccw = C.holes[c];
+                ccw.make_counter_clockwise();
+                if (ccw.contains(P.holes[h].points.front())) {
+                    map[h]  = int(c);
+                    used[c] = true;
+                    break;
+                }
+            }
+        return std::find(map.begin(), map.end(), -1) == map.end();
+    };
+    std::vector<SpiralChain> out;
+    std::function<void(int, bool)> run = [&](int first, bool lead) {
+        std::vector<int>              seg { first };
+        std::vector<std::vector<int>> maps;
+        for (;;) {
+            const Node &node = nodes[size_t(seg.back())];
+            std::vector<int> map;
+            if (node.children.size() != 1 || !match_holes(seg.back(), node.children.front(), map))
+                break;
+            maps.push_back(std::move(map));
+            seg.push_back(node.children.front());
+        }
+        SpiralChain contour;
+        contour.lead = lead ? 0 : -1;
+        for (const int id : seg)
+            contour.rings.push_back(nodes[size_t(id)].ex.contour);
+        out.push_back(std::move(contour));
+        for (size_t h = 0; h < nodes[size_t(first)].ex.holes.size(); ++h) {
+            SpiralChain hole;
+            hole.lead  = lead ? int(h) + 1 : -1;
+            size_t cur = h;
+            for (size_t i = 0; i < seg.size(); ++i) {
+                hole.rings.push_back(nodes[size_t(seg[i])].ex.holes[cur]);
+                if (i < maps.size())
+                    cur = size_t(maps[i][cur]);
+            }
+            out.push_back(std::move(hole));
+        }
+        for (const int c : nodes[size_t(seg.back())].children)
+            run(c, false);
+    };
+    for (const int r : roots)
+        run(r, roots.size() == 1);
+    return out;
+}
+
+} // namespace
+
 std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTopsPattern pattern, const Flow &solid_flow, int k,
                                                  const PrintConfig &pcfg, const PrintObjectConfig &ocfg, bool *failed)
 {
@@ -493,7 +953,13 @@ std::vector<CurvedTopsFillPath> curved_tops_fill(const ExPolygon &area, CurvedTo
     params.density = 1.f;
     bool         threw    = false;
     const double area_mm2 = area.area() * SCALING_FACTOR * SCALING_FACTOR;
-    if (pattern == ctpConcentric) {
+    if (pattern == ctpSpiral) {
+        // No wall loop to lead in from: each spiral starts with a full turn on its outer inset.
+        int index = 0;
+        for (const SpiralChain &chain : spiral_chains(area, solid_flow.scaled_spacing()))
+            spiral_append_paths(spiral_unit(nullptr, 0., 0., chain.rings, solid_flow.scaled_spacing(), k, index++), solid_flow, solid_flow,
+                                out);
+    } else if (pattern == ctpConcentric) {
         std::unique_ptr<Fill> filler(Fill::new_from_type(ipConcentric));
         filler->spacing             = solid_flow.spacing();
         filler->bounding_box        = get_extents(area);
@@ -579,7 +1045,7 @@ double curved_tops_uncovered_mm2(const ExPolygon &fp, const std::vector<CurvedTo
 
 std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, CurvedTopsPattern pattern, const Flow &wall_flow,
                                                         const Flow &solid_flow, int k, const PrintConfig &pcfg,
-                                                        const PrintObjectConfig &ocfg, bool *failed)
+                                                        const PrintObjectConfig &ocfg, bool *failed, double nozzle_tolerance)
 {
     std::vector<CurvedTopsFillPath> out;
     // One wall loop along the outline, each loop starting at a seam spread along its length per layer.
@@ -595,24 +1061,84 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
         p.wall = true;
         out.push_back(std::move(p));
     };
-    for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
-        wall(loop.contour);
-        for (const Polygon &hole : loop.holes)
-            wall(hole);
+    // The fill region's outline lies this far inside the patch edge (its beads' outer edge).
+    const double inner_delta = wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() + 0.5 * solid_flow.scaled_spacing();
+    if (pattern == ctpSpiral) {
+        // P5: each wall loop leads into the spiral inside it, when the region inside it is one piece; a hole's wall loop
+        // leads into the spiral round that hole. A wall loop with nothing to lead into prints on its own, first.
+        const double s = solid_flow.scaled_spacing();
+        // Wall centre line to the first inset's: the wall's half width, the fill's outline, half a spacing.
+        const double lead_distance = inner_delta - 0.5 * wall_flow.scaled_width() + 0.5 * s;
+        const double area_mm2      = fp.area() * SCALING_FACTOR * SCALING_FACTOR;
+        size_t       fill_paths    = 0;
+        int          unit_no       = 0;
+        for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
+            const ExPolygons         areas = offset_ex(loop, -float(inner_delta - 0.5 * wall_flow.scaled_width()));
+            std::vector<SpiralChain> chains;
+            for (const ExPolygon &area : areas)
+                append(chains, spiral_chains(area, s));
+            // Which wall ring leads into which chain: the outline into the outline chain of the single first inset, a
+            // hole into the chain of the first inset's hole round it.
+            std::vector<const Polygon *> lead_of(chains.size(), nullptr);
+            std::vector<bool>            led(loop.holes.size() + 1, false);
+            if (areas.size() == 1)
+                for (size_t c = 0; c < chains.size(); ++c) {
+                    if (chains[c].lead == 0) {
+                        lead_of[c] = &loop.contour;
+                        led[0]     = true;
+                    } else if (chains[c].lead > 0 && !chains[c].rings.empty()) {
+                        Polygon ccw = chains[c].rings.front();
+                        ccw.make_counter_clockwise();
+                        for (size_t h = 0; h < loop.holes.size(); ++h)
+                            if (!led[h + 1] && !loop.holes[h].points.empty() && ccw.contains(loop.holes[h].points.front())) {
+                                lead_of[c]  = &loop.holes[h];
+                                led[h + 1] = true;
+                                break;
+                            }
+                    }
+                }
+            if (!led[0])
+                wall(loop.contour);
+            for (size_t h = 0; h < loop.holes.size(); ++h)
+                if (!led[h + 1])
+                    wall(loop.holes[h]);
+            for (size_t c = 0; c < chains.size(); ++c) {
+                const size_t before = out.size();
+                if (lead_of[c] != nullptr)
+                    spiral_append_paths(spiral_unit(lead_of[c], wall_flow.scaled_spacing(), lead_distance, chains[c].rings, s, k, -1 - loop_no++),
+                                        wall_flow, solid_flow, out);
+                else
+                    spiral_append_paths(spiral_unit(nullptr, 0., 0., chains[c].rings, s, k, unit_no++), wall_flow, solid_flow, out);
+                for (size_t i = before; i < out.size(); ++i)
+                    fill_paths += out[i].wall ? 0 : 1;
+            }
+        }
+        // As for the other patterns: never a wall with nothing inside (review S3).
+        if (failed != nullptr && fill_paths == 0 && area_mm2 > 4.0 && !offset_ex(fp, -float(inner_delta)).empty())
+            *failed = true;
+    } else {
+        for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
+            wall(loop.contour);
+            for (const Polygon &hole : loop.holes)
+                wall(hole);
+        }
+        // The fill inside it. P5: Monotonic with a nozzle tolerance in force reaches CURVED_TOPS_MONOTONIC_OVERLAP of a
+        // spacing further out, over the wall loop's inner edge, so the line ends close the wedges between them and the
+        // wall (their beads touch the wall's by about that much, within the tolerance); without one, P4's fill exactly.
+        const double overlap = pattern == ctpMonotonic && nozzle_tolerance > 0. ?
+                                   CURVED_TOPS_MONOTONIC_OVERLAP * solid_flow.scaled_spacing() : 0.;
+        for (const ExPolygon &area : offset_ex(fp, -(inner_delta - overlap)))
+            append(out, curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg, failed));
     }
-    // The fill inside it.
-    const ExPolygons inner = offset_ex(fp, -(wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() + 0.5 * solid_flow.scaled_spacing()));
-    for (const ExPolygon &area : inner)
-        append(out, curved_tops_fill(area, pattern, solid_flow, k, pcfg, ocfg, failed));
 
     // Gap fill (owner, 2026-11-17): whatever the wall and the fill leave open and a bead can still cover - the
     // spine of a narrowing limb that the concentric loops do not reach, wedges where loops turn sharp corners,
     // the strip between the wall and the fill - gets variable-width beads along its medial axis, at the layer's
     // height (flow from width and height as for any bead). Slivers narrower than a quarter of the nozzle stay.
-    // Concentric only: the monotonic lines leave nothing but the small wedges at their ends (under 1.5 % of the
-    // patch in the tests), and beads squeezed into those touched their neighbours (0.1 mm contacts the strict
-    // head check refuses).
-    if (pattern != ctpConcentric)
+    // Monotonic (P5) only with a nozzle contact tolerance in force: beads squeezed into the wedges at the line ends
+    // touch their neighbours by about 0.1 mm, which the strict head check (tolerance 0) refuses; without a tolerance
+    // Monotonic keeps P4's behaviour (no gap fill, the wedges stay open).
+    if (pattern == ctpMonotonic && nozzle_tolerance <= 0.)
         return out;
     const double h         = solid_flow.height();
     const double min_width = curved_tops_min_gap_width(pcfg);
@@ -622,6 +1148,40 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
         const size_t before = gaps.size();
         gap.douglas_peucker(scale_(0.0125));
         gap.medial_axis(scale_(min_width), scale_(max_width), &gaps);
+        // P5 (owner: diamond gaps where loops turn): an axis too short for a bead of its own (under 0.2 mm, dropped below)
+        // left a small diamond open, such as those along a narrowing limb's spine where the concentric loops turn. Such a
+        // gap gets one short line through it along its longest extent, at the fill's width.
+        bool axis_kept = false;
+        for (size_t i = before; i < gaps.size(); ++i)
+            axis_kept |= gaps[i].length() >= scale_(0.2);
+        if (gaps.size() != before && !axis_kept) {
+            const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
+            const Points &pts    = gap.contour.points;
+            if (gap_mm2 < 0.05 || gap_mm2 > 1.0 || pts.size() < 3)
+                continue;
+            size_t ia = 0, ib = 1;
+            double best = -1.;
+            for (size_t i = 0; i < pts.size(); ++i)
+                for (size_t j = i + 1; j < pts.size(); ++j) {
+                    const double d = (pts[i] - pts[j]).cast<double>().squaredNorm();
+                    if (d > best) {
+                        best = d;
+                        ia   = i;
+                        ib   = j;
+                    }
+                }
+            const Vec2d  pa = unscale(pts[ia]), pb = unscale(pts[ib]);
+            const double len = (pb - pa).norm();
+            if (len < 1e-3)
+                continue;
+            const Vec2d  c    = 0.5 * (pa + pb);
+            const Vec2d  dir  = (pb - pa) / len;
+            const double half = 0.5 * std::max(len - solid_flow.width(), 0.1);
+            const Vec2d  a = c - dir * half, b = c + dir * half;
+            out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
+                            solid_flow.mm3_per_mm(), false, true });
+            continue;
+        }
         if (gaps.size() == before) {
             // A compact hole with no axis (a dome's apex inside the innermost ring): one short line through it.
             const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
@@ -634,7 +1194,7 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
             const double      half = 0.5 * std::max(std::max(size.x(), size.y()) - solid_flow.width(), 0.1);
             const Vec2d       a = c - dir * half, b = c + dir * half;
             out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
-                            solid_flow.mm3_per_mm() });
+                            solid_flow.mm3_per_mm(), false, true });
         }
     }
     for (const ThickPolyline &tp : gaps) {
@@ -643,7 +1203,7 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
         const ExtrusionMultiPath mp = thick_polyline_to_multi_path(tp, erGapFill, solid_flow, scaled<float>(0.05), float(SCALED_EPSILON));
         for (const ExtrusionPath &p : mp.paths)
             if (p.polyline.points.size() >= 2)
-                out.push_back({ p.polyline.points, p.width, p.mm3_per_mm });
+                out.push_back({ p.polyline.points, p.width, p.mm3_per_mm, false, true });
     }
     return out;
 }
@@ -1419,18 +1979,39 @@ CurvedTopsResult apply_curved_tops(PrintObject &object, const TriangleMesh &mesh
     };
 
     const CurvedTopsPattern pattern = ocfg.curved_tops_pattern.value;
+    const double min_gap_width = curved_tops_min_gap_width(pcfg);
+    // P5: the head check applies the nozzle tolerance only on a plate without Z contouring (GCode.cpp); with Z contouring
+    // on any object (developer overrides only), Monotonic keeps P4's paths, which the strict check passes.
+    bool plate_contoured = false;
+    for (const PrintObject *other : print->objects())
+        plate_contoured |= other->need_z_contouring();
+    const double pattern_tol = plate_contoured ? 0. : nozzle_tol;
     for (int k = 0; k < n_layers; ++k) {
         const ExtrusionRole fill_role = k == n_layers - 1 ? erTopSolidInfill : erSolidInfill;
+        double layer_open = 0., layer_area_mm2 = 0.;
+        size_t layer_starts = 0, layer_gap = 0;
         for (const ExPolygon &fp : partial ? layer_area[k] : footprint) {
             // One wall loop along the surface's outline and the fill inside it in the chosen pattern, with the
-            // gaps between them filled (P4, curved_tops_layer_paths()).
+            // gaps between them filled (P4, curved_tops_layer_paths(); P5: Monotonic only with a nozzle tolerance).
             bool layer_failed = false;
-            for (const CurvedTopsFillPath &p : curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg, &layer_failed))
+            const std::vector<CurvedTopsFillPath> paths = curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg,
+                                                                                  &layer_failed, pattern_tol);
+            for (const CurvedTopsFillPath &p : paths) {
                 add_path(p.points, p.wall ? erExternalPerimeter : fill_role, p.width, p.mm3_per_mm, k);
+                layer_gap += p.gap ? 1 : 0;
+            }
             // Review S3: never a curved layer with its wall and no fill.
             if (layer_failed)
                 return refuse(Slic3r::format(_u8L("the fill of curved layer %1% could not be built."), k + 1));
+            // P5: for the log (the owner's test file tables): what the layer leaves open and how often it travels.
+            layer_open += curved_tops_uncovered_mm2(fp, paths, h, min_gap_width);
+            layer_area_mm2 += fp.area() * SCALING_FACTOR * SCALING_FACTOR;
+            layer_starts += curved_tops_path_starts(paths);
         }
+        BOOST_LOG_TRIVIAL(info) << "Curved tops: layer " << k + 1 << " of " << n_layers << ", pattern " << int(pattern) << ": open "
+                                << layer_open << " mm2 of " << layer_area_mm2 << " mm2 ("
+                                << (layer_area_mm2 > 0. ? 100. * layer_open / layer_area_mm2 : 0.) << " %), " << layer_starts
+                                << " path starts (travels), " << layer_gap << " gap-fill paths";
     }
     if (n_paths == 0 || last_samples == nullptr)
         return refuse(_u8L("no curved path could be built on its top surface."));
