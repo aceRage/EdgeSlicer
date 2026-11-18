@@ -1944,7 +1944,12 @@ bool its_write_stl_ascii(const char *file, const char *label, const std::vector<
     }
 
     fprintf(fp, "endsolid  %s\n", label);
-    fclose(fp);
+    // A full disk or a lost volume shows here, not at the open: report it instead of a partial file as written.
+    const bool write_failed = ferror(fp) != 0;
+    if (fclose(fp) != 0 || write_failed) {
+        BOOST_LOG_TRIVIAL(error) << "its_write_stl_ascii: Couldn't write " << file;
+        return false;
+    }
     return true;
 }
 
@@ -1980,7 +1985,12 @@ bool its_write_stl_binary(const char *file, const char *label, const std::vector
         fwrite(&f, 50, 1, fp);
     }
 
-    fclose(fp);
+    // A full disk or a lost volume shows here, not at the open: report it instead of a partial file as written.
+    const bool write_failed = ferror(fp) != 0;
+    if (fclose(fp) != 0 || write_failed) {
+        BOOST_LOG_TRIVIAL(error) << "its_write_stl_binary: Couldn't write " << file;
+        return false;
+    }
     return true;
 }
 
