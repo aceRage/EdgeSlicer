@@ -269,7 +269,7 @@ struct JournalSession
     std::string           python_home;
     std::string           helper_dir;
     std::string           resources_dir;
-    std::uint64_t         granted_at  = 0; // FILETIME 100ns since 1601, stamped at prepare
+    std::uint64_t         granted_at  = 0; // FILETIME 100ns; earliest stamp for this SID/session
     std::uint32_t         owner_pid   = 0;
     std::uint64_t         owner_start = 0; // FILETIME of the owning Edge process
     std::vector<DirGrant> grants;
@@ -932,7 +932,7 @@ void merge_session(std::vector<JournalSession>& sessions, JournalSession incomin
             existing.helper_dir = incoming.helper_dir;
         if (existing.resources_dir.empty())
             existing.resources_dir = incoming.resources_dir;
-        if (existing.granted_at == 0)
+        if (existing.granted_at == 0 || (incoming.granted_at != 0 && incoming.granted_at < existing.granted_at))
             existing.granted_at = incoming.granted_at;
         if (incoming.owner_pid != 0) {
             existing.owner_pid   = incoming.owner_pid;
@@ -1077,6 +1077,18 @@ struct JournalFileLock
     bool ok() const { return locked; }
 };
 
+std::uint64_t journaled_granted_at(const boost::filesystem::path& journal_path, const std::string& package_sid)
+{
+    if (package_sid.empty() || journal_path.empty())
+        return 0;
+    const auto all = load_journal_sessions_at(journal_path);
+    for (const JournalSession& session : all) {
+        if (session.package_sid == package_sid)
+            return session.granted_at;
+    }
+    return 0;
+}
+
 bool persist_acl_journal(PSID sid)
 {
     if (!parent_acl_ops_allowed())
@@ -1104,8 +1116,11 @@ bool persist_acl_journal(PSID sid)
     bool replaced         = false;
     for (JournalSession& session : all) {
         if (session.package_sid == current.package_sid) {
-            session  = current;
-            replaced = true;
+            if (session.granted_at != 0 && (current.granted_at == 0 || session.granted_at < current.granted_at))
+                current.granted_at = session.granted_at;
+            session          = current;
+            g_win.granted_at = current.granted_at;
+            replaced         = true;
             break;
         }
     }
@@ -1514,6 +1529,10 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     }
     // Drop this process's live grants first, then sweep leftover sessions (other SIDs)
     // from the parent-only journals we know. Sweep other SIDs even if we were ready.
+    // Remember this SID's grant-time across the revoke; a later prepare must not restamp
+    // it or helper-created files from the earlier spawn look pre-grant on close.
+    const std::uint64_t prior_granted_at = g_win.granted_at;
+    const std::wstring  prior_profile    = g_win.profile_name;
     clear_win_state();
     sweep_win_acl_journal();
     if (!g_apis_ok) {
@@ -1555,6 +1574,15 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
     g_win.sid            = sid;
     g_win.profile_name   = name;
     g_last_package_sid   = sid_to_string(sid);
+    {
+        std::uint64_t earliest = g_win.granted_at;
+        if (prior_granted_at != 0 && prior_profile == name && prior_granted_at < earliest)
+            earliest = prior_granted_at;
+        const std::uint64_t journaled = journaled_granted_at(g_win.journal_path, boost::nowide::narrow(sid_to_string(sid)));
+        if (journaled != 0 && journaled < earliest)
+            earliest = journaled;
+        g_win.granted_at = earliest;
+    }
     // Journal exists before the first ACE is applied. Parent-only, AppContainer-unwritable.
     if (!persist_acl_journal(sid)) {
         error = "AppContainer ACL journal failed";

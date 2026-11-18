@@ -147,7 +147,7 @@ void  close_parent_sandbox();
 // process added (WRITE_OWNER failure fail-closes that user root). Edge work dirs
 // warn and continue if the Low label cannot be set. Close/sweep skip
 // the grant root unless this process added the label, and apply grant-time
-// before any label removal. Copy-replace of
+// (the earliest stamp for that SID/session) before any label removal. Copy-replace of
 // Low-IL files stays inside this process's known user-rw roots (current data_dir,
 // remembered spec data_dirs, plugin dirs, python_home, helper, resources, temp)
 // and only rewrites files created at/after the session grant time that are

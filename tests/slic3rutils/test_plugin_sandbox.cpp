@@ -2058,6 +2058,11 @@ class Pkg(orca.base):
     INFO("nowo host: " << completion.result.message << " err=" << completion.error);
     CHECK(completion.error.empty());
     CHECK(completion.result.message == "nowo-ok");
+    plugin_ipc::PluginHostClient::instance().shutdown();
+    {
+        boost::system::error_code ec;
+        fs::remove_all(data.dir, ec);
+    }
 }
 
 TEST_CASE("AppContainer leaves a pre-existing Low label on fs_readwrite after close", "[PluginSandbox][windows][acl]")

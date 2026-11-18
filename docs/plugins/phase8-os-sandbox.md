@@ -221,7 +221,9 @@ A `full_access` Python audit grant does **not** widen the OS sandbox.
   already Low stays Low. Close/sweep never strip the grant root unless this
   process added the label, and they apply the grant-time filter before any
   label removal (not only copy-replace) so a pre-existing Low file or dir
-  inside the tree keeps its label. Copy-replace is never used to apply or restore a
+  inside the tree keeps its label. The grant-time is the earliest stamp for
+  that package SID / session and is not restamped on a later prepare.
+  Copy-replace is never used to apply or restore a
   user folder's label. If `WRITE_OWNER` is missing, spawn fail-closes for
   that **user** `fs_readwrite` root with a clear error rather than leaving it
   read-only. Edge-owned work dirs (`plugin_host`, `plugin_data`, `write_root`)
