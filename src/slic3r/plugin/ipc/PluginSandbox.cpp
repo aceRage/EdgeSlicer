@@ -59,9 +59,14 @@ std::string unsandboxed_bind_hash(const std::string& plugin_key)
     return plugin_trust::sha256_plugin_tree(root, hash_error);
 }
 
+bool is_tree_wildcard(const std::string& path)
+{
+    return path.size() >= 2 && path.compare(path.size() - 2, 2, "/*") == 0;
+}
+
 std::string strip_tree_wildcard(std::string path)
 {
-    if (path.size() >= 2 && path.compare(path.size() - 2, 2, "/*") == 0)
+    if (is_tree_wildcard(path))
         path.resize(path.size() - 2);
     while (path.size() > 1 && (path.back() == '/' || path.back() == '\\'))
         path.pop_back();
@@ -90,6 +95,14 @@ bool path_exists(const std::string& path)
         return false;
     boost::system::error_code ec;
     return boost::filesystem::exists(path, ec) && !ec;
+}
+
+bool path_is_regular_file(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    return boost::filesystem::is_regular_file(path, ec) && !ec;
 }
 
 // Create an owned directory so a later ACL/Landlock grant has something to attach to.
@@ -330,19 +343,26 @@ SandboxSpec make_sandbox_spec(const PluginDescriptor& descriptor, const PluginPe
     }
 
     for (const std::string& path : permissions.fs_read) {
-        const std::string stripped = strip_tree_wildcard(path);
-        if (path_exists(stripped))
-            add_unique_path(spec.extra_paths, stripped, false);
+        if (is_tree_wildcard(path)) {
+            const std::string stripped = strip_tree_wildcard(path);
+            if (path_exists(stripped))
+                add_unique_path(spec.extra_paths, stripped, false);
+        } else if (path_is_regular_file(path)) {
+            add_unique_path(spec.extra_paths, path, false);
+        }
     }
     for (const std::string& path : permissions.fs_readwrite) {
-        const std::string stripped = strip_tree_wildcard(path);
-        // AppContainer is Low IL. The helper cannot write up into a Medium folder, so each
-        // fs_readwrite root gets package-SID modify plus a Low label when one is not already
-        // present. The parent journals both and restores them on close/sweep. Missing
-        // WRITE_OWNER fail-closes that user root rather than leaving it read-only. Edge
-        // work dirs (plugin_host, plugin_data, write_root) warn and continue instead.
-        if (ensure_grant_directory(stripped))
-            add_unique_path(spec.extra_paths, stripped, true, true, true);
+        // Audit is the plugin-visible policy: exact path vs <dir>/*. OS matches that split so
+        // a bare directory is not a tree grant. Tree roots get package-SID modify plus Low
+        // (AppContainer cannot write up). Missing WRITE_OWNER fail-closes that user root.
+        // Edge work dirs (plugin_host, plugin_data, write_root) warn and continue instead.
+        if (is_tree_wildcard(path)) {
+            const std::string stripped = strip_tree_wildcard(path);
+            if (ensure_grant_directory(stripped))
+                add_unique_path(spec.extra_paths, stripped, true, true, true);
+        } else if (path_is_regular_file(path)) {
+            add_unique_path(spec.extra_paths, path, true, true, true);
+        }
     }
     return spec;
 }

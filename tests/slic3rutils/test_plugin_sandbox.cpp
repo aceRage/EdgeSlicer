@@ -1133,7 +1133,7 @@ TEST_CASE("make_sandbox_spec marks fs_readwrite extras writable and Low-labelled
     PluginDescriptor  descriptor;
     descriptor.plugin_key = "FsRw_Spec";
     PluginPermissions permissions;
-    permissions.fs_readwrite = {user_rw.string()};
+    permissions.fs_readwrite = {user_rw.string() + "/*"};
     const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec(descriptor, permissions, {});
     bool granted = false;
     for (const auto& extra : spec.extra_paths) {
@@ -1141,6 +1141,27 @@ TEST_CASE("make_sandbox_spec marks fs_readwrite extras writable and Low-labelled
             granted = true;
     }
     CHECK(granted);
+}
+
+TEST_CASE("make_sandbox_spec does not tree-grant a bare fs_readwrite directory", "[PluginSandbox]")
+{
+    ScopedDataDir             data("plugin-sandbox-fsrw-exact");
+    boost::system::error_code ec;
+    const fs::path            user_rw = data.dir / "user-rw";
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+
+    PluginDescriptor  descriptor;
+    descriptor.plugin_key = "FsRw_Exact";
+    PluginPermissions permissions;
+    permissions.fs_readwrite = {user_rw.string()};
+    const plugin_ipc::SandboxSpec spec = plugin_ipc::make_sandbox_spec(descriptor, permissions, {});
+    bool granted = false;
+    for (const auto& extra : spec.extra_paths) {
+        if (extra.path == user_rw.string())
+            granted = true;
+    }
+    CHECK_FALSE(granted);
 }
 
 TEST_CASE("host log dir is plugin_host not the ACL journal sibling", "[PluginSandbox]")
@@ -1869,7 +1890,9 @@ class Pkg(orca.base):
     state.installed_from             = "local";
     state.plugin_name                = "FsRw Write";
     state.enabled                    = true;
-    state.permissions.fs_readwrite   = {user_rw.string()};
+    // Audit (plugin-visible policy) treats a bare directory as an exact grant; children
+    // need "<dir>/*". OS follows the same split, so the hosted write uses the tree form.
+    state.permissions.fs_readwrite   = {user_rw.string() + "/*"};
     REQUIRE(write_install_state(data.plugins_dir() / "Sandbox_FsRw", state));
 
     PluginManager& manager = PluginManager::instance();
@@ -1880,7 +1903,8 @@ class Pkg(orca.base):
     INFO("hosted write: " << completion.result.message << " err=" << completion.error);
     CHECK(completion.error.empty());
     CHECK(completion.result.message == "wrote");
-    const std::wstring sid_str = plugin_ipc::win_current_package_sid_string_for_testing();
+    // close_host clears the live SID; the last-prepare snapshot survives that.
+    const std::wstring sid_str = plugin_ipc::win_last_package_sid_string_for_testing();
     REQUIRE_FALSE(sid_str.empty());
     LocalSid package(sid_str.c_str());
     REQUIRE(package.sid != nullptr);

@@ -128,7 +128,9 @@ are killed. `setsid` is denied so `kill(-pgid)` cannot be escaped.
 
 From the plugin's Phase 4 sidecar:
 
-- `fs_read` / `fs_readwrite` paths (tree `/*` markers stripped)
+- `fs_read` / `fs_readwrite` tree paths (`<dir>/*`, marker stripped) and exact files. A
+  bare directory is an exact grant at both the audit layer and the OS layer; it does not
+  cover children. Audit is the source of truth for that split.
 - network (`network_http` / `network_socket`) → Windows `internetClient` capability; Linux
   seccomp allows non-AF_UNIX `socket()` (inet). When network is not granted, Landlock ABI ≥ 4
   also handles TCP bind/connect with no rules added (so those are denied) and seccomp denies

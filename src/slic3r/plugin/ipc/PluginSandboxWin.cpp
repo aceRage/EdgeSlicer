@@ -301,8 +301,9 @@ struct WinState
 std::vector<std::string>        g_known_journal_data_dirs;
 std::unordered_set<std::string> g_created_profile_keys; // CreateAppContainerProfile succeeded (not ALREADY_EXISTS)
 
-WinState g_win;
-bool     g_low_label_used_copy_replace = false;
+WinState     g_win;
+std::wstring g_last_package_sid; // last prepare SID; not cleared on close (tests)
+bool         g_low_label_used_copy_replace = false;
 
 std::wstring win_path_key(const boost::filesystem::path& path);
 
@@ -1551,8 +1552,9 @@ bool prepare_win_appcontainer(const SandboxSpec& spec, std::string& error)
         error = "CreateAppContainerProfile failed";
         return false;
     }
-    g_win.sid          = sid;
-    g_win.profile_name = name;
+    g_win.sid            = sid;
+    g_win.profile_name   = name;
+    g_last_package_sid   = sid_to_string(sid);
     // Journal exists before the first ACE is applied. Parent-only, AppContainer-unwritable.
     if (!persist_acl_journal(sid)) {
         error = "AppContainer ACL journal failed";
@@ -1866,6 +1868,8 @@ std::vector<std::string> win_granted_paths_for_testing()
 }
 
 std::wstring win_current_package_sid_string_for_testing() { return sid_to_string(g_win.sid); }
+
+std::wstring win_last_package_sid_string_for_testing() { return g_last_package_sid; }
 
 void win_abandon_grants_for_testing()
 {

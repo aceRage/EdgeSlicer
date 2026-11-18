@@ -141,8 +141,9 @@ void  close_parent_sandbox();
 // is rejected). ACE revoke and Low-label restore on a recorded grant path are
 // allowed for that session's python_home / helper / resources / data_dir even when
 // those paths sit outside this process's current roots (moved install, portable
-// copy, test binary vs GUI). Hosted `fs_readwrite` roots get package-SID modify
-// and a Low label when needed for writes; close/sweep restore only a label this
+// copy, test binary vs GUI). Hosted `fs_readwrite` trees (`<dir>/*`) get package-SID
+// modify and a Low label when needed for writes; a bare directory is an exact grant
+// (audit policy) and is not an OS tree grant. Close/sweep restore only a label this
 // process added (WRITE_OWNER failure fail-closes that user root). Edge work dirs
 // warn and continue if the Low label cannot be set. Close/sweep skip
 // the grant root unless this process added the label, and apply grant-time
@@ -186,6 +187,8 @@ bool win_build_pipe_security_descriptor(void* container_sid, void** out_sd, std:
 // Paths that received a package-SID ACE during the current prepare (skipped RO grants omitted).
 std::vector<std::string> win_granted_paths_for_testing();
 std::wstring             win_current_package_sid_string_for_testing();
+// Last package SID from prepare. Survives close_parent_sandbox (current is cleared).
+std::wstring             win_last_package_sid_string_for_testing();
 // Drop in-memory grant state without revoking or deleting the journal (crash simulation).
 void win_abandon_grants_for_testing();
 bool win_path_has_low_integrity_label(const std::string& path);
