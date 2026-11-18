@@ -46,14 +46,30 @@ void write_temp_amf(const fs::path &path, const std::string &xml)
     REQUIRE(out);
 }
 
-float max_vertex_x(const Model &model)
+const ModelVolume &first_volume(const Model &model)
 {
     REQUIRE_FALSE(model.objects.empty());
     REQUIRE_FALSE(model.objects.front()->volumes.empty());
-    float max_x = 0.f;
-    for (const Vec3f &v : model.objects.front()->volumes.front()->mesh().its.vertices)
+    return *model.objects.front()->volumes.front();
+}
+
+// Raw ITS after AMF load. load_amf always calls center_geometry_after_creation(),
+// so a 0..1 triangle's vertices sit at ±0.5, not at the file coordinates.
+float max_vertex_x(const Model &model)
+{
+    const auto &verts = first_volume(model).mesh().its.vertices;
+    REQUIRE_FALSE(verts.empty());
+    float max_x = verts.front().x();
+    for (const Vec3f &v : verts)
         max_x = std::max(max_x, v.x());
     return max_x;
+}
+
+// World X: centred mesh plus the volume offset that keeps the original origin.
+float max_world_x(const Model &model)
+{
+    const ModelVolume &vol = first_volume(model);
+    return float(vol.mesh().transformed_bounding_box(vol.get_matrix()).max.x());
 }
 
 } // namespace
@@ -105,11 +121,15 @@ TEST_CASE("Model::read_from_file reports AMF inches through is_bbl_3mf; CLI conv
         Model::read_from_file(inch_path.string(), &config, &subst, LoadStrategy::AddDefaultInstances, nullptr, nullptr, &inch_flag);
     // The reused flag is the bug: inches come back as "this is a Bambu 3MF".
     REQUIRE(inch_flag);
-    REQUIRE_THAT(max_vertex_x(inch_model), Catch::Matchers::WithinAbs(1.f, 1e-4f));
+    // Unit metadata is applied as a flag only; the mesh is still in file units, recentred.
+    REQUIRE_THAT(max_vertex_x(inch_model), Catch::Matchers::WithinAbs(0.5f, 1e-4f));
+    REQUIRE_THAT(max_world_x(inch_model), Catch::Matchers::WithinAbs(1.f, 1e-4f));
 
     cli_apply_amf_inch_flag(inch_path.string(), inch_model, inch_flag);
     CHECK_FALSE(inch_flag);
-    REQUIRE_THAT(max_vertex_x(inch_model), Catch::Matchers::WithinAbs(25.4f, 1e-3f));
+    // convert_from_imperial_units scales the centred mesh and the volume offset (25.4).
+    REQUIRE_THAT(max_vertex_x(inch_model), Catch::Matchers::WithinAbs(12.7f, 1e-3f));
+    REQUIRE_THAT(max_world_x(inch_model), Catch::Matchers::WithinAbs(25.4f, 1e-3f));
 
     bool  mm_flag = true;
     Model mm_model =
@@ -117,7 +137,8 @@ TEST_CASE("Model::read_from_file reports AMF inches through is_bbl_3mf; CLI conv
     CHECK_FALSE(mm_flag);
     cli_apply_amf_inch_flag(mm_path.string(), mm_model, mm_flag);
     CHECK_FALSE(mm_flag);
-    REQUIRE_THAT(max_vertex_x(mm_model), Catch::Matchers::WithinAbs(1.f, 1e-4f));
+    REQUIRE_THAT(max_vertex_x(mm_model), Catch::Matchers::WithinAbs(0.5f, 1e-4f));
+    REQUIRE_THAT(max_world_x(mm_model), Catch::Matchers::WithinAbs(1.f, 1e-4f));
 
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
