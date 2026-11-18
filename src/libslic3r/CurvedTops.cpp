@@ -27,6 +27,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1557,6 +1558,8 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
     const PrintRegionConfig &rcfg  = object.layers().back()->regions().front()->region().config();
     const int n_top   = std::max(rcfg.top_shell_layers.value, int(std::ceil(rcfg.top_shell_thickness.value / h - EPSILON)));
     const int n_solid = std::max(2, n_top - n_layers);
+    BOOST_LOG_TRIVIAL(info) << "Curved tops: solid under the block: " << n_solid << " layers, cover " << area(cover) * SCALING_FACTOR * SCALING_FACTOR
+                            << " mm2, partial " << partial << ", cut " << cut;
     std::vector<size_t> idx;
     std::vector<float>  za, zb;
     for (size_t i = 1; i < object.layers().size(); ++i) {
@@ -1588,9 +1591,19 @@ size_t solid_under_curved_block(PrintObject &object, const indexed_triangle_set 
                 // of them; the others carry void there, which is just as unsupported.
                 if (s.surface_type == stInternal || s.surface_type == stInternalVoid)
                     sparse.push_back(s.expolygon);
-            if (sparse.empty())
-                continue;
-            const ExPolygons solid = opening_ex(intersection_ex(under, sparse), float(scale_(0.2)));
+            const ExPolygons solid = sparse.empty() ? ExPolygons() : opening_ex(intersection_ex(under, sparse), float(scale_(0.2)));
+            {
+                std::map<int, double> by_type;
+                for (const Surface &s : region->fill_surfaces.surfaces)
+                    by_type[int(s.surface_type)] += s.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+                std::ostringstream types;
+                for (const auto &[t, a] : by_type)
+                    types << " " << t << ":" << a;
+                BOOST_LOG_TRIVIAL(info) << "Curved tops: under the block, layer Z " << z << ": under " << area(under) * SCALING_FACTOR * SCALING_FACTOR
+                                         << " mm2, fill surfaces by type" << types.str() << ", sparse " << area(sparse) * SCALING_FACTOR * SCALING_FACTOR
+                                         << " mm2, replaced " << area(solid) * SCALING_FACTOR * SCALING_FACTOR << " mm2, fills "
+                                         << region->fills.entities.size();
+            }
             if (solid.empty())
                 continue;
             clip_collection(region->fills, solid, get_extents(solid));
