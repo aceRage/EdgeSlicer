@@ -1708,6 +1708,52 @@ bool restrict_dacl_full_noninheritable(const std::string& path)
     return rc == ERROR_SUCCESS;
 }
 
+bool restrict_dacl_user_system(const std::string& path, DWORD user_perms, DWORD system_perms, DWORD inheritance, bool protect)
+{
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD needed = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        ::CloseHandle(token);
+        return false;
+    }
+    std::vector<BYTE> buf(needed);
+    if (!::GetTokenInformation(token, TokenUser, buf.data(), static_cast<DWORD>(buf.size()), &needed)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    ::CloseHandle(token);
+    PSID user = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+    PSID system = nullptr;
+    if (!::ConvertStringSidToSidW(L"S-1-5-18", &system) || system == nullptr)
+        return false;
+    EXPLICIT_ACCESSW ea[2]{};
+    auto             fill = [&](DWORD i, PSID s, DWORD perms, TRUSTEE_TYPE type) {
+        ea[i].grfAccessPermissions = perms;
+        ea[i].grfAccessMode        = SET_ACCESS;
+        ea[i].grfInheritance       = inheritance;
+        ea[i].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+        ea[i].Trustee.TrusteeType  = type;
+        ea[i].Trustee.ptstrName    = static_cast<LPWSTR>(s);
+    };
+    fill(0, user, user_perms, TRUSTEE_IS_USER);
+    fill(1, system, system_perms, TRUSTEE_IS_WELL_KNOWN_GROUP);
+    PACL neu = nullptr;
+    if (::SetEntriesInAclW(2, ea, nullptr, &neu) != ERROR_SUCCESS) {
+        ::LocalFree(system);
+        return false;
+    }
+    const std::wstring wide  = boost::nowide::widen(path);
+    const DWORD        flags = DACL_SECURITY_INFORMATION |
+                        (protect ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION);
+    const DWORD rc = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(wide.c_str()), SE_FILE_OBJECT, flags, nullptr, nullptr, neu, nullptr);
+    ::LocalFree(neu);
+    ::LocalFree(system);
+    return rc == ERROR_SUCCESS;
+}
+
 bool path_current_user_can_rw(const std::string& path)
 {
     const std::wstring wide = boost::nowide::widen(path);
@@ -2766,6 +2812,8 @@ TEST_CASE("AppContainer Low-IL tree strip copy-replaces only helper-created file
     REQUIRE(write_zone_identifier(pre_file.string()));
     REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(pre_file.string()));
     REQUIRE(restrict_dacl_to_modify(pre_file.string()));
+    const std::string pre_dacl = path_dacl_sddl(pre_file.string());
+    REQUIRE_FALSE(pre_dacl.empty());
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     plugin_ipc::SandboxSpec spec;
@@ -2790,8 +2838,82 @@ TEST_CASE("AppContainer Low-IL tree strip copy-replaces only helper-created file
     CHECK(plugin_ipc::win_path_has_low_integrity_label(pre_file.string()));
     CHECK(read_file_bytes(pre_file.string()) == pre_body);
     CHECK(zone_identifier_present(pre_file.string()));
+    CHECK(path_dacl_sddl(pre_file.string()) == pre_dacl);
     CHECK_FALSE(plugin_ipc::win_path_has_low_integrity_label(post_file.string()));
     CHECK(read_file_bytes(post_file.string()) == post_body);
+}
+
+TEST_CASE("AppContainer close leaves pre-grant file DACLs unchanged", "[PluginSandbox][windows][acl]")
+{
+    const auto probe = plugin_ipc::probe_os_sandbox();
+    if (!probe.appcontainer)
+        SKIP("AppContainer unavailable: " + probe.reason);
+
+    ScopedDataDir             data("plugin-sandbox-pregrant-dacl");
+    boost::system::error_code ec;
+    const fs::path            user_rw = fs::temp_directory_path() / fs::unique_path("orca-pregrant-dacl-%%%%-%%%%");
+    fs::create_directories(user_rw, ec);
+    REQUIRE_FALSE(ec);
+    struct RemoveDir
+    {
+        fs::path p;
+        ~RemoveDir()
+        {
+            boost::system::error_code ignore;
+            fs::remove_all(p, ignore);
+        }
+    } cleanup{user_rw};
+    CloseSandbox close_guard;
+
+    constexpr DWORD k_modify = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_EA | FILE_WRITE_EA | FILE_EXECUTE |
+                               FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | READ_CONTROL | SYNCHRONIZE;
+    const fs::path explicit_file   = user_rw / "pregrant_motw.txt";
+    const fs::path inherited_file  = user_rw / "pregrant_motw_F.txt";
+    {
+        boost::nowide::ofstream out(explicit_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << "explicit-dacl";
+    }
+    REQUIRE(write_zone_identifier(explicit_file.string()));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(explicit_file.string()));
+    REQUIRE(restrict_dacl_user_system(explicit_file.string(), k_modify, FILE_ALL_ACCESS, NO_INHERITANCE, true));
+
+    REQUIRE(restrict_dacl_user_system(user_rw.string(), FILE_ALL_ACCESS, FILE_ALL_ACCESS,
+                                      CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE, true));
+    {
+        boost::nowide::ofstream out(inherited_file.string(), std::ios::binary | std::ios::trunc);
+        REQUIRE(out);
+        out << "inherited-dacl";
+    }
+    REQUIRE(write_zone_identifier(inherited_file.string()));
+    REQUIRE(plugin_ipc::win_apply_low_integrity_label_for_testing(inherited_file.string()));
+
+    const std::string explicit_dacl  = path_dacl_sddl(explicit_file.string());
+    const std::string inherited_dacl = path_dacl_sddl(inherited_file.string());
+    REQUIRE_FALSE(explicit_dacl.empty());
+    REQUIRE_FALSE(inherited_dacl.empty());
+    INFO("explicit DACL: " << explicit_dacl);
+    INFO("inherited DACL: " << inherited_dacl);
+    REQUIRE(inherited_dacl.find("ID") != std::string::npos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    plugin_ipc::SandboxSpec spec;
+    spec.plugin_key        = unique_test_plugin_key("Pregrant_Dacl");
+    close_guard.plugin_key = spec.plugin_key;
+    spec.data_dir          = data.dir.string();
+    spec.extra_paths.push_back({user_rw.string(), true, true});
+    std::string error;
+    REQUIRE(plugin_ipc::prepare_parent_sandbox(spec, error));
+    plugin_ipc::close_parent_sandbox();
+
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(explicit_file.string()));
+    CHECK(plugin_ipc::win_path_has_low_integrity_label(inherited_file.string()));
+    CHECK(zone_identifier_present(explicit_file.string()));
+    CHECK(zone_identifier_present(inherited_file.string()));
+    CHECK(read_file_bytes(explicit_file.string()) == "explicit-dacl");
+    CHECK(read_file_bytes(inherited_file.string()) == "inherited-dacl");
+    CHECK(path_dacl_sddl(explicit_file.string()) == explicit_dacl);
+    CHECK(path_dacl_sddl(inherited_file.string()) == inherited_dacl);
 }
 
 TEST_CASE("AppContainer journals an existing package-SID ACE so sweep can remove it", "[PluginSandbox][windows][acl]")
