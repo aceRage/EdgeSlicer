@@ -17,9 +17,10 @@
     ],
     "curved_tops": {
         "verified_printer_models": ["Elegoo Centauri Carbon"],
-        "verified_rise_mm": 1.8,
-        "verified_angle_deg": 10.3,
-        "verified_on": "2026-11 (before 2026-11-16)",
-        "verified_note": "Owner's print of CurvedTops_Dome40_CC1 (40 mm puck, 1.8 mm spherical cap, edge slope 10.3 deg, 3 curved layers, 0.20mm Standard @Elegoo CC 0.4 nozzle, Elegoo PLA) printed well, per the hand-test card (tests/design_curved_tops.md). The head itself was never measured."
+        "verified_rise_mm": 2.37,
+        "verified_angle_deg": 20.0,
+        "verified_nozzle_contact_mm": 0.61,
+        "verified_on": "2026-11-17",
+        "verified_note": "Owner's prints, Elegoo PLA, 0.20mm Standard @Elegoo CC 0.4 nozzle, 2026-11-17: the arm (curvedtops1 shape, 3 curved layers, max angle 20, clearance margin 0, material beside allowed) curved a 2.37 mm rise at 20.0 deg with the nozzle tip up to 0.37 mm and its flank up to 0.40 mm in printed material, sock 0.77 mm clear, no visible sign of contact; ladder file 07f (4 curved layers, angle 10, margin 1.0) had the nozzle tip up to 0.61 mm and its flank up to 0.54 mm in the flat inner-wall stubs along the patch edge, sock 1.44 mm clear, and passed. Earlier: CurvedTops_Dome40_CC1 (1.8 mm rise, 10.3 deg) printed well. The head itself was never measured."
     }
 }

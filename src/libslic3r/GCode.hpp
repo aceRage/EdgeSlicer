@@ -81,10 +81,12 @@ public:
     // EdgeSlicer, curved tops: the stored path is a curved-tops line. The wipe back along it is held to
     // the curved paths' speed cap (CURVED_TOPS_MAX_SPEED_MM_S), like the line itself. False otherwise.
     bool curved_top { false };
+    // Curved tops P3: the wipe's cap, mm/s (CURVED_TOPS_MAX_SPEED_MM_S unless a developer override set one).
+    double curved_wipe_speed_cap { 40.0 };
 
     Wipe() : enable(false) {}
     bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); this->heights.clear(); this->curved_top = false; }
+    void reset_path() { this->path = Polyline(); this->heights.clear(); this->curved_top = false; this->curved_wipe_speed_cap = 40.0; }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
     // Orca: rebuild the stored path while deduplicating shared path boundaries.

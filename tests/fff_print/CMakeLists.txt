@@ -12,10 +12,13 @@ add_executable(${_TEST_NAME}_tests
 	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
 	test_min_layer_time_pause.cpp
+	test_fine_detail_print.cpp
+	test_thin_feature_notice.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp
 	test_height_colour_pattern_slice.cpp
+	test_layer_range_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
 	test_gcode_timing.cpp
@@ -37,6 +40,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tower_labels_and_order.cpp
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
+	test_preload_validate.cpp
 	test_printgcode.cpp
 	test_h2c_timelapse_placement.cpp
 	test_h2c_tower_wait_pos.cpp

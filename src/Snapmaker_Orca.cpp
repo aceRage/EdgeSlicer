@@ -65,6 +65,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -85,6 +86,7 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliNamedPresets.hpp"
 #include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
@@ -725,7 +727,7 @@ struct NamedPresets
     }
 
     // User preset: <datadir>/user/*/<type>/*.json whose "name" matches, flattened onto its parent.
-    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id)
+    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id, std::string* system_parent = nullptr)
     {
         const boost::filesystem::path root = boost::filesystem::path(data_dir()) / "user";
         if (!boost::filesystem::exists(root)) return false;
@@ -757,6 +759,7 @@ struct NamedPresets
                     out = parent->config;
                     out.apply(cfg, true);
                     if (filament_id.empty()) filament_id = parent->filament_id;
+                    if (system_parent) *system_parent = parent->name;
                 } else {
                     out = cfg;
                 }
@@ -771,20 +774,24 @@ struct NamedPresets
     std::string resolve_to_file(const std::string& name, Preset::Type t, const std::string& out_dir, int ordinal)
     {
         DynamicPrintConfig cfg;
-        std::string        filament_id;
+        std::string        filament_id, system_parent;
+        bool               is_user = false;
         if (const Preset* p = find_system(name, t)) {
             cfg         = p->config;
             filament_id = p->filament_id;
-        } else if (!find_user(name, t, cfg, filament_id)) {
+        } else if (find_user(name, t, cfg, filament_id, &system_parent)) {
+            is_user = true;
+        } else {
             return "";
         }
         cfg.erase(BBL_JSON_KEY_INHERITS);
+        const CliNamedPresetOrigin origin = cli_named_preset_origin(t == Preset::TYPE_PRINTER, is_user, system_parent);
         nlohmann::json j;
         j[BBL_JSON_KEY_TYPE]     = type_dir(t);
         j[BBL_JSON_KEY_NAME]     = name;
-        j[BBL_JSON_KEY_FROM]     = "system";
+        j[BBL_JSON_KEY_FROM]     = origin.from;
         j[BBL_JSON_KEY_VERSION]  = SLIC3R_VERSION;
-        j[BBL_JSON_KEY_INHERITS] = "";
+        j[BBL_JSON_KEY_INHERITS] = origin.inherits;
         if (t == Preset::TYPE_FILAMENT && !filament_id.empty()) j[BBL_JSON_KEY_FILAMENT_ID] = filament_id;
         for (const std::string& key : cfg.keys()) {
             const ConfigOption* opt = cfg.option(key);
@@ -2178,6 +2185,21 @@ int CLI::run(int argc, char **argv)
     if (normative_check_option)
         normative_check = normative_check_option->value;
 
+    // EdgeSlicer, curved tops P3: the CLI has no Developer mode; --curved-tops-dev-overrides stands in
+    // for it. Off unless given, so a project's curved_tops_dev_* values are ignored by default.
+    {
+        const ConfigOptionBool *dev_option = m_config.option<ConfigOptionBool>("curved_tops_dev_overrides");
+        Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
+        if (dev_option != nullptr && dev_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+        // Curved tops on any printer: the CLI's stand-in for the app's one-time acceptance of head values no curved
+        // print has checked. Never a preset or project key: a downloaded 3MF cannot carry it.
+        const ConfigOptionBool *accept_option = m_config.option<ConfigOptionBool>("curved_tops_accept_unverified");
+        Slic3r::set_curved_tops_accept_unverified(accept_option != nullptr && accept_option->value);
+        if (accept_option != nullptr && accept_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops may run on unverified print head values for this run (--curved-tops-accept-unverified)";
+    }
+
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");
     if (uptodate_option)
         up_config_to_date = uptodate_option->value;
@@ -2757,14 +2779,8 @@ int CLI::run(int argc, char **argv)
                 flush_and_exit(CLI_CONFIG_FILE_ERROR);
             }
             new_printer_name = config_name;
-            if (config_from == "system") {
-                new_printer_system_name = new_printer_name;
-                new_printer_config_is_system = true;
-            }
-            else {
-                new_printer_system_name = config.option<ConfigOptionString>("inherits", true)->value;
-                new_printer_config_is_system = false;
-            }
+            new_printer_system_name = cli_config_system_name(config_from, new_printer_name, config.option<ConfigOptionString>("inherits", true)->value);
+            new_printer_config_is_system = config_from == "system";
             config.set("printer_settings_id", new_printer_name, true);
 
             //get printer_model_id
@@ -6849,7 +6865,8 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -7089,7 +7106,6 @@ int CLI::run(int argc, char **argv)
         // get type and color for platedata
         auto* filament_types = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_type"));
         const ConfigOptionStrings* filament_color = dynamic_cast<const ConfigOptionStrings *>(m_print_config.option("filament_colour"));
-        auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_ids"));
         const ConfigOptionFloats* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
         if (nozzle_diameter_option)
@@ -7108,8 +7124,10 @@ int CLI::run(int argc, char **argv)
             for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
                 std::string display_filament_type;
                 it->type  = m_print_config.get_filament_type(display_filament_type, it->id);
-                it->color = filament_color ? filament_color->get_at(it->id) : "#FFFFFF";
-                it->filament_id = filament_id?filament_id->get_at(it->id):"";
+                // A project need not carry every per-filament list (a Bambu project written by
+                // another tool may leave filament_ids out).
+                it->color       = m_print_config.filament_string_at("filament_colour", it->id, "#FFFFFF");
+                it->filament_id = m_print_config.filament_string_at("filament_ids", it->id, "");
             }
 
             if (!plate_data->plate_thumbnail.is_valid()) {
@@ -8257,13 +8275,9 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
         default: assert(false); break;
     };
     // use --outputdir when available
-    file_name = object.name.empty()?object.input_file:object.name;
-    file_name = "obj_"+std::to_string(index)+"_"+file_name;
-    size_t pos = file_name.find_last_of(ext), ext_pos = file_name.size() - 1;
-    if (pos != ext_pos)
-        file_name += ext;
+    file_name = cli_object_file_name(object.name.empty() ? object.input_file : object.name, index, ext);
 
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name<< ", pos = "<<pos<<", ext_pos="<<ext_pos;
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name;
     if (path_dir.empty()) {
         std::string cmdline_param = m_config.opt_string("outputdir");
         if (! cmdline_param.empty()) {

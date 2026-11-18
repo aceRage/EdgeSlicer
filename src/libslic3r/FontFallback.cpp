@@ -93,6 +93,7 @@ FontReferenceHeights font_reference_heights(const Emboss::FontFile &font, unsign
 }
 
 std::string bundled_symbol_font_path() { return resources_dir() + "/fonts/NotoSansSymbols2-Subset.ttf"; }
+std::string bundled_text_font_path() { return resources_dir() + "/fonts/NanumGothic-Regular.ttf"; }
 
 std::shared_ptr<const Emboss::FontFile> bundled_symbol_font()
 {

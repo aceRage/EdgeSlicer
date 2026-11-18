@@ -109,6 +109,12 @@ body.remote .cell.expanded { aspect-ratio: auto; max-height: none; }
 }
 .cell .label { position: absolute; left: 8px; top: 6px; z-index: 2; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,0.55); color: #fff; font-size: 12px; cursor: grab; user-select: none; }
 .cell .expand { position: absolute; right: 8px; top: 6px; z-index: 2; min-width: 28px; height: 24px; line-height: 24px; text-align: center; border-radius: 10px; background: rgba(0,0,0,0.55); color: #fff; font-size: 14px; cursor: pointer; user-select: none; -webkit-touch-callout: none; }
+/* "No video" hint over a tile whose picture did not arrive. A tile is black in both themes, so the
+   overlay uses fixed light-on-dark colours (readable either way); it sits under the label (z 2). */
+.cell .nopic { position: absolute; inset: 0; z-index: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 30px 12px 10px; background: rgba(0,0,0,0.88); color: #e6e9ea; font-size: 13px; line-height: 1.35; text-align: center; overflow: auto; }
+.cell .nopic button { background: #2d3335; color: #fff; border: 1px solid #6a7376; border-radius: 6px; padding: 4px 14px; font-size: 13px; cursor: pointer; }
+.cell .nopic button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+body.remote .cell .nopic { font-size: 12px; gap: 6px; padding: 28px 8px 8px; }
 .cell.expanded { position: fixed; inset: 0; z-index: 60; border-radius: 0; background: #000; }
 .cell.expanded .label { top: calc(6px + env(safe-area-inset-top)); left: calc(8px + env(safe-area-inset-left)); }
 .cell.expanded .expand { top: calc(6px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right)); }
@@ -770,19 +776,21 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
     // Hand the slicer the full list plus, per host, what a phone needs: the source kind, the
     // go2rtc stream name/source or the direct page URL. Credentials stay inside the app.
+    // rcam is the camera type the person picked (kindOf): the phone's "No video" hint words itself
+    // by it (the hub passes it on; an older hub drops it and the phone says the generic line).
     function remoteDescriptor(h) {
         var kind = kindOf(h);
         if (kind === 'flashforge') {
             var u = ffUrls[h.ip];
             if (u && /^rtsps?:\/\//i.test(u)) kind = 'rtsp-url', h = { ip: u };
-            else if (u) return { rkind: 'url', rurl: u };
-            else return { rkind: 'flashforge' };
+            else if (u) return { rkind: 'url', rurl: u, rcam: 'flashforge' };
+            else return { rkind: 'flashforge', rcam: 'flashforge' };
         }
-        if (kind === 'p1') return { rkind: 'p1' };
-        if (kind === 'elegoo') return { rkind: 'elegoo' }; // the hub's relay, looked up by id
-        if (kind === 'url') return { rkind: 'url', rurl: streamSrc(h) };
+        if (kind === 'p1') return { rkind: 'p1', rcam: 'p1' };
+        if (kind === 'elegoo') return { rkind: 'elegoo', rcam: 'elegoo' }; // the hub's relay, looked up by id
+        if (kind === 'url') return { rkind: 'url', rurl: streamSrc(h), rcam: 'url' };
         var src = go2rtcSrc(h, kind);
-        return { rkind: 'go2rtc', rname: 's' + hashStr(src), rsrc: src };
+        return { rkind: 'go2rtc', rname: 's' + hashStr(src), rsrc: src, rcam: kind };
     }
     function pushState() {
         if (!hubStateKnown) { askHubState(); return; } // never over a list this window has not read
@@ -1085,15 +1093,131 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         var cells = document.querySelectorAll('#grid .cell[data-hub]');
         for (var i = 0; i < cells.length; i++) cells[i].dataset.id = '';
     }
-    function go2rtcCell(cell, src) {
+    // ---- "No video" hint (NOPIC block; tests/slic3rutils/stream_center_nopicture_test.js) --------
+    // A camera that accepts the connection but sends no picture (a Bambu with "LAN Mode Liveview"
+    // off, a wrong access code, a camera port that is closed) used to leave a plain black tile.
+    // Now, when no picture has arrived NOPIC_MS after the tile started, the tile says so, in words
+    // for its camera type, with Retry; the overlay goes away the moment a picture arrives.
+    //   hub players (go2rtc iframes)  player.html watches its <video> and the go2rtc WebSocket and
+    //                                 posts snorcaPicture / snorcaNoPicture(+reason) to this page
+    //   Bambu MJPEG <img> tiles       a timer here, cleared by the image's load event
+    // The clock only runs while the tile is running (parked tiles and hidden pages stop it), so
+    // scrolling or a locked screen never produces a hint. A reason is shown only when go2rtc said
+    // one in words we recognise (player.html classifies it); nothing is ever guessed, and go2rtc's
+    // own text is never shown (it can carry the camera's address or password).
+    // All wording lives in NOPIC_TEXT, like every other string on this page (plain English).
+    // 10 s: a healthy Bambu start (TLS + login + first keyframe) is 1 to 3 s, a slow Wi-Fi or a
+    // cold relay a few more. ?nopicms=<ms> on the page URL shortens it for the headless gate
+    // (tests/phone/stream_no_picture_gate.js); the hub players get the same value.
+    var NOPIC_MS = (function() {
+        try { var v = parseInt(new URLSearchParams(location.search).get('nopicms'), 10); if (v >= 500) return v; } catch (e) {}
+        return 10000;
+    })();
+    var NOPIC_QS = NOPIC_MS !== 10000 ? '&nopicms=' + NOPIC_MS : '';
+    var NOPIC_TEXT = {
+        noVideo: 'No video.',
+        bambuHint: 'Check that LAN Mode Liveview is on at the printer (Settings on the printer’s screen), and that the access code is current.',
+        p1Hint: 'Check the access code, that the printer is on this network, and that its camera is not disabled.',
+        from: 'No video from ',
+        retry: 'Retry',
+        reasons: {
+            auth: 'Login refused.',
+            refused: 'Connection refused.',
+            unreachable: 'Not reachable.',
+            timeout: 'Timed out.',
+            codec: 'Unsupported video format.',
+            ffmpeg: 'ffmpeg is missing on this PC.'
+        }
+    };
+    // The address out of whatever was typed (no scheme, login, port or path): never show a password.
+    function camHostOnly(ip) {
+        return String(ip || '').replace(/^[a-z][a-z0-9+.\-]*:\/\//i, '').replace(/[\/?#].*$/, '').replace(/^.*@/, '').replace(/:\d+$/, '');
+    }
+    // cam is the camera type (kindOf's word: rtsps = Bambu X1/H2, p1 = Bambu A1/P1 port-6000 picture
+    // stream, anything else is generic); reason is player.html's code or ''.
+    function noPictureText(cam, reason, name) {
+        var r = NOPIC_TEXT.reasons[reason] || '';
+        if (cam === 'rtsps') return (r || NOPIC_TEXT.noVideo) + ' ' + NOPIC_TEXT.bambuHint;
+        if (cam === 'p1') return NOPIC_TEXT.noVideo + ' ' + NOPIC_TEXT.p1Hint;
+        return NOPIC_TEXT.from + (name || 'the camera') + '.' + (r ? ' ' + r : '');
+    }
+    // The overlay for a tile. onRetry runs after the overlay is hidden.
+    function noPicMake(cell, info, onRetry) {
+        var ov = document.createElement('div');
+        ov.className = 'nopic';
+        ov.setAttribute('role', 'status');
+        var txt = document.createElement('div');
+        ov.appendChild(txt);
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = NOPIC_TEXT.retry;
+        ov.appendChild(retry);
+        cell.appendChild(ov);
+        var api = {
+            el: ov,
+            show: function(reason) { txt.textContent = noPictureText(info.cam, reason, info.name); ov.style.display = 'flex'; },
+            hide: function() { ov.style.display = 'none'; },
+            shown: function() { return ov.style.display === 'flex'; }
+        };
+        retry.onclick = function(e) { if (e && e.stopPropagation) e.stopPropagation(); api.hide(); onRetry(); };
+        cell._nopic = api;
+        return api;
+    }
+    // A hub player tile: the player says when a picture is up or is not coming. Retry reloads the frame.
+    function noPicAttachFrame(cell, frame, info) {
+        var api = noPicMake(cell, info, function() { frame.src = frame.src; });
+        cell._npwStart = function() { api.hide(); }; // a tile put back starts a fresh attempt
+        return api;
+    }
+    // A picture <img> tile (the Bambu MJPEG relay): its first frame fires load.
+    function noPicAttachImg(cell, im, info) {
+        var timer = 0, tries = 0, loaded = false;
+        function disarm() { if (timer) { clearTimeout(timer); timer = 0; } }
+        function arm() {
+            disarm();
+            loaded = false;
+            timer = setTimeout(function() { timer = 0; if (!loaded) api.show(''); }, NOPIC_MS);
+        }
+        var api = noPicMake(cell, info, function() {
+            tries++;
+            im.setAttribute('src', String(im.getAttribute('src') || '').replace(/&n=\d+/, '') + '&n=' + tries);
+            arm();
+        });
+        im.addEventListener('load', function() { loaded = true; disarm(); api.hide(); });
+        im.addEventListener('error', function() {
+            if (!im.getAttribute('src')) return; // a parked tile has its source taken away on purpose
+            disarm();
+            api.show('');
+        });
+        cell._npwStart = function() { api.hide(); arm(); };
+        cell._npwStop = function() { disarm(); api.hide(); };
+        return api;
+    }
+    // The player's word for a tile, by the frame that sent it.
+    function noPicOnMessage(e) {
+        var d = e && e.data;
+        if (!d || typeof d !== 'object' || (d.snorcaPicture !== true && d.snorcaNoPicture !== true)) return;
+        var cells = document.querySelectorAll('#grid .cell');
+        for (var i = 0; i < cells.length; i++) {
+            var cell = cells[i], fr = cell.querySelector('iframe');
+            if (!fr || fr.contentWindow !== e.source || !cell._nopic) continue;
+            if (d.snorcaPicture === true) cell._nopic.hide();
+            else cell._nopic.show(typeof d.reason === 'string' ? d.reason : '');
+        }
+    }
+    // ---- end NOPIC block -----------------------------------------------------------------------
+    window.addEventListener('message', noPicOnMessage); // by frame identity, not origin: the PC page and the hub's player are different origins
+
+    function go2rtcCell(cell, src, info) {
         cell.dataset.hub = '1';
         var name = 's' + hashStr(src);
         // The hub registers streams from the pushed state; go2rtc's API is the hub's alone.
         if (!go2rtcStreams[name]) { go2rtcStreams[name] = true; pushState(); }
         var f = document.createElement('iframe');
         f.allow = 'autoplay';
-        f.src = 'http://127.0.0.1:' + go2rtcPort + '/stream.html?src=' + name + '&mode=mse&lt=' + encodeURIComponent(hubSecret);
+        f.src = 'http://127.0.0.1:' + go2rtcPort + '/stream.html?src=' + name + '&mode=mse&lt=' + encodeURIComponent(hubSecret) + NOPIC_QS;
         cell.appendChild(f);
+        if (info) noPicAttachFrame(cell, f, info);
     }
     function relayWaitCell(cell, failed) {
         ensureHub();
@@ -1252,7 +1376,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             return;
         }
         if (/^rtsps?:\/\//i.test(url)) {
-            if (go2rtcPort) go2rtcCell(cell, url); else relayWaitCell(cell, hubAnswered && !go2rtcPort);
+            if (go2rtcPort) go2rtcCell(cell, url, { cam: 'flashforge', name: camHostOnly(h.ip) }); else relayWaitCell(cell, hubAnswered && !go2rtcPort);
         } else if (/action=stream/i.test(url)) {
             var im = document.createElement('img');
             im.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
@@ -1479,8 +1603,10 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             // The stream name carries the quality step (a '<name>_med' / '_low' variant the hub
             // registered, or the source name), so a slow link asks go2rtc for less picture rather
             // than throttling a full one.
-            f.src = '/stream.html?src=' + encodeURIComponent(qualityName(h.id, h.rname)) + '&mode=' + encodeURIComponent(streamMode(h.id));
+            f.src = '/stream.html?src=' + encodeURIComponent(qualityName(h.id, h.rname)) + '&mode=' + encodeURIComponent(streamMode(h.id)) + NOPIC_QS;
             cell.appendChild(f);
+            // The phone is not told the camera's address (it stays on the PC): the name is the alias.
+            noPicAttachFrame(cell, f, { cam: h.rcam || '', name: h.alias || '' });
             modePicker(cell, h.id);
         } else if (h.rkind === 'p1') {
             var im = document.createElement('img');
@@ -1496,6 +1622,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             var fps = qualityFps(h.id);
             im.src = REMOTE + 'bambu?id=' + encodeURIComponent(h.id) + (fps ? '&fps=' + fps : '');
             cell.appendChild(im);
+            noPicAttachImg(cell, im, { cam: 'p1', name: h.alias || '' });
         } else if (h.rkind === 'elegoo') {
             var eim = document.createElement('img');
             eim.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
@@ -1984,6 +2111,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         if (cell._parked) return;
         var m = tileMedia(cell);
         if (!m) return;
+        if (cell._npwStop) cell._npwStop(); // the "No video" clock only runs while the tile does
         if (m.tagName === 'IMG') {
             // Detached images keep downloading; emptying the source is what aborts the request.
             cell._parked = { el: m, src: m.getAttribute('src') };
@@ -2000,6 +2128,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         cell._parked = null;
         if (p.src) p.el.setAttribute('src', p.src);
         cell.insertBefore(p.el, cell.firstChild);
+        if (cell._npwStart) cell._npwStart();
     }
     var tileIO = null;
     function tileWanted(cell) {
@@ -2044,6 +2173,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         } else if (!tilesShowing()) {
             parkTile(cell);
         }
+        if (!cell._parked && cell._npwStart) cell._npwStart(); // a tile that starts running starts its clock
     }
     document.addEventListener('visibilitychange', tilesSweep);
     // iOS keeps a page in its back/forward cache without a visibilitychange: pagehide / pageshow
@@ -2198,7 +2328,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                     } else if (kind === 'flashforge') {
                         ffCell(hh, cell);
                     } else if (kind === 'rtsp-url' || kind === 'rtsps' || kind === 'ipcam' || kind === 'wyze') {
-                        if (go2rtcPort) go2rtcCell(cell, go2rtcSrc(hh, kind)); else relayWaitCell(cell, hubAnswered && !go2rtcPort);
+                        if (go2rtcPort) go2rtcCell(cell, go2rtcSrc(hh, kind), { cam: kind, name: camHostOnly(hh.ip) }); else relayWaitCell(cell, hubAnswered && !go2rtcPort);
                     } else if (kind === 'elegoo') {
                         if (!relayPort) relayWaitCell(cell, hubAnswered && !relayPort);
                         else {
@@ -2219,6 +2349,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                             im.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
                             im.src = streamSrc(hh);
                             cell.appendChild(im);
+                            noPicAttachImg(cell, im, { cam: 'p1', name: camHostOnly(hh.ip) });
                         }
                     } else {
                         var f = document.createElement('iframe');

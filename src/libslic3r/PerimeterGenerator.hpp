@@ -104,6 +104,9 @@ public:
     SurfaceCollection           *fill_surfaces;
     //BBS
     ExPolygons                  *fill_no_overlap;
+    // EdgeSlicer, thin feature notice: when set, the generator records the thin spots it skips or widens here
+    // (observation only, no extrusion depends on it). One layer's record, owned by the caller.
+    ThinFeatureLayer            *thin_features = nullptr;
 
     //BBS
     Flow                        smaller_ext_perimeter_flow;
@@ -184,6 +187,12 @@ public:
             m_ext_mm3_per_mm(-1), m_mm3_per_mm(-1), m_mm3_per_mm_overhang(-1), m_ext_mm3_per_mm_smaller_width(-1),
             number_of_layers(layer_count)
         {}
+
+    // Observation for the thin feature notice: whether Fine text would print what was just found thinner (Arachne).
+    bool        fine_text_prints_thinner(coord_t bead_width_0, coord_t bead_width_x) const;
+    // Records the spots of `outline` against `limits` in thin_features. `hint` says what would print them thinner:
+    // 0 nothing, 1 Fine detail (Arachne), 2 Fine detail or Detect thin wall (Classic with thin walls off).
+    void        observe_thin_features(const ExPolygons &outline, const ThinFeatureLimits &limits, int hint, coord_t bead_width_0, coord_t bead_width_x) const;
 
     void        process_classic();
     void        process_arachne();

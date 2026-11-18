@@ -207,11 +207,14 @@ static bool layer_height_ranges_equal(const t_layer_config_ranges &lr1, const t_
     auto it2 = lr2.begin();
     for (const auto &kvp1 : lr1) {
         const auto &kvp2 = *it2 ++;
-        if (!kvp2.second.has("layer_height") || !kvp1.second.has("layer_height"))
+        // A range without a layer height prints at the object's (layer_height_profile_from_ranges()): two such ranges are equal.
+        const ConfigOption *lh1 = kvp1.second.option("layer_height");
+        const ConfigOption *lh2 = kvp2.second.option("layer_height");
+        if ((lh1 == nullptr) != (lh2 == nullptr))
             return false;
         if (std::abs(kvp1.first.first  - kvp2.first.first ) > EPSILON ||
             std::abs(kvp1.first.second - kvp2.first.second) > EPSILON ||
-            (check_layer_height && std::abs(kvp1.second.option("layer_height")->getFloat() - kvp2.second.option("layer_height")->getFloat()) > EPSILON))
+            (check_layer_height && lh1 != nullptr && std::abs(lh1->getFloat() - lh2->getFloat()) > EPSILON))
             return false;
     }
     return true;
@@ -1628,6 +1631,17 @@ bool Print::install_pending_extruder_filament_info()
     return this->install_pending_extruder_filament_info_unguarded();
 }
 
+// What normalize_fdm_2 calls the number of objects: print by object builds a prime tower only for a plate with one
+// copy on it (the plater and the CLI's tower placement count copies). Several copies of one object are one PrintObject,
+// and counting PrintObjects left the tower on for them, so the G-code printed the copies layer by layer.
+static int printed_copies_count(const PrintObjectPtrs &objects)
+{
+    size_t count = 0;
+    for (const PrintObject *object : objects)
+        count += object->instances().size();
+    return int(count);
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1727,7 +1741,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //new_full_config.normalize_fdm(used_filaments);
     new_full_config.normalize_fdm_1();
-    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(objects().size(), used_filaments);
+    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), used_filaments);
     if (changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got changed_keys, size=%1%")%changed_keys.size();
         for (int i = 0; i < changed_keys.size(); i++)
@@ -2290,7 +2304,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: check the config again
     int new_used_filaments = this->extruders(true).size();
-    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(objects().size(), new_used_filaments);
+    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), new_used_filaments);
     if (new_changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got new_changed_keys, size=%1%")%new_changed_keys.size();
         for (int i = 0; i < new_changed_keys.size(); i++)
@@ -2549,7 +2563,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         DynamicPrintConfig after              = m_full_print_config;
         if (auto *ept = after.option<ConfigOptionBool>("enable_prime_tower"))
             ept->value = requested_enable_prime_tower;
-        t_config_option_keys keys = after.normalize_fdm_2(int(m_objects.size()), used_after_regions);
+        t_config_option_keys keys = after.normalize_fdm_2(printed_copies_count(m_objects), used_after_regions);
         auto                 differs = [&](const t_config_option_key &key) {
             const ConfigOption *live = m_config.option(key);
             const ConfigOption *want = after.option(key);
@@ -2601,8 +2615,17 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
             if (multi_filament < 0)
                 multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
-            if (object->curved_tops_guard_inputs_used() != curved_tops_guard_inputs(*object, multi_filament))
-                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament);
+            const std::string now = curved_tops_guard_inputs(*object, multi_filament);
+            if (object->curved_tops_guard_inputs_used() != now) {
+                // P3: a change of the developer overrides (or of Developer mode) always re-plans, so the
+                // warning that lists them is never stale; without overrides both tails are empty.
+                const auto dev_tail = [](const std::string &record) {
+                    const size_t pos = record.find(";dev=");
+                    return pos == std::string::npos ? std::string() : record.substr(pos);
+                };
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament) ||
+                             dev_tail(object->curved_tops_guard_inputs_used()) != dev_tail(now);
+            }
         }
         if (regenerate)
             update_apply_status(object->invalidate_step(posPerimeters));

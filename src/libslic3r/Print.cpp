@@ -798,6 +798,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "extruder_clearance_max_radius",
         "farthest_point_timelapse",
         "nozzle_height",
+        // EdgeSlicer, curved tops on any printer: the user's head values. The planner's use is in the guard
+        // record (curved_tops_guard_inputs), which re-plans the block when it changes; the head check reads them at export.
+        "head_nozzle_protrusion",
+        "head_max_surface_angle",
+        "head_nozzle_contact_record",
         "extruder_colour",
         "extruder_offset",
         "filament_flow_ratio",
@@ -3412,7 +3417,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     // H2 preload: the pre-changes purge into the prime tower, so refuse the combination up front
     // rather than silently doing nothing. Points the user at enable_prime_tower.
-    if (m_config.preload_all_filaments.value && !m_config.enable_prime_tower.value)
+    // Not for a plate printed in one filament: there is nothing to preload, and normalize_fdm_2 turns the
+    // tower off for it, so the check refused every such plate, asking for the tower the user had enabled.
+    if (m_config.preload_all_filaments.value && !m_config.enable_prime_tower.value && extruders.size() > 1)
         return {L("\"Preload all filaments\" requires the prime tower: every filament is loaded and purged into it "
                   "on the first layer. Enable the prime tower, or turn \"Preload all filaments\" off."),
                 nullptr, "enable_prime_tower"};
@@ -6525,9 +6532,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
 
         // ZAA (Z contouring): after infill and ironing, before path simplification.
+        // EdgeSlicer, curved tops (P2): an object with curved tops on runs this step after its supports
+        // (below), so the curved block is checked against the final support layers.
         for (PrintObject *obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
-                obj->contour_z();
+                if (! obj->curved_tops_after_support())
+                    obj->contour_z();
             }
             else {
                 if (obj->set_started(posContouring))
@@ -6549,6 +6559,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 }
             }
         );
+
+        for (PrintObject *obj : m_objects)
+            if (need_slicing_objects.count(obj) != 0 && obj->curved_tops_after_support())
+                obj->contour_z();
 
         for (PrintObject* obj : m_objects) {
             if (need_slicing_objects.count(obj) != 0) {
@@ -6584,8 +6598,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 obj->make_perimeters();
                 obj->infill();
                 obj->ironing();
-                obj->contour_z();
-                obj->generate_support_material();
+                // Curved tops (P2): after the supports, as above.
+                if (obj->curved_tops_after_support()) {
+                    obj->generate_support_material();
+                    obj->contour_z();
+                } else {
+                    obj->contour_z();
+                    obj->generate_support_material();
+                }
                 obj->detect_overhangs_for_lift();
                 obj->estimate_curled_extrusions();
             }

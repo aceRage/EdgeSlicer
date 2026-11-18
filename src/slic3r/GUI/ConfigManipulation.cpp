@@ -500,6 +500,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            ! config->opt_bool("enable_support") &&
            config->opt_int("enforce_support_layers") == 0 &&
            ! config->opt_bool("detect_thin_wall") &&
+           // EdgeSlicer: Fine detail detects thin walls on Classic, which open the spiral's single wall.
+           (! config->has("fine_detail") || config->opt_enum<FineDetailLevel>("fine_detail") == FineDetailLevel::Off) &&
            ! config->opt_bool("overhang_reverse") &&
            // Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
            (! config->has("stabilizer_supports") || config->opt_enum<StabilizerMode>("stabilizer_supports") == smOff) &&
@@ -516,6 +518,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("enable_support", new ConfigOptionBool(false));
             new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
             new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+            if (new_conf.has("fine_detail"))
+                new_conf.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
             if (new_conf.has("stabilizer_supports"))
                 new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
@@ -1191,8 +1195,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     // EdgeSlicer: curved tops (experimental) detail settings.
     bool has_curved_tops = config->opt_bool("curved_tops_enabled");
-    for (auto el : {"curved_tops_layers", "curved_tops_max_angle"})
+    for (auto el : {"curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern"})
         toggle_line(el, has_curved_tops);
+    // Curved tops P3: the developer overrides (their lines are comDevelop and need Developer mode on too).
+    for (auto el : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",
+                     "curved_tops_dev_flank_margin", "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin",
+                     "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap", "curved_tops_dev_safe_lift",
+                     "curved_tops_dev_contact_warning_only", "curved_tops_dev_allow_multiple_objects", "curved_tops_dev_allow_by_object",
+                     "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
+                     "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
+                     "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
+                     "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
+        // Shown exactly when the overrides can act (GUI_App::update_mode() sets the slicer's gate the same way).
+        toggle_line(el, has_curved_tops && GUI::wxGetApp().curved_tops_developer_lines_shown());
 
     bool have_sequential_printing = (config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);
     // for (auto el : { "extruder_clearance_radius", "extruder_clearance_height_to_rod", "extruder_clearance_height_to_lid" })
@@ -1409,9 +1424,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
         "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
-        "wall_maximum_resolution", "wall_maximum_deviation"})
+        "wall_maximum_resolution", "wall_maximum_deviation", "min_odd_wall_line_width", "min_even_wall_line_width"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
+    // EdgeSlicer, Fine detail: the level works on both generators (on Classic it detects thin walls); its two floors
+    // are Arachne's, and the floors and the speed only act while a level is chosen.
+    if (config->has("fine_detail")) {
+        const bool fine_detail_on = config->opt_enum<FineDetailLevel>("fine_detail") != FineDetailLevel::Off;
+        for (auto el : { "thin_feature_line_width", "thin_feature_min_size" }) {
+            toggle_line(el, have_arachne);
+            toggle_field(el, fine_detail_on);
+        }
+        toggle_field("fine_detail_speed", fine_detail_on);
+    }
 
     // Orca
     auto is_role_based_wipe_speed = config->opt_bool("role_based_wipe_speed");

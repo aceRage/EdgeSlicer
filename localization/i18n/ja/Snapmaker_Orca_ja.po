@@ -8000,8 +8000,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr ""
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] ""
 
 #. TRN  Remove/Delete

@@ -2491,13 +2491,19 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         if (volume->type() != ModelVolumeType::MODEL_PART)
             continue;
 
-        // splited volume should not be text object 
-        if (volume->text_configuration.has_value())
+        // splited volume should not be text object. Its emboss shape goes too, or the part reads as an SVG
+        // (is_svg(): an emboss shape and no text configuration).
+        if (volume->text_configuration.has_value()) {
             volume->text_configuration.reset();
+            volume->emboss_shape.reset();
+        }
 
         if (!is_multi_volume_object) {
             //BBS: not multi volume object, then split mesh.
             std::vector<TriangleMesh> volume_meshes = volume->mesh().split();
+            // An SVG part cut into pieces: no piece is the shape any more.
+            if (volume_meshes.size() > 1)
+                volume->emboss_shape.reset();
             int mesh_count = 0;
             for (TriangleMesh& mesh : volume_meshes) {
                 if (mesh.facets_count() < 3)
@@ -3251,9 +3257,12 @@ size_t ModelVolume::split(unsigned int max_extruders)
     if (meshes.size() <= 1)
         return 1;
 
-    // splited volume should not be text object
+    // splited volume should not be text object, nor an SVG one: no piece is the shape any more. With only the text
+    // configuration gone, a text part's emboss shape stayed on every piece, and the pieces read as SVG parts.
     if (text_configuration.has_value())
         text_configuration.reset();
+    if (emboss_shape.has_value())
+        emboss_shape.reset();
 
     size_t idx = 0;
     size_t ivolume = std::find(this->object->volumes.begin(), this->object->volumes.end(), this) - this->object->volumes.begin();

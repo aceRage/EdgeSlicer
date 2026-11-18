@@ -48,6 +48,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -165,6 +166,13 @@ private:
     bool                  m_adjust_seen{ false };
     // The Output Log's fold: collapsed by default, remembered for the session.
     bool                  m_output_log_open{ false };
+    // Panel height: the body scrolls, the action row stays put. The last frame's measurements size this
+    // frame's body (content height, the parts table's width, the action row's height); the open / closed
+    // state of every collapsible section is read from the app config once and kept here.
+    float                 m_body_content_h{ 0.f };
+    float                 m_table_w{ 0.f };
+    float                 m_footer_h{ 0.f };
+    std::map<std::string, bool> m_section_open;
     // A warning clicked in the Output Log: its box, outlined in the 3D view.
     BoundingBoxf3         m_highlight;
     GLModel               m_highlight_model;

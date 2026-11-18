@@ -1142,7 +1142,8 @@ int  NetworkAgent::change_user(std::string user_info)
     if (network_agent && change_user_ptr) {
         ret = change_user_ptr(network_agent, user_info);
         if (ret)
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, user_info=%3%")%network_agent %ret %user_info ;
+            // user_info is the sign-in data: it holds the access and refresh tokens. Its size only.
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, user_info_len=%3%")%network_agent %ret %user_info.size();
         if (s_login_changed_hook)
             s_login_changed_hook();
     }
@@ -1245,8 +1246,8 @@ int NetworkAgent::ping_bind(std::string ping_code)
     if (network_agent && ping_bind_ptr) {
         ret = ping_bind_ptr(network_agent, ping_code);
         if (ret)
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, pin code=%3%")
-            % network_agent % ret % ping_code;
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, pin_code_len=%3%")
+            % network_agent % ret % ping_code.size();
     }
     return ret;
 }
@@ -1519,7 +1520,8 @@ int NetworkAgent::get_user_print_info(unsigned int* http_code, std::string* http
     int ret = 0;
     if (network_agent && get_user_print_info_ptr) {
         ret = get_user_print_info_ptr(network_agent, http_code, http_body);
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, http_code=%3%, http_body=%4%")%network_agent %ret %(*http_code) %(*http_body);
+        // The body lists the account's printers with each one's LAN access code ("dev_access_code").
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" error: network_agent=%1%, ret=%2%, http_code=%3%, http_body=%4%")%network_agent %ret %(*http_code) %body_for_log(*http_body);
     }
     return ret;
 }
@@ -1736,6 +1738,11 @@ std::string NetworkAgent::login_failure_body_for_log(const std::string& body, co
         if (c == '\r' || c == '\n')
             c = ' ';
     return scrub_for_crash_report(text, max_len);
+}
+
+std::string NetworkAgent::body_for_log(const std::string& body, size_t max_len)
+{
+    return login_failure_body_for_log(body, std::string(), max_len);
 }
 
 int NetworkAgent::get_my_profile(std::string token, unsigned int *http_code, std::string *http_body)

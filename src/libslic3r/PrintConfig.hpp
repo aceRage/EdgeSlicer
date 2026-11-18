@@ -448,6 +448,11 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
+// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp). P5 adds Spiral.
+enum CurvedTopsPattern {
+    ctpMonotonic, ctpConcentric, ctpSpiral
+};
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -467,6 +472,17 @@ enum class PerimeterGeneratorType
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
     Arachne
+};
+
+// EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, P2): how thin a line the walls may use for
+// features narrower than a wall. Off is the walls as they always were; the floors of the named levels are in
+// FineDetail.hpp. Custom takes thin_feature_line_width / thin_feature_min_size as set.
+enum class FineDetailLevel
+{
+    Off,
+    Balanced,
+    FineText,
+    Custom
 };
 
 // Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
@@ -1102,6 +1118,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
@@ -1113,6 +1130,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SideScrapeFace)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FineDetailLevel)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
@@ -1317,6 +1335,11 @@ public:
 
     //BBS special case Support G/ Support W
     std::string get_filament_type(std::string &displayed_filament_type, int id = 0);
+    // Entry `id` of the per-filament text list `opt_key`, or `fallback` when the config has no such
+    // list or the list is empty: a project written by another tool may leave filament_ids out, and
+    // get_at() on an empty list reads past it. An index past the end reads the first entry, as
+    // get_at() does.
+    std::string filament_string_at(const std::string &opt_key, int id, const std::string &fallback) const;
 
     bool is_custom_defined();
 
@@ -1665,6 +1688,31 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                curved_tops_enabled))
     ((ConfigOptionInt,                 curved_tops_layers))
     ((ConfigOptionFloat,               curved_tops_max_angle))
+    // EdgeSlicer, curved tops P4.
+    ((ConfigOptionFloat,               curved_tops_nozzle_tolerance))
+    ((ConfigOptionEnum<CurvedTopsPattern>, curved_tops_pattern))
+    // EdgeSlicer, curved tops P3: developer overrides (Developer mode only, see CurvedTops.hpp).
+    ((ConfigOptionFloat,               curved_tops_dev_angle_ceiling))
+    ((ConfigOptionFloat,               curved_tops_dev_head_lowest_part))
+    ((ConfigOptionFloat,               curved_tops_dev_clearance_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_flank_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_land_tolerance))
+    ((ConfigOptionFloat,               curved_tops_dev_reach_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_wipe_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_safe_lift))
+    ((ConfigOptionBool,                curved_tops_dev_contact_warning_only))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multiple_objects))
+    ((ConfigOptionBool,                curved_tops_dev_allow_by_object))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multi_filament))
+    ((ConfigOptionBool,                curved_tops_dev_allow_supports_in_reach))
+    ((ConfigOptionBool,                curved_tops_dev_allow_material_beside))
+    ((ConfigOptionBool,                curved_tops_dev_allow_z_contouring))
+    ((ConfigOptionBool,                curved_tops_dev_allow_raft))
+    ((ConfigOptionBool,                curved_tops_dev_allow_variable_layer_height))
+    ((ConfigOptionBool,                curved_tops_dev_allow_tall_skirt))
+    ((ConfigOptionBool,                curved_tops_dev_allow_unverified_head))
+    ((ConfigOptionBool,                curved_tops_dev_nozzle_tolerance_unrecorded))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))
@@ -1785,6 +1833,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_feature_size))
     ((ConfigOptionPercent,            initial_layer_min_bead_width))
     ((ConfigOptionPercent,            min_bead_width))
+    // EdgeSlicer (Fine detail P2, Cura's separate minimums): the line widths that decide when one wall line
+    // splits into two (odd) and when a centre line is added between two (even). 0 = min_bead_width, as before.
+    ((ConfigOptionPercent,            min_odd_wall_line_width))
+    ((ConfigOptionPercent,            min_even_wall_line_width))
 
     // Orca
     ((ConfigOptionFloat,              wall_maximum_resolution))
@@ -1995,6 +2047,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.
     ((ConfigOptionBool, detect_thin_wall))
+    // EdgeSlicer, Fine detail (P2): region keys, so a modifier can carry them. See FineDetail.hpp.
+    ((ConfigOptionEnum<FineDetailLevel>, fine_detail))
+    ((ConfigOptionPercent, thin_feature_line_width))
+    ((ConfigOptionPercent, thin_feature_min_size))
+    ((ConfigOptionFloat, fine_detail_speed))
     // Ultra: offset layers (interlocked half-layer-shifted odd walls)
     ((ConfigOptionBool, offset_layers))
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
@@ -2508,6 +2565,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // by-object collision and arrange keep extruder_clearance_radius.
     ((ConfigOptionFloat,              extruder_clearance_max_radius))
     ((ConfigOptionFloat,              nozzle_height))
+    // EdgeSlicer, curved tops on any printer: the user's own print head values (HeadClearance.hpp, HeadUserValues).
+    ((ConfigOptionFloat,              head_nozzle_protrusion))
+    ((ConfigOptionFloat,              head_max_surface_angle))
+    ((ConfigOptionFloat,              head_nozzle_contact_record))
     ((ConfigOptionStrings,            extruder_colour))
     ((ConfigOptionPoints,             extruder_offset))
     ((ConfigOptionBools,              reduce_fan_stop_start_freq))

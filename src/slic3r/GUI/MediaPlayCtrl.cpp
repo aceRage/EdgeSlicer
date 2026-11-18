@@ -885,7 +885,8 @@ void MediaPlayCtrl::media_proc()
             break; // ~MediaPlayCtrl is waiting; queued tasks would only drive a player being destroyed
         wxString url = m_tasks.front();
         if (m_tasks.size() >= 2 && !url.IsEmpty() && url[0] != '<' && m_tasks[1] == "<stop>") {
-            BOOST_LOG_TRIVIAL(trace) << "MediaPlayCtrl: busy skip url: " << url;
+            // Not the URL itself: a LAN one carries the printer's access code ("passwd=", "bblp:<code>@").
+            BOOST_LOG_TRIVIAL(trace) << "MediaPlayCtrl: busy, skipped a queued url";
             m_tasks.pop_front();
             m_tasks.pop_front();
             continue;

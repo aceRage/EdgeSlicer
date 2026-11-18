@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,6 +58,13 @@ struct ContourZSamples
     //  - exit_lift: the last path of a curved block. After it the emitter retracts (and wipes) and
     //    lifts to base + safe_z_delta before anything else moves the head (design R5).
     bool               exit_lift    = false;
+    //  - speed caps for this path's extrusion and for a wipe back along it, mm/s; 0 means
+    //    CURVED_TOPS_MAX_SPEED_MM_S. Set only by a curved-tops developer override (P3).
+    float              speed_cap      = 0.f;
+    float              wipe_speed_cap = 0.f;
+    //  - G-code comment lines written before the block's first path (developer overrides in force).
+    //    Empty otherwise, which keeps the G-code byte-identical.
+    std::string        block_comment;
     // Per-sample flow multiplier (same order as points); empty means 1.
     std::vector<float> flow;
 
@@ -92,6 +100,16 @@ using ContourZSamplesPtr = std::shared_ptr<const ContourZSamples>;
 
 // EdgeSlicer, curved tops: speed cap for conformal paths, mm/s (see GCode.cpp).
 static constexpr double CURVED_TOPS_MAX_SPEED_MM_S = 40.0;
+
+// The speed caps a curved path keeps to: its own (developer override) or the built-in one.
+inline double curved_tops_speed_cap(const ContourZSamples &s)
+{
+    return s.speed_cap > 0.f ? double(s.speed_cap) : CURVED_TOPS_MAX_SPEED_MM_S;
+}
+inline double curved_tops_wipe_speed_cap(const ContourZSamples &s)
+{
+    return s.wipe_speed_cap > 0.f ? double(s.wipe_speed_cap) : CURVED_TOPS_MAX_SPEED_MM_S;
+}
 
 // ---------------------------------------------------------------------------------------------
 // The tuning constants of the pass. All of them exist because of a measured artifact on a real
