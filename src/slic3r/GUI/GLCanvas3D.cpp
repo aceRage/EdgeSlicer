@@ -3703,7 +3703,13 @@ void GLCanvas3D::render(bool only_init)
         return;
 
     // ensures this canvas is current and initialized
-    if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
+    if (!_is_shown_on_screen())
+        return;
+    if (!_set_current()) {
+        wxGetApp().get_opengl_manager().report_make_current_failure(*m_canvas, m_context);
+        return;
+    }
+    if (!wxGetApp().init_opengl())
         return;
 
     if (!is_initialized() && !init())
@@ -5045,6 +5051,8 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
 {
     // GCodeViewer::init()/load() create GL buffers and textures directly, and this is called from
     // Preview::load_print_as_fff outside any render pass (a hidden instance never renders).
+    // OrcaSlicer #17441: without a current context the OpenGL functions were never loaded.
+    // Edge's ensure_gl_ready() already make-currents and calls init_opengl().
     if (!ensure_gl_ready())
         return;
     PartPlateList& partplate_list = wxGetApp().plater()->get_partplate_list();
