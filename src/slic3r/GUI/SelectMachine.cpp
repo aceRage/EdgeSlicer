@@ -13,7 +13,6 @@
 #include "DualNozzleState.hpp"
 #include "NozzleInfo.hpp"
 #include "BambuSendMapping.hpp"
-#include "SendTimelapseGate.hpp"
 #include "BambuSendDiagnosis.hpp"
 #include <chrono>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -981,7 +980,7 @@ void SelectMachineDialog::update_select_layout(MachineObject *obj)
         }
     }
 
-    if (obj && (obj->is_support_timelapse || bbl_caps_fallback) && is_show_timelapse()) {
+    if (obj && (obj->is_support_timelapse || bbl_caps_fallback)) {
         select_timelapse->Show();
         update_timelapse_enable_status();
     } else {
@@ -3587,18 +3586,6 @@ void SelectMachineDialog::update_timelapse_enable_status()
     }
 }
 
-
-bool SelectMachineDialog::is_show_timelapse()
-{
-    // Not for G-code from OrcaSlicer / Snapmaker Orca before 2.2.0 (SendTimelapseGate.cpp), read
-    // from the header only.
-    PartPlate *plate      = m_plater->get_partplate_list().get_curr_plate();
-    fs::path   gcode_path = plate->get_tmp_gcode_path();
-    std::ifstream gcode_file(gcode_path.string());
-    if (gcode_file.fail())
-        return true;
-    return timelapse_allowed_for_gcode(gcode_file);
-}
 
 void SelectMachineDialog::reset_ams_material()
 {
