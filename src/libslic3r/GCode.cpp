@@ -1640,7 +1640,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             gcodegen.writer().set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_tool_change;
-            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_str, temp_z_after_tool_change)) {
+            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_str, temp_z_after_tool_change, gcodegen.writer().get_position()(2))) {
                 Vec3d pos = gcodegen.writer().get_position();
                 pos(2)    = temp_z_after_tool_change;
                 gcodegen.writer().set_position(pos);
@@ -5857,7 +5857,7 @@ GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, 
         m_writer.set_current_position_clear(false);
 
     double z_after_timelapse;
-    if (GCodeProcessor::get_last_z_from_gcode(timelapse_gcode, z_after_timelapse)) {
+    if (GCodeProcessor::get_last_z_from_gcode(timelapse_gcode, z_after_timelapse, z_before_timelapse)) {
         if (std::abs(z_after_timelapse - z_before_timelapse) > EPSILON) {
             // The template moved Z (the park branch lifts to max_layer_z + 3): go back down, as
             // BambuStudio does, so the following lift / travel logic starts from the known Z.
@@ -8136,7 +8136,7 @@ LayerResult GCode::process_layer(const Print& print,
                 m_writer.set_current_position_clear(false);
                 // BBS: check whether custom gcode changes the z position. Update if changed
                 double temp_z_after_timepals_gcode;
-                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                     Vec3d pos = m_writer.get_position();
                     pos(2)    = temp_z_after_timepals_gcode;
                     m_writer.set_position(pos);
@@ -8153,7 +8153,7 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode += timepals_gcode;
                 m_writer.set_current_position_clear(false);
                 double temp_z_after_timepals_gcode;
-                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                     Vec3d pos = m_writer.get_position();
                     pos(2)    = temp_z_after_timepals_gcode;
                     m_writer.set_position(pos);
@@ -10277,7 +10277,7 @@ LayerResult GCode::process_layer(const Print& print,
                         m_writer.set_current_position_clear(false);
                         // BBS: check whether custom gcode changes the z position. Update if changed
                         double temp_z_after_timepals_gcode;
-                        if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                        if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                             Vec3d pos = m_writer.get_position();
                             pos(2)    = temp_z_after_timepals_gcode;
                             m_writer.set_position(pos);
@@ -10297,7 +10297,7 @@ LayerResult GCode::process_layer(const Print& print,
                     gcode += timepals_gcode;
                     m_writer.set_current_position_clear(false);
                     double temp_z_after_timepals_gcode;
-                    if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                    if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                         Vec3d pos = m_writer.get_position();
                         pos(2)    = temp_z_after_timepals_gcode;
                         m_writer.set_position(pos);
@@ -10664,7 +10664,7 @@ LayerResult GCode::process_layer(const Print& print,
                                 m_writer.set_current_position_clear(false);
                                 // BBS: check whether custom gcode changes the z position. Update if changed
                                 double temp_z_after_timepals_gcode;
-                                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                                     Vec3d pos = m_writer.get_position();
                                     pos(2)    = temp_z_after_timepals_gcode;
                                     m_writer.set_position(pos);
@@ -10780,7 +10780,7 @@ LayerResult GCode::process_layer(const Print& print,
             m_writer.set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_timepals_gcode;
-            if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+            if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode, m_writer.get_position()(2))) {
                 Vec3d pos = m_writer.get_position();
                 pos(2)    = temp_z_after_timepals_gcode;
                 m_writer.set_position(pos);
@@ -14270,7 +14270,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             m_writer.set_current_position_clear(false);
             // BBS: check whether custom gcode changes the z position. Update if changed
             double temp_z_after_tool_change;
-            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_parsed, temp_z_after_tool_change)) {
+            if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_parsed, temp_z_after_tool_change, m_writer.get_position()(2))) {
                 Vec3d pos = m_writer.get_position();
                 pos(2)    = temp_z_after_tool_change;
                 m_writer.set_position(pos);
