@@ -1769,12 +1769,26 @@ size_t count_occurrences(const std::string &text, const std::string &what)
     return n;
 }
 
-// P5: the head check's message for a clean curved print: none, "no head contact found", or only nozzle contacts within the
-// tolerance (Monotonic's gap fill and line ends touch the neighbouring beads by about 0.1 mm since P5).
-bool head_check_clean(const std::string &check)
+// P5: the head check's message for a clean curved print: none, "no head contact found", or only the information line for
+// nozzle contacts within the tolerance (Monotonic's gap fill and line ends touch the neighbouring beads by about 0.1 mm
+// since P5), at most `tolerance` deep and no deeper than printed on the printer. Any reported contact ("EXPECTED CONTACT",
+// another head part, a contact the check refuses) is not clean (review M2 of #1103).
+bool head_check_clean(const std::string &check, double tolerance = 0.4)
 {
-    return check.empty() || check.find("no head contact found") != std::string::npos ||
-           (check.find("The nozzle passes up to 0.") != std::string::npos && check.find("no other head part touches") != std::string::npos);
+    if (check.empty())
+        return true;
+    if (check.rfind("Curved tops head check", 0) != 0 || check.find("EXPECTED CONTACT") != std::string::npos ||
+        check.find("NOT ONLY") != std::string::npos || check.find("By head part") != std::string::npos ||
+        check.find("deeper than has been printed") != std::string::npos)
+        return false;
+    if (check.find("no head contact found") != std::string::npos)
+        return check.find("The nozzle passes") == std::string::npos;
+    const std::string lead = "The nozzle passes up to ";
+    const size_t      pos  = check.find(lead);
+    if (pos == std::string::npos || check.find("no other head part touches in those moves") == std::string::npos)
+        return false;
+    const double depth = std::atof(check.c_str() + pos + lead.size());
+    return depth > 0. && depth <= tolerance + 1e-6;
 }
 
 // Every overridable refusal switched off and every number moved off its built-in value.
@@ -3203,6 +3217,190 @@ TEST_CASE("Curved tops P5: corner wedges are filled", "[CurvedTops][CurvedTopsP5
 
 namespace {
 
+// Local fill (review M1 of #1103): every bead's volume spread over its strip (spacing = flow / layer height, centred on the
+// line) on a 0.05 mm grid, then summed in square windows of `window` mm whose centre lies at least `edge` mm inside the patch,
+// every 0.1 mm. Each window's ratio is that volume / (window area x layer height): 1.0 = filled once, 2.0 = two beads on
+// top of each other.
+struct LocalFill
+{
+    double lo { std::numeric_limits<double>::max() };
+    double hi { 0. };
+    Vec2d  at_lo { Vec2d::Zero() }, at_hi { Vec2d::Zero() };
+    size_t windows { 0 };
+};
+
+LocalFill local_fill(const ExPolygon &fp, const std::vector<CurvedTopsFillPath> &paths, double h, double window, double edge)
+{
+    const double      cell = 0.05;
+    const BoundingBox bb   = get_extents(fp);
+    const Vec2d       org  = unscale(bb.min);
+    const int         nx   = int(std::ceil(unscale<double>(bb.size().x()) / cell)) + 2;
+    const int         ny   = int(std::ceil(unscale<double>(bb.size().y()) / cell)) + 2;
+    std::vector<double> dep(size_t(nx) * size_t(ny), 0.);
+    const auto add = [&](const Vec2d &q, double area) {
+        const int ix = int(std::floor((q.x() - org.x()) / cell)), iy = int(std::floor((q.y() - org.y()) / cell));
+        if (ix >= 0 && iy >= 0 && ix < nx && iy < ny)
+            dep[size_t(iy) * size_t(nx) + size_t(ix)] += area;
+    };
+    for (const CurvedTopsFillPath &p : paths) {
+        const double strip = p.mm3_per_mm / h;
+        for (size_t i = 1; i < p.points.size(); ++i) {
+            const Vec2d  a = unscale(p.points[i - 1]), b = unscale(p.points[i]);
+            const double len = (b - a).norm();
+            if (len <= 0.)
+                continue;
+            const Vec2d dir = (b - a) / len, nrm(-dir.y(), dir.x());
+            const int   na = std::max(1, int(std::ceil(len / (0.5 * cell)))), nw = std::max(1, int(std::ceil(strip / (0.5 * cell))));
+            const double da = (len / na) * (strip / nw);
+            for (int ia = 0; ia < na; ++ia)
+                for (int iw = 0; iw < nw; ++iw)
+                    add(a + dir * (len * (ia + 0.5) / na) + nrm * (strip * ((iw + 0.5) / nw - 0.5)), da);
+        }
+    }
+    // Summed-area table.
+    std::vector<double> sat(size_t(nx + 1) * size_t(ny + 1), 0.);
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x)
+            sat[size_t(y + 1) * size_t(nx + 1) + size_t(x + 1)] = dep[size_t(y) * size_t(nx) + size_t(x)] +
+                                                                  sat[size_t(y) * size_t(nx + 1) + size_t(x + 1)] +
+                                                                  sat[size_t(y + 1) * size_t(nx + 1) + size_t(x)] -
+                                                                  sat[size_t(y) * size_t(nx + 1) + size_t(x)];
+    const int        wc    = int(std::lround(window / cell));
+    const ExPolygons inner = offset_ex(fp, -float(scale_(edge)));
+    LocalFill        out;
+    for (int y = 0; y + wc <= ny; y += 2)
+        for (int x = 0; x + wc <= nx; x += 2) {
+            const Vec2d c = org + Vec2d((x + 0.5 * wc) * cell, (y + 0.5 * wc) * cell);
+            bool        in = false;
+            for (const ExPolygon &e : inner)
+                in |= e.contains(Point::new_scale(c.x(), c.y()));
+            if (!in)
+                continue;
+            const double sum = sat[size_t(y + wc) * size_t(nx + 1) + size_t(x + wc)] - sat[size_t(y) * size_t(nx + 1) + size_t(x + wc)] -
+                               sat[size_t(y + wc) * size_t(nx + 1) + size_t(x)] + sat[size_t(y) * size_t(nx + 1) + size_t(x)];
+            const double ratio = sum / (wc * cell * wc * cell);
+            ++out.windows;
+            if (ratio < out.lo) {
+                out.lo    = ratio;
+                out.at_lo = c;
+            }
+            if (ratio > out.hi) {
+                out.hi    = ratio;
+                out.at_hi = c;
+            }
+        }
+    return out;
+}
+
+} // namespace
+
+// Review M1 of #1103: the material laid per area stays near 1.0 everywhere, not only on average. On the tapered L and the
+// teardrop (narrowing limbs) and the disc, for every pattern and curved layer, every 1 mm window whose centre lies 1 mm or
+// more inside the patch holds between 0.85 and 1.15 times a layer's volume with Spiral and with Monotonic (tolerance 0.4).
+// Concentric (Arachne, unchanged since P4) is held to 0.5-1.35 and its numbers are printed. P5's first Spiral laid up to
+// four beads along a limb's spine (2.2 x on the owner's arm).
+TEST_CASE("Curved tops P5: local fill per area stays near one layer for every pattern", "[CurvedTops][CurvedTopsP5]")
+{
+    const PrintConfig       pcfg;
+    const PrintObjectConfig ocfg;
+    const Flow              wall_flow(0.45f, 0.2f, 0.4f);
+    const Flow              solid_flow(0.42f, 0.2f, 0.4f);
+    for (const int shape : { 0, 2, 1 })
+        for (const CurvedTopsPattern pattern : { ctpMonotonic, ctpConcentric, ctpSpiral }) {
+            DYNAMIC_SECTION(p5_shape_name(shape) << ", " << p5_pattern_name(pattern))
+            {
+                const ExPolygon fp = p5_shape(shape);
+                for (int k = 0; k < 3; ++k) {
+                    const std::vector<CurvedTopsFillPath> paths = curved_tops_layer_paths(fp, pattern, wall_flow, solid_flow, k, pcfg, ocfg,
+                                                                                          nullptr, 0.4);
+                    const LocalFill f = local_fill(fp, paths, 0.2, 1.0, 1.0);
+                    WARN("local fill: " << p5_shape_name(shape) << ", " << p5_pattern_name(pattern) << ", layer " << k << ": "
+                                        << f.windows << " windows, " << f.lo << " (at " << f.at_lo.x() << "," << f.at_lo.y()
+                                        << ") to " << f.hi << " (at " << f.at_hi.x() << "," << f.at_hi.y() << ")");
+                    REQUIRE(f.windows > 50);
+                    if (pattern == ctpConcentric) {
+                        CHECK(f.lo >= 0.5);
+                        CHECK(f.hi <= 1.35);
+                    } else {
+                        CHECK(f.lo >= 0.85);
+                        CHECK(f.hi <= 1.15);
+                    }
+                }
+            }
+        }
+}
+
+// Review S3 of #1103: Monotonic without a nozzle tolerance is P4's composition exactly: the wall loops with P4's seams, then
+// the monotonic fill of the region inside them, no overlap and no gap fill, point for point.
+TEST_CASE("Curved tops P5: Monotonic at tolerance 0 is P4's paths", "[CurvedTops][CurvedTopsP5]")
+{
+    const PrintConfig       pcfg;
+    const PrintObjectConfig ocfg;
+    const Flow              wall_flow(0.45f, 0.2f, 0.4f);
+    const Flow              solid_flow(0.42f, 0.2f, 0.4f);
+    for (int shape = 0; shape < 4; ++shape)
+        for (int k = 0; k < 3; ++k) {
+            const ExPolygon fp = p5_shape(shape);
+            // P4's curved_tops_layer_paths for Monotonic, as it was.
+            std::vector<CurvedTopsFillPath> p4;
+            const Point centre  = get_extents(fp).center();
+            int         loop_no = 0;
+            const auto  wall    = [&](const Polygon &polygon) {
+                Points pts = polygon.points;
+                if (pts.size() >= 3)
+                    std::rotate(pts.begin(), pts.begin() + ptrdiff_t(curved_tops_seam_index(pts, centre, k, -1 - loop_no)), pts.end());
+                ++loop_no;
+                pts.push_back(pts.front());
+                CurvedTopsFillPath p{ std::move(pts), float(wall_flow.width()), wall_flow.mm3_per_mm() };
+                p.wall = true;
+                p4.push_back(std::move(p));
+            };
+            for (const ExPolygon &loop : offset_ex(fp, -0.5 * wall_flow.scaled_width())) {
+                wall(loop.contour);
+                for (const Polygon &hole : loop.holes)
+                    wall(hole);
+            }
+            for (const ExPolygon &area :
+                 offset_ex(fp, -(wall_flow.scaled_width() - 0.5 * wall_flow.scaled_spacing() + 0.5 * solid_flow.scaled_spacing())))
+                append(p4, curved_tops_fill(area, ctpMonotonic, solid_flow, k, pcfg, ocfg));
+            const std::vector<CurvedTopsFillPath> p5 = curved_tops_layer_paths(fp, ctpMonotonic, wall_flow, solid_flow, k, pcfg, ocfg, nullptr, 0.);
+            INFO(p5_shape_name(shape) << ", layer " << k);
+            REQUIRE(p5.size() == p4.size());
+            for (size_t i = 0; i < p4.size(); ++i) {
+                CHECK(p5[i].points == p4[i].points);
+                CHECK(p5[i].width == p4[i].width);
+                CHECK(p5[i].mm3_per_mm == p4[i].mm3_per_mm);
+                CHECK(p5[i].wall == p4[i].wall);
+                CHECK_FALSE(p5[i].gap);
+            }
+        }
+}
+
+// Review M2 of #1103: the helper the P3 cases use accepts only a clean head check: no message, "no head contact found", or
+// the information line for nozzle contacts within the tolerance. Any reported contact, another head part, a contact
+// beyond the tolerance or deeper than printed fails it.
+TEST_CASE("Curved tops P5: a clean head check message is only the tolerated-nozzle information line", "[CurvedTops][CurvedTopsP5]")
+{
+    CHECK(head_check_clean(""));
+    CHECK(head_check_clean("Curved tops head check: no head contact found. Nearest head part over the curved layer: heater block and "
+                           "silicone sock, 0.97 mm above the printed material (tip at X 1 Y 2 Z 3)."));
+    CHECK(head_check_clean("Curved tops head check (developer overrides active): The nozzle passes up to 0.10 mm through printed material "
+                           "in 6 moves (nozzle contact tolerance 0.40 mm); no other head part touches in those moves."));
+    CHECK_FALSE(head_check_clean("Curved tops head check: The nozzle passes up to 0.45 mm through printed material in 6 moves (nozzle "
+                                 "contact tolerance 0.40 mm); no other head part touches in those moves."));
+    CHECK_FALSE(head_check_clean("Curved tops head check: The nozzle passes up to 0.30 mm through printed material in 6 moves (nozzle "
+                                 "contact tolerance 0.40 mm); no other head part touches in those moves. That is deeper than has been "
+                                 "printed on this printer so far (0.20 mm, 2026-11-17). Watch the first print."));
+    CHECK_FALSE(head_check_clean("EXPECTED CONTACT - do not print unattended. Curved tops (developer override, contact is a warning only): 4 "
+                                 "moves bring the print head into material that is already printed, up to 0.30 mm deep. By head part: low "
+                                 "sock: 4 moves. NOT ONLY THE NOZZLE TIP. Besides those: The nozzle passes up to 0.10 mm through printed "
+                                 "material in 6 moves (nozzle contact tolerance 0.40 mm); no other head part touches in those moves."));
+    CHECK_FALSE(head_check_clean("Curved tops head check: The nozzle passes up to 0.10 mm through printed material in 6 moves (nozzle "
+                                 "contact tolerance 0.40 mm). By head part: nozzle flank: 3 moves."));
+}
+
+namespace {
+
 // Lifts in the curved block: travels between its paths (each one a retract, a lift to the safe Z and a drop).
 size_t curved_block_travels(const std::string &gcode) { return check_curved_travels(gcode, 0.7, 0.2).travels; }
 
@@ -3280,7 +3478,31 @@ TEST_CASE("Curved tops P5: gap-fill beads are judged by the head check, and left
         }
         return error;
     };
-    size_t strict_monotonic = 0;
+    // Review S3 of #1103: every curved path in full (role, width, flow, points, Z and flow samples), not only how many.
+    const auto curved_signature = [](const Print &print) {
+        std::vector<std::string> out;
+        std::function<void(const ExtrusionEntity *)> visit = [&](const ExtrusionEntity *e) {
+            if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+                for (const ExtrusionEntity *child : c->entities)
+                    visit(child);
+            } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+                if (p->z_contour == nullptr || !p->z_contour->curved_top)
+                    return;
+                std::ostringstream s;
+                s << int(p->role()) << "|" << p->width << "|" << p->mm3_per_mm << "|";
+                for (const Point &pt : p->polyline.points)
+                    s << pt.x() << "," << pt.y() << ";";
+                for (size_t i = 0; i < p->z_contour->z.size(); ++i)
+                    s << p->z_contour->z[i] << "/" << p->z_contour->flow[i] << ";";
+                out.push_back(s.str());
+            }
+        };
+        for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+            visit(&region->fills);
+        return out;
+    };
+    size_t                   strict_monotonic = 0;
+    std::vector<std::string> strict_paths;
     {
         const ResourcesDirGuard resources;
         for (const char *printer : { "Elegoo Centauri Carbon", "Bambu Lab X1 Carbon" }) {
@@ -3292,6 +3514,7 @@ TEST_CASE("Curved tops P5: gap-fill beads are judged by the head check, and left
             REQUIRE(top_block(strict));
             REQUIRE(top_block(tolerant));
             strict_monotonic = curved_paths(strict);
+            strict_paths     = curved_signature(strict);
             CHECK(curved_paths(tolerant) > strict_monotonic);
             CHECK(export_error(strict).empty());
             CHECK(export_error(tolerant).empty());
@@ -3323,8 +3546,11 @@ TEST_CASE("Curved tops P5: gap-fill beads are judged by the head check, and left
             Model model;
             slice_puck(print, model, true, { { "printer_model", "Bambu Lab X1 Carbon" }, { "curved_tops_pattern", pattern } });
             REQUIRE(top_block(print));
-            if (std::string(pattern) == "monotonic")
+            if (std::string(pattern) == "monotonic") {
                 CHECK(curved_paths(print) == strict_monotonic);
+                // The same paths, point for point, as with the tolerance set to 0 on the shipped head.
+                CHECK(curved_signature(print) == strict_paths);
+            }
             const std::string error = export_error(print);
             INFO("error: " << error);
             CHECK(error.empty());

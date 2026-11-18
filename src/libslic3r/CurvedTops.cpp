@@ -501,6 +501,8 @@ namespace {
 
 // The insets are densified to this before a spiral runs over them, so each turn moves inward in small steps.
 constexpr double SPIRAL_STEP_MM = 0.25;
+// Shortest ring a spiral runs on.
+constexpr double SPIRAL_MIN_RING_MM = 1.0;
 
 // A closed loop (one inset), densified, first point not repeated, with its arc length and a nearest-point index.
 // Spiral geometry is in scaled units held as doubles.
@@ -536,7 +538,9 @@ public:
         if (pts.size() >= 3)
             dist = std::make_unique<AABBTreeLines::LinesDistancer<Line>>(std::move(lines));
     }
-    bool valid() const { return pts.size() >= 3 && length > scale_(0.05) && dist != nullptr; }
+    // Review S1: a ring shorter than SPIRAL_MIN_RING_MM is not run (the spiral ends on the ring before, and the gap fill
+    // closes the middle), so the last turn never shrinks to a fraction of a millimetre at the apex.
+    bool valid() const { return pts.size() >= 3 && length > scale_(SPIRAL_MIN_RING_MM) && dist != nullptr; }
     // The point of the loop nearest p and its arc position from pts[0].
     void nearest(const Vec2d &p, double &arc, Vec2d &q) const
     {
@@ -745,25 +749,55 @@ std::vector<SpiralVertex> spiral_unit(const Polygon *lead, double lead_spacing, 
     const double h0 = 0.5 * first_strip;
     for (size_t i = 0; i + 1 < loops.size(); ++i) {
         const SpiralStep step = spiral_step(ring, loops[i + 1]);
-        // Where a ring has no part opposite (the tip of a narrowing limb), the turn moves at most two spacings.
-        const double cap = 2. * expected(i);
-        for (size_t j = 1; j < ring.pts.size(); ++j) {
+        // Review M1: where the next ring has no part opposite (it ends short of this ring's tip in a narrowing limb), the
+        // nearest point of it lies along the limb, not across. The turn then does not move toward it: its move fades
+        // out between 1.5 and 2 expected distances, so the turn stays on its own ring there (the rings have no slivers,
+        // spiral_chains(), so its two sides lie at least a spacing apart) and the variable-width gap fill takes the
+        // limb's spine. (P5's first version pulled both sides onto the spine, laying beads on top of each other.)
+        // There the turn instead steps inward across its own ring (along its inward normal) as far as the turn outside it
+        // closes in, its bead no wider than the room left up to the middle between the ring's two sides (`across`, the
+        // distance to the other side), so the two sides' beads meet in the middle and never lie on top of each other.
+        const double e_i = expected(i);
+        const size_t n_i = ring.pts.size();
+        for (size_t j = 1; j < n_i; ++j) {
             const Vec2d &a     = ring.pts[j];
-            Vec2d        v     = step.target[j] - a;
-            double       d     = v.norm();
+            const Vec2d  v     = step.target[j] - a;
+            const double d     = v.norm();
             const double theta = ring.theta[j];
-            if (d > cap) {
-                v *= cap / d;
-                d = cap;
-            }
+            const double w     = std::clamp((2. * e_i - d) / (0.5 * e_i), 0., 1.);
+            // The regular move (toward the next ring) and its strip.
+            Vec2d  p_reg;
+            double strip_reg;
             if (i == 0) {
                 // At a corner of the lap the next ring lies farther off; the bead stays at most 1.1 spacings wide there
                 // and the gap fill takes the rest of the corner.
                 const double lo = h0;
                 const double hi = std::clamp(d - 0.5 * s + theta * s, lo, lo + 1.1 * s);
-                out.push_back({ d > 1. ? Vec2d(a + v * (0.5 * (lo + hi) / d)) : a, hi - lo, false });
-            } else
-                out.push_back({ a + v * theta, s, false });
+                p_reg           = d > 1. ? Vec2d(a + v * (0.5 * (lo + hi) / d)) : a;
+                strip_reg       = hi - lo;
+            } else {
+                p_reg     = a + v * theta;
+                strip_reg = s;
+            }
+            if (w >= 1.) {
+                out.push_back({ p_reg, strip_reg, false });
+                continue;
+            }
+            // The tip zone: inward across the own ring.
+            Vec2d        p_tip     = a;
+            double       strip_tip = 0.;
+            const Vec2d  t         = ring.pts[j + 1 < n_i ? j + 1 : 1] - ring.pts[j - 1];
+            if (t.norm() > 1.) {
+                const Vec2d  nrm    = Vec2d(-t.y(), t.x()) / t.norm();
+                const double across = spiral_ray_hit(ring.pts, j, nrm, 4. * s);
+                // Covered so far on this side: the lap's bead (first turn) or the turn outside, which has closed in to
+                // theta of a spacing from this ring.
+                const double lo  = i == 0 ? h0 : theta * s - 0.5 * s;
+                const double hi  = std::min(0.5 * across, lo + (i == 0 ? 1.1 : 1.0) * s);
+                strip_tip        = std::max(hi - lo, 0.);
+                p_tip            = a + nrm * std::clamp(0.5 * (lo + hi), 0., 0.5 * across);
+            }
+            out.push_back({ p_reg * w + p_tip * (1. - w), strip_reg * w + strip_tip * (1. - w), false });
         }
         ring = step.next;
     }
@@ -840,7 +874,8 @@ void spiral_append_paths(const std::vector<SpiralVertex> &v, const Flow &wall_fl
     }
 }
 
-// The insets of `area`, one spacing `s` apart (the first half a spacing in, so they are the beads' centre lines), as
+// The insets of `area`, one spacing `s` apart (the first half a spacing in, so they are the beads' centre lines; parts too
+// narrow for a bead on each side left out), as
 // the chains of rings a spiral can run through: an inset continues a chain while the inset inside it is a single piece
 // with its holes matching one to one. Where it splits (a narrow neck), or a hole's insets meet the outline's, the
 // chain ends and each piece starts its own. Each chain is the outline's rings or one hole's rings; `lead` is 0 for the
@@ -861,7 +896,11 @@ std::vector<SpiralChain> spiral_chains(const ExPolygon &area, double s)
     std::vector<Node> nodes;
     std::vector<int>  roots, prev;
     for (int j = 0; j < 5000; ++j) {
-        ExPolygons level = offset_ex(area, -float((0.5 + double(j)) * s));
+        // Review M1: without its slivers. The inset at (j + 0.5) spacings is taken as the inset at j + 1 spacings grown back
+        // by half a spacing, so wherever the area is too narrow for two beads side by side on this ring (a narrowing
+        // limb's tip, a neck) the ring is not there: its two sides always lie at least a spacing apart, and what it leaves
+        // goes to the variable-width gap fill, as with Concentric. (Mitred, so the corners stay sharp.)
+        ExPolygons level = offset_ex(offset_ex(area, -float((1. + double(j)) * s)), float(0.5 * s));
         if (level.empty())
             break;
         std::vector<int> cur;
@@ -1148,45 +1187,24 @@ std::vector<CurvedTopsFillPath> curved_tops_layer_paths(const ExPolygon &fp, Cur
         const size_t before = gaps.size();
         gap.douglas_peucker(scale_(0.0125));
         gap.medial_axis(scale_(min_width), scale_(max_width), &gaps);
-        // P5 (owner: diamond gaps where loops turn): an axis too short for a bead of its own (under 0.2 mm, dropped below)
-        // left a small diamond open, such as those along a narrowing limb's spine where the concentric loops turn. Such a
-        // gap gets one short line through it along its longest extent, at the fill's width.
-        bool axis_kept = false;
-        for (size_t i = before; i < gaps.size(); ++i)
-            axis_kept |= gaps[i].length() >= scale_(0.2);
-        if (gaps.size() != before && !axis_kept) {
-            const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
-            const Points &pts    = gap.contour.points;
-            if (gap_mm2 < 0.05 || gap_mm2 > 1.0 || pts.size() < 3)
-                continue;
-            size_t ia = 0, ib = 1;
-            double best = -1.;
-            for (size_t i = 0; i < pts.size(); ++i)
-                for (size_t j = i + 1; j < pts.size(); ++j) {
-                    const double d = (pts[i] - pts[j]).cast<double>().squaredNorm();
-                    if (d > best) {
-                        best = d;
-                        ia   = i;
-                        ib   = j;
-                    }
-                }
-            const Vec2d  pa = unscale(pts[ia]), pb = unscale(pts[ib]);
-            const double len = (pb - pa).norm();
-            if (len < 1e-3)
-                continue;
-            const Vec2d  c    = 0.5 * (pa + pb);
-            const Vec2d  dir  = (pb - pa) / len;
-            const double half = 0.5 * std::max(len - solid_flow.width(), 0.1);
-            const Vec2d  a = c - dir * half, b = c + dir * half;
-            out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) }, float(solid_flow.width()),
-                            solid_flow.mm3_per_mm(), false, true });
-            continue;
-        }
         if (gaps.size() == before) {
             // A compact hole with no axis (a dome's apex inside the innermost ring): one short line through it.
             const double gap_mm2 = gap.area() * SCALING_FACTOR * SCALING_FACTOR;
             if (gap_mm2 < 0.05 || gap_mm2 > 1.0)
                 continue;
+            if (pattern == ctpSpiral) {
+                // Review S1: the spiral ends round the apex; the line through the middle turns from layer to layer (60
+                // degrees per curved layer), so its ends do not stack, and its flow puts the hole's own volume in it.
+                const double ang  = double(k) * M_PI / 3.;
+                const Vec2d  c    = unscale(get_extents(gap).center());
+                const Vec2d  dir(std::cos(ang), std::sin(ang));
+                const double half = 0.5 * std::max(2. * std::sqrt(gap_mm2 / M_PI) - solid_flow.width(), 0.1);
+                const double mm3  = std::clamp(gap_mm2 * h / (2. * half), 0.25 * solid_flow.mm3_per_mm(), 2. * solid_flow.mm3_per_mm());
+                const Vec2d  a = c - dir * half, b = c + dir * half;
+                out.push_back({ Points{ Point::new_scale(a.x(), a.y()), Point::new_scale(b.x(), b.y()) },
+                                float(mm3 / h + h * (1. - 0.25 * PI)), mm3, false, true });
+                continue;
+            }
             const BoundingBox bb   = get_extents(gap);
             const Vec2d       size = unscale(bb.size());
             const Vec2d       c    = unscale(bb.center());
