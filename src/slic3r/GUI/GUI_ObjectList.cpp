@@ -3457,10 +3457,7 @@ DynamicPrintConfig ObjectList::get_default_layer_config(const int obj_idx)
                             object(obj_idx)->config.opt_float("layer_height") :
                             wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("layer_height");
     config.set_key_value("layer_height",new ConfigOptionFloat(layer_height));
-    // BBS
-    int extruder = object(obj_idx)->config.has("extruder") ?
-        object(obj_idx)->config.opt_int("extruder") :
-        wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("extruder");
+    // BBS: a new range follows the object's filament (0 = inherit).
     config.set_key_value("extruder",    new ConfigOptionInt(0));
 
     return config;
@@ -6501,12 +6498,10 @@ void ObjectList::repair_by_remesh()
 
     size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
     auto remesh_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
-        RemeshOptions o = opts;
-        // An untouched voxel field means "auto", and auto is per part - so a
-        // multi-part selection still gets each part's own scale-appropriate value
-        // rather than the first part's.
-        if (std::abs(o.voxel_size - auto_voxel) < 1e-9)
-            o.voxel_size = 0.;
+        // An untouched voxel field means "auto" (the dialog gives voxel_size 0), and auto
+        // is per part - so a multi-part selection still gets each part's own
+        // scale-appropriate value rather than the first part's.
+        const RemeshOptions &o = opts;
         RemeshReport rep;
         indexed_triangle_set its = remesh_with_options(mv.mesh().its, o, &remesh_by_voxels,
                                                        volume_bed_direction(mo, mv), &rep);
@@ -7470,7 +7465,13 @@ void ObjectList::OnEditingStarted(wxDataViewEvent &event)
 
         get_selected_item_indexes(obj_idx, vol_idx, item);
         //wxGetApp().plater()->PopupObjectTable(obj_idx, vol_idx, mouse_pos);
-        dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
+        // The row's own settings, as list_manipulation() picks them: a plate's, a height range's, a part's or an object's.
+        if (m_objects_model->GetItemType(item) & itPlate)
+            dynamic_cast<TabPrintPlate*>(wxGetApp().get_plate_tab())->reset_model_config();
+        else if (m_objects_model->GetItemType(item) & itLayer)
+            dynamic_cast<TabPrintLayer*>(wxGetApp().get_layer_tab())->reset_model_config();
+        else if (item.IsOk())
+            dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
         return;
     }
 #ifdef __WXOSX__

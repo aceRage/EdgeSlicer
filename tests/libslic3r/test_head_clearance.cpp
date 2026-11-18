@@ -113,8 +113,10 @@ TEST_CASE("Head clearance: shipped data files load and cover the first printers"
         if (h.id == "bambu-x1" || h.id == "elegoo-centauri-carbon") {
             CHECK(h.lowest_box_z() == Approx(2.5));
             REQUIRE(h.curved_tops_verified.has_value());
-            CHECK(h.curved_tops_verified->rise_mm == Approx(1.8));
-            CHECK(h.curved_tops_verified->angle_deg == Approx(10.3));
+            // P4: the CC1 record is the owner's 2026-11-17 arm print (2.37 mm, 20 degrees).
+            const bool cc1 = h.id == "elegoo-centauri-carbon";
+            CHECK(h.curved_tops_verified->rise_mm == Approx(cc1 ? 2.37 : 1.8));
+            CHECK(h.curved_tops_verified->angle_deg == Approx(cc1 ? 20.0 : 10.3));
             CHECK(h.nozzle_flank_angle_deg(0.1) > 35.);
         } else
             CHECK_FALSE(h.curved_tops_verified.has_value());
@@ -388,6 +390,18 @@ TEST_CASE("Head collision check: the curved-tops slope allowance covers only the
         CHECK(r.hits.front().part == "nozzle");
     }
 
+    // Support and stabilizer extrusions are obstacles like any other (curved tops P2 allows supports):
+    // a support bead beyond the land, under the cone, met by a curved extrusion on the block's layer.
+    for (const ExtrusionRole role : { erSupportMaterial, erSupportMaterialInterface, erSupportTransition }) {
+        auto moves = neighbour_case(0.9f, 1.5f, EMoveType::Extrude);
+        moves[1].extrusion_role = role;
+        const HeadCollisionReport r = check_head_collisions(moves, head, sloped(20.));
+        INFO("support role " << int(role));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK_FALSE(r.hits.front().travel);
+    }
+
     // Boxes are never relaxed: material reaching 0.5 into the duct (bottom 4 above the tip) 5 mm away.
     // (The descent before it meets the duct too; the extrusion's own hit is the one checked.)
     {
@@ -398,4 +412,204 @@ TEST_CASE("Head collision check: the curved-tops slope allowance covers only the
                 extrusion_duct_hit = true;
         CHECK(extrusion_duct_hit);
     }
+}
+
+// Curved tops P2, partial curving (review b): the lowest curved bead lies one layer (0.2) above the flat
+// plateau at the cut. Here the curved extrusion runs at Z 1.0 = cut + h, so the cut is Z 0.8. With the
+// curved block's slope allowance (10 degrees) on, as in a real curved print:
+//  - the plateau at the cut, right beside the tip in the land: clean;
+//  - the plateau level with the lowest bead (the flat layer at cut + h): clean;
+//  - a flat flank one layer above the lowest bead under the cone: a near miss, clean;
+//  - a flat flank two layers above it there (what the planner's cut must prevent): a nozzle contact,
+//    which stops a curved print's export.
+TEST_CASE("Head collision check: a curved bead beside the flat plateau and a flank above it", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+    CHECK(check_head_collisions(neighbour_case(0.45f, 0.8f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    CHECK(check_head_collisions(neighbour_case(0.45f, 1.0f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    CHECK(check_head_collisions(neighbour_case(0.9f, 1.2f, EMoveType::Extrude), head, sloped(10.)).hit_moves == 0);
+    const HeadCollisionReport r = check_head_collisions(neighbour_case(0.9f, 1.4f, EMoveType::Extrude), head, sloped(10.));
+    REQUIRE(r.hit_moves == 1);
+    CHECK(r.hits.front().part == "nozzle");
+    CHECK_FALSE(r.hits.front().travel);
+    CHECK(r.max_depth > 0.1f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Curved tops P4: the nozzle's own contact tolerance (HeadCollisionParams::nozzle_contact_tolerance)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+HeadCollisionParams nozzle_tolerant(double tol, unsigned min_layer = 0)
+{
+    HeadCollisionParams p;
+    p.nozzle_contact_tolerance = tol;
+    p.nozzle_contact_min_layer = min_layer;
+    return p;
+}
+
+} // namespace
+
+// MINIMAL_HEAD: tip land radius 0.5, so a neighbour bead at x = 0.45 (0.25 to 0.65 from the axis) sits under
+// the land; its top above the tip (z 1.0) is the contact depth.
+TEST_CASE("Head collision check P4: the nozzle tolerance splits nozzle contacts from box contacts", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+
+    // Off (the default, and Z contouring's): a 0.3 mm nozzle contact is a hit, nothing is tolerated.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.3f, EMoveType::Extrude), head);
+        CHECK(r.hit_moves == 1);
+        CHECK(r.tolerated_moves == 0);
+    }
+    // On: the same extrusion is tolerated, counted and measured, and is no hit.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.3f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        CHECK(r.hit_moves == 0);
+        CHECK(r.hits.empty());
+        CHECK(r.tolerated_moves == 1);
+        CHECK(r.tolerated_max_depth > 0.25f);
+        CHECK(r.tolerated_max_depth < 0.35f);
+        // The per-part statistics still show the nozzle contact.
+        REQUIRE(r.parts.size() >= 2);
+        CHECK(r.parts[0].hit_moves + r.parts[1].hit_moves >= 1);
+    }
+    // A wipe back along the bead and a vertical drop onto it are tolerated too; a horizontal travel is not.
+    CHECK(check_head_collisions(neighbour_case(0.45f, 1.3f, EMoveType::Wipe), head, nozzle_tolerant(0.4)).hit_moves == 0);
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.3f, EMoveType::Travel), head, nozzle_tolerant(0.4));
+        CHECK(r.hit_moves == 1);
+        CHECK(r.tolerated_moves == 0);
+    }
+    {
+        std::vector<MV> moves;
+        moves.push_back(vertex(EMoveType::Travel, 0.45f, 0.f, 1.3f, 0));
+        moves.push_back(vertex(EMoveType::Extrude, 0.45f, 10.f, 1.3f, 0, erTopSolidInfill));
+        moves.push_back(vertex(EMoveType::Travel, 0.f, 5.f, 3.f, 1));
+        moves.push_back(vertex(EMoveType::Travel, 0.f, 5.f, 1.f, 1)); // straight down beside the bead
+        const HeadCollisionReport r = check_head_collisions(moves, head, nozzle_tolerant(0.4));
+        CHECK(r.hit_moves == 0);
+        CHECK(r.tolerated_moves == 1);
+    }
+    // Only from the block's layer on.
+    CHECK(check_head_collisions(neighbour_case(0.45f, 1.3f, EMoveType::Extrude), head, nozzle_tolerant(0.4, 2)).hit_moves == 1);
+
+    // A box contact is never tolerated, however large the nozzle tolerance: material 0.5 into the duct.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(5.f, 5.5f, EMoveType::Extrude), head, nozzle_tolerant(1.0));
+        bool extrusion_duct_hit = false;
+        for (const HeadCollisionHit &h : r.hits)
+            if (!h.travel && h.part == "duct")
+                extrusion_duct_hit = true;
+        CHECK(extrusion_duct_hit);
+    }
+    // One move touching both the nozzle (within the tolerance) and the duct: a hit, not tolerated.
+    {
+        std::vector<MV> moves;
+        moves.push_back(vertex(EMoveType::Travel, 0.45f, 0.f, 1.3f, 0));
+        moves.push_back(vertex(EMoveType::Extrude, 0.45f, 10.f, 1.3f, 0, erTopSolidInfill));
+        moves.push_back(vertex(EMoveType::Travel, 5.f, 0.f, 5.5f, 0));
+        moves.push_back(vertex(EMoveType::Extrude, 5.f, 10.f, 5.5f, 0, erTopSolidInfill));
+        moves.push_back(vertex(EMoveType::Travel, 0.f, -5.f, 12.f, 1));
+        moves.push_back(vertex(EMoveType::Travel, 0.f, -12.f, 12.f, 1));
+        moves.push_back(vertex(EMoveType::Travel, 0.f, -12.f, 1.f, 1)); // the duct (|y| <= 10) is clear of y 0-10 here
+        moves.push_back(vertex(EMoveType::Extrude, 0.f, 10.f, 1.f, 1, erTopSolidInfill));
+        const HeadCollisionReport r = check_head_collisions(moves, head, nozzle_tolerant(1.0));
+        REQUIRE(r.hit_moves >= 1);
+        bool both = false;
+        for (const HeadCollisionHit &h : r.hits)
+            both |= !h.travel && h.part == "duct";
+        CHECK(both);
+        CHECK(r.tolerated_moves == 0);
+    }
+}
+
+TEST_CASE("Head collision check P4: a nozzle contact just inside the tolerance passes, just outside it is a hit", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+    // Contact 0.38 and 0.42 against a 0.4 tolerance.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.38f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        CHECK(r.hit_moves == 0);
+        CHECK(r.tolerated_moves == 1);
+        CHECK(r.tolerated_max_depth <= 0.4f);
+    }
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(0.45f, 1.42f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK(r.max_depth > 0.4f);
+        CHECK(r.tolerated_moves == 0);
+    }
+}
+
+TEST_CASE("Head clearance P4: the curved tops record may carry the deepest nozzle contact printed", "[HeadClearance]")
+{
+    const std::string base = R"({"schema": "edgeslicer.head_clearance.v1", "id": "c", "printer_models": ["C"],
+        "nozzle": {"profile": [[0, 0.5]]}, )";
+    auto with = parse_head_clearance_json(base + R"("curved_tops": {"verified_printer_models": ["C"], "verified_rise_mm": 2.37,
+        "verified_angle_deg": 20, "verified_nozzle_contact_mm": 0.61, "verified_on": "2026-11-17"}})");
+    REQUIRE(with.has_value());
+    REQUIRE(with->curved_tops_verified.has_value());
+    CHECK(with->curved_tops_verified->nozzle_contact_mm == Approx(0.61));
+    auto without = parse_head_clearance_json(base + R"("curved_tops": {"verified_printer_models": ["C"], "verified_rise_mm": 1.8,
+        "verified_angle_deg": 10.3}})");
+    REQUIRE(without.has_value());
+    CHECK(without->curved_tops_verified->nozzle_contact_mm == Approx(0.));
+
+    // The shipped Centauri Carbon file records the owner's 2026-11-17 prints.
+    const std::string saved = resources_dir();
+    set_resources_dir((boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources").string());
+    const HeadClearancePtr cc1 = resolve_head_clearance("Elegoo Centauri Carbon");
+    const HeadClearancePtr x1c = resolve_head_clearance("Bambu Lab X1 Carbon");
+    set_resources_dir(saved);
+    // The X1 Carbon records the owner's 07e arm print of 2026-11-17 (rise and slope unchanged: 1.78 / 10.0 is within them).
+    REQUIRE(x1c != nullptr);
+    REQUIRE(x1c->curved_tops_verified.has_value());
+    CHECK(x1c->curved_tops_verified->nozzle_contact_mm == Approx(0.44));
+    CHECK(x1c->curved_tops_verified->rise_mm == Approx(1.8));
+    REQUIRE(cc1 != nullptr);
+    REQUIRE(cc1->curved_tops_verified.has_value());
+    CHECK(cc1->curved_tops_verified->rise_mm == Approx(2.37));
+    CHECK(cc1->curved_tops_verified->angle_deg == Approx(20.0));
+    CHECK(cc1->curved_tops_verified->nozzle_contact_mm == Approx(0.61));
+    CHECK(cc1->curved_tops_verified->on == "2026-11-17");
+}
+
+// Review M1: the tolerance covers the nozzle only against material standing no more than the tolerance above the
+// tip. MINIMAL_HEAD's cone: u(d) = d - 0.5 up to d = 1.5, then vertical to 2, then u = 2 + (d - 1.5) / 1.5 out to 3.
+TEST_CASE("Head collision check P4: the cone is never tolerated against taller material, nor is a box", "[HeadClearance][CurvedTops]")
+{
+    const HeadClearance head = test_head();
+    // A wall 0.85 above the tip, 1.0-1.4 from the axis: only 0.35 into the cone (within 0.4), but it stands
+    // 0.85 above the tip: a hit on the flank.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(1.2f, 1.85f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK(r.max_depth <= 0.4f);
+        CHECK(r.tolerated_moves == 0);
+        REQUIRE(r.parts.size() >= 2);
+        CHECK(r.parts[1].hit_moves == 1); // the flank
+    }
+    // High on the cone: a wall 2.7 above the tip, 2.1-2.5 out, 0.3 into the cone: a hit.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(2.3f, 3.7f, EMoveType::Extrude), head, nozzle_tolerant(0.4));
+        REQUIRE(r.hit_moves == 1);
+        CHECK(r.hits.front().part == "nozzle");
+        CHECK(r.tolerated_moves == 0);
+    }
+    // Just outside the cone (3.2-3.6 out) and 0.2 into the duct (bottom 4 above the tip): a box hit, whatever the
+    // nozzle tolerance.
+    {
+        const HeadCollisionReport r = check_head_collisions(neighbour_case(3.4f, 5.2f, EMoveType::Extrude), head, nozzle_tolerant(1.0));
+        bool duct = false;
+        for (const HeadCollisionHit &h : r.hits)
+            duct |= !h.travel && h.part == "duct";
+        CHECK(duct);
+        CHECK(r.tolerated_moves == 0);
+    }
+    // The same flank wall low enough (0.35 above the tip, under the land and the cone foot): tolerated.
+    CHECK(check_head_collisions(neighbour_case(0.55f, 1.35f, EMoveType::Extrude), head, nozzle_tolerant(0.4)).tolerated_moves == 1);
 }

@@ -512,6 +512,8 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     MixedSublayer.cpp
     MixedSublayer.hpp
+    CliNamedPresets.cpp
+    CliNamedPresets.hpp
     CliPresetSlots.cpp
     CliPresetSlots.hpp
     CliOutput.cpp
@@ -563,6 +565,10 @@ set(lisbslic3r_sources
     PlateBedTypes.hpp
     PrimeTowerDefaults.cpp
     PrimeTowerDefaults.hpp
+    FineDetail.cpp
+    FineDetail.hpp
+    ThinFeatures.cpp
+    ThinFeatures.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp

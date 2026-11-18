@@ -934,10 +934,22 @@ bool is_compatible_with_parent_printer(const PresetWithVendorProfile& preset, co
 {
     auto *compatible_printers     = dynamic_cast<const ConfigOptionStrings*>(preset.preset.config.option("compatible_printers"));
     bool  has_compatible_printers = compatible_printers != nullptr && ! compatible_printers->values.empty();
-    //BBS: FIXME only check the parent now, but should check grand-parent as well.
-    return has_compatible_printers &&
-           std::find(compatible_printers->values.begin(), compatible_printers->values.end(), active_printer.preset.inherits()) !=
-               compatible_printers->values.end();
+    if (! has_compatible_printers)
+        return false;
+    const std::vector<std::string> &names = compatible_printers->values;
+    // The printer's parent, and (where the collection is known) its parent's parent and so on up to the first
+    // system preset: a user printer made from another user printer inherits its system printer's processes and
+    // filaments too. Only the parent was looked at (BBS: "FIXME ... should check grand-parent as well").
+    const Preset *printer = &active_printer.preset;
+    for (int depth = 0; printer != nullptr && ! printer->is_system && depth < 32; ++ depth) {
+        const std::string &parent_name = printer->inherits();
+        if (parent_name.empty())
+            return false;
+        if (std::find(names.begin(), names.end(), parent_name) != names.end())
+            return true;
+        printer = active_printer.collection != nullptr ? active_printer.collection->get_preset_parent(*printer) : nullptr;
+    }
+    return false;
 }
 
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config)
@@ -1245,7 +1257,14 @@ static std::vector<std::string> s_Preset_print_options {
     "align_infill_direction_to_model", "center_of_surface_pattern", "separated_infills", "extra_solid_infills",
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
-    "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling", "zaa_max_segment_rate", "curved_tops_enabled", "curved_tops_layers", "curved_tops_max_angle",
+    "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling", "zaa_max_segment_rate", "curved_tops_enabled", "curved_tops_layers", "curved_tops_max_angle", "curved_tops_nozzle_tolerance", "curved_tops_pattern",
+    // EdgeSlicer, curved tops P3: developer overrides (Developer mode only; never in a system or vendor profile).
+    "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin", "curved_tops_dev_flank_margin",
+    "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin", "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap",
+    "curved_tops_dev_safe_lift", "curved_tops_dev_contact_warning_only", "curved_tops_dev_allow_multiple_objects",
+    "curved_tops_dev_allow_by_object", "curved_tops_dev_allow_multi_filament", "curved_tops_dev_allow_supports_in_reach",
+    "curved_tops_dev_allow_material_beside", "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
+    "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt", "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded",
     "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing", "support_ironing_inset", "support_ironing_speed", "support_ironing_direction",
     "over_support_surfaces", "over_support_flow", "over_support_speed",
     "max_travel_detour_distance",
@@ -1286,7 +1305,10 @@ static std::vector<std::string> s_Preset_print_options {
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
-     "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "process_change_extrusion_role_gcode", "min_length_factor", "wall_maximum_resolution", "wall_maximum_deviation",
+     "wall_distribution_count", "min_feature_size", "min_bead_width",
+     // EdgeSlicer, Fine detail (P2)
+     "min_odd_wall_line_width", "min_even_wall_line_width", "fine_detail", "thin_feature_line_width", "thin_feature_min_size", "fine_detail_speed",
+     "post_process", "process_change_extrusion_role_gcode", "min_length_factor", "wall_maximum_resolution", "wall_maximum_deviation",
      "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","initial_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","first_layer_travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",
@@ -1793,7 +1815,13 @@ void PresetCollection::load_presets(
 
                     std::string version_str = key_values[BBL_JSON_KEY_VERSION];
                     boost::optional<Semver> version = Semver::parse(version_str);
-                    if (!version) continue;
+                    if (!version) {
+                        // Left out of the lists as before, but said where the user can find it.
+                        BOOST_LOG_TRIVIAL(error) << boost::format("user preset %1% (%2%) not loaded: its version \"%3%\" cannot be read")
+                                                        % preset.name % preset.file % version_str;
+                        ++m_errors;
+                        continue;
+                    }
                     preset.version = *version;
 
                     if (key_values.find(BBL_JSON_KEY_FILAMENT_ID) != key_values.end())
@@ -3261,6 +3289,9 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
         preset.is_default  = false;
         preset.is_system   = false;
         preset.is_external = false;
+        // A new preset is updated now. It kept the time of the preset it was made from (0 for a system
+        // one), and Preset::load_info() only put the time in at the next start.
+        preset.updated_time = (long long) Slic3r::Utils::get_current_time_utc();
         preset.file        = this->path_for_preset(preset);
         // The newly saved preset will be activated -> make it visible.
         preset.is_visible  = true;
@@ -3625,7 +3656,7 @@ PresetWithVendorProfile PresetCollection::get_preset_with_vendor_profile(const P
 		}
 		p = this->get_preset_parent(*p);
 	} while (p != nullptr);
-	return PresetWithVendorProfile(preset, v);
+	return PresetWithVendorProfile(preset, v, this);
 }
 
 const std::string& PresetCollection::get_preset_name_by_alias(const std::string& alias) const

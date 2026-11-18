@@ -5,6 +5,7 @@
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
+#include "FineDetail.hpp"
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
@@ -469,6 +470,11 @@ void PrintObject::make_perimeters()
     // off-mode G-code byte-identical.
     this->build_over_support_below();
 
+    // EdgeSlicer, thin feature notice: each layer's own thread records into its regions; start from nothing.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->thin_feature_layers.clear();
+
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -482,6 +488,20 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     this->clear_over_support_below();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // EdgeSlicer, thin feature notice (design P3, D6 (a)): one notice per object, merged after the parallel loop.
+    // Observation only; the notice names the object, so the slicing warning offers "Jump to [object]".
+    {
+        std::vector<const ThinFeatureLayer *> found;
+        for (const Layer *layer : m_layers)
+            for (const LayerRegion *layerm : layer->regions())
+                for (const ThinFeatureLayer &thin : layerm->thin_feature_layers)
+                    found.push_back(&thin);
+        m_thin_feature_summary = summarize_thin_features(found);
+        const std::string notice = thin_feature_notice(m_thin_feature_summary, this->model_object()->name);
+        if (!notice.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice, PrintStateBase::SlicingThinFeatures);
+    }
 
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
     det_dump_extrusions(*this, "2_make_perimeters_extrusions");
@@ -773,7 +793,7 @@ void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_s
     const double line_width = ext_flow.width();
     const double nozzle     = ext_flow.nozzle_diameter();
     const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
-    const bool   thin_walls = layerm->region().config().detect_thin_wall.value;
+    const bool   thin_walls = FineDetail::classic_thin_walls(layerm->region().config());
 
     auto mm = [](double v) { return Slic3r::format("%.2f", v); };
     std::string message;
@@ -930,17 +950,32 @@ void PrintObject::contour_z()
                                                            "refused. Slice again."),
                                                       this->model_object()->name),
                                        this->id().id);
+        // P3: developer overrides. In force: their own warning, every slice. Carried by the project but
+        // Developer mode off: ignored, and the curved-tops message says so.
+        const CurvedTopsDevOverrides dev     = curved_tops_dev_overrides(m_config);
+        std::string                  ignored = dev.ignored_note();
+        // Out-of-range override values: clamped by curved_tops_dev_overrides(), said here.
+        if (dev.active)
+            for (const std::string &note : dev.clamp_notes)
+                ignored += (ignored.empty() ? "" : "\n") + note;
         if (!ct.applied)
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                           Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
-                                                         this->model_object()->name, ct.refusal),
+                                                         this->model_object()->name, ct.refusal) +
+                                              (ignored.empty() ? std::string() : "\n" + ignored),
                                           PrintStateBase::SlicingCurvedTopsUnavailable);
         else {
             std::string msg = ct.summary;
             for (const std::string &note : ct.notes)
                 msg += "\n" + note;
+            if (!ignored.empty())
+                msg += "\n" + ignored;
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
         }
+        if (dev.active)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("%1% (object %2%)"), dev.active_message(), this->model_object()->name),
+                                          PrintStateBase::SlicingCurvedTopsDevOverrides);
     }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
@@ -1881,6 +1916,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_shadow_speed_ratio"
             || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
+            // EdgeSlicer, Fine detail: region keys read by the perimeter generator.
+            || opt_key == "fine_detail"
+            || opt_key == "thin_feature_line_width"
+            || opt_key == "thin_feature_min_size"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
@@ -1906,7 +1945,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_maximum_deviation"
             || opt_key == "min_feature_size"
             || opt_key == "min_length_factor"
-            || opt_key == "min_bead_width") {
+            || opt_key == "min_bead_width"
+            // EdgeSlicer, Fine detail: Cura's separate minimums.
+            || opt_key == "min_odd_wall_line_width"
+            || opt_key == "min_even_wall_line_width") {
             steps.emplace_back(posSlice);
         } else if (
                opt_key == "seam_position"
@@ -1946,6 +1988,8 @@ bool PrintObject::invalidate_state_by_config_options(
             // so nothing sliced has to be redone.
             || opt_key == "over_support_flow"
             || opt_key == "over_support_speed"
+            // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
+            || opt_key == "fine_detail_speed"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
@@ -1964,7 +2008,15 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_interface_nozzle_temperature"
             // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
             || opt_key == "apply_scarf_seam_on_circles"
-            || opt_key == "support_ironing_speed") {
+            || opt_key == "support_ironing_speed"
+            // EdgeSlicer, curved tops P3: the developer overrides. What they change is in the guard record
+            // (curved_tops_guard_inputs), which Print::apply() compares and which re-plans the block when it
+            // differs; with Developer mode off they are ignored and change nothing but the config block.
+            || opt_key.rfind("curved_tops_dev_", 0) == 0
+            // EdgeSlicer, curved tops P4: the same for the nozzle contact tolerance and the pattern (both in the
+            // guard record; the head check reads the tolerance at export).
+            || opt_key == "curved_tops_nozzle_tolerance"
+            || opt_key == "curved_tops_pattern") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
@@ -2008,6 +2060,13 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // EdgeSlicer, curved tops (P2): the block is checked against the support layers, so new supports
+        // re-plan it. Walls a block already cut are regenerated first (posPerimeters invalidates
+        // posContouring), so a block now refused leaves an uncut planar top. Objects without curved
+        // tops on invalidate exactly as before. Called from Print::apply(), under the state mutex the
+        // slicing thread writes m_curved_tops_clipped under.
+        if (m_config.curved_tops_enabled.value)
+            invalidated |= this->invalidate_step(m_curved_tops_clipped ? posPerimeters : posContouring);
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.

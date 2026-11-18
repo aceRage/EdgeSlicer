@@ -56,6 +56,10 @@ FontReferenceHeights font_reference_heights(const Emboss::FontFile &font, unsign
 // Location of the bundled symbol font subset: resources_dir() + "/fonts/NotoSansSymbols2-Subset.ttf"
 std::string bundled_symbol_font_path();
 
+// The text font the Emboss tool falls back on when no installed font can be loaded: NanumGothic Regular
+// (SIL OFL 1.1, licence in resources/fonts/OFL.txt), which draws Latin and Hangul.
+std::string bundled_text_font_path();
+
 // The bundled symbol font, loaded once per process from bundled_symbol_font_path(); nullptr when it
 // cannot be loaded (then nothing falls back). Thread safe.
 std::shared_ptr<const Emboss::FontFile> bundled_symbol_font();

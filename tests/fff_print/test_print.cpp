@@ -25,7 +25,9 @@
 #include <boost/nowide/fstream.hpp>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -1259,6 +1261,66 @@ TEST_CASE("Non-mixed multi-object ByObject G-code dump", "[Print][GCode]")
     if (const char *dir = std::getenv("DUMP_GCODE_DIR")) {
         boost::nowide::ofstream dump(std::string(dir) + "/nonmixed_byobject_multi.gcode");
         dump << strip_gcode_timestamps(gcode);
+    }
+}
+
+// A printer with several tools whose start G-code sets no nozzle temperature: the slicer sets the first layer's
+// temperature of every printing tool before the start G-code. Without ooze prevention only the highest-numbered
+// tool's was written, so the tool that printed first started cold.
+TEST_CASE("Every printing tool is heated when the start G-code sets no nozzle temperature", "[Print][GCode]")
+{
+    const bool ooze = GENERATE(false, true);
+    DYNAMIC_SECTION((ooze ? "ooze prevention" : "no ooze prevention"))
+    {
+        DynamicPrintConfig config = two_filament_config(false, false);
+        config.set_deserialize_strict({
+            {"single_extruder_multi_material",   "0"},
+            {"gcode_flavor",                     "marlin2"},
+            {"machine_start_gcode",              "G28 ; start"},
+            {"nozzle_temperature_initial_layer", "211,212"},
+            {"ooze_prevention",                  ooze ? "1" : "0"},
+            {"standby_temperature_delta",        "-40"},
+            {"idle_temperature",                 "0,0"},
+            {"wall_filament",                    "1"},
+            {"sparse_infill_filament",           "2"},
+            {"solid_infill_filament",            "2"},
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.extruders() == std::vector<unsigned int>{0, 1});
+        const std::string gcode = export_print_gcode(print);
+
+        // The temperatures set before the start G-code, and the tool selected first after it.
+        const size_t start = gcode.find("G28 ; start");
+        REQUIRE(start != std::string::npos);
+        std::map<int, int> set_before; // tool -> last temperature set
+        std::vector<int>   order;
+        std::istringstream before(gcode.substr(0, start));
+        for (std::string line; std::getline(before, line);) {
+            int s = 0, t = 0;
+            if (std::sscanf(line.c_str(), "M104 S%d T%d", &s, &t) == 2 || std::sscanf(line.c_str(), "M109 S%d T%d", &s, &t) == 2) {
+                set_before[t] = s;
+                order.push_back(t);
+            }
+        }
+        int first_tool = -1;
+        std::istringstream after(gcode.substr(start));
+        for (std::string line; std::getline(after, line);)
+            if (line.size() >= 2 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+                first_tool = std::atoi(line.c_str() + 1);
+                break;
+            }
+        REQUIRE((first_tool == 0 || first_tool == 1));
+        CAPTURE(first_tool, order);
+        // The first tool at its first layer temperature, written last; the other at its own or, with ooze
+        // prevention, at standby.
+        REQUIRE(set_before.count(first_tool) == 1);
+        CHECK(set_before[first_tool] == 211 + first_tool);
+        CHECK(order.back() == first_tool);
+        const int other = 1 - first_tool;
+        REQUIRE(set_before.count(other) == 1);
+        CHECK(set_before[other] == 211 + other + (ooze ? -40 : 0));
     }
 }
 

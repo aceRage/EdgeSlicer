@@ -186,6 +186,8 @@ std::optional<HeadClearance> parse_head_clearance_json(const std::string &json_t
             v.rise_mm = ct["verified_rise_mm"].get<double>();
         if (ct.contains("verified_angle_deg") && ct["verified_angle_deg"].is_number())
             v.angle_deg = ct["verified_angle_deg"].get<double>();
+        if (ct.contains("verified_nozzle_contact_mm") && ct["verified_nozzle_contact_mm"].is_number())
+            v.nozzle_contact_mm = std::max(0., ct["verified_nozzle_contact_mm"].get<double>());
         v.on   = ct.value("verified_on", std::string());
         v.note = ct.value("verified_note", std::string());
         if (!(v.rise_mm > 0.) || !(v.angle_deg > 0.) || v.printer_models.empty())

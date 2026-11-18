@@ -18931,6 +18931,12 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingInvalidPrintSpeed) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
+                // EdgeSlicer, curved tops P3: a head contact downgraded to a warning by a developer override, or a curved
+                // top that could not be checked at all, must not look like the ordinary warnings next to it. The same
+                // message type also carries the harmless "no head contact found", which is NON_CRITICAL.
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingCurvedTopsHeadCheck &&
+                    warning.level == PrintStateBase::WarningLevel::CRITICAL)
+                    notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);
                 add_warning(warning, object_id.id);
             }
@@ -21902,6 +21908,16 @@ bool Plater::is_active_project() const
     return shown == nullptr || shown == this;
 }
 
+void Plater::invalidate_slices_for_developer_mode()
+{
+    p->partplate_list.invalid_all_slice_result();
+    if (is_active_project()) {
+        post_slice_state_change_update();
+        schedule_background_process();
+    } else
+        p->update_while_hidden = true;
+}
+
 void Plater::on_project_hidden()
 {
     // A re-apply scheduled just before the switch would apply the next project's presets to this one: it waits.
@@ -23514,6 +23530,7 @@ void Plater::calib_VFA(const Calib_Params& params)
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     if (params.nozzle_based_resize) {
         print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
@@ -23578,6 +23595,7 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23641,6 +23659,7 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -23712,6 +23731,7 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config->set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
@@ -26312,12 +26332,20 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
     else
         mesh_to_export = mesh_to_export_sla;
 
-    auto get_save_file = [](std::string const & dir, std::string const & name) {
-        auto path = dir + name + ".stl";
-        int n = 1;
-        while (boost::filesystem::exists(path))
-            path = dir + name + "(" + std::to_string(n++) + ").stl";
-        return path;
+    // A file that could not be written (a name the file system refuses, a full disk) used to be
+    // reported as nothing at all; collect them and say so once.
+    std::vector<std::string> failed_files;
+    auto store = [&failed_files](const std::string &file, TriangleMesh &mesh) {
+        if (!Slic3r::store_stl(file.c_str(), &mesh, true))
+            failed_files.push_back(file);
+    };
+    auto report_failed = [this, &failed_files]() {
+        if (failed_files.empty())
+            return;
+        wxString files;
+        for (const std::string &file : failed_files)
+            files += "\n" + from_u8(file);
+        show_error(this, _L("The following STL files could not be written:") + files);
     };
 
     TriangleMesh mesh;
@@ -26349,8 +26377,9 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
                 auto mesh = mesh_to_export(*object, i.second);
                 mesh.translate(-object->origin_translation.cast<float>());
 
-                Slic3r::store_stl(get_save_file(path_u8, object->name).c_str(), &mesh, true);
+                store(stl_export_file_path(path_u8, object->name), mesh);
             }
+            report_failed();
             return;
         }
     }
@@ -26362,12 +26391,14 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
         for (const ModelObject* o : p->model.objects) {
             auto mesh = mesh_to_export(*o, -1);
             mesh.translate(-o->origin_translation.cast<float>());
-            Slic3r::store_stl(get_save_file(path_u8, o->name).c_str(), &mesh, true);
+            store(stl_export_file_path(path_u8, o->name), mesh);
         }
+        report_failed();
         return;
     }
 
-    Slic3r::store_stl(path_u8.c_str(), &mesh, true);
+    store(path_u8, mesh);
+    report_failed();
 }
 
 // Strip the characters no filesystem we ship on will take, so an object or part named
@@ -26458,7 +26489,8 @@ void Plater::export_stl_part()
     if (mesh.empty())
         return;
 
-    Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
+    if (!Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true))
+        show_error(this, _L("The following STL files could not be written:") + "\n" + out_path);
 }
 
 // "Export outline as DXF": the 2D shape an SVG or text part is embossed from, in the plane of the

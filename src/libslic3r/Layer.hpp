@@ -3,6 +3,7 @@
 
 #include "libslic3r.h"
 #include "AdaptiveLayerMerge.hpp"
+#include "ThinFeatures.hpp"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
 #include "SurfaceCollection.hpp"
@@ -71,6 +72,11 @@ public:
     // A region may hold several patches on one layer: disjoint group-top slabs after local Z-conflict
     // clipping, swallowed-span marker copies of those slabs, and orphan-suppression records.
     std::vector<AdaptiveMergePatch> adaptive_merge_patches;
+
+    // EdgeSlicer, thin feature notice (ThinFeatures.hpp): the thin spots the wall generator skipped or widened on
+    // this layer, one record per generator call that found any. Written by this layer's own thread in
+    // make_perimeters, merged per object afterwards. Runtime only; the overlay of design B3 can draw them.
+    std::vector<ThinFeatureLayer> thin_feature_layers;
 
     // collection of expolygons representing the bridged areas (thus not
     // needing support material)

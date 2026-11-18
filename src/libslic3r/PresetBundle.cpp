@@ -1226,15 +1226,21 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(AppConfig &          
 
 PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string> &              files,
                                                         std::function<int(std::string const &)> override_confirm,
-                                                        ForwardCompatibilitySubstitutionRule    rule)
+                                                        ForwardCompatibilitySubstitutionRule    rule,
+                                                        PresetImportReport *                    report)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " entry";
     PresetsConfigSubstitutions substitutions;
     int overwrite = 0;
     std::vector<std::string>   result;
+    // The JSON files given and those extracted from bundles are imported together at the end, in passes: a
+    // preset whose parent is another preset of the import (later in the archive, or in another file) waits
+    // for a pass after its parent's. Imported in archive order, it used to be skipped.
+    std::vector<std::string> json_files;
+    std::vector<fs::path>    temp_folders;
     for (auto &file : files) {
         if (Slic3r::is_json_file(file)) {
-            import_json_presets(substitutions, file, override_confirm, rule, overwrite, result);
+            json_files.push_back(file);
         }
         // Determine if it is a preset bundle
         if (boost::iends_with(file, ".orca_printer") || boost::iends_with(file, ".orca_filament") || boost::iends_with(file, ".zip")) {
@@ -1274,7 +1280,8 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (zipFile != nullptr)
                     std::fclose(zipFile);
                 fs::remove_all(temp_folder, ec);
-                return substitutions;
+                // The files gathered so far are imported below; this one is left out.
+                continue;
             } else {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Success to initialize reader ZIP archive";
             }
@@ -1308,15 +1315,43 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                     if (MZ_FALSE == status) {
                         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Failed to open target file: " << target_file_path;
                     } else {
-                        bool is_success = import_json_presets(substitutions, target_file_path, override_confirm, rule, overwrite, result);
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " import target file: " << target_file_path << " import result" << is_success;
+                        json_files.push_back(target_file_path);
                     }
                 }
             }
             fclose(zipFile);
-            if (fs::exists(temp_folder)) fs::remove_all(temp_folder, ec);
-            if (ec) BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " remove directory failed: " << ec.message();
+            temp_folders.push_back(temp_folder);
         }
+    }
+
+    std::vector<std::string> pending = std::move(json_files);
+    while (!pending.empty()) {
+        std::vector<std::string> deferred;
+        for (std::string &file : pending) {
+            PresetImportSkip skipped = PresetImportSkip::None;
+            bool is_success = import_json_presets(substitutions, file, override_confirm, rule, overwrite, result, &skipped);
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " import target file: " << file << " import result" << is_success;
+            if (skipped == PresetImportSkip::MissingParent)
+                deferred.push_back(file);
+            else if (skipped == PresetImportSkip::BadVersion && report != nullptr)
+                report->bad_version.push_back(file);
+        }
+        if (deferred.size() == pending.size()) {
+            // No parent turned up in this pass: these cannot be imported.
+            for (const std::string &file : deferred) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " can not find the inherit preset of " << file << ", not imported";
+                if (report != nullptr)
+                    report->missing_parent.push_back(file);
+            }
+            break;
+        }
+        pending = std::move(deferred);
+    }
+
+    for (const fs::path &temp_folder : temp_folders) {
+        boost::system::error_code ec;
+        if (fs::exists(temp_folder)) fs::remove_all(temp_folder, ec);
+        if (ec) BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " remove directory failed: " << ec.message();
     }
     files = result;
     return substitutions;
@@ -1327,7 +1362,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
                                        std::function<int(std::string const &)> override_confirm,
                                        ForwardCompatibilitySubstitutionRule    rule,
                                        int &                                   overwrite,
-                                       std::vector<std::string> &              result)
+                                       std::vector<std::string> &              result,
+                                       PresetImportSkip *                      skipped)
 {
     try {
         DynamicPrintConfig config;
@@ -1341,7 +1377,12 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         if (untrusted_config_filter)
             untrusted_config_filter(name.empty() ? file : name, config);
         boost::optional<Semver>            version              = Semver::parse(version_str);
-        if (!version) return false;
+        if (!version) {
+            // Skipped as before, now with a word in the log and a count in the import's result.
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" %1% (%2%) not imported: its version \"%3%\" cannot be read") % name % file % version_str;
+            if (skipped) *skipped = PresetImportSkip::BadVersion;
+            return false;
+        }
 
         PresetCollection *collection = nullptr;
         if (config.has("printer_settings_id"))
@@ -1359,6 +1400,25 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset name escapes the preset directory, not loading: " << name;
             return false;
         }
+        Preset *           inherit_preset  = nullptr;
+        ConfigOption *     inherits_config = config.option(BBL_JSON_KEY_INHERITS);
+        std::string        inherits_value;
+        if (inherits_config) {
+            ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
+            inherits_value                 = option_str->value;
+            inherit_preset                 = collection->find_preset2(inherits_value);
+        }
+        if (!inherit_preset) {
+            // We support custom root preset now
+            auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
+            if (inherits_config2 && !inherits_config2->value.empty()) {
+                // Not now: the parent may be another preset of this import, imported in a later pass (import_presets).
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", can not find inherit preset for user preset %1% yet") % name;
+                if (skipped) *skipped = PresetImportSkip::MissingParent;
+                return false;
+            }
+        }
+
         if (overwrite == 0) overwrite = 1;
         if (auto p = collection->find_preset(name, false)) {
             if (p->is_default || p->is_system) {
@@ -1373,24 +1433,9 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         }
 
         DynamicPrintConfig new_config;
-        Preset *           inherit_preset  = nullptr;
-        ConfigOption *     inherits_config = config.option(BBL_JSON_KEY_INHERITS);
-        std::string        inherits_value;
-        if (inherits_config) {
-            ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
-            inherits_value                 = option_str->value;
-            inherit_preset                 = collection->find_preset2(inherits_value);
-        }
         if (inherit_preset) {
             new_config = inherit_preset->config;
         } else {
-            // We support custom root preset now
-            auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
-            if (inherits_config2 && !inherits_config2->value.empty()) {
-                // we should skip this preset here
-                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", can not find inherit preset for user preset %1%, just skip") % name;
-                return false;
-            }
             // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
             const Preset &default_preset = collection->default_preset_for(config);
             new_config                   = default_preset.config;

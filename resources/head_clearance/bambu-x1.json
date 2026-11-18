@@ -20,7 +20,8 @@
         "verified_printer_models": ["Bambu Lab X1 Carbon"],
         "verified_rise_mm": 1.8,
         "verified_angle_deg": 10.3,
-        "verified_on": "2026-11-16",
-        "verified_note": "Owner's print of CurvedTops_Dome40_X1C (40 mm puck, 1.8 mm spherical cap, edge slope 10.3 deg, 3 curved layers, 0.20mm Standard @BBL X1C, Bambu PLA Basic) came out good. Curved tops was planned with 2.0 mm allowed rise (sock 2.5 mm less 0.5 mm margin)."
+        "verified_nozzle_contact_mm": 0.44,
+        "verified_on": "2026-11-17",
+        "verified_note": "Owner's print (2026-11-17, Bambu PLA) of the arm with the ladder file 07e settings (3 curved layers, max angle 10, material beside allowed): nozzle tip up to 0.44 mm and flank up to 0.43 mm in the flat top-surface material along the patch edge, sock 0.88 mm clear, clean print (its curved part, 1.78 mm at 10.0 deg, is within the rise and slope below). Earlier (2026-11-16): owner's print of CurvedTops_Dome40_X1C (40 mm puck, 1.8 mm spherical cap, edge slope 10.3 deg, 3 curved layers, 0.20mm Standard @BBL X1C, Bambu PLA Basic) came out good. Curved tops was planned with 2.0 mm allowed rise (sock 2.5 mm less 0.5 mm margin)."
     }
 }
