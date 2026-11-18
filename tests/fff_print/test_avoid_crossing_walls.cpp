@@ -177,6 +177,16 @@ DynamicPrintConfig opening_config(const std::string &time_lapse_gcode)
         {"enable_support",             "0"},
         // Edge: non-i3 BBL inserts time_lapse_gcode at the start of each layer.
         {"printer_structure",          "corexy"},
+        // Edge defaults are skirt_loops=1 and brim_type=auto_brim. After that first-layer
+        // skirt/brim, AvoidCrossingPerimeters::disable_once() allows a straight hop to the
+        // object (m_disabled_once also starts true for the print's first travel). With a
+        // random seam that hop can clip the hole. That is not the timelapse-position bug:
+        // later layers are already being planned (planned_runs > 0). Isolate layer-change
+        // travels, which are what inert timelapse used to skip.
+        {"skirt_loops",                "0"},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+        {"machine_end_gcode",          ""},
     });
     return config;
 }
