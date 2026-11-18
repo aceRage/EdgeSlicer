@@ -191,6 +191,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
 	test_process_preset_export.cpp
 	test_preset_import_order.cpp
 	test_preset_manager_model.cpp
