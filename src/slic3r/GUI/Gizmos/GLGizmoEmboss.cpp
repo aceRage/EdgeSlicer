@@ -21,6 +21,7 @@
 
 #include "libslic3r/Geometry.hpp" // to range pi pi
 #include "libslic3r/Timer.hpp" 
+#include "libslic3r/FontFallback.hpp" // bundled_text_font_path
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -1233,8 +1234,8 @@ EmbossStyles GLGizmoEmboss::create_default_styles()
         styles.push_back(WxFontUtils::create_emboss_style(wx_font, _u8L("First font")));
     } else {
         // On current OS is not installed any correct TTF font
-        // use font packed with Slic3r
-        std::string font_path = Slic3r::resources_dir() + "/fonts/NotoSans-Regular.ttf";
+        // use font packed with Slic3r (NotoSans-Regular.ttf, PrusaSlicer's, is not shipped here)
+        std::string font_path = Slic3r::bundled_text_font_path();
         styles.push_back(EmbossStyle{_u8L("Default font"), font_path, EmbossStyle::Type::file_path});
     }
     return styles;
