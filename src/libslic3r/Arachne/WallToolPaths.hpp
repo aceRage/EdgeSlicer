@@ -65,6 +65,16 @@ public:
 WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
                                       const PrintRegionConfig *region_config = nullptr);
 
+// EdgeSlicer, thin feature notice: the two widths WideningBeadingStrategy gets (scaled): features thinner than
+// input_width get no line, features thinner than output_width are printed output_width wide. WallToolPaths::generate()
+// uses this, and so does the observer that reports skipped / widened features, so both always agree.
+struct WideningLimits
+{
+    coord_t input_width{0};
+    coord_t output_width{0};
+};
+WideningLimits widening_limits(const WallToolPathsParams &params, coord_t bead_width_0, coord_t bead_width_x, coordf_t layer_height);
+
 class WallToolPaths
 {
 public:
@@ -163,8 +173,6 @@ private:
     bool print_thin_walls; //<! Whether to enable the widening beading meta-strategy for thin features
     coord_t min_feature_size; //<! The minimum size of the features that can be widened by the widening beading meta-strategy. Features thinner than that will not be printed
     coord_t min_bead_width;  //<! The minimum bead size to use when widening thin model features with the widening beading meta-strategy
-    coord_t thin_bead_width;   //<! EdgeSlicer: Widening's output width (min_bead_width unless Fine detail lowers it)
-    coord_t thin_feature_size; //<! EdgeSlicer: Widening's input width (min_feature_size unless Fine detail lowers it)
     coord_t min_odd_wall_width;  //<! EdgeSlicer: the split threshold's minimum (min_bead_width unless set)
     coord_t min_even_wall_width; //<! EdgeSlicer: the add threshold's minimum (min_bead_width unless set)
     double small_area_length; //<! The length of the small features which are to be filtered out, this is squared into a surface

@@ -23,6 +23,7 @@
 #include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
+#include "ThinFeatures.hpp"
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -789,6 +790,8 @@ public:
     // read by Print::apply(), which holds that mutex; the getters do not lock (call them from apply()
     // or with the slicing stopped).
     bool               curved_tops_clipped() const { return m_curved_tops_clipped; }
+    // EdgeSlicer, thin feature notice: what the last wall step skipped or widened (ThinFeatures.hpp).
+    const ThinFeatureSummary &thin_feature_summary() const { return m_thin_feature_summary; }
     void               set_curved_tops_clipped(bool clipped);
     const std::string &curved_tops_guard_inputs_used() const { return m_curved_tops_guard_inputs; }
     void               set_curved_tops_guard_inputs_used(std::string inputs);
@@ -904,6 +907,8 @@ private:
     std::unique_ptr<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>> m_local_z_plan_before_merge;
     // EdgeSlicer, curved tops: see curved_tops_clipped().
     bool                                    m_curved_tops_clipped { false };
+    // EdgeSlicer, thin feature notice: written by make_perimeters() after its parallel loop.
+    ThinFeatureSummary                      m_thin_feature_summary;
     std::string                             m_curved_tops_guard_inputs;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;

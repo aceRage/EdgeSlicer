@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mass_limited_acceleration.cpp
 	test_min_layer_time_pause.cpp
 	test_fine_detail_print.cpp
+	test_thin_feature_notice.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp

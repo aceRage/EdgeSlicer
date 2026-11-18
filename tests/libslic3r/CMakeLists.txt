@@ -228,6 +228,7 @@ add_executable(${_TEST_NAME}_tests
     test_bbl_rib_tower.cpp
     test_prime_tower_defaults.cpp
     test_fine_detail.cpp
+    test_thin_features.cpp
     test_bbl_h3c.cpp
     test_bs29_keys_import.cpp
     test_tower_interface.cpp

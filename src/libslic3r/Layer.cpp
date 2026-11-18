@@ -334,6 +334,7 @@ void Layer::make_perimeters()
             lm->make_perimeters(lm->slices, { lm }, &lm->fill_surfaces, &lm->fill_no_overlap_expolygons);
             lm->perimeters.clear();
             lm->thin_fills.clear();
+            lm->thin_feature_layers.clear(); // nothing is extruded here, so nothing was skipped or widened
         }
         lm->fills.clear();
         lm->fill_expolygons = to_expolygons(lm->fill_surfaces.surfaces);
