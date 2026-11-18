@@ -927,7 +927,10 @@ public:
 
     void postprocess_bed_index_for_selected(arrangement::ArrangePolygon& arrange_polygon);
     void postprocess_bed_index_for_unselected(arrangement::ArrangePolygon& arrange_polygon);
-    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon);
+    // Arranging only the current plate: bed 0 is that plate. With plates_before (the plate count before the
+    // arrangement), each further bed becomes a plate of its own after those, created when needed; without it
+    // (the CLI, which treats anything off the plate as a failure) it is put beside the last plate.
+    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before = -1);
 
     //postprocess an arrangement:;ArrangePolygon
     void postprocess_arrange_polygon(arrangement::ArrangePolygon& arrange_polygon, bool selected);

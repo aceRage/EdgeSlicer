@@ -392,3 +392,15 @@ TEST_CASE("printer_extruder_variant_value_index names the value the slicer reads
         CHECK(printer_extruder_variant_value_index(dual, dual_sources, "retraction_length", 1) == 1);
     }
 }
+
+TEST_CASE("Each extruder page's cut retraction line has its own id", "[ExtruderVariant][Regression]")
+{
+    // TabPrinter builds the line as "retraction_distances_when_cut#<value index>" and toggles it by the same
+    // index; it used to toggle "#0", the first page's line, from every page.
+    DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+    const std::vector<size_t> sources = printer_extruder_variant_sources(dual);
+    const size_t first  = printer_extruder_variant_value_index(dual, sources, "retraction_distances_when_cut", 0);
+    const size_t second = printer_extruder_variant_value_index(dual, sources, "retraction_distances_when_cut", 1);
+    CHECK(first != second);
+    CHECK(second != 0);
+}

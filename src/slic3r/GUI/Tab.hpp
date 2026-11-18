@@ -591,6 +591,8 @@ public:
 	void		toggle_options() override;
 	void		update() override;
 	void		clear_pages() override;
+	void		msw_rescale() override;
+	void		sys_color_changed() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 	// Per-nozzle process P2: the Speed page header's note lists the filaments on each nozzle; refresh it after a
 	// filament's nozzle assignment changed.
@@ -636,6 +638,11 @@ private:
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;
 
+	// EdgeSlicer, Fine detail P1: "= x mm on this nozzle" for the percent keys of the Thin features group.
+	wxStaticText*	m_fine_detail_note = nullptr;
+	wxSizer*		fine_detail_note_create_widget(wxWindow* parent);
+	void			update_fine_detail_note();
+
 	// Ultra (support sets): the "Support set" row at the top of the Support page. A support set
 	// is not a preset - Apply copies its values into the edited process settings through
 	// Tab::load_config(), so the preset shows as modified exactly like a hand edit.
@@ -671,6 +678,24 @@ private:
 	void		on_support_set_save_as();
 	void		on_support_set_delete();
 	void		on_support_set_groups();
+
+	// "Use Bambu defaults" (Multimaterial page, Prime tower group; tests/design_prime_tower_menu_rework.md 5).
+	// A labelled widget-only row (no option), like the Extruder page's "Nozzles in this project" row. get_line(opt_key)
+	// cannot find a row without an option, so tower_defaults_line() looks it up by its label on the active page.
+	// The keys and values are libslic3r/PrimeTowerDefaults; applying goes through Tab::load_config(), so the changed rows
+	// show as modified with their revert arrows, exactly like hand edits.
+	// Weak: switching pages destroys the page's controls without going through clear_pages().
+	wxWeakRef<wxWindow> m_tower_defaults_btn;
+	wxSizer*	tower_defaults_create_widget(wxWindow* parent);
+	// Style and size of the button: the label's width (DPI-scaled, translation-safe), at least the option fields' width.
+	void		tower_defaults_size_button();
+	Line*		tower_defaults_line();
+	// The Bambu system process the values come from: the edited preset's system parent, else the printer's
+	// default_print_profile. nullptr when neither is a system preset.
+	const Preset* tower_defaults_source() const;
+	// Shows the row on a Bambu printer with the tower on, and enables the button when it can act.
+	void		tower_defaults_update_row();
+	void		on_tower_defaults();
 };
 
 class TabPrintModel : public TabPrint
@@ -840,6 +865,13 @@ private:
     // Under Time cost: which machine rate slicing uses (yours from Costs, or the preset's) and why.
     wxStaticText*       m_rate_note                     {nullptr};
     wxSizer*            rate_note_create_widget(wxWindow* parent);
+    // Under Machine start / end G-code: the "Startup sound" / "Ending sound" buttons, each shown when
+    // that G-code has an M1006 tune. Index 0 = start, 1 = end.
+    wxWindow*           m_sound_btn[2]                  {nullptr, nullptr};
+    wxStaticText*       m_sound_note[2]                 {nullptr, nullptr};
+    wxSizer*            sound_create_widget(wxWindow* parent, bool end);
+    void                update_sound_widgets();
+    void                edit_sound(bool end);
     // Per-nozzle process P5: under each extruder's Rack nozzle diameters, what is wrong with the text (or nothing).
     std::map<size_t, std::pair<wxWeakRef<wxTextCtrl>, wxWeakRef<wxStaticText>>> m_rack_controls; // extruder -> (text box, problem)
     void                update_rack_error(size_t extruder, const std::string& text);

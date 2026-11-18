@@ -199,6 +199,12 @@ public:
     float z_offset { 0.f };
     float extrusion_multiplier { 1.f };
 
+    // True for what a narrow internal solid area is filled with (detect_narrow_internal_solid_infill,
+    // FillConcentricInternal): loops along its outline, and a line down its middle where one fits. They are solid
+    // infill by role but not the straight lines of the pattern set for it, so what goes by the length of a line of
+    // solid infill does not go by the length of their moves (GCode::_needSAFC).
+    bool narrow_area_fill { false };
+
     // ZAA (Z contouring): per-position Z deltas relative to this path's own base Z
     // (print_z + z_offset * height). Null unless the posContouring step contoured this path.
     // Shared and immutable, so seam splits, clip_end and reversals cannot desynchronise it -
@@ -222,6 +228,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(ExtrusionPath &&rhs)
@@ -236,6 +243,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
@@ -250,6 +258,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
@@ -264,6 +273,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
     }
 
@@ -278,6 +288,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
         return *this;
     }
@@ -292,6 +303,7 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->narrow_area_fill = rhs.narrow_area_fill;
         this->z_contour = rhs.z_contour;
         return *this;
     }

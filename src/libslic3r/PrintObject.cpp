@@ -5,9 +5,12 @@
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
+#include "FineDetail.hpp"
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
+#include "MixedFilament.hpp"
+#include "MixedSublayer.hpp"
 #include "MutablePolygon.hpp"
 #include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
@@ -21,6 +24,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
 #include "ContourZ.hpp"
+#include "CurvedTops.hpp"
 #include "SLA/IndexedMesh.hpp"
 #include "Support/Stabilizers.hpp"
 #include "ExtruderAreas.hpp"
@@ -334,6 +338,19 @@ void PrintObject::_transform_hole_to_polyholes()
 // 1) Merges typed region slices into stInternal type.
 // 2) Increases an "extra perimeters" counter at region slices where needed.
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
+// EdgeSlicer, curved tops: written on the slicing thread, read by Print::apply() under the state mutex.
+void PrintObject::set_curved_tops_clipped(bool clipped)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_clipped = clipped;
+}
+
+void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_guard_inputs = std::move(inputs);
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -341,6 +358,9 @@ void PrintObject::make_perimeters()
 
     if (! this->set_started(posPerimeters))
         return;
+    // Curved tops: the walls are regenerated whole here (the fills follow in posInfill, which this
+    // step invalidates), so nothing an earlier curved-tops run cut is left.
+    this->set_curved_tops_clipped(false);
 
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
@@ -430,6 +450,18 @@ void PrintObject::make_perimeters()
     // print through a single nozzle diameter returns at the gate and leaves every region without patches.
     this->compute_adaptive_merge_groups();
     m_print->throw_if_canceled();
+    // Mixed color sublayer P3 (D9): Ratio rows split the band heights the merge just chose.
+    const MixedRatioMergeStats merge_stats = this->adapt_local_z_ratio_plan_to_merge_bands();
+    if (merge_stats.whole_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: %2% merged layer bands of a mixed color sublayer print in one colour each: no sub-layer "
+                             "of the mix is tall enough to start above the layers the band merges."),
+                           this->model_object()->name, merge_stats.whole_bands));
+    if (merge_stats.reordered_top_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: on %2% merged layer bands of a mixed color sublayer the Bambu Studio colour order could not be "
+                             "kept, so the top colour there may differ: the first sub-layer must reach above the layers the band merges."),
+                           this->model_object()->name, merge_stats.reordered_top_bands));
 
     // Ultra (over-support walls): the per-layer "there is support under here" region the wall
     // classifier needs, built once here and dropped again below. When the feature is off this
@@ -437,6 +469,11 @@ void PrintObject::make_perimeters()
     // pointer, and the generator takes its original code path verbatim - which is what makes the
     // off-mode G-code byte-identical.
     this->build_over_support_below();
+
+    // EdgeSlicer, thin feature notice: each layer's own thread records into its regions; start from nothing.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->thin_feature_layers.clear();
 
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
@@ -451,6 +488,20 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     this->clear_over_support_below();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // EdgeSlicer, thin feature notice (design P3, D6 (a)): one notice per object, merged after the parallel loop.
+    // Observation only; the notice names the object, so the slicing warning offers "Jump to [object]".
+    {
+        std::vector<const ThinFeatureLayer *> found;
+        for (const Layer *layer : m_layers)
+            for (const LayerRegion *layerm : layer->regions())
+                for (const ThinFeatureLayer &thin : layerm->thin_feature_layers)
+                    found.push_back(&thin);
+        m_thin_feature_summary = summarize_thin_features(found);
+        const std::string notice = thin_feature_notice(m_thin_feature_summary, this->model_object()->name);
+        if (!notice.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice, PrintStateBase::SlicingThinFeatures);
+    }
 
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
     det_dump_extrusions(*this, "2_make_perimeters_extrusions");
@@ -701,8 +752,71 @@ void PrintObject::infill()
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         det_dump_extrusions(*this, "4_infill_extrusions");
+        this->warn_if_first_layer_prints_nothing(*this);
         this->set_done(posInfill);
     }
+}
+
+// An object whose bed contact is narrower than the first-layer wall gets no first-layer extrusion
+// at all: it starts in mid-air, and because getObjectExtruderMap (Print.cpp) finds no first-layer
+// extruder for it, it gets no brim of any kind either (brim types and painted ears alike). Nothing
+// here changes the slice; it only says so, with the width needed and the settings that fix it.
+void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_src)
+{
+    if (layers_src.layers().empty() || this->has_raft())
+        return;
+    const Layer *first = layers_src.layers().front();
+    if (first->lslices.empty() || first->has_extrusions())
+        return;
+
+    // Contact width: the narrowest inward offset that erases the whole first-layer footprint.
+    BoundingBox bbox = get_extents(first->lslices);
+    double lo = 0., hi = unscaled(std::max(bbox.size().x(), bbox.size().y()));
+    for (int i = 0; i < 24 && hi - lo > 0.002; ++ i) {
+        const double mid = 0.5 * (lo + hi);
+        if (offset_ex(first->lslices, -float(scale_(mid / 2.))).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    const double contact = hi;
+
+    // Wall settings of the first region that has first-layer slices.
+    const LayerRegion *layerm = nullptr;
+    for (const LayerRegion *r : first->regions())
+        if (!r->slices.empty()) { layerm = r; break; }
+    if (layerm == nullptr && !first->regions().empty())
+        layerm = first->regions().front();
+    if (layerm == nullptr)
+        return;
+    const Flow   ext_flow   = layerm->flow(frExternalPerimeter);
+    const double line_width = ext_flow.width();
+    const double nozzle     = ext_flow.nozzle_diameter();
+    const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
+    const bool   thin_walls = FineDetail::classic_thin_walls(layerm->region().config());
+
+    auto mm = [](double v) { return Slic3r::format("%.2f", v); };
+    std::string message;
+    if (classic && !thin_walls) {
+        // Classic walls without thin-wall detection need room for one whole external wall.
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
+                                      "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
+                                      "contact must be comfortably wider than %3% mm."),
+                                 this->model_object()->name, mm(contact), mm(line_width));
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
+        if (suggest >= 0.6 * nozzle)
+            message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
+                                            mm(suggest));
+        else
+            message += " " + _u8L("To fix it, set Wall generator to Arachne or turn on Detect thin wall, or give the part a wider base.");
+    } else {
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow to print, "
+                                      "so it gets no brim and starts in mid-air. Give the part a wider base or reorient it."),
+                                 this->model_object()->name, mm(contact));
+    }
+    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message, PrintStateBase::SlicingEmptyFirstLayer);
 }
 
 void PrintObject::ironing()
@@ -782,12 +896,16 @@ void PrintObject::contour_z()
     if (!this->set_started(posContouring))
         return;
 
-    if (!this->need_z_contouring()) {
+    // EdgeSlicer: curved tops share this step and its mesh (CurvedTops.cpp). With
+    // curved_tops_enabled off (the default) this is exactly the ZAA-only step it was.
+    const bool zaa         = this->need_z_contouring();
+    const bool curved_tops = m_config.curved_tops_enabled.value && !m_instances.empty();
+    if (!zaa && !curved_tops) {
         this->set_done(posContouring);
         return;
     }
 
-    m_print->set_status(40, L("Z contouring"));
+    m_print->set_status(40, zaa ? L("Z contouring") : L("Curved tops"));
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
 
     TriangleMesh mesh = this->m_model_object->raw_mesh();
@@ -804,16 +922,61 @@ void PrintObject::contour_z()
     sla::IndexedMesh imesh(mesh);
     imesh.ground_level_offset(-z);
 
-    tbb::parallel_for(
-        // Contouring starts with the second layer to avoid a build plate collision.
-        tbb::blocked_range<size_t>(1, m_layers.size()),
-        [this, &imesh](const tbb::blocked_range<size_t>& range) {
-            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
-                m_print->throw_if_canceled();
-                m_layers[layer_idx]->make_contour_z(imesh);
+    if (zaa)
+        tbb::parallel_for(
+            // Contouring starts with the second layer to avoid a build plate collision.
+            tbb::blocked_range<size_t>(1, m_layers.size()),
+            [this, &imesh](const tbb::blocked_range<size_t>& range) {
+                for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+                    m_print->throw_if_canceled();
+                    m_layers[layer_idx]->make_contour_z(imesh);
+                }
             }
+        );
+    m_print->throw_if_canceled();
+
+    if (curved_tops) {
+        // A refusal leaves the object planar; every refusal and every block is reported to the user.
+        // What the guards read is recorded, so Print::apply() regenerates the walls when it changes.
+        this->set_curved_tops_guard_inputs_used(curved_tops_guard_inputs(*this));
+        const bool             clipped_before = m_curved_tops_clipped;
+        const CurvedTopsResult ct             = apply_curved_tops(*this, mesh, imesh);
+        // Safety net (review finding g): this step running again over layers an earlier, unfinished run
+        // already cut (a cancel), with a guard now refusing, would print a cut-down top with nothing on
+        // it. Print::apply() regenerates the walls before that can happen; should it ever be reached
+        // anyway, stop rather than slice it.
+        if (!ct.applied && clipped_before)
+            throw Slic3r::SlicingError(Slic3r::format(_u8L("Curved tops: the top layers of %1% were cut for a curved top that is now "
+                                                           "refused. Slice again."),
+                                                      this->model_object()->name),
+                                       this->id().id);
+        // P3: developer overrides. In force: their own warning, every slice. Carried by the project but
+        // Developer mode off: ignored, and the curved-tops message says so.
+        const CurvedTopsDevOverrides dev     = curved_tops_dev_overrides(m_config);
+        std::string                  ignored = dev.ignored_note();
+        // Out-of-range override values: clamped by curved_tops_dev_overrides(), said here.
+        if (dev.active)
+            for (const std::string &note : dev.clamp_notes)
+                ignored += (ignored.empty() ? "" : "\n") + note;
+        if (!ct.applied)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
+                                                         this->model_object()->name, ct.refusal) +
+                                              (ignored.empty() ? std::string() : "\n" + ignored),
+                                          PrintStateBase::SlicingCurvedTopsUnavailable);
+        else {
+            std::string msg = ct.summary;
+            for (const std::string &note : ct.notes)
+                msg += "\n" + note;
+            if (!ignored.empty())
+                msg += "\n" + ignored;
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
         }
-    );
+        if (dev.active)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("%1% (object %2%)"), dev.active_message(), this->model_object()->name),
+                                          PrintStateBase::SlicingCurvedTopsDevOverrides);
+    }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
 
@@ -1753,6 +1916,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_shadow_speed_ratio"
             || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
+            // EdgeSlicer, Fine detail: region keys read by the perimeter generator.
+            || opt_key == "fine_detail"
+            || opt_key == "thin_feature_line_width"
+            || opt_key == "thin_feature_min_size"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
@@ -1778,7 +1945,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_maximum_deviation"
             || opt_key == "min_feature_size"
             || opt_key == "min_length_factor"
-            || opt_key == "min_bead_width") {
+            || opt_key == "min_bead_width"
+            // EdgeSlicer, Fine detail: Cura's separate minimums.
+            || opt_key == "min_odd_wall_line_width"
+            || opt_key == "min_even_wall_line_width") {
             steps.emplace_back(posSlice);
         } else if (
                opt_key == "seam_position"
@@ -1818,6 +1988,8 @@ bool PrintObject::invalidate_state_by_config_options(
             // so nothing sliced has to be redone.
             || opt_key == "over_support_flow"
             || opt_key == "over_support_speed"
+            // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
+            || opt_key == "fine_detail_speed"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
@@ -1831,9 +2003,20 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "spiral_finishing_flow_ratio"
             // Edge: read by GCode::process_layer only.
             || opt_key == "min_layer_time_pause"
+            // Edge: nothing sliced depends on it. Print::apply invalidates psWipeTower when the resolved
+            // interface temperatures (Print::support_interface_temperatures) change.
+            || opt_key == "support_interface_nozzle_temperature"
             // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
             || opt_key == "apply_scarf_seam_on_circles"
-            || opt_key == "support_ironing_speed") {
+            || opt_key == "support_ironing_speed"
+            // EdgeSlicer, curved tops P3: the developer overrides. What they change is in the guard record
+            // (curved_tops_guard_inputs), which Print::apply() compares and which re-plans the block when it
+            // differs; with Developer mode off they are ignored and change nothing but the config block.
+            || opt_key.rfind("curved_tops_dev_", 0) == 0
+            // EdgeSlicer, curved tops P4: the same for the nozzle contact tolerance and the pattern (both in the
+            // guard record; the head check reads the tolerance at export).
+            || opt_key == "curved_tops_nozzle_tolerance"
+            || opt_key == "curved_tops_pattern") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
@@ -1877,6 +2060,13 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // EdgeSlicer, curved tops (P2): the block is checked against the support layers, so new supports
+        // re-plan it. Walls a block already cut are regenerated first (posPerimeters invalidates
+        // posContouring), so a block now refused leaves an uncut planar top. Objects without curved
+        // tops on invalidate exactly as before. Called from Print::apply(), under the state mutex the
+        // slicing thread writes m_curved_tops_clipped under.
+        if (m_config.curved_tops_enabled.value)
+            invalidated |= this->invalidate_step(m_curved_tops_clipped ? posPerimeters : posContouring);
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
@@ -3192,6 +3382,86 @@ static bool prints_dense(const Surface &surface, const PrintRegionConfig &region
     }
 }
 
+// Orca: Derive the fallback bridge direction from the supplied anchor geometry.
+// Pattern-specific angle selection belongs at the call site, where the supporting
+// layer and region are known; this helper must not override it with a base config angle.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors)
+{
+    AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
+
+    std::map<double, int> counted_directions;
+    for (const Polygon &p : bridged_area) {
+        double acc_distance = 0;
+        for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
+            Vec2d  start        = p.points[point_idx].cast<double>();
+            Vec2d  next         = p.points[point_idx + 1].cast<double>();
+            Vec2d  v            = next - start; // vector from next to current
+            double dist_to_next = v.norm();
+            acc_distance += dist_to_next;
+            if (acc_distance > scaled(2.0)) {
+                acc_distance = 0.0;
+                v.normalize();
+                int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
+                float step_size   = dist_to_next / lines_count;
+                for (int i = 0; i < lines_count; ++i) {
+                    Point a                   = (start + v * (i * step_size)).cast<coord_t>();
+                    auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
+                    double angle = lines_tree.get_line(index).orientation();
+                    if (angle > PI) {
+                        angle -= PI;
+                    }
+                    angle += PI * 0.5;
+                    counted_directions[angle]++;
+                }
+            }
+        }
+    }
+
+    std::pair<double, int> best_dir{0, 0};
+    // sliding window accumulation
+    for (const auto &dir : counted_directions) {
+        int    score_acc          = 0;
+        double dir_acc            = 0;
+        double window_start_angle = dir.first - PI * 0.1;
+        double window_end_angle   = dir.first + PI * 0.1;
+        for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
+             dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
+            dir_acc += dirs_window->first * dirs_window->second;
+            score_acc += dirs_window->second;
+        }
+        // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
+        //  opposite direction.
+        if (window_start_angle < 0.5 * PI) {
+            for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
+                 dirs_window != counted_directions.end(); dirs_window++) {
+                dir_acc += (dirs_window->first - PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+        // A window reaching above the top of the span takes in the directions at the bottom of it, as for the window
+        // reaching below the bottom just above. (Asked of window_start_angle, which never comes above 1.4 PI, and with
+        // a bound of window_start_angle - 1.5 PI, this was never run, and votes near 1.5 PI were never pooled with
+        // the votes near 0.5 PI they agree with.)
+        if (window_end_angle > 1.5 * PI) {
+            for (auto dirs_window = counted_directions.begin();
+                 dirs_window != counted_directions.upper_bound(window_end_angle - PI); dirs_window++) {
+                dir_acc += (dirs_window->first + PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+
+        if (score_acc > best_dir.second) {
+            best_dir = {dir_acc / score_acc, score_acc};
+        }
+    }
+    double bridging_angle = best_dir.first;
+    if (bridging_angle == 0) {
+        bridging_angle = 0.001;
+    }
+
+    return bridging_angle;
+}
+
 // This method applies bridge flow to the first internal solid layer above sparse infill.
 void PrintObject::bridge_over_infill()
 {
@@ -3549,11 +3819,13 @@ void PrintObject::bridge_over_infill()
     }
 
     // LAMBDA to gather areas with sparse infill deep enough that we can fit thick bridges there.
-    auto gather_areas_w_depth = [target_flow_height_factor](const PrintObject *po, int lidx, float target_flow_height) {
+    // target_flow_height is the depth a thick bridge sinks to, target_flow_height_factor of its height already: the
+    // caller applies the factor. Applying it again here looked only 0.81 of a thread deep.
+    auto gather_areas_w_depth = [](const PrintObject *po, int lidx, float target_flow_height) {
         // Gather layers sparse infill areas, to depth defined by used bridge flow
         ExPolygons layers_sparse_infill{};
         ExPolygons not_sparse_infill{};
-        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height * target_flow_height_factor - EPSILON;
+        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height - EPSILON;
         for (int i = int(lidx) - 1; i >= 0; --i) {
             // Stop iterating if layer is lower than bottom_z and at least one iteration was made
             const Layer *layer = po->get_layer(i);
@@ -3576,81 +3848,6 @@ void PrintObject::bridge_over_infill()
         not_sparse_infill    = union_ex(not_sparse_infill);
         not_sparse_infill    = closing_ex(not_sparse_infill, float(SCALED_EPSILON));
         return diff(layers_sparse_infill, not_sparse_infill);
-    };
-
-    // Orca: Derive the fallback bridge direction from the supplied anchor geometry.
-    // Pattern-specific angle selection belongs at the call site, where the supporting
-    // layer and region are known; this helper must not override it with a base config angle.
-    auto determine_bridging_angle = [](const Polygons &bridged_area, const Lines &anchors) {
-        AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
-
-        std::map<double, int> counted_directions;
-        for (const Polygon &p : bridged_area) {
-            double acc_distance = 0;
-            for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
-                Vec2d  start        = p.points[point_idx].cast<double>();
-                Vec2d  next         = p.points[point_idx + 1].cast<double>();
-                Vec2d  v            = next - start; // vector from next to current
-                double dist_to_next = v.norm();
-                acc_distance += dist_to_next;
-                if (acc_distance > scaled(2.0)) {
-                    acc_distance = 0.0;
-                    v.normalize();
-                    int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
-                    float step_size   = dist_to_next / lines_count;
-                    for (int i = 0; i < lines_count; ++i) {
-                        Point a                   = (start + v * (i * step_size)).cast<coord_t>();
-                        auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
-                        double angle = lines_tree.get_line(index).orientation();
-                        if (angle > PI) {
-                            angle -= PI;
-                        }
-                        angle += PI * 0.5;
-                        counted_directions[angle]++;
-                    }
-                }
-            }
-        }
-
-        std::pair<double, int> best_dir{0, 0};
-        // sliding window accumulation
-        for (const auto &dir : counted_directions) {
-            int    score_acc          = 0;
-            double dir_acc            = 0;
-            double window_start_angle = dir.first - PI * 0.1;
-            double window_end_angle   = dir.first + PI * 0.1;
-            for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
-                 dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
-                dir_acc += dirs_window->first * dirs_window->second;
-                score_acc += dirs_window->second;
-            }
-            // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
-            //  opposite direction.
-            if (window_start_angle < 0.5 * PI) {
-                for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
-                     dirs_window != counted_directions.end(); dirs_window++) {
-                    dir_acc += (dirs_window->first - PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-            if (window_start_angle > 1.5 * PI) {
-                for (auto dirs_window = counted_directions.begin();
-                     dirs_window != counted_directions.upper_bound(window_start_angle - 1.5 * PI); dirs_window++) {
-                    dir_acc += (dirs_window->first + PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-
-            if (score_acc > best_dir.second) {
-                best_dir = {dir_acc / score_acc, score_acc};
-            }
-        }
-        double bridging_angle = best_dir.first;
-        if (bridging_angle == 0) {
-            bridging_angle = 0.001;
-        }
-
-        return bridging_angle;
     };
 
     // Orca: Extend scan sections to the nearest anchors and reconstruct the bridge area.
@@ -3840,7 +4037,6 @@ void PrintObject::bridge_over_infill()
                                                                                            target_flow_height_factor, &surfaces_by_layer,
                                                                                            &clustered_layers_for_threads,
                                                                                            gather_areas_w_depth, &infill_lines,
-                                                                                           determine_bridging_angle,
                                                                                            construct_anchored_polygon](
                                                                                               tbb::blocked_range<size_t> r) {
         PRINT_OBJECT_TIME_LIMIT_MILLIS(PRINT_OBJECT_TIME_LIMIT_DEFAULT);
@@ -6323,6 +6519,39 @@ double Print::adaptive_merge_reference_nozzle() const
     return adaptive_band_reference_nozzle(m_config, plate_wall_filament_ids(*this));
 }
 
+// Mixed color sublayer P3 (D9): a Ratio row's painted region keeps its virtual (mixed) filament id, whose nozzle
+// is no physical nozzle. Its components print through one nozzle diameter (D8, Print::validate), so the region is
+// banded on that nozzle, as Bambu Studio 2.9.1 syncs a mixed slot's nozzle from its components
+// (sync_mixed_filament_nozzle_diameters). Every other region, and every row outside the feature, keeps its own id.
+static unsigned int adaptive_merge_region_filament(const Print &print, unsigned int wall_filament)
+{
+    const PrintConfig          &cfg          = print.config();
+    const MixedFilamentManager &mgr          = print.mixed_filament_manager();
+    const size_t                num_physical = cfg.filament_colour.size();
+    if (wall_filament == 0 || !mgr.is_mixed(wall_filament, num_physical) ||
+        mixed_sublayer_legacy_mode(mgr.mixed_filaments(), cfg.enable_mixed_color_sublayer.value))
+        return wall_filament;
+    const MixedFilament *mf = mgr.mixed_filament_from_id(wall_filament, num_physical);
+    if (mf == nullptr)
+        return wall_filament;
+    const bool gradient = mf->gradient_enabled && mf->component_a != mf->component_b;
+    if (mixed_sublayer_effective_method(mf->sublayer_method, cfg.enable_mixed_color_sublayer.value, cfg.dithering_local_z_mode.value, gradient) !=
+        MixedSublayerMethod::Ratio)
+        return wall_filament;
+    const std::vector<MixedRatioComponent> components = mixed_ratio_components(*mf, num_physical);
+    if (components.size() < 2)
+        return wall_filament;
+    std::vector<unsigned int> ids;
+    std::vector<double>       nozzles(num_physical, 0.);
+    for (size_t i = 0; i < num_physical; ++i)
+        nozzles[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
+    for (const MixedRatioComponent &c : components)
+        ids.push_back(c.extruder);
+    if (mixed_ratio_diameter_mismatch(ids, nozzles).mismatch())
+        return wall_filament;
+    return components.front().extruder;
+}
+
 void PrintObject::compute_adaptive_merge_groups()
 {
     for (Layer *layer : m_layers)
@@ -6359,7 +6588,7 @@ void PrintObject::compute_adaptive_merge_groups()
         // wall_filament is already a 1-based config id; nozzle_diameter_for_filament() wants that
         // convention, so it is passed through unchanged. (used_printing_filaments() / object_extruders()
         // are 0-based and need +1, which adaptive_band_reference_nozzle() applies internally.)
-        const unsigned int filament = (unsigned int) config.wall_filament.value;
+        const unsigned int filament = adaptive_merge_region_filament(*this->print(), (unsigned int) config.wall_filament.value);
         region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
     }
     // Band reference is the plate's wall nozzles only. Infill-only nozzles deliberately do not size the
@@ -6369,6 +6598,18 @@ void PrintObject::compute_adaptive_merge_groups()
     const double min_nozzle = adaptive_band_reference_nozzle(print_config, plate_wall_filament_ids(*this->print()));
     if (min_nozzle <= EPSILON)
         return;
+    // A mixed region that is not a Ratio row (Subdivide, gradient, cadence kept on its virtual id) is never banded: its
+    // Local-Z passes split one layer, not a merged band. nozzle_diameter_for_filament() now resolves a mixed filament to
+    // its components' nozzle, so pin these regions to the band reference (a ladder of one), as they printed before.
+    {
+        const MixedFilamentManager &mgr          = this->print()->mixed_filament_manager();
+        const size_t                num_physical = print_config.filament_colour.size();
+        for (size_t region_id = 0; region_id < region_count; ++region_id) {
+            const unsigned int wall = (unsigned int) this->printing_region(region_id).config().wall_filament.value;
+            if (mgr.is_mixed(wall, num_physical) && adaptive_merge_region_filament(*this->print(), wall) == wall)
+                region_nozzles[region_id] = min_nozzle;
+        }
+    }
 
     // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
     // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that
@@ -6380,7 +6621,8 @@ void PrintObject::compute_adaptive_merge_groups()
     for (size_t region_id = 0; region_id < region_count; ++ region_id)
         region_ranges[region_id] = adaptive_ladder_height_range(
             adaptive_layer_height_range_for_nozzle(
-                print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments),
+                print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                used_filaments),
             region_nozzles[region_id], min_nozzle, m_slicing_params.layer_height);
 
     // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
@@ -6460,7 +6702,7 @@ void PrintObject::compute_adaptive_merge_groups()
         // base layers, in the same window) instead of the size ratio. The finest nozzle keeps printing the plate's layer height.
         if (nozzle > min_nozzle + EPSILON)
             band_size = nozzle_process_band_size(
-                nozzle_layer_height_for_filament(print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                nozzle_layer_height_for_filament(print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value)),
                 band_size, m_slicing_params.layer_height, range.min_height, range.max_height);
 
         std::vector<unsigned char> has_material(layer_count, 0);

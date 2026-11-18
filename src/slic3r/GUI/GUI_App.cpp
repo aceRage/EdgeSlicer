@@ -1,6 +1,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
+#include "AmsTypes.hpp"
 #include "AmsUiPreview.hpp"
 #include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
@@ -32,6 +33,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 
 // Localization headers: include libslic3r version first so everything in this file
@@ -3057,6 +3059,16 @@ void GUI_App::init_app_config()
     }
     MixedFilamentManager::set_auto_generate_enabled(app_config->get_bool("auto_generate_gradients"));
     set_logging_level(Slic3r::level_string_to_boost(app_config->get("log_severity_level")));
+    // EdgeSlicer, curved tops on any printer: the head values the user accepted the risk of (Plater::
+    // confirm_curved_tops_head_before_slice), handed to the slicer.
+    {
+        std::vector<std::string> keys;
+        if (app_config->has_section(CURVED_TOPS_ACK_SECTION))
+            for (const auto &kv : app_config->get_section(CURVED_TOPS_ACK_SECTION))
+                if (!kv.second.empty())
+                    keys.push_back(kv.first);
+        set_curved_tops_acknowledgements(keys);
+    }
 
 }
 
@@ -5900,6 +5912,16 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
         input_file = dialog.GetPath();
 }
 
+wxString GUI_App::transition_tridid(int trid_id, bool rack_printer)
+{
+    if (rack_printer) {
+        const std::string label = GUI::AmsTypes::rack_tray_label(trid_id);
+        if (!label.empty())
+            return wxString::FromUTF8(label);
+    }
+    return transition_tridid(trid_id);
+}
+
 wxString GUI_App::transition_tridid(int trid_id)
 {
     wxString maping_dict[] = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
@@ -8574,6 +8596,32 @@ void GUI_App::update_mode()
     //BBS plater()->update_menus();
 
     plater()->canvas3D()->update_gizmos_on_off_state();
+
+    // EdgeSlicer, curved tops P3: the developer overrides act only in Developer mode (Preferences), and only
+    // while the settings show Developer lines (user_mode "develop"): the same condition that shows the
+    // override lines (ConfigManipulation), so an override is never in force with its line hidden. The
+    // slicer reads the flag; Print::apply() re-plans a curved block when it changes (guard record), and
+    // every plate of every open project is invalidated so nothing planned the other way can be exported.
+    const bool developer = curved_tops_developer_lines_shown();
+    if (developer != curved_tops_developer_mode()) {
+        set_curved_tops_developer_mode(developer);
+        BOOST_LOG_TRIVIAL(info) << "Curved tops developer overrides " << (developer ? "allowed" : "ignored") << " (Developer mode "
+                                << (developer ? "on" : "off") << ")";
+        bool any = false;
+        if (mainframe != nullptr)
+            for (Plater *project : mainframe->project_platers())
+                if (project != nullptr) {
+                    project->invalidate_slices_for_developer_mode();
+                    any = true;
+                }
+        if (!any)
+            plater()->invalidate_slices_for_developer_mode();
+    }
+}
+
+bool GUI_App::curved_tops_developer_lines_shown()
+{
+    return app_config->get_bool("developer_mode") && get_mode() == comDevelop;
 }
 
 void GUI_App::update_internal_development() {

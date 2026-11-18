@@ -144,6 +144,10 @@ void AMSDualView::load_bitmaps()
 
 wxSize AMSDualView::unit_icon_size(const AmsDual::UnitRef &ref) const
 {
+    if (ref.slot_count > 4) { // a rack AMS: a wider icon, one thin cube per slot
+        const wxSize four = m_four_slot.GetBmpSize();
+        return wxSize(std::max<int>(four.x, FromDIP(6) * ref.slot_count + FromDIP(12)), four.y);
+    }
     if (ref.slot_count > 1)
         return m_four_slot.GetBmpSize();
     return m_single_slot.GetBmpSize();
@@ -213,14 +217,16 @@ AMSDualView::Palette AMSDualView::palette() const
     return p;
 }
 
-int AMSDualView::side_width() const { return FromDIP(SIDE_W); }
+// One extruder (the H3C with its nine-slot AMS 3H) gets one side across the whole view, so nine
+// tiles fit; two extruders get two sides side by side.
+int AMSDualView::side_width() const { return m_sides.size() == 1 ? FromDIP(VIEW_W - 2 * SIDE_GAP) : FromDIP(SIDE_W); }
 
 int AMSDualView::side_x0(int side) const
 {
     const int n     = std::max<int>(1, int(m_sides.size()));
-    const int total = n * FromDIP(SIDE_W) + (n - 1) * FromDIP(SIDE_GAP);
+    const int total = n * side_width() + (n - 1) * FromDIP(SIDE_GAP);
     const int x0    = (GetSize().x - total) / 2;
-    return x0 + side * (FromDIP(SIDE_W) + FromDIP(SIDE_GAP));
+    return x0 + side * (side_width() + FromDIP(SIDE_GAP));
 }
 
 const DualUnitView *AMSDualView::unit_view(const std::string &ams_id) const
@@ -396,8 +402,12 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
         };
 
         if (unit->ref.slot_count > 1) {
-            const wxSize cube(FromDIP(9), FromDIP(14));
-            int          x = r.x + FromDIP(8);
+            // A rack AMS (AMS 3H, nine slots) has no frame picture in Bambu Studio's resources: its
+            // cubes share the icon's width and a plain border stands in for the four-slot frame.
+            const bool   many  = int(unit->slots.size()) > 4;
+            const int    n_cub = std::max<int>(1, int(unit->slots.size()));
+            const wxSize cube(many ? std::max<int>(FromDIP(3), (r.width - FromDIP(12)) / n_cub) : FromDIP(9), FromDIP(14));
+            int          x = r.x + (many ? (r.width - cube.x * n_cub) / 2 : FromDIP(8));
             const int    y = r.y + (r.height - cube.y) / 2;
             for (const DualSlotView &sv : unit->slots) {
                 bool transparent = false, empty = false;
@@ -422,7 +432,13 @@ void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *
                 }
                 x += cube.x;
             }
-            dc.DrawBitmap((dark ? m_four_slot_dark : m_four_slot).bmp(), r.x, r.y, true);
+            if (many) {
+                dc.SetPen(wxPen(pal.icon_border, 1));
+                dc.SetBrush(*wxTRANSPARENT_BRUSH);
+                dc.DrawRoundedRectangle(r, FromDIP(3));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+            } else
+                dc.DrawBitmap((dark ? m_four_slot_dark : m_four_slot).bmp(), r.x, r.y, true);
         } else if (!unit->slots.empty()) {
             const DualSlotView &sv = unit->slots.front();
             bool transparent = false, empty = false;

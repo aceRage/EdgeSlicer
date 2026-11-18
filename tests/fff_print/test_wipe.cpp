@@ -1,8 +1,11 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <initializer_list>
 #include <map>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -1031,4 +1034,199 @@ TEST_CASE("A cone wall's first-layer footprint grows with the cone angle", "[Wip
     // lines unchanged here; the footprint above is what the cone changes.
     CHECK(min_30 == min_0);
     CHECK(max_30 == max_0);
+}
+
+namespace {
+
+// One mesh of several boxes, each given by two opposite corners in mm. Boxes that are to be one body overlap.
+TriangleMesh boxes(std::initializer_list<std::array<double, 6>> corners)
+{
+    indexed_triangle_set all;
+    for (const std::array<double, 6> &c : corners) {
+        indexed_triangle_set box = its_make_cube(c[3] - c[0], c[4] - c[1], c[5] - c[2]);
+        for (stl_vertex &v : box.vertices)
+            v += Vec3f(float(c[0]), float(c[1]), float(c[2]));
+        its_merge(all, box);
+    }
+    return TriangleMesh(std::move(all));
+}
+
+// A plate 40 mm by 16 mm and 1 mm high with three square holes of 8 mm in a row, turned about Z.
+TriangleMesh plate_with_square_holes(double degrees)
+{
+    TriangleMesh plate = boxes({
+        {0., 0., 0., 40., 4., 1.},
+        {0., 12., 0., 40., 16., 1.},
+        {0., 0., 0., 4., 16., 1.},
+        {12., 0., 0., 16., 16., 1.},
+        {24., 0., 0., 28., 16., 1.},
+        {36., 0., 0., 40., 16., 1.},
+    });
+    plate.rotate_z(float(degrees * M_PI / 180.));
+    return plate;
+}
+
+// A cross of two bars 24 mm by 8 mm, 1 mm high, turned about Z: an outline with four inside corners.
+TriangleMesh cross(double degrees)
+{
+    TriangleMesh out = boxes({
+        {0., 8., 0., 24., 16., 1.},
+        {8., 0., 0., 16., 24., 1.},
+    });
+    out.rotate_z(float(degrees * M_PI / 180.));
+    return out;
+}
+
+// The moves made in to an outer wall's start from inside the part (wipe_before_external_loop), by layer.
+struct Approaches
+{
+    std::vector<int> by_layer;
+    // How far each goes, in mm, and whether any of them has an E word.
+    std::vector<double> lengths;
+    bool                extrudes = false;
+};
+
+Approaches approaches(const std::string &gcode)
+{
+    Approaches  out;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            out.by_layer.push_back(0);
+        else if (line.comment().find("move inwards before retraction/seam") != std::string_view::npos && line.dist_XY(self) > EPSILON) {
+            REQUIRE_FALSE(out.by_layer.empty());
+            ++out.by_layer.back();
+            out.lengths.push_back(line.dist_XY(self));
+            out.extrudes |= line.has_e();
+        }
+    });
+    return out;
+}
+
+DynamicPrintConfig approach_config(const char *wall_generator, const char *wall_loops, bool wipe_before_external_loop)
+{
+    DynamicPrintConfig config = wipe_config(wall_generator, false, "50%", "10%", false, wall_loops);
+    config.set_deserialize_strict({{"wipe_before_external_loop", wipe_before_external_loop ? "1" : "0"}});
+    return config;
+}
+
+// How many wipes are made while each of two tools is the one in use.
+std::array<int, 2> wipes_by_tool(const std::string &gcode)
+{
+    const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    std::array<int, 2> out{0, 0};
+    int                tool = -1;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.size() >= 2 && line[0] == 'T' && (line[1] == '0' || line[1] == '1') &&
+            (line.size() == 2 || line[2] == ' ' || line[2] == '\r' || line[2] == ';'))
+            tool = line[1] - '0';
+        else if (tool >= 0 && line.find(start_tag) != std::string::npos)
+            ++out[size_t(tool)];
+    }
+    return out;
+}
+
+// Two cubes of 10 mm, 1 mm high, the first printed with the first filament and the second with the second.
+std::string slice_two_filaments(const char *wipe)
+{
+    DynamicPrintConfig config = wipe_config("classic", true);
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4,0.4"},
+        {"single_extruder_multi_material", "0"},
+        {"enable_prime_tower", "0"},
+        {"skirt_loops", "0"},
+        {"wipe", wipe},
+        {"wipe_distance", "2,2"},
+        {"retraction_length", "0.8,0.8"},
+        {"retraction_minimum_travel", "0,0"},
+    });
+
+    Print print;
+    Model model;
+    for (int tool = 1; tool <= 2; ++tool) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(tool) + ".stl";
+        object->add_volume(make_cube(10., 10., 1.));
+        object->add_instance()->set_offset(Vec3d(60. + 30. * tool, 60., 0.));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", tool);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    return gcode(print);
+}
+
+} // namespace
+
+// wipe_before_external_loop comes at an outer wall from a point inside the part, a nozzle's width from where the
+// wall starts, if there is another wall beside that point to bring the filament forward over. The wall itself
+// was looked for there as well, strictly nearer than the nozzle's width, and at a corner of a square hole the
+// point is exactly that far from it: found or not by how the point's coordinates came out rounded.
+TEST_CASE("An outer wall round a square hole is come at from inside the part however the part is turned",
+          "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    // One outline and three holes: four outer walls a layer, each with an inner wall behind it.
+    const Approaches made = approaches(slice({plate_with_square_holes(degrees)}, approach_config(wall_generator, "2", true)));
+    CHECK(made.by_layer == std::vector<int>(5, 4));
+    // Each ends where its wall starts, a nozzle's width (the walls are wider) from where it began, and lays nothing.
+    for (const double length : made.lengths)
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.4, 2e-3));
+    CHECK_FALSE(made.extrudes);
+}
+
+// The same at an inside corner of the outline, where a seam is put by choice.
+TEST_CASE("An outer wall that starts in an inside corner of the outline is come at from inside the part",
+          "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    const Approaches made = approaches(slice({cross(degrees)}, approach_config(wall_generator, "2", true)));
+    CHECK(made.by_layer == std::vector<int>(5, 1));
+    for (const double length : made.lengths)
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.4, 2e-3));
+    CHECK_FALSE(made.extrudes);
+}
+
+TEST_CASE("An outer wall with no wall behind it is not come at from inside the part", "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    // With one wall the region still holds four loops, none of them beside another's point.
+    const TriangleMesh plate = plate_with_square_holes(degrees);
+    CHECK(approaches(slice({plate}, approach_config(wall_generator, "1", true))).by_layer == std::vector<int>(5, 0));
+    // And none where it is not asked for.
+    CHECK(approaches(slice({plate}, approach_config(wall_generator, "2", false))).by_layer == std::vector<int>(5, 0));
+}
+
+// The path the inward wipe makes is used by the retract, which asks the filament in use for its own `wipe`.
+// (Before Orca #17160 was ported, in #879, the inward wipe was made at once after an outer wall wherever any
+// filament of the print had `wipe` on.)
+TEST_CASE("A filament with wipe off is not wiped inward beside one with it on", "[Wipe][Regression]")
+{
+    const std::array<int, 2> both   = wipes_by_tool(slice_two_filaments("1,1"));
+    const std::array<int, 2> first  = wipes_by_tool(slice_two_filaments("1,0"));
+    const std::array<int, 2> second = wipes_by_tool(slice_two_filaments("0,1"));
+    CAPTURE(both, first, second);
+
+    CHECK(both[0] > 0);
+    CHECK(both[1] > 0);
+    CHECK(first[0] == both[0]);
+    CHECK(first[1] == 0);
+    CHECK(second[0] == 0);
+    CHECK(second[1] == both[1]);
 }

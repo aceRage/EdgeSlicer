@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <cstdint>
+#include <set>
 
 #include <libnest2d/libnest2d.hpp>
 #include "printer_parts.hpp"
@@ -722,6 +723,41 @@ TEST_CASE("Items can be preloaded", "[Nesting]") {
     }
 }
 
+// Each bed's search for an item starts from the item's own rotation. The placer leaves the item
+// turned as its last search left it, and the next bed's search used to start from there, so with
+// rotations that are not closed under addition a later bed tried turns the configuration does not
+// have (here: half and three-quarter turns with only {0, 90 degrees} allowed).
+TEST_CASE("Each bed tries the configured rotations from the item's own rotation", "[Nesting]")
+{
+    const Box bin({0, 0}, {100000000, 100000000});
+
+    std::vector<Item> items;
+    for (int i = 0; i < 60; ++i) {
+        const Coord w = (18 + 7 * (i % 5)) * 1000000, h = (10 + 9 * (i % 3)) * 1000000;
+        items.emplace_back(Item{{0, 0}, {w / 4, h}, {w, 0}});
+    }
+
+    NestConfig<> cfg;
+    cfg.placer_config.rotations = {0., Pi / 2};
+
+    int passes = 0;
+    const int max_passes = 1000000;
+    libnest2d::nest(items, bin, 2000000, cfg, NestControl{[&passes, max_passes] { return ++passes > max_passes; }});
+    REQUIRE(passes <= max_passes);
+
+    std::set<int> beds;
+    for (const Item &itm : items) {
+        REQUIRE(itm.binId() >= 0);
+        beds.insert(itm.binId());
+        double r = std::fmod(double(itm.rotation()), 2 * Pi);
+        if (r < 0) r += 2 * Pi;
+        const bool allowed = std::abs(r) < 1e-6 || std::abs(r - Pi / 2) < 1e-6 || std::abs(r - 2 * Pi) < 1e-6;
+        INFO("bed " << itm.binId() << " rotation " << r);
+        CHECK(allowed);
+    }
+    CHECK(beds.size() > 1);
+}
+
 namespace {
 
 struct ItemPair {
@@ -1224,4 +1260,37 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
     // Here the result shall be a stairway of boxes
     REQUIRE(pile.size() == N);
     REQUIRE(bb.area() == double(N) * N * W * W);
+}
+
+// An item that fits an empty bed but not beside a fixed item (a prime tower) that sits on every
+// bed was put on a bed past the plate limit (the first bed without a fixed item), however many
+// beds that took: the MAX_NUM_PLATES test in firstfit could never be true. It is now reported as
+// unplaced once every bed up to the limit has been tried.
+TEST_CASE("Item that fits only an empty bed is unplaced when every bed holds a fixed item", "[Nesting]")
+{
+    const Box bin({0, 0}, {250000000, 210000000});
+
+    std::vector<Item> items;
+    const int fixed_beds = MAX_NUM_PLATES + 4;
+    items.reserve(fixed_beds + 1);
+    for (int b = 0; b < fixed_beds; ++b) {
+        items.emplace_back(RectangleItem{20000000, 20000000});
+        items.back().translate(bin.center() - items.back().boundingBox().center());
+        items.back().markAsFixedInBin(b);
+        items.back().is_wipe_tower = true;
+    }
+    items.emplace_back(RectangleItem{240000000, 200000000});
+    Item &big = items.back();
+
+    NestConfig<> cfg;
+    cfg.placer_config.alignment = NestConfig<>::Placement::Alignment::DONT_ALIGN;
+
+    // Guard: the selection asks the stop condition on every pass, so a run that keeps opening beds
+    // stops here instead of hanging the suite.
+    int passes = 0;
+    const int max_passes = 100000;
+    libnest2d::nest(items, bin, 0, cfg, NestControl{[&passes, max_passes] { return ++passes > max_passes; }});
+
+    REQUIRE(passes <= max_passes);
+    CHECK(big.binId() == BIN_ID_UNSET);
 }

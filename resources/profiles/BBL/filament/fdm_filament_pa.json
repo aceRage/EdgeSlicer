@@ -7,6 +7,9 @@
     "activate_air_filtration": [
         "1"
     ],
+    "filament_adhesiveness_category": [
+        "400"
+    ],
     "supertack_plate_temp": [
         "0"
     ],

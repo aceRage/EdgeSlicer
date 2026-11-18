@@ -522,7 +522,7 @@ void PresetManagerDialog::delete_row(const std::string &key)
     if (!children.empty()) {
         wxString msg = _L("Presets inherited by other presets cannot be deleted!");
         msg += "\n";
-        msg += _L_PLURAL("The following presets inherit this preset.", "The following preset inherits this preset.", children.size());
+        msg += _L_PLURAL("The following preset inherits this preset.", "The following presets inherit this preset.", children.size());
         for (const std::string &child : children)
             msg += "\n - " + from_u8(child);
         m_busy = true;

@@ -92,10 +92,10 @@ namespace Slic3r {
                         }
                     }
                     else
-                        BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to get host form URL " << url;
+                        BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to get host form URL " << Http::url_without_userinfo(url);
                 }
                 else
-                    BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to parse URL " << url;
+                    BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to parse URL " << Http::url_without_userinfo(url);
                 curl_url_cleanup(hurl);
             }
             else
@@ -124,10 +124,10 @@ namespace Slic3r {
                         curl_free(host);
                     }
                     else
-                        BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to get host form URL " << url;
+                        BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to get host form URL " << Http::url_without_userinfo(url);
                 }
                 else
-                    BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to parse URL " << url;
+                    BOOST_LOG_TRIVIAL(error) << "ElegooLink get_host_from_url: failed to parse URL " << Http::url_without_userinfo(url);
                 curl_url_cleanup(hurl);
             }
             else
@@ -190,9 +190,9 @@ namespace Slic3r {
                         } else
                             BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to extract the URL after substitution";
                     } else
-                        BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to substitute host " << sub_addr << " in URL " << orig_addr;
+                        BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to substitute host " << sub_addr << " in URL " << Http::url_without_userinfo(orig_addr);
                 } else
-                    BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to parse URL " << orig_addr;
+                    BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to parse URL " << Http::url_without_userinfo(orig_addr);
                 curl_url_cleanup(hurl);
             } else
                 BOOST_LOG_TRIVIAL(error) << "ElegooLink substitute_host: failed to allocate curl_url";
@@ -341,7 +341,7 @@ namespace Slic3r {
         http.header("Host", host);
         set_auth(http);
         http.on_error([&](std::string body, std::string error, unsigned status) {
-                BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % url %
+                BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % Http::url_without_userinfo(url) %
                                                 error % status % body;
                 res = false;
                 msg = format_error(body, error, status);
@@ -452,7 +452,7 @@ namespace Slic3r {
             // in original address (m_host) replace host for resolved ip 
             info_fn(L"resolve", test_msg_or_host_ip);
             url = substitute_host(make_url("uploadFile/upload"), GUI::into_u8(test_msg_or_host_ip));
-            BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << url;
+            BOOST_LOG_TRIVIAL(info) << "Upload address after ip resolve: " << Http::url_without_userinfo(url);
         }
     #endif // _WIN32
 
@@ -770,7 +770,7 @@ namespace Slic3r {
         }
         if (resolved_addr.empty()) {
             // no resolved addresses - try system resolving
-            BOOST_LOG_TRIVIAL(error) << "ElegooLink failed to resolve hostname " << m_host << " into the IP address. Starting upload with system resolving.";
+            BOOST_LOG_TRIVIAL(error) << "ElegooLink failed to resolve hostname " << Http::url_without_userinfo(m_host) << " into the IP address. Starting upload with system resolving.";
             return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
         } else if (resolved_addr.size() == 1) {
             // one address resolved - upload there
@@ -825,15 +825,18 @@ namespace Slic3r {
             const std::string jsonString = ElegooStartPrint::build_payload(extended_info, static_cast<int>(BedType::btPC), filename,
                                                                            requestID, milliseconds,
                                                                            ElegooLinkCommand::ELEGOO_START_PRINT);
-                    std::cout << "send: " << jsonString << std::endl;
                     BOOST_LOG_TRIVIAL(info) << "start print, param: " << jsonString;
                     client.send(jsonString);
                     // wait 30s
                     auto start_time = std::chrono::steady_clock::now();
+                    // receive() gives up at the end of the 30 s rather than wait for a frame forever:
+                    // a printer that goes quiet used to hang the send for good.
+                    client.set_deadline(start_time + std::chrono::seconds(30));
+                    bool answered = false;
                     do{
                         std::string response = client.receive();
-                        std::cout << "Received: " << response << std::endl;
-                        BOOST_LOG_TRIVIAL(info) << "Received: " << response;
+                        // Never the frame as it came: it carries the printer's MainboardID (and its topic).
+                        BOOST_LOG_TRIVIAL(info) << "Received: " << canvas_redact_frame(response);
 
                         //sample response
                         // {"Id":"979d4C788A4a78bC777A870F1A02867A","Data":{"Cmd":128,"Data":{"Ack":1},"RequestID":"5223de52cc7642ae8d7924f9dd46f6ad","MainboardID":"1c7319d30105041800009c0000000000","TimeStamp":1735032553},"Topic":"sdcp/response/1c7319d30105041800009c0000000000"}  
@@ -852,6 +855,7 @@ namespace Slic3r {
                             continue;
                         }
                         if(*cmd == ElegooLinkCommand::ELEGOO_START_PRINT){
+                            answered = true;
                             auto _ack = data->get_optional<int>("Data.Ack");
                             if(!_ack){
                                 BOOST_LOG_TRIVIAL(error) << "start print failed, ack not found";
@@ -906,10 +910,14 @@ namespace Slic3r {
                             break;
                         }
                     } while (std::chrono::steady_clock::now() - start_time < std::chrono::seconds(30));
-                    if (std::chrono::steady_clock::now() - start_time >= std::chrono::seconds(30)) {
+                    if (wait_timed_out(answered, std::chrono::steady_clock::now() - start_time, std::chrono::seconds(30))) {
                         res = false;
                         error_fn(_L("Start print timeout"));
                     }
+            } catch (const WebSocketClient::Timeout&) {
+                BOOST_LOG_TRIVIAL(error) << "start print: the printer did not answer within 30 s";
+                error_fn(_L("Start print timeout"));
+                res = false;
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << std::endl;
                 BOOST_LOG_TRIVIAL(error) << "start print error: " << e.what();
@@ -947,19 +955,21 @@ namespace Slic3r {
                                             "From":1
                                         }
                                     })";
-            std::cout << "send: " << jsonString << std::endl;
             BOOST_LOG_TRIVIAL(info) << "start print, param: " << jsonString;
             bool needWrite = true;
             // wait 60s
             auto start_time = std::chrono::steady_clock::now();
+            // As in print(): receive() gives up when the 60 s are over.
+            client.set_deadline(start_time + std::chrono::seconds(60));
+            bool answered = false;
             do {
                 if (needWrite) {
                     client.send(jsonString);
                     needWrite = false;
                 }
                 std::string response = client.receive();
-                std::cout << "Received: " << response << std::endl;
-                BOOST_LOG_TRIVIAL(info) << "Received: " << response;
+                // Never the frame as it came: it carries the printer's MainboardID (and its topic).
+                BOOST_LOG_TRIVIAL(info) << "Received: " << canvas_redact_frame(response);
                 pt::ptree          root;
                 std::istringstream is(response);
                 pt::read_json(is, root);
@@ -977,17 +987,23 @@ namespace Slic3r {
                             // sleep 1s
                             std::this_thread::sleep_for(std::chrono::seconds(1));
                         } else {
+                            answered = true;
                             break;
                         }
                     } else {
+                        answered = true;
                         break;
                     }
                 }
             } while (std::chrono::steady_clock::now() - start_time < std::chrono::seconds(60));
-            if (std::chrono::steady_clock::now() - start_time >= std::chrono::seconds(60)) {
+            if (wait_timed_out(answered, std::chrono::steady_clock::now() - start_time, std::chrono::seconds(60))) {
                 res = false;
                 error_fn(_L("Start print timeout"));
             }
+        } catch (const WebSocketClient::Timeout&) {
+            BOOST_LOG_TRIVIAL(error) << "start print: the printer did not report its state within 60 s";
+            error_fn(_L("Start print timeout"));
+            res = false;
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << std::endl;
             BOOST_LOG_TRIVIAL(error) << "start print error: " << e.what();

@@ -245,6 +245,13 @@ public:
         float               retract_length;
         float               retract_speed;
         float               flat_iron_area;
+        // The filament's own pressure advance, when its profile sets one (enable_pressure_advance).
+        bool                pressure_advance_enabled = false;
+        float               pressure_advance         = 0.f;
+        // Whether the slicer's G-code sets this filament's pressure advance again after a tool change:
+        // its profile value, or a pressure advance command in its filament start G-code or in the
+        // printer's change filament G-code. Only then may the ram change it.
+        bool                pressure_advance_reset = false;
         // Tower interface (TowerInterface::): the filament as the trigger sees it, and its values.
         TowerInterface::FilamentKind kind;
         int                 interface_temperature = 0;

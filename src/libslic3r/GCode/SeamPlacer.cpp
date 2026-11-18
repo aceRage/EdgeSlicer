@@ -1827,6 +1827,9 @@ std::vector<std::pair<size_t, size_t>> SeamPlacer::find_seam_string(const PrintO
         if (next_layer < 0) {
           break;
         }
+        // Edge: reverse_lookup_direction() has already set the layer below the first seam. Stepping on from it, as
+        // below, skipped that layer: it was left out of the string and its seam out of line with the rest.
+        continue;
       } else {
         break;
       }

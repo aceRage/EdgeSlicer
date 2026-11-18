@@ -1443,11 +1443,11 @@ msgstr "特徵 1"
 msgid "Reverse rotation"
 msgstr "反向旋轉"
 
-msgid "Rotate around center:"
-msgstr "圍繞中心旋轉："
+msgid "Orbit"
+msgstr "圍繞中心旋轉"
 
-msgid "Parallel distance:"
-msgstr "平行距離："
+msgid "Parallel distance"
+msgstr "平行距離"
 
 msgid "Flip by Face 2"
 msgstr "通過面 2 翻轉"
@@ -8083,8 +8083,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "被其他預設繼承的預設無法刪除！"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "以下預設繼承了此預設。"
 
 #. TRN  Remove/Delete

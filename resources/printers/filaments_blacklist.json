@@ -47,14 +47,14 @@
     {
       "vendor": "Bambulab",
       "type": "PET-CF",
-      "action": "prohibition",
-      "description": "Bambu PET-CF/PA6-CF: not supported"
+      "action": "warning",
+      "description": "Bambu PET-CF/PA6-CF: the filament may break in the bent PTFE tube of an AMS"
     },
     {
       "vendor": "Bambulab",
       "type": "PA6-CF",
-      "action": "prohibition",
-      "description": "Bambu PET-CF/PA6-CF: not supported"
+      "action": "warning",
+      "description": "Bambu PET-CF/PA6-CF: the filament may break in the bent PTFE tube of an AMS"
     }
   ]
 }

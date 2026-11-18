@@ -1571,6 +1571,8 @@ void CalibrationPresetPage::sync_ams_info(MachineObject* obj)
     // sync filament_ams_list from obj ams list
     filament_ams_list.clear();
     for (auto& ams_item : obj->amsList) {
+        if (ams_item.second && ams_item.second->is_rack())
+            continue; // calibrating from a rack AMS (H3C AMS 3H) is not supported yet
         for (auto& tray_item: ams_item.second->trayList) {
             int tray_id = -1;
             if (!tray_item.second->id.empty()) {
@@ -1615,6 +1617,8 @@ void CalibrationPresetPage::sync_ams_info(MachineObject* obj)
     for (auto ams = obj->amsList.begin(); ams != obj->amsList.end(); ams++) {
         AMSinfo info;
         info.ams_id = ams->first;
+        if (ams->second->is_rack())
+            continue; // not a calibration source yet (H3C AMS 3H)
         if (ams->second->is_exists 
             && info.parse_ams_info(obj, ams->second, obj->ams_calibrate_remain_flag, obj->is_support_ams_humidity)) {
             ams_info.push_back(info);

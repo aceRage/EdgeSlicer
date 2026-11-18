@@ -254,7 +254,8 @@ public:
     // BBS
     void on_bed_type_change(BedType bed_type);
     void load_ams_list(std::string const & device, MachineObject* obj);
-    std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
+    // Static: reads only the printer, so the unit tests can build it with no window.
+    static std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
     // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
     // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
@@ -432,6 +433,10 @@ public:
     // slice and preview; a slice running on it goes on, and what would touch the window or the app-global presets (the
     // slice / export completion handling, a scheduled re-apply of the presets) waits until it is shown again.
     void on_project_hidden();
+    // Curved tops P3: Developer mode changed. Every plate's slice result is invalid (a curved block planned with
+    // or without the developer overrides must be planned again before it can be exported or sent); a hidden
+    // project re-applies when it is shown, the shown one now.
+    void invalidate_slices_for_developer_mode();
     void on_project_shown();
     // Why the active project cannot be switched away from right now (a job holds the plate, a print or send is being
     // prepared, a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool
@@ -859,6 +864,9 @@ public:
     /// @brief Show confirmation dialog for allowed high/low temperature mixing before slice.
     /// @return True if slicing can proceed; false if blocked or user cancelled.
     bool confirm_filament_temp_mixing_before_slice();
+    // EdgeSlicer, curved tops on any printer (design 3.4): once per printer preset and head values, the user accepts
+    // head values no curved print has checked. False = the user cancelled the slice.
+    bool confirm_curved_tops_head_before_slice();
     /// @brief Confirm warning-level high/low temperature material mixing before slicing all plates.
     /// @return True if slice-all can continue; otherwise false.
     bool confirm_filament_temp_mixing_before_slice_all();

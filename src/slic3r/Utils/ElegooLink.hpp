@@ -32,6 +32,12 @@ public:
     // A Centauri Carbon 2 / Centauri 2: HTTP /system/info + PUT /upload + an MQTT start command
     // (ElegooCc2.hpp) instead of the CC1's SDCP. Decided by the preset's printer_model.
     bool is_cc2() const { return m_cc2; }
+    // Whether a wait for the printer's answer ended without it. An answer that came is never a
+    // time-out, however late it was read.
+    static bool wait_timed_out(bool answered, std::chrono::steady_clock::duration waited, std::chrono::steady_clock::duration limit)
+    {
+        return !answered && waited >= limit;
+    }
 protected:
 #ifdef WIN32
     virtual bool upload_inner_with_resolved_ip(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn, const boost::asio::ip::address& resolved_addr) const;

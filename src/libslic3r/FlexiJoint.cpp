@@ -1112,9 +1112,11 @@ static std::vector<Vec2d> ball_profile(const FlexiJointParams &p)
     prof.emplace_back(0.,  -A);
     prof.emplace_back(Rn, -A);
     prof.emplace_back(Rn, zj);
-    // Spherical arc from the junction up over the pole. beta is measured from +Z.
+    // Spherical arc from the junction up over the pole. beta is measured from +Z. It starts one
+    // step past the junction: at i == 0 the arc is (Rn, zj), the point the neck already ended
+    // on, and a repeated point revolves into a band of zero-area triangles.
     const double beta_j = M_PI - std::asin(std::min(1., Rn / Rb));
-    for (int i = 0; i <= FLEXI_ARC_STEPS; ++ i) {
+    for (int i = 1; i <= FLEXI_ARC_STEPS; ++ i) {
         const double beta = beta_j * (1. - double(i) / double(FLEXI_ARC_STEPS));
         prof.emplace_back(Rb * std::sin(beta), zb + Rb * std::cos(beta));
     }

@@ -700,7 +700,8 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 
     // for small overhang removal
     struct OverhangCluster {
-        std::map<int, const ExPolygon*> layer_overhangs;
+        // A layer may hold more than one of the cluster's overhangs.
+        std::map<int, std::vector<const ExPolygon*>> layer_overhangs;
         ExPolygons merged_poly;
         BoundingBox merged_bbox;
         int min_layer = 1e7;
@@ -713,7 +714,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             push_back(expoly, layer_nr);
         }
         void push_back(const ExPolygon* expoly, int layer_nr) {
-            layer_overhangs.emplace(layer_nr, expoly);
+            layer_overhangs[layer_nr].push_back(expoly);
             auto dilate1 = offset_ex(*expoly, offset);
             if (!dilate1.empty())
                 merged_poly = union_ex(merged_poly, dilate1);
@@ -724,18 +725,24 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         int height() {
             return max_layer - min_layer + 1;
         }
+        bool overlaps_layer(int layer_nr, const ExPolygons& dilated) const {
+            auto it = layer_overhangs.find(layer_nr);
+            if (it == layer_overhangs.end()) return false;
+            for (const ExPolygon* overhang : it->second)
+                if (overlaps({ *overhang }, dilated))
+                    return true;
+            return false;
+        }
         bool intersects(const ExPolygon& region, int layer_nr, coordf_t offset) {
             if (layer_nr < 1) return false;
-            auto it = layer_overhangs.find(layer_nr - 1);
-            if (it == layer_overhangs.end()) return false;
-            const ExPolygon* overhang = it->second;
+            if (layer_overhangs.find(layer_nr - 1) == layer_overhangs.end()) return false;
 
             this->offset = offset;
             auto dilate1 = offset_ex(region, offset);
             BoundingBox bbox = get_extents(dilate1);
             if (!merged_bbox.overlap(bbox))
                 return false;
-            return overlaps({ *overhang }, dilate1);
+            return overlaps_layer(layer_nr - 1, dilate1);
         }
         // it's basically the combination of push_back and intersects, but saves an offset_ex
         bool push_back_if_intersects(const ExPolygon& region, int layer_nr, coordf_t offset) {
@@ -744,9 +751,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             BoundingBox bbox;
             do {
                 if (layer_nr < 1) break;
-                auto it = layer_overhangs.find(layer_nr - 1);
-                if (it == layer_overhangs.end()) break;
-                const ExPolygon* overhang = it->second;
+                if (layer_overhangs.find(layer_nr - 1) == layer_overhangs.end()) break;
 
                 this->offset = offset;
                 dilate1 = offset_ex(region, offset);
@@ -754,10 +759,10 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 bbox = get_extents(dilate1);
                 if (!merged_bbox.overlap(bbox))
                     break;
-                is_intersect = overlaps({ *overhang }, dilate1);
+                is_intersect = overlaps_layer(layer_nr - 1, dilate1);
             } while (0);
             if (is_intersect) {
-                layer_overhangs.emplace(layer_nr, &region);
+                layer_overhangs[layer_nr].push_back(&region);
                 merged_poly = union_ex(merged_poly, dilate1);
                 min_layer = std::min(min_layer, layer_nr);
                 max_layer = std::max(max_layer, layer_nr);
@@ -1037,8 +1042,8 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         // collect overhangs that's not small overhangs
         for (auto it = cluster.layer_overhangs.begin(); it != cluster.layer_overhangs.end(); it++) {
             int  layer_nr   = it->first;
-            auto p_overhang = it->second;
-            m_object->get_layer(layer_nr)->loverhangs.emplace_back(*p_overhang);
+            for (const ExPolygon* p_overhang : it->second)
+                m_object->get_layer(layer_nr)->loverhangs.emplace_back(*p_overhang);
         }
     }
 

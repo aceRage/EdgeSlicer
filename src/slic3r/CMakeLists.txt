@@ -96,6 +96,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FillBedDialog.hpp
     GUI/HeightPatternDialog.cpp
     GUI/HeightPatternDialog.hpp
+    GUI/StartupSoundDialog.cpp
+    GUI/StartupSoundDialog.hpp
     GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
@@ -243,6 +245,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
+    GUI/Gizmos/GLGizmoSplitToFit.cpp
+    GUI/Gizmos/GLGizmoSplitToFit.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
     GUI/Gizmos/GLGizmoSculpt.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
@@ -335,6 +339,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsDualLayout.hpp
     GUI/AmsDrying.cpp
     GUI/AmsDrying.hpp
+    GUI/AmsTypes.hpp
     GUI/AMSDryCtrlDialog.cpp
     GUI/AMSDryCtrlDialog.hpp
     GUI/AmsUiPreview.cpp
@@ -380,6 +385,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SliceBakeJob.hpp
     GUI/Jobs/StabilizerBakeJob.cpp
     GUI/Jobs/StabilizerBakeJob.hpp
+    GUI/Jobs/SplitToFitJob.cpp
+    GUI/Jobs/SplitToFitJob.hpp
     GUI/Jobs/SeamAutoPaintJob.cpp
     GUI/Jobs/SeamAutoPaintJob.hpp
     GUI/Jobs/QuadRemeshJob.cpp
@@ -597,6 +604,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
+    GUI/AmsMatch.cpp
+    GUI/AmsMatch.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp

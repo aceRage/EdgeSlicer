@@ -194,6 +194,8 @@ TEST_CASE("The Bambu tower with uniform nozzles announces no per-tool width", "[
     REQUIRE_FALSE(widths.empty()); // the first layer's 1.15 x tags at least
     for (long w : widths) {
         INFO("width " << w);
-        CHECK((w == 0 || w == 500 || w == 575));
+        // 1000: Bambu Studio 2.9.1 nozzle-change ramming lines (0.4 nozzle) inside a tool change onto the other
+        // extruder (WipeTower::ramming, tests/design_bbs_tower_port.md).
+        CHECK((w == 0 || w == 500 || w == 575 || w == 1000));
     }
 }

@@ -638,6 +638,8 @@ public:
     void            load_gcode(wxWindow* parent, wxString& input_file) const;
 
     wxString transition_tridid(int trid_id);
+    // rack_printer: the H3C's numbering (GUI::AmsTypes::rack_tray_label: "1".."9", "1-Ext".."9-Ext").
+    wxString transition_tridid(int trid_id, bool rack_printer);
     void            ShowUserGuide();
     // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). Everything that
     // used to offer that download - sign-in, the Device tab, the setup wizard, Preferences, the
@@ -856,6 +858,8 @@ public:
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
+    bool            curved_tops_developer_lines_shown();
     void            update_internal_development();
     void            show_ip_address_enter_dialog(wxString title = wxEmptyString);
     void            show_ip_address_enter_dialog_handler(wxCommandEvent &evt);

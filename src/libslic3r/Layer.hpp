@@ -3,6 +3,7 @@
 
 #include "libslic3r.h"
 #include "AdaptiveLayerMerge.hpp"
+#include "ThinFeatures.hpp"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
 #include "SurfaceCollection.hpp"
@@ -71,6 +72,11 @@ public:
     // A region may hold several patches on one layer: disjoint group-top slabs after local Z-conflict
     // clipping, swallowed-span marker copies of those slabs, and orphan-suppression records.
     std::vector<AdaptiveMergePatch> adaptive_merge_patches;
+
+    // EdgeSlicer, thin feature notice (ThinFeatures.hpp): the thin spots the wall generator skipped or widened on
+    // this layer, one record per generator call that found any. Written by this layer's own thread in
+    // make_perimeters, merged per object afterwards. Runtime only; the overlay of design B3 can draw them.
+    std::vector<ThinFeatureLayer> thin_feature_layers;
 
     // collection of expolygons representing the bridged areas (thus not
     // needing support material)
@@ -260,6 +266,13 @@ public:
                     height = patch.merged_height;
         return height;
     }
+    // EdgeSlicer, curved tops (CurvedTops.cpp): set on the object's top layer when it carries the
+    // conformal layers. The planar layers under it were emptied on purpose (their material is in the
+    // curved block), so the empty Z span below is not a printability gap.
+    bool                    curved_tops_block { false };
+    // With curved_tops_block: the steepest facet slope (degrees) of the surfaces the block follows. The
+    // head clearance check lets the tip land meet the neighbouring bead up to this slope, no further.
+    float                   curved_tops_slope_deg { 0.f };
     // Mixed-layer-height band merge: true when this layer takes part in a merge and carries no extrusions of its
     // own. What it would have printed moved up into the group top, so the empty Z span is not a printability gap
     // and the layer above must not be reported as unsupported. A merged band that had nothing printable to begin

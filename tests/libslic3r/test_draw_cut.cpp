@@ -2321,6 +2321,93 @@ TEST_CASE("Draw cut chain: an open line is cut with only when the user says so",
 }
 
 // ===========================================================================
+// THE EXTENSION CLAMP AND THE OPEN-LINE EDIT. Both found by the EdgeSlicerRS port.
+// ===========================================================================
+
+TEST_CASE("Draw cut extension clearance: only a face the ray goes into stops it", "[DrawCut]")
+{
+    // A 20 mm cube at the origin, and a second one 10 mm off its +X side.
+    indexed_triangle_set part = its_make_cube(20, 20, 20);
+    TriangleMesh neighbour(its_make_cube(20, 20, 20));
+    neighbour.translate(30.f, 0.f, 0.f);
+    const AABBMesh lone(part);
+    its_merge(part, neighbour.its);
+    const AABBMesh pair(part);
+    const double none = std::numeric_limits<double>::max();
+
+    // An open line drawn on the top face ends at x = 15. A pick lands a hair under the
+    // face (float precision), so the ray off the end runs just inside the top face and
+    // meets the side wall x = 20 from INSIDE - it is leaving the part there. That wall
+    // must not clamp the extension: reaching past the silhouette is what it is for.
+    // (Stopping at the first hit gave 4.9 mm here and the cut ended on the side wall.)
+    const Vec3d end_on_top(15., 10., 20. - 1e-4);
+    REQUIRE(draw_cut_extension_clearance(lone, end_on_top, Vec3d::UnitX()) == none);
+    // Exactly on the face's plane: same answer.
+    REQUIRE(draw_cut_extension_clearance(lone, Vec3d(15., 10., 20.), Vec3d::UnitX()) == none);
+
+    // The neighbour IS met from outside, so it still clamps: it is entered at x = 30,
+    // 15 mm off the line's end, less the 0.1 mm margin.
+    REQUIRE(draw_cut_extension_clearance(pair, end_on_top, Vec3d::UnitX()) == Approx(14.9).margin(1e-3));
+
+    // The outward rail off the top face leaves the part and meets nothing.
+    REQUIRE(draw_cut_extension_clearance(pair, Vec3d(10., 10., 20.), Vec3d::UnitZ()) == none);
+
+    // A ray from outside the part stops at the first wall it enters.
+    REQUIRE(draw_cut_extension_clearance(lone, Vec3d(-10., 10., 10.), Vec3d::UnitX()) == Approx(9.9).margin(1e-3));
+
+    // A zero direction casts along -Z, as before: from above the cube, down onto its top.
+    REQUIRE(draw_cut_extension_clearance(lone, Vec3d(10., 10., 25.), Vec3d::Zero()) == Approx(4.9).margin(1e-3));
+}
+
+TEST_CASE("Draw cut chain: editing a point keeps an open line open and a loop a loop", "[DrawCut]")
+{
+    const double r = 2.0;
+
+    // A line across the top of a cube, finished OPEN ("Cut along the line").
+    DrawCutChain line;
+    REQUIRE(line.append(face_run(Vec3d(-25, 0, 20), Vec3d(25, 0, 20), Vec3d::UnitZ(), 51), r) == DrawChainEnd::Back);
+    REQUIRE(line.finish_open());
+    DrawCutStroke st;
+    REQUIRE(line.finish(st, 1.0, 0.0) == DrawCutError::None);
+    REQUIRE_FALSE(st.is_closed());
+
+    // What the gizmo does on a handle drag: the handles are the finished path, one is
+    // moved, and the chain is rewritten from them.
+    std::vector<DrawCutSample> pts = st.path();
+    REQUIRE(pts.size() > 10);
+    pts[pts.size() / 2].pos.y() += 1.0;
+    draw_cut_chain_set_edited(line, pts);
+
+    REQUIRE_FALSE(line.is_closed());
+    REQUIRE(line.is_finished_open());
+    REQUIRE(line.finish(st, 1.0, 0.0) == DrawCutError::None);
+    REQUIRE(st.valid());
+    REQUIRE_FALSE(st.is_closed());
+
+    // A loop stays a loop.
+    DrawCutChain loop;
+    std::vector<DrawCutSample> ring;
+    for (int i = 0; i < 48; ++ i) {
+        const double a = 2. * M_PI * double(i) / 48.;
+        DrawCutSample s;
+        s.pos    = Vec3d(8. * std::cos(a), 8. * std::sin(a), 20.);
+        s.normal = Vec3d::UnitZ();
+        s.facet  = size_t(i);
+        ring.push_back(s);
+    }
+    REQUIRE(loop.append(ring, r) == DrawChainEnd::Back);
+    REQUIRE(loop.is_closed());
+    REQUIRE(loop.finish(st, 1.0, 0.0) == DrawCutError::None);
+    pts = st.path();
+    pts[3].pos.x() += 0.5;
+    draw_cut_chain_set_edited(loop, pts);
+    REQUIRE(loop.is_closed());
+    REQUIRE_FALSE(loop.is_finished_open());
+    REQUIRE(loop.finish(st, 1.0, 0.0) == DrawCutError::None);
+    REQUIRE(st.is_closed());
+}
+
+// ===========================================================================
 // 2026-09-13, OWNER CLICK-TEST. Three things were broken in practice and none
 // of them could have been caught by the phase-1/2/3 tests, because all three
 // live where the geometry meets the camera and the phase tests never had one.
@@ -5453,5 +5540,113 @@ TEST_CASE("Draw cut: outward-side probes do not cross gaps into neighbouring mat
         const Vec3d outward = draw_cut_outward_side(ring, n, &sphere);
         INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
         REQUIRE(outward.z() > 0.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Found by the EdgeSlicerRS port of this file.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Draw cut: a plug on a face of a coarse box does not leave a side empty", "[DrawCut]")
+{
+    // A circle on the top of a 12-triangle box: the plug holds none of the box's
+    // eight corners, so asking only the mesh's vertices called the plug's side
+    // empty and the panel refused a cut that does separate the part.
+    const indexed_triangle_set cube = centred_cube();
+    REQUIRE(cube.vertices.size() == 8);
+    REQUIRE(cube.indices.size() == 12);
+
+    DrawCutStroke stroke = circle_on_top(10.0, 96);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+    for (double thickness : { 0.0, 0.5 }) {
+        params.thickness = thickness;
+        INFO("thickness " << thickness);
+
+        // The cut itself separates the part: a plug and the rest.
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        REQUIRE(draw_cut_split(cube, stroke, params, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(its_volume(upper) > 100.f);
+        REQUIRE(its_volume(lower) > 100.f);
+
+        // And the cheap test agrees.
+        bool upper_empty = true, lower_empty = true;
+        draw_cut_empty_sides(cube, stroke, params, upper_empty, lower_empty);
+        REQUIRE_FALSE(upper_empty);
+        REQUIRE_FALSE(lower_empty);
+    }
+
+    // The control: the same loop drawn in the air 10 mm above the box. Its cutter
+    // is nowhere near the part, so the plug's side is empty, as before.
+    DrawCutStroke above = circle_on_top(10.0, 96, 0.5 * CUBE + 10.0);
+    REQUIRE(above.finish(1.0, 0.0) == DrawCutError::None);
+    params.thickness = 0.0;
+    bool upper_empty = false, lower_empty = false;
+    draw_cut_empty_sides(cube, above, params, upper_empty, lower_empty);
+    REQUIRE(upper_empty);
+    REQUIRE_FALSE(lower_empty);
+}
+
+TEST_CASE("Draw cut: the core face is the face the cutter builds when the samples cancel", "[DrawCut]")
+{
+    // A plug loop over the top of a cylinder lying along X, reaching 137 degrees
+    // down each flank: its sample normals fan out so far that their mean is under
+    // build_core_band()'s pinning guard, so the cutter asks the mesh which way is
+    // out. draw_cut_core_face() did not have the mesh, so its normal followed the
+    // way the loop was dragged, and for one winding it named a plane on the other
+    // side of the loop from the core the cutter builds.
+    const double R = 10.0, a = 8.0, b = 2.4;
+    indexed_triangle_set cyl = its_make_cylinder(R, 80.0, 2.0 * M_PI / 128.0);
+    for (Vec3f& v : cyl.vertices)
+        v = Vec3f(v.z() - 40.0f, v.y(), -v.x());   // axis along X, centred; a rotation
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+
+    std::optional<Vec3d> first_normal;
+    for (bool clockwise : { false, true }) {
+        INFO("clockwise " << clockwise);
+        DrawCutStroke stroke;
+        const int n = 240;
+        for (int i = 0; i < n; ++ i) {
+            const double t   = (clockwise ? -1.0 : 1.0) * 2.0 * M_PI * double(i) / double(n);
+            const double phi = b * std::sin(t);
+            const Vec3d  nrm(0.0, std::sin(phi), std::cos(phi));
+            stroke.append(Vec3d(a * std::cos(t), 0.0, 0.0) + R * nrm, nrm, size_t(i));
+        }
+        stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+        REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+        REQUIRE(stroke.is_closed());
+
+        // The case: a plug, with sample normals that cancel below the 0.25 guard.
+        REQUIRE_FALSE(draw_cut_loop_separates(cyl, stroke, params));
+        Vec3d avg = Vec3d::Zero();
+        for (const DrawCutSample& s : stroke.path())
+            avg += s.normal;
+        INFO("mean sample normal " << avg.norm() / double(stroke.path().size()));
+        REQUIRE(avg.norm() < 0.25 * double(stroke.path().size()));
+
+        Vec3d nn, pt;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, nn, pt, &cyl));
+        INFO("core normal " << nn.x() << " " << nn.y() << " " << nn.z());
+
+        // The mesh decides, so the winding does not.
+        if (!first_normal)
+            first_normal = nn;
+        else
+            REQUIRE(nn.dot(*first_normal) > 0.99);
+
+        // And the cutter's flat core lies on the reported face.
+        const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &cyl);
+        REQUIRE_FALSE(cutter.empty());
+        const size_t on = vertices_on_plane(cutter, nn, pt, 0.05);
+        INFO("cutter vertices on the core face: " << on);
+        REQUIRE(on > 8);
     }
 }
