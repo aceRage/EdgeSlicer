@@ -79,6 +79,30 @@ WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfi
     return input_params;
 }
 
+// EdgeSlicer, Fine detail (C1): with thin_bead_width / thin_feature_size / min_odd_wall_width at 0 this is
+// (min_feature_size, min_bead_width), the pair the strategy always got.
+WideningLimits widening_limits(const WallToolPathsParams &params, coord_t bead_width_0, coord_t bead_width_x, coordf_t layer_height)
+{
+    const coord_t min_bead_width = scaled<coord_t>(params.min_bead_width);
+    const coord_t thin_bead_width = params.thin_bead_width > 0.f ?
+        scaled<coord_t>(FineDetail::effective_thin_bead_width(params.thin_bead_width, params.min_bead_width, layer_height)) :
+        min_bead_width;
+    const coord_t thin_feature_size = params.thin_feature_size > 0.f ?
+        scaled<coord_t>(FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size)) :
+        scaled<coord_t>(params.min_feature_size);
+    const coord_t min_odd_wall_width = scaled<coord_t>(params.min_odd_wall_width > 0.f ? params.min_odd_wall_width : params.min_bead_width);
+    const float   external_perimeter_extrusion_width = Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(bead_width_0), float(layer_height));
+    const double  wall_split_middle_threshold = std::clamp(2. * unscaled<double>(min_odd_wall_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99);
+
+    // A thin-feature line wider than the point where one line splits into two would make a single line wider than the
+    // two that follow it. Only when the new keys are in play, so Off stays as it was.
+    coord_t output_width = thin_bead_width;
+    if (params.thin_bead_width > 0.f || params.min_odd_wall_width > 0.f)
+        output_width = std::min(output_width, coord_t((1. + wall_split_middle_threshold) * double(bead_width_0)));
+    (void) bead_width_x;
+    return { thin_feature_size, output_width };
+}
+
 WallToolPaths::WallToolPaths(const Polygons& outline, const coord_t bead_width_0, const coord_t bead_width_x,
                              const size_t inset_count, const coord_t wall_0_inset, const coordf_t layer_height, const WallToolPathsParams &params)
     : outline(outline)
@@ -90,13 +114,7 @@ WallToolPaths::WallToolPaths(const Polygons& outline, const coord_t bead_width_0
     , print_thin_walls(Slic3r::Arachne::fill_outline_gaps)
     , min_feature_size(scaled<coord_t>(params.min_feature_size))
     , min_bead_width(scaled<coord_t>(params.min_bead_width))
-    // EdgeSlicer, Fine detail: with the four fields at 0 these are exactly min_bead_width / min_feature_size.
-    , thin_bead_width(params.thin_bead_width > 0.f ?
-                          scaled<coord_t>(FineDetail::effective_thin_bead_width(params.thin_bead_width, params.min_bead_width, layer_height)) :
-                          scaled<coord_t>(params.min_bead_width))
-    , thin_feature_size(params.thin_feature_size > 0.f ?
-                            scaled<coord_t>(FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size)) :
-                            scaled<coord_t>(params.min_feature_size))
+    // EdgeSlicer, Fine detail: with the four fields at 0 these are exactly min_bead_width.
     , min_odd_wall_width(scaled<coord_t>(params.min_odd_wall_width > 0.f ? params.min_odd_wall_width : params.min_bead_width))
     , min_even_wall_width(scaled<coord_t>(params.min_even_wall_width > 0.f ? params.min_even_wall_width : params.min_bead_width))
     , small_area_length(static_cast<double>(bead_width_0) / 2.)
@@ -545,11 +563,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 	const double wall_split_middle_threshold = std::clamp(2. * unscaled<double>(this->min_odd_wall_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99); // For an uneven nr. of lines: When to split the middle wall into two.
     const double wall_add_middle_threshold   = std::clamp(unscaled<double>(this->min_even_wall_width) / perimeter_extrusion_width, 0.01, 0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
     
-    // EdgeSlicer, Fine detail: a thin-feature line wider than the point where one line splits into two would make a
-    // single line wider than the two that follow it. Only when the new keys are in play, so Off stays as it was.
-    coord_t widening_output_width = this->thin_bead_width;
-    if (this->m_params.thin_bead_width > 0.f || this->m_params.min_odd_wall_width > 0.f)
-        widening_output_width = std::min(widening_output_width, coord_t((1. + wall_split_middle_threshold) * double(bead_width_0)));
+    // EdgeSlicer, Fine detail: the two widths the thin-feature rule gets (see widening_limits()).
+    const WideningLimits widening = widening_limits(this->m_params, bead_width_0, bead_width_x, this->layer_height);
 
     const int wall_distribution_count = this->m_params.wall_distribution_count;
     const size_t max_bead_count = (inset_count < std::numeric_limits<coord_t>::max() / 2) ? 2 * inset_count : std::numeric_limits<coord_t>::max();
@@ -560,8 +575,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
             wall_transition_length,
             transitioning_angle,
             print_thin_walls,
-            widening_output_width,
-            thin_feature_size,
+            widening.output_width,
+            widening.input_width,
             wall_split_middle_threshold,
             wall_add_middle_threshold,
             max_bead_count,

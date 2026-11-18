@@ -5054,7 +5054,9 @@ void TabPrint::on_tower_defaults()
 wxSizer* TabPrint::fine_detail_note_create_widget(wxWindow* parent)
 {
     auto* vsizer = new wxBoxSizer(wxVERTICAL);
-    m_fine_detail_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    // One short fixed line, so the page never changes height; the live paragraph is its hover text.
+    m_fine_detail_note = new wxStaticText(parent, wxID_ANY, _L("(i) Values on this printer: hover for details"));
+    m_fine_detail_note->SetName(_L("Values on this printer"));
     m_fine_detail_note->SetFont(wxGetApp().normal_font());
     vsizer->Add(m_fine_detail_note, 0, wxEXPAND);
     update_fine_detail_note();
@@ -5090,12 +5092,12 @@ void TabPrint::update_fine_detail_note()
     } else {
         text += "\n" + _L("Classic walls: these settings are for Arachne; turn on Fine detail or Detect thin wall to print thin parts.");
     }
-    if (m_fine_detail_note->GetLabel() == text)
+    // The paragraph is the hover text (live: nozzle, layer height, wall generator and level), also the help text a
+    // screen reader can read; the visible line stays one line long.
+    if (m_fine_detail_note->GetHelpText() == text)
         return;
-    m_fine_detail_note->SetLabel(text);
-    m_fine_detail_note->Wrap(em_unit(m_fine_detail_note) * 45);
-    if (wxWindow* parent = m_fine_detail_note->GetParent())
-        parent->Layout();
+    m_fine_detail_note->SetHelpText(text);
+    m_fine_detail_note->SetToolTip(text);
 }
 
 void TabPrint::update_description_lines()

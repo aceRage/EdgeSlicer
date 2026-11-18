@@ -470,6 +470,11 @@ void PrintObject::make_perimeters()
     // off-mode G-code byte-identical.
     this->build_over_support_below();
 
+    // EdgeSlicer, thin feature notice: each layer's own thread records into its regions; start from nothing.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->thin_feature_layers.clear();
+
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -483,6 +488,20 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     this->clear_over_support_below();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // EdgeSlicer, thin feature notice (design P3, D6 (a)): one notice per object, merged after the parallel loop.
+    // Observation only; the notice names the object, so the slicing warning offers "Jump to [object]".
+    {
+        std::vector<const ThinFeatureLayer *> found;
+        for (const Layer *layer : m_layers)
+            for (const LayerRegion *layerm : layer->regions())
+                for (const ThinFeatureLayer &thin : layerm->thin_feature_layers)
+                    found.push_back(&thin);
+        m_thin_feature_summary = summarize_thin_features(found);
+        const std::string notice = thin_feature_notice(m_thin_feature_summary, this->model_object()->name);
+        if (!notice.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice, PrintStateBase::SlicingThinFeatures);
+    }
 
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
     det_dump_extrusions(*this, "2_make_perimeters_extrusions");

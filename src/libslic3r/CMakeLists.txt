@@ -565,6 +565,8 @@ set(lisbslic3r_sources
     PrimeTowerDefaults.hpp
     FineDetail.cpp
     FineDetail.hpp
+    ThinFeatures.cpp
+    ThinFeatures.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp

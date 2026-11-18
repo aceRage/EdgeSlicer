@@ -160,7 +160,10 @@ public:
         // Curved tops P3: the head check's result on a curved print with developer overrides in force
         // (contacts downgraded to a warning, or none found, with the nearest head part). Raised during
         // export_gcode; CRITICAL when there is a contact. Appended, own id.
-        SlicingCurvedTopsHeadCheck
+        SlicingCurvedTopsHeadCheck,
+        // Thin features (ThinFeatures.hpp): features the wall generator skipped, or printed wider than the model.
+        // Raised in the wall step, one notice per object; appended, own id.
+        SlicingThinFeatures
     };
 
     typedef size_t TimeStamp;
