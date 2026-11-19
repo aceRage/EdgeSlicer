@@ -83,10 +83,12 @@ execute worker, so they cannot pop a permission dialog off the UI thread.
 
 ## Missing helper
 
-If `edge-plugin-host` is not next to the EdgeSlicer binary, Edge logs a warning and falls
-back to in-process execute. The Home > Plugins card shows that fallback. The env overrides
-`EDGE_PLUGIN_HOST` and `EDGE_PLUGIN_HOST_IN_PROCESS` are ignored in production; tests may
-enable them through `PluginHostClient::set_allow_env_overrides_for_testing`.
+Landing change (review H4, 2026-11-18): there is no in-process fallback. If
+`edge-plugin-host` is missing, or (Windows) not signed although EdgeSlicer is, or cannot
+start, the run fails with a message that plugins do not run and to reinstall. The Home >
+Plugins card shows the same reason (`PluginHostClient::host_unavailable_reason()`). The env
+overrides `EDGE_PLUGIN_HOST` and `EDGE_PLUGIN_HOST_IN_PROCESS` are ignored in production;
+tests may enable them through `PluginHostClient::set_allow_env_overrides_for_testing`.
 
 ## Smoke tests owed at merge
 

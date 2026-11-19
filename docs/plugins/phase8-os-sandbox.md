@@ -88,7 +88,17 @@ missing, unsigned macOS helper, and so on) Edge **does not** silently fall back.
   Don't run (`broken_promise` included) so quitting with the dialog up does not hang.
 - Early slicing-pipeline steps (`posSlice` … `psSkirtBrim`) stay in-process with a live `Print *`.
   They do **not** get this prompt. The Home card already says "Early slicing steps run
-  unsandboxed in-process".
+  unsandboxed in-process". Landing change (H7): they run only when the user turns on
+  Preferences > Python plugins > "Allow plugins on the early slicing steps (unsandboxed)";
+  off by default, so a pipeline plugin then only post-processes the G-code in the helper.
+- Landing changes (review H1, H5, M1, M2, M4, M8): Python starts with `site` off and the
+  shared packages join `sys.path` only after the audit hook (app) or the OS sandbox
+  (helper); OS grants are narrowed around EdgeSlicer's secret stores
+  (`PluginAuditManager::secret_store_paths()`), and `trust.json` is no longer granted (the
+  helper checks the tree hash Edge sends); the Linux helper gets `/dev/null` stdio, only
+  null/zero/random/urandom from `/dev`, no TIOCSTI/TIOCLINUX and signals only to itself;
+  the Windows job carries UI restrictions; the parent confirms the reported sandbox
+  (TokenIsAppContainer, `/proc/<pid>/status`).
 - **Import is not sandboxed.** `load_enabled_plugins` (startup auto-load) and Home > Plugins
   Enable import a *trusted* plugin inside Edge with the user's rights. The OS sandbox covers
   helper **execute**, not import. Trust is the import-time control. See
