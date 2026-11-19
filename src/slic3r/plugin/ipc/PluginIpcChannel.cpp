@@ -42,6 +42,19 @@ std::chrono::steady_clock::time_point deadline_from_timeout(int timeout_ms)
     return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 }
 
+#ifdef _WIN32
+// M6: CancelIoEx only requests the cancel. Wait until the I/O has really finished before the
+// caller's OVERLAPPED (on its stack) and buffer go away; otherwise a slow helper decides when
+// the kernel writes into reused memory.
+void cancel_and_wait(HANDLE handle, OVERLAPPED& ov)
+{
+    if (::CancelIoEx(handle, &ov) || ::GetLastError() != ERROR_NOT_FOUND) {
+        DWORD ignored = 0;
+        (void) ::GetOverlappedResult(handle, &ov, &ignored, TRUE);
+    }
+}
+#endif
+
 } // namespace
 
 Channel::Channel(Channel&& other) noexcept
@@ -121,7 +134,7 @@ bool Channel::write_all(const uint8_t* data, size_t size, int timeout_ms, std::s
             }
             const DWORD wait = ::WaitForSingleObject(ov.hEvent, wait_ms < 0 ? INFINITE : static_cast<DWORD>(wait_ms));
             if (wait != WAIT_OBJECT_0) {
-                ::CancelIoEx(static_cast<HANDLE>(m_handle), &ov);
+                cancel_and_wait(static_cast<HANDLE>(m_handle), ov);
                 ::CloseHandle(ov.hEvent);
                 error = wait == WAIT_TIMEOUT ? "IPC write timed out" : "IPC write failed";
                 return false;
@@ -181,7 +194,7 @@ bool Channel::read_all(uint8_t* data, size_t size, int timeout_ms, std::string& 
             }
             const DWORD wait = ::WaitForSingleObject(ov.hEvent, wait_ms < 0 ? INFINITE : static_cast<DWORD>(wait_ms));
             if (wait != WAIT_OBJECT_0) {
-                ::CancelIoEx(static_cast<HANDLE>(m_handle), &ov);
+                cancel_and_wait(static_cast<HANDLE>(m_handle), ov);
                 ::CloseHandle(ov.hEvent);
                 error = wait == WAIT_TIMEOUT ? "truncated IPC message" : "IPC read failed";
                 return false;

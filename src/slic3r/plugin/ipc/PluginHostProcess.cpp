@@ -592,7 +592,11 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
     }
 
     auto abort_connect = [&](const std::string& msg, bool terminate_child) {
-        ::CancelIoEx(pipe, &ov);
+        // M6: wait for the cancelled connect to finish before ov (on this stack) goes away.
+        if (::CancelIoEx(pipe, &ov) || ::GetLastError() != ERROR_NOT_FOUND) {
+            DWORD ignored = 0;
+            (void) ::GetOverlappedResult(pipe, &ov, &ignored, TRUE);
+        }
         ::CloseHandle(ov.hEvent);
         if (terminate_child)
             ::TerminateProcess(pi.hProcess, 1);
