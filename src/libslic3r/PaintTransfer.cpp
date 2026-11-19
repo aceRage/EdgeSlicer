@@ -77,6 +77,8 @@ using Layer = FacetsAnnotation ModelVolume::*;
 const Layer COLOUR_LAYER = &ModelVolume::mmu_segmentation_facets;
 const Layer LAYERS[]     = { &ModelVolume::supported_facets, &ModelVolume::seam_facets,
                              &ModelVolume::mmu_segmentation_facets, &ModelVolume::fuzzy_skin_facets };
+// The LayerMask bit of each entry of LAYERS.
+const unsigned LAYER_BITS[] = { LAYER_SUPPORT, LAYER_SEAM, LAYER_COLOUR, LAYER_FUZZY };
 
 struct PreparedSource
 {
@@ -130,12 +132,13 @@ Transfer::Transfer(std::vector<Source> sources) : m(new Impl)
 
 Transfer::~Transfer() = default;
 
-Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament)
+Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament,
+               unsigned layers)
 {
     const auto t0 = std::chrono::steady_clock::now();
     Transfer   transfer(sources);
     const long prepare_ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
-    Stats      stats      = transfer.to(target, target_to_world, base_filament);
+    Stats      stats      = transfer.to(target, target_to_world, base_filament, nullptr, layers);
     stats.prepare_ms      = prepare_ms;
     return stats;
 }
@@ -182,7 +185,8 @@ static void store_spliced(FacetsAnnotation &to, const ModelVolume &target, Trian
     to.set(selector);
 }
 
-Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map)
+Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map,
+                   unsigned layers)
 {
     Stats stats;
     const std::vector<Source>         &sources  = m->sources;
@@ -340,6 +344,8 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
     };
 
     for (size_t layer_idx = 0; layer_idx < std::size(LAYERS); ++layer_idx) {
+        if ((layers & LAYER_BITS[layer_idx]) == 0)
+            continue;
         const Layer layer  = LAYERS[layer_idx];
         const bool  colour = layer == COLOUR_LAYER;
 
@@ -487,13 +493,16 @@ std::vector<int> FacetMatcher::match(const indexed_triangle_set &piece) const
     return map;
 }
 
-bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map)
+bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map, unsigned layers)
 {
     if (facet_map.size() != target.mesh().its.indices.size() ||
         std::any_of(facet_map.begin(), facet_map.end(), [](int f) { return f < 0; }))
         return false;
 
-    for (const Layer layer : LAYERS) {
+    for (size_t layer_idx = 0; layer_idx < std::size(LAYERS); ++layer_idx) {
+        if ((layers & LAYER_BITS[layer_idx]) == 0)
+            continue;
+        const Layer             layer = LAYERS[layer_idx];
         const FacetsAnnotation &from = source.*layer;
         FacetsAnnotation       &to   = target.*layer;
         if (from.empty()) {
@@ -511,6 +520,87 @@ bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::ve
         store_spliced(to, target, std::move(out));
     }
     return true;
+}
+
+std::vector<Source> object_boolean_sources(const ModelObject &object)
+{
+    std::vector<Source> out;
+    for (const ModelVolume *v : object.volumes)
+        if ((v->is_model_part() || v->is_negative_volume()) && ! v->mesh().empty()) {
+            Source src;
+            src.volume   = v;
+            src.to_world = v->get_matrix();
+            src.filament = effective_filament(*v);
+            src.cutter   = v->is_negative_volume();
+            out.push_back(src);
+        }
+    return out;
+}
+
+std::vector<Source> part_boolean_sources(const ModelVolume &source, const ModelVolume &tool, bool difference)
+{
+    std::vector<Source> out(2);
+    out[0].volume   = &source;
+    out[0].to_world = source.get_matrix();
+    out[0].filament = effective_filament(source);
+    out[1].volume   = &tool;
+    out[1].to_world = tool.get_matrix();
+    out[1].filament = effective_filament(tool);
+    out[1].cutter   = difference;
+    return out;
+}
+
+bool paint_boolean_result(const std::vector<Source> &sources, ModelVolume &result)
+{
+    if (sources.empty() || result.mesh().empty() || ! worth_transferring(sources))
+        return false;
+    unsigned layers = ALL_LAYERS;
+    for (const Source &src : sources)
+        if (src.volume != nullptr && src.volume->airbrush_field)
+            layers &= ~unsigned(LAYER_COLOUR);
+    transfer(sources, result, result.get_matrix(), effective_filament(result), layers);
+    return true;
+}
+
+struct SplitPainter::Impl
+{
+    const ModelVolume                *source = nullptr;
+    Transform3d                       source_to_world = Transform3d::Identity();
+    unsigned                          layers = ALL_LAYERS;
+    // The mesh the matcher refers to: the source's own, kept alive here.
+    std::shared_ptr<const TriangleMesh> mesh;
+    std::unique_ptr<FacetMatcher>     matcher;
+    std::unique_ptr<Transfer>         fallback; // built on the first piece that needs it
+};
+
+SplitPainter::SplitPainter(const ModelVolume &source, const Transform3d &source_to_world, unsigned layers) : m(new Impl)
+{
+    m->source          = &source;
+    m->source_to_world = source_to_world;
+    m->layers          = layers;
+    m->mesh            = std::make_shared<const TriangleMesh>(source.mesh());
+    m->matcher         = std::make_unique<FacetMatcher>(m->mesh->its);
+}
+
+SplitPainter::~SplitPainter() = default;
+
+std::vector<int> SplitPainter::match(const indexed_triangle_set &piece) const { return m->matcher->match(piece); }
+
+bool SplitPainter::paint(ModelVolume &piece, const std::vector<int> &map, const Transform3d &piece_to_world)
+{
+    if (copy_painting(*m->source, piece, map, m->layers))
+        return true;
+    if (! m->fallback) {
+        Source src;
+        src.volume   = m->source;
+        src.to_world = m->source_to_world;
+        src.filament = effective_filament(*m->source);
+        m->fallback  = std::make_unique<Transfer>(std::vector<Source>{ src });
+    }
+    // The piece prints with the source's filament: its unpainted skin stays unpainted. The facets
+    // that did match are still copied; only the others are resampled.
+    m->fallback->to(piece, piece_to_world, effective_filament(*m->source), &map, m->layers);
+    return false;
 }
 
 } // namespace PaintTransfer

@@ -16,6 +16,7 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
 #include "libslic3r/Airbrush/AirbrushBake.hpp"
@@ -3404,7 +3405,18 @@ void ObjectList::boolean()
     new_object->name = object->name;
     new_object->config.assign_config(object->config);
     // Centred on its own volume, whose offset keeps it where the parts were in the object.
-    new_object->add_volume(mesh);
+    ModelVolume* new_volume = new_object->add_volume(mesh);
+    // Keep paint v2 (re-port of PR #605): paint the result from every part, in the object's own
+    // coordinates like the mesh, while the parts still exist (inside this one undo step). The skin
+    // of a part with another filament keeps it; what is left of a negative part's skin is the wall
+    // of its cut and stays plain. An airbrushed part's colour is not carried (as before).
+    {
+        const std::vector<PaintTransfer::Source> sources = PaintTransfer::object_boolean_sources(*object);
+        if (PaintTransfer::worth_transferring(sources)) {
+            wxBusyCursor wait;
+            PaintTransfer::paint_boolean_result(sources, *new_volume);
+        }
+    }
     for (const ModelInstance* instance : object->instances)
         new_object->add_instance(*instance);
     if (new_object->instances.empty())

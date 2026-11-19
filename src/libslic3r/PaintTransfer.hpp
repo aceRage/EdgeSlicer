@@ -60,6 +60,15 @@ void append_object_sources(const ModelObject &object, bool cutter, std::vector<S
 // In a facet map of Transfer::to(): a new facet that stays unpainted.
 constexpr int FACET_UNPAINTED = -2;
 
+// Which paint layers a transfer writes; the others are left as they are on the target.
+enum LayerMask : unsigned {
+    LAYER_SUPPORT = 1,
+    LAYER_SEAM    = 2,
+    LAYER_COLOUR  = 4,
+    LAYER_FUZZY   = 8,
+    ALL_LAYERS    = LAYER_SUPPORT | LAYER_SEAM | LAYER_COLOUR | LAYER_FUZZY,
+};
+
 // The sources prepared once (search trees, painting loaded) for several targets, as when one
 // mesh is split into many pieces.
 class Transfer
@@ -71,7 +80,8 @@ public:
     // which facets of the target are facets of the source: their painting is copied as it is and
     // only the rest is resampled (a cut, where only the facets along the plane are new).
     // FACET_UNPAINTED in the map leaves that facet unpainted without sampling it (the cap of a cut).
-    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr);
+    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr,
+             unsigned layers = ALL_LAYERS);
 
 private:
     struct Impl;
@@ -82,7 +92,8 @@ private:
 // `target_to_world` maps the target mesh into the same world as the sources. Where the skins of
 // two sources coincide, the one listed first wins. `base_filament` is the filament the target
 // prints with: skin that would be coloured with it is left unpainted.
-Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament);
+Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament,
+               unsigned layers = ALL_LAYERS);
 
 // Split / cut: a piece cut out of a mesh keeps the very same triangles (same vertices, same corner
 // order), so its painting is copied triangle by triangle, exactly and without any search.
@@ -102,7 +113,39 @@ private:
 };
 // Copies the painting of `source` onto `target` through `facet_map` (from FacetMatcher::match() on
 // their meshes). Returns false, without touching `target`, when some facet has no match.
-bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map);
+bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map, unsigned layers = ALL_LAYERS);
+
+// Mesh Boolean. The inputs of the boolean, in the object's own coordinates (each volume's mesh by
+// its own matrix, as the booleans take them): every model part, and every negative part as a
+// cutter (object list "Boolean"), ...
+std::vector<Source> object_boolean_sources(const ModelObject &object);
+// ... or the gizmo's source and tool parts (the tool is a cutter in a Difference).
+std::vector<Source> part_boolean_sources(const ModelVolume &source, const ModelVolume &tool, bool difference);
+// Paints a boolean's result (its matrix maps its mesh into the sources' frame) when there is
+// anything to carry (worth_transferring()). The colour is left alone when an input is airbrushed:
+// its field is re-baked from the source instead (Airbrush P3). Returns whether it painted.
+bool paint_boolean_result(const std::vector<Source> &sources, ModelVolume &result);
+
+// Split (to objects or to parts): each piece TriangleMesh::split() cuts out of a mesh keeps that
+// mesh's facets with the very same corners, so its painting is copied facet by facet. A piece that
+// cannot be matched in full (a shell split() turned inside out) is resampled from the source.
+class SplitPainter
+{
+public:
+    // `source` (with the painting) must outlive the painter; `source_to_world` maps its mesh into
+    // the frame paint() is given each piece's matrix in.
+    SplitPainter(const ModelVolume &source, const Transform3d &source_to_world, unsigned layers = ALL_LAYERS);
+    ~SplitPainter();
+    // Call on the piece's mesh as split() made it, before anything moves it.
+    std::vector<int> match(const indexed_triangle_set &piece) const;
+    // Paints `piece` from the map match() gave for its mesh. `piece_to_world`: its mesh into the
+    // source's frame (only used when the map is incomplete). Returns whether it was an exact copy.
+    bool paint(ModelVolume &piece, const std::vector<int> &map, const Transform3d &piece_to_world);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m;
+};
 
 } // namespace PaintTransfer
 } // namespace Slic3r
