@@ -147,6 +147,24 @@ bool toggle(const std::string &key, Kind kind)
     return state;
 }
 
+void rename_key(const std::string &old_key, const std::string &new_key, Kind kind)
+{
+    std::set<std::string> keys = load(kind);
+    if (!FavoriteFilaments::rename_key(keys, old_key, new_key))
+        return;
+    fav_write_config(kind, keys);
+    fav_notify(kind);
+}
+
+void remove_key(const std::string &key, Kind kind)
+{
+    std::set<std::string> keys = load(kind);
+    if (!FavoriteFilaments::remove_key(keys, key))
+        return;
+    fav_write_config(kind, keys);
+    fav_notify(kind);
+}
+
 int subscribe(std::function<void()> on_changed, Kind kind)
 {
     static int next_id = 1;

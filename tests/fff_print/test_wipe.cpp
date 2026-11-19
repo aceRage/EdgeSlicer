@@ -1,8 +1,11 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <initializer_list>
 #include <map>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -176,24 +179,115 @@ TEST_CASE("Wipe retraction preserves fractional speed with inward wipe disabled"
     CHECK_THAT(before_wipe, Catch::Matchers::WithinAbs(0.8 - expected_during, 0.00005));
 }
 
-TEST_CASE("Inward wipe respects the minimum travel for retraction and Z hop", "[Wipe][Regression]")
+namespace {
+
+struct WipeFilament
+{
+    size_t wipes = 0;
+    double e_during_wipes = 0.;
+};
+
+WipeFilament wipe_filament(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    const auto &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    const auto &end_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End);
+    WipeFilament out;
+    bool in_wipe = false;
+    GCodeReader parser;
+    parser.apply_config(config);
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find(start_tag) != std::string_view::npos) {
+            in_wipe = true;
+            ++out.wipes;
+        } else if (line.comment().find(end_tag) != std::string_view::npos) {
+            in_wipe = false;
+        } else if (in_wipe && line.has_e()) {
+            out.e_during_wipes += std::abs(line.dist_E(self));
+        }
+    });
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Wipe moves no filament under firmware retraction", "[Wipe][RetractionSplit][Regression]")
+{
+    // G11 restores only what G10 retracted, so filament moved during a wipe is never restored.
+    const char *retract_before_wipe = GENERATE("0%", "70%", "100%");
+    const char *relative_e = GENERATE("0", "1");
+    CAPTURE(retract_before_wipe, relative_e);
+    DynamicPrintConfig config = wipe_config("classic", false);
+    config.set_deserialize_strict({
+        {"gcode_flavor", "klipper"},
+        {"use_firmware_retraction", "1"},
+        {"use_relative_e_distances", relative_e},
+        {"retract_before_wipe", retract_before_wipe},
+        {"retract_after_wipe", "0%"},
+    });
+    const WipeFilament wipes = wipe_filament(slice({make_cube(10., 10., 1.)}, config), config);
+    CHECK(wipes.wipes > 0);
+    CHECK_THAT(wipes.e_during_wipes, Catch::Matchers::WithinAbs(0., EPSILON));
+}
+
+TEST_CASE("Firmware retraction changes wipe G-code only when wipe is also on", "[Wipe][RetractionSplit][Regression]")
+{
+    const char *firmware = GENERATE("0", "1");
+    const char *wipe = GENERATE("0", "1");
+    CAPTURE(firmware, wipe);
+    DynamicPrintConfig config = wipe_config("classic", false);
+    config.set_deserialize_strict({
+        {"gcode_flavor", "klipper"},
+        {"use_firmware_retraction", firmware},
+        {"wipe", wipe},
+        {"retract_before_wipe", "70%"},
+        {"retract_after_wipe", "0%"},
+        {"retraction_speed", "25.5"},
+        {"role_based_wipe_speed", "0"},
+        {"wipe_speed", "100"},
+        {"wipe_distance", "2"},
+    });
+    const WipeFilament wipes = wipe_filament(slice({make_cube(10., 10., 1.)}, config), config);
+    const bool firmware_on = std::string(firmware) == "1";
+    const bool wipe_on = std::string(wipe) == "1";
+    if (!wipe_on) {
+        CHECK(wipes.wipes == 0);
+        CHECK_THAT(wipes.e_during_wipes, Catch::Matchers::WithinAbs(0., EPSILON));
+    } else if (firmware_on) {
+        CHECK(wipes.wipes > 0);
+        CHECK_THAT(wipes.e_during_wipes, Catch::Matchers::WithinAbs(0., EPSILON));
+    } else {
+        CHECK(wipes.wipes > 0);
+        CHECK(wipes.e_during_wipes > EPSILON);
+    }
+}
+
+TEST_CASE("Inward wipe preserves retraction splits and minimum travel", "[Wipe][RetractionSplit][Regression]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     const char *relative_e = GENERATE("0", "1");
     const char *reduce_crossing_wall = GENERATE("0", "1");
-    const char *minimum_travel = GENERATE("5", "0");
-    CAPTURE(wall_generator, relative_e, reduce_crossing_wall, minimum_travel);
+    const char *minimum_travel = GENERATE("5", "1", "0");
+    const bool wipe_on_loops = GENERATE(false, true);
+    const auto split = GENERATE(table<const char *, const char *>({
+        {"0%", "50%"}, {"25%", "25%"}, {"100%", "0%"}, {"0%", "100%"}, {"0%", "0%"}
+    }));
+    const char *before_percent = std::get<0>(split);
+    const char *after_percent = std::get<1>(split);
+    CAPTURE(wall_generator, relative_e, reduce_crossing_wall, minimum_travel, wipe_on_loops,
+            before_percent, after_percent);
     DynamicPrintConfig config = wipe_config(
-        wall_generator, true, "50%", "10%", false, "3", "inner-outer-inner wall");
+        wall_generator, true, "50%", "10%", wipe_on_loops, "3", "inner-outer-inner wall");
     config.set_deserialize_strict({
         {"gcode_flavor", "marlin2"},
         {"use_relative_e_distances", relative_e},
         {"reduce_crossing_wall", reduce_crossing_wall},
         {"retraction_minimum_travel", minimum_travel},
+        // This case checks the threshold itself, which retract_after_outer_wall overrides after an outer wall.
+        {"retract_after_outer_wall", "0"},
         {"retract_when_changing_layer", "0"},
         {"use_firmware_retraction", "0"},
-        {"retract_before_wipe", "0%"},
-        {"retract_after_wipe", "0%"},
+        {"retract_before_wipe", before_percent},
+        {"retract_after_wipe", after_percent},
         {"retraction_speed", "25.5"},
         {"role_based_wipe_speed", "0"},
         {"wipe_speed", "100"},
@@ -203,62 +297,96 @@ TEST_CASE("Inward wipe respects the minimum travel for retraction and Z hop", "[
     });
     config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{zhtNormal});
     config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric{rletAllSurfaces});
-    const std::string output = slice({make_cube(10., 10., 1.)}, config);
-    const auto &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
-    const auto &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
-    const auto &end_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End);
-    ExtrusionRole role = erNone;
-    bool after_outer_wall = false;
-    bool in_wipe = false;
-    size_t transitions = 0;
-    size_t same_layer_transitions = 0;
-    size_t inward_wipes = 0;
-    double retraction = 0.;
-    double lift = 0.;
-    double outer_z = 0.;
-    GCodeReader parser;
-    parser.apply_config(config);
-    parser.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
-        if (line.comment().find(role_tag) == 0)
-            role = ExtrusionEntity::string_to_role(line.comment().substr(role_tag.size()));
-        if (line.comment().find(start_tag) == 0) {
-            in_wipe = true;
-            if (after_outer_wall)
-                ++inward_wipes;
-        } else if (line.comment().find(end_tag) == 0) {
-            in_wipe = false;
-        }
-        if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
-            if (role == erExternalPerimeter) {
-                after_outer_wall = true;
-                retraction = lift = 0.;
-                outer_z = line.new_Z(self);
-            } else if (after_outer_wall) {
-                REQUIRE(role == erPerimeter);
-                ++transitions;
-                const double layer_rise = std::max(0., double(self.z()) - outer_z);
-                if (layer_rise < EPSILON)
-                    ++same_layer_transitions;
-                // A 5 mm threshold suppresses retraction across a few wall widths.
-                // A zero threshold still permits the ordinary retract and lift.
-                const bool retract = std::stod(minimum_travel) == 0.;
-                CHECK_THAT(retraction, Catch::Matchers::WithinAbs(retract ? 0.8 : 0., 0.00005));
-                // Exclude an ordinary layer change from the accumulated upward motion.
-                CHECK_THAT(lift - layer_rise, Catch::Matchers::WithinAbs(retract ? 0.4 : 0., 0.001));
-                after_outer_wall = false;
+    std::vector<bool> regular_wipes;
+    for (bool inward : {false, true}) {
+        config.set_key_value("wipe_inward", new ConfigOptionBool(inward));
+        const std::string output = slice({make_cube(10., 10., 1.)}, config);
+        const auto &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+        const auto &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+        const auto &end_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End);
+        ExtrusionRole role = erNone;
+        bool after_outer_wall = false;
+        bool in_wipe = false;
+        bool wipe_seen = false;
+        size_t transitions = 0;
+        size_t same_layer_transitions = 0;
+        size_t outer_wipes = 0;
+        double before_wipe = 0.;
+        double during_wipe = 0.;
+        double after_wipe = 0.;
+        double wipe_length = 0.;
+        double lift = 0.;
+        double outer_z = 0.;
+        GCodeReader parser;
+        parser.apply_config(config);
+        parser.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.comment().find(role_tag) == 0)
+                role = ExtrusionEntity::string_to_role(line.comment().substr(role_tag.size()));
+            if (line.comment().find(start_tag) == 0) {
+                in_wipe = true;
+                wipe_seen = true;
+                if (after_outer_wall)
+                    ++outer_wipes;
+            } else if (line.comment().find(end_tag) == 0) {
+                in_wipe = false;
             }
-        } else if (after_outer_wall) {
-            if (line.retracting(self))
-                retraction -= line.dist_E(self);
-            lift += std::max(0., double(line.dist_Z(self)));
-            if (in_wipe)
-                CHECK_THAT(line.dist_E(self), Catch::Matchers::WithinAbs(0., 0.00005));
-        }
-    });
-    // The 1 mm cube has five 0.2 mm layers: every outer wall must still wipe.
-    REQUIRE(transitions == 5);
-    REQUIRE(same_layer_transitions >= 4);
-    REQUIRE(inward_wipes == transitions);
+            if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+                if (role == erExternalPerimeter) {
+                    after_outer_wall = true;
+                    before_wipe = during_wipe = after_wipe = wipe_length = lift = 0.;
+                    wipe_seen = false;
+                    outer_z = line.new_Z(self);
+                } else if (after_outer_wall) {
+                    REQUIRE(role == erPerimeter);
+                    const bool retract = inward ? regular_wipes.at(transitions) : wipe_seen;
+                    if (!inward)
+                        regular_wipes.push_back(wipe_seen);
+                    CHECK(wipe_seen == retract);
+                    if (retract)
+                        REQUIRE(wipe_length > EPSILON);
+                    else
+                        CHECK_THAT(wipe_length, Catch::Matchers::WithinAbs(0., EPSILON));
+                    ++transitions;
+                    const double layer_rise = std::max(0., double(self.z()) - outer_z);
+                    if (layer_rise < EPSILON)
+                        ++same_layer_transitions;
+                    // Inward wiping must use the same retraction decisions as
+                    // regular wiping, including a longer first-layer transition.
+                    // The 1 mm threshold also catches a wipe endpoint that would
+                    // make an otherwise short travel long enough to retract.
+                    // Otherwise the configured split is limited by the time available
+                    // at 100 mm/s, with any excess retracted before the wipe.
+                    const double expected_after = retract ? 0.8 * std::stod(after_percent) / 100. : 0.;
+                    const double requested_before = retract ? 0.8 * std::stod(before_percent) / 100. : 0.;
+                    const double expected_during = retract ? std::min(0.8 - requested_before - expected_after,
+                                                                      25.5 * wipe_length / 100.) : 0.;
+                    const double expected_before = retract ? 0.8 - expected_during - expected_after : 0.;
+                    CHECK_THAT(before_wipe, Catch::Matchers::WithinAbs(expected_before, 0.0001));
+                    CHECK_THAT(during_wipe, Catch::Matchers::WithinAbs(expected_during, 0.0001));
+                    CHECK_THAT(after_wipe, Catch::Matchers::WithinAbs(expected_after, 0.0001));
+                    CHECK_THAT(lift - layer_rise, Catch::Matchers::WithinAbs(retract ? 0.4 : 0., 0.001));
+                    after_outer_wall = false;
+                }
+            } else if (after_outer_wall) {
+                if (line.retracting(self)) {
+                    double &portion = in_wipe ? during_wipe : (wipe_seen ? after_wipe : before_wipe);
+                    portion -= line.dist_E(self);
+                }
+                if (in_wipe)
+                    wipe_length += line.dist_XY(self);
+                lift += std::max(0., double(line.dist_Z(self)));
+            }
+        });
+        // The 1 mm cube has five 0.2 mm layers. Inward wiping follows the
+        // ordinary retraction decision at every outer-to-inner wall transition.
+        REQUIRE(transitions == 5);
+        REQUIRE(same_layer_transitions >= 4);
+        REQUIRE(outer_wipes == std::count(regular_wipes.begin(), regular_wipes.end(), true));
+        if (std::stod(minimum_travel) == 0.)
+            REQUIRE(outer_wipes == transitions);
+        else
+            REQUIRE(outer_wipes < transitions);
+    }
 }
 
 TEST_CASE("Changing inward wipe settings preserves the sliced geometry", "[Wipe][Regression]")
@@ -372,6 +500,7 @@ TEST_CASE("Inward wipe recognizes an external wall starting on an overhang", "[W
     init_print({make_cube(10., 10., 1.)}, print, model, config);
     print.process();
     size_t mixed_loops = 0;
+    double external_width = 0.;
     const auto mark_overhangs = [&](auto &&self, ExtrusionEntity *entity) -> void {
         if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity)) {
             for (ExtrusionEntity *child : collection->entities)
@@ -388,6 +517,11 @@ TEST_CASE("Inward wipe recognizes an external wall starting on an overhang", "[W
                     path.polyline.points = {source.polyline.points[i - 1], source.polyline.points[i]};
                     const bool overhang = path.polyline.points.front().y() > 0 || path.polyline.points.back().y() > 0;
                     path.set_extrusion_role(overhang ? erOverhangPerimeter : erExternalPerimeter);
+                    // A wider overhang bead at the seam must not widen the inward offset.
+                    if (overhang)
+                        path.width *= 2.f;
+                    else
+                        external_width = std::max(external_width, double(path.width));
                     has_overhang |= overhang;
                     has_external |= !overhang;
                     paths.push_back(std::move(path));
@@ -410,8 +544,11 @@ TEST_CASE("Inward wipe recognizes an external wall starting on an overhang", "[W
         if (trajectory.destinations.empty())
             continue;
         const Vec2d move = trajectory.destinations.front() - trajectory.start;
-        if (trajectory.start.x() > 4. && trajectory.start.y() > 4. && move.x() < -0.05 && move.y() < -0.05)
+        if (trajectory.start.x() > 4. && trajectory.start.y() > 4. && move.x() < -0.05 && move.y() < -0.05) {
             has_inward_wipe = true;
+            // The 50% offset of the external wall reaches at most its miter at this square corner.
+            CHECK(move.norm() < 0.5 * external_width * std::sqrt(2.) + 0.01);
+        }
     }
     CHECK(has_inward_wipe == inward);
 }
@@ -436,8 +573,10 @@ TEST_CASE("Inward wipe is retained across layers with a back seam", "[Wipe][Regr
     const char *wall_generator = GENERATE("classic", "arachne");
     INFO("wall generator: " << wall_generator);
 
-    const DynamicPrintConfig inward_config = wipe_config(
+    DynamicPrintConfig inward_config = wipe_config(
         wall_generator, true, "50%", "0%", false, "3", "inner-outer-inner wall", false, "0%", "back");
+    // Exercise the offset on every layer independently of the travel threshold.
+    inward_config.set_deserialize_strict({{"retraction_minimum_travel", "0"}});
     const std::vector<WipeTrajectory> inward = wipe_trajectories(slice({make_cube(27., 27., 1.)}, inward_config));
 
     REQUIRE_FALSE(inward.empty());
@@ -460,6 +599,41 @@ TEST_CASE("Inward wipe is retained across layers with a back seam", "[Wipe][Regr
     }
 }
 
+TEST_CASE("Inward wipe leaves a sandwich wall corner toward the printed material",
+          "[Wipe][InwardCornerRegression][Regression]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    const char *layer_height = GENERATE("0.1", "0.2");
+    const char *seam_gap = GENERATE("0%", "10%");
+    const bool wipe_on_loops = GENERATE(false, true);
+    CAPTURE(wall_generator, layer_height, seam_gap, wipe_on_loops);
+    DynamicPrintConfig config = wipe_config(
+        wall_generator, true, "50%", seam_gap, wipe_on_loops, "3", "inner-outer-inner wall", false, "0%", "back");
+    config.set_deserialize_strict({
+        {"layer_height", layer_height},
+        {"initial_layer_print_height", layer_height},
+        {"initial_layer_line_width", "0.5"},
+        {"outer_wall_line_width", "0.42"},
+        {"inner_wall_line_width", "0.45"},
+        {"elefant_foot_compensation", "0"},
+        {"retraction_minimum_travel", "0"},
+    });
+    size_t outer_wipes = 0;
+    const double requested_offset = 0.42 * 0.5;
+    for (const WipeTrajectory &trajectory : wipe_trajectories(slice({make_cube(27., 27., 0.6)}, config))) {
+        // This back seam lies above x=y=13; the inner walls lie below it.
+        if (trajectory.start.x() <= 13. || trajectory.start.y() <= 13.)
+            continue;
+        ++outer_wipes;
+        REQUIRE_FALSE(trajectory.destinations.empty());
+        const Vec2d first_move = trajectory.destinations.front() - trajectory.start;
+        CHECK(first_move.x() < -0.2 * requested_offset);
+        CHECK(first_move.y() < -0.2 * requested_offset);
+        CHECK(first_move.norm() > 0.5 * requested_offset);
+    }
+    REQUIRE(outer_wipes == size_t(std::lround(0.6 / std::stod(layer_height))));
+}
+
 TEST_CASE("Literal inward wipe distance is clamped to the outer wall width", "[Wipe][Regression]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
@@ -479,15 +653,44 @@ TEST_CASE("Literal inward wipe distance is clamped to the outer wall width", "[W
         REQUIRE_THAT((oversized[i] - full_width[i]).norm(), Catch::Matchers::WithinAbs(0., 0.01));
 }
 
+TEST_CASE("Sandwich wall order limits inward wipe to half the outer wall width", "[Wipe][InwardWallOrder][Regression]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    const bool wipe_on_loops = GENERATE(false, true);
+    const auto [outer_width, distance, limited] = GENERATE(table<const char *, const char *, bool>({
+        {"0", "25%", false}, {"0", "50%", true}, {"0", "50.1%", true}, {"0", "100%", true},
+        {"0.4", "0.15", false}, {"0.4", "0.21", true}, {"0.6", "0.21", false}, {"0.6", "0.4", true}
+    }));
+    CAPTURE(wall_generator, wipe_on_loops, outer_width, distance);
+    DynamicPrintConfig regular = wipe_config(
+        wall_generator, false, "50%", "10%", wipe_on_loops, "3", "inner-outer-inner wall");
+    regular.set_deserialize_strict({{"outer_wall_line_width", outer_width}, {"retraction_minimum_travel", "0"}});
+    DynamicPrintConfig inward = regular;
+    inward.set_deserialize_strict({{"wipe_inward", "1"}});
+    const auto regular_paths = wipe_destinations(slice({make_cube(10., 10., 1.)}, regular));
+    const auto half_width_paths = wipe_destinations(slice({make_cube(10., 10., 1.)}, inward));
+    inward.set_deserialize_strict({{"wipe_inward_distance", distance}});
+    const auto requested_paths = wipe_destinations(slice({make_cube(10., 10., 1.)}, inward));
+    REQUIRE_FALSE(regular_paths.empty());
+    REQUIRE_FALSE(half_width_paths.empty());
+    REQUIRE_FALSE(requested_paths.empty());
+    // Oversized requests retain the inward wipe instead of falling back to the
+    // regular path. The same 0.21 mm request reaches the limit for a 0.4 mm
+    // wall but remains below it for a 0.6 mm wall, using actual extrusion widths.
+    REQUIRE(trajectories_differ(regular_paths, half_width_paths));
+    CHECK(trajectories_differ(half_width_paths, requested_paths) == !limited);
+}
+
 TEST_CASE("Inward wipe is not applied without an adjacent wall", "[Wipe][Regression]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
-    INFO("wall generator: " << wall_generator);
+    const char *wall_sequence = GENERATE("inner wall/outer wall", "outer wall/inner wall", "inner-outer-inner wall");
+    INFO("wall generator: " << wall_generator << ", wall sequence: " << wall_sequence);
 
-    const std::vector<Vec2d> regular = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(wall_generator, false, "50%", "10%", false, "1")));
-    const std::vector<Vec2d> inward = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(wall_generator, true, "50%", "10%", false, "1")));
+    const std::vector<Vec2d> regular = wipe_destinations(slice({make_cube(10., 10., 1.)},
+        wipe_config(wall_generator, false, "50%", "10%", false, "1", wall_sequence)));
+    const std::vector<Vec2d> inward = wipe_destinations(slice({make_cube(10., 10., 1.)},
+        wipe_config(wall_generator, true, "50%", "10%", false, "1", wall_sequence)));
 
     REQUIRE_FALSE(regular.empty());
     REQUIRE_FALSE(trajectories_differ(regular, inward));
@@ -512,20 +715,27 @@ TEST_CASE("Inward wipe uses an alternate extra wall when the configured wall cou
     REQUIRE(trajectories_differ(regular, inward));
 }
 
-TEST_CASE("Inward wipe is not applied before the adjacent wall is printed", "[Wipe][Regression]")
+TEST_CASE("Outer wall first limits inward wipe to half the outer wall width", "[Wipe][Regression]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     INFO("wall generator: " << wall_generator);
 
-    const std::vector<Vec2d> regular = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(
-            wall_generator, false, "50%", "10%", false, "2", "outer wall/inner wall")));
-    const std::vector<Vec2d> inward = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(
-            wall_generator, true, "50%", "10%", false, "2", "outer wall/inner wall")));
+    // The adjacent inner wall is printed after the outer wall. It still sets the
+    // inward side, but only the outer bead's own inner half is available.
+    const auto destinations = [wall_generator](bool wipe_inward, const char *distance) {
+        DynamicPrintConfig config = wipe_config(
+            wall_generator, wipe_inward, distance, "10%", false, "2", "outer wall/inner wall");
+        // Wipe after every outer wall, including the short travel to its inner wall.
+        config.set_deserialize_strict({{"retraction_minimum_travel", "0"}});
+        return wipe_destinations(slice({make_cube(10., 10., 1.)}, config));
+    };
+    const std::vector<Vec2d> regular = destinations(false, "50%");
+    const std::vector<Vec2d> half_width = destinations(true, "50%");
 
     REQUIRE_FALSE(regular.empty());
-    REQUIRE_FALSE(trajectories_differ(regular, inward));
+    REQUIRE_FALSE(half_width.empty());
+    REQUIRE(trajectories_differ(regular, half_width));
+    CHECK_FALSE(trajectories_differ(half_width, destinations(true, "100%")));
 }
 
 TEST_CASE("Wipe on loops preserves the corner move with inward wipe disabled", "[Wipe][Regression]")
@@ -824,4 +1034,199 @@ TEST_CASE("A cone wall's first-layer footprint grows with the cone angle", "[Wip
     // lines unchanged here; the footprint above is what the cone changes.
     CHECK(min_30 == min_0);
     CHECK(max_30 == max_0);
+}
+
+namespace {
+
+// One mesh of several boxes, each given by two opposite corners in mm. Boxes that are to be one body overlap.
+TriangleMesh boxes(std::initializer_list<std::array<double, 6>> corners)
+{
+    indexed_triangle_set all;
+    for (const std::array<double, 6> &c : corners) {
+        indexed_triangle_set box = its_make_cube(c[3] - c[0], c[4] - c[1], c[5] - c[2]);
+        for (stl_vertex &v : box.vertices)
+            v += Vec3f(float(c[0]), float(c[1]), float(c[2]));
+        its_merge(all, box);
+    }
+    return TriangleMesh(std::move(all));
+}
+
+// A plate 40 mm by 16 mm and 1 mm high with three square holes of 8 mm in a row, turned about Z.
+TriangleMesh plate_with_square_holes(double degrees)
+{
+    TriangleMesh plate = boxes({
+        {0., 0., 0., 40., 4., 1.},
+        {0., 12., 0., 40., 16., 1.},
+        {0., 0., 0., 4., 16., 1.},
+        {12., 0., 0., 16., 16., 1.},
+        {24., 0., 0., 28., 16., 1.},
+        {36., 0., 0., 40., 16., 1.},
+    });
+    plate.rotate_z(float(degrees * M_PI / 180.));
+    return plate;
+}
+
+// A cross of two bars 24 mm by 8 mm, 1 mm high, turned about Z: an outline with four inside corners.
+TriangleMesh cross(double degrees)
+{
+    TriangleMesh out = boxes({
+        {0., 8., 0., 24., 16., 1.},
+        {8., 0., 0., 16., 24., 1.},
+    });
+    out.rotate_z(float(degrees * M_PI / 180.));
+    return out;
+}
+
+// The moves made in to an outer wall's start from inside the part (wipe_before_external_loop), by layer.
+struct Approaches
+{
+    std::vector<int> by_layer;
+    // How far each goes, in mm, and whether any of them has an E word.
+    std::vector<double> lengths;
+    bool                extrudes = false;
+};
+
+Approaches approaches(const std::string &gcode)
+{
+    Approaches  out;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            out.by_layer.push_back(0);
+        else if (line.comment().find("move inwards before retraction/seam") != std::string_view::npos && line.dist_XY(self) > EPSILON) {
+            REQUIRE_FALSE(out.by_layer.empty());
+            ++out.by_layer.back();
+            out.lengths.push_back(line.dist_XY(self));
+            out.extrudes |= line.has_e();
+        }
+    });
+    return out;
+}
+
+DynamicPrintConfig approach_config(const char *wall_generator, const char *wall_loops, bool wipe_before_external_loop)
+{
+    DynamicPrintConfig config = wipe_config(wall_generator, false, "50%", "10%", false, wall_loops);
+    config.set_deserialize_strict({{"wipe_before_external_loop", wipe_before_external_loop ? "1" : "0"}});
+    return config;
+}
+
+// How many wipes are made while each of two tools is the one in use.
+std::array<int, 2> wipes_by_tool(const std::string &gcode)
+{
+    const std::string &start_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start);
+    std::array<int, 2> out{0, 0};
+    int                tool = -1;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (line.size() >= 2 && line[0] == 'T' && (line[1] == '0' || line[1] == '1') &&
+            (line.size() == 2 || line[2] == ' ' || line[2] == '\r' || line[2] == ';'))
+            tool = line[1] - '0';
+        else if (tool >= 0 && line.find(start_tag) != std::string::npos)
+            ++out[size_t(tool)];
+    }
+    return out;
+}
+
+// Two cubes of 10 mm, 1 mm high, the first printed with the first filament and the second with the second.
+std::string slice_two_filaments(const char *wipe)
+{
+    DynamicPrintConfig config = wipe_config("classic", true);
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4,0.4"},
+        {"single_extruder_multi_material", "0"},
+        {"enable_prime_tower", "0"},
+        {"skirt_loops", "0"},
+        {"wipe", wipe},
+        {"wipe_distance", "2,2"},
+        {"retraction_length", "0.8,0.8"},
+        {"retraction_minimum_travel", "0,0"},
+    });
+
+    Print print;
+    Model model;
+    for (int tool = 1; tool <= 2; ++tool) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(tool) + ".stl";
+        object->add_volume(make_cube(10., 10., 1.));
+        object->add_instance()->set_offset(Vec3d(60. + 30. * tool, 60., 0.));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", tool);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    return gcode(print);
+}
+
+} // namespace
+
+// wipe_before_external_loop comes at an outer wall from a point inside the part, a nozzle's width from where the
+// wall starts, if there is another wall beside that point to bring the filament forward over. The wall itself
+// was looked for there as well, strictly nearer than the nozzle's width, and at a corner of a square hole the
+// point is exactly that far from it: found or not by how the point's coordinates came out rounded.
+TEST_CASE("An outer wall round a square hole is come at from inside the part however the part is turned",
+          "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    // One outline and three holes: four outer walls a layer, each with an inner wall behind it.
+    const Approaches made = approaches(slice({plate_with_square_holes(degrees)}, approach_config(wall_generator, "2", true)));
+    CHECK(made.by_layer == std::vector<int>(5, 4));
+    // Each ends where its wall starts, a nozzle's width (the walls are wider) from where it began, and lays nothing.
+    for (const double length : made.lengths)
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.4, 2e-3));
+    CHECK_FALSE(made.extrudes);
+}
+
+// The same at an inside corner of the outline, where a seam is put by choice.
+TEST_CASE("An outer wall that starts in an inside corner of the outline is come at from inside the part",
+          "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    const Approaches made = approaches(slice({cross(degrees)}, approach_config(wall_generator, "2", true)));
+    CHECK(made.by_layer == std::vector<int>(5, 1));
+    for (const double length : made.lengths)
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.4, 2e-3));
+    CHECK_FALSE(made.extrudes);
+}
+
+TEST_CASE("An outer wall with no wall behind it is not come at from inside the part", "[Wipe][WipeBeforeExternalLoop][Regression]")
+{
+    const char  *wall_generator = GENERATE("classic", "arachne");
+    const double degrees        = GENERATE(0., 5., 15., 20., 30., 37., 45., 60., 75., 90.);
+    CAPTURE(wall_generator, degrees);
+
+    // With one wall the region still holds four loops, none of them beside another's point.
+    const TriangleMesh plate = plate_with_square_holes(degrees);
+    CHECK(approaches(slice({plate}, approach_config(wall_generator, "1", true))).by_layer == std::vector<int>(5, 0));
+    // And none where it is not asked for.
+    CHECK(approaches(slice({plate}, approach_config(wall_generator, "2", false))).by_layer == std::vector<int>(5, 0));
+}
+
+// The path the inward wipe makes is used by the retract, which asks the filament in use for its own `wipe`.
+// (Before Orca #17160 was ported, in #879, the inward wipe was made at once after an outer wall wherever any
+// filament of the print had `wipe` on.)
+TEST_CASE("A filament with wipe off is not wiped inward beside one with it on", "[Wipe][Regression]")
+{
+    const std::array<int, 2> both   = wipes_by_tool(slice_two_filaments("1,1"));
+    const std::array<int, 2> first  = wipes_by_tool(slice_two_filaments("1,0"));
+    const std::array<int, 2> second = wipes_by_tool(slice_two_filaments("0,1"));
+    CAPTURE(both, first, second);
+
+    CHECK(both[0] > 0);
+    CHECK(both[1] > 0);
+    CHECK(first[0] == both[0]);
+    CHECK(first[1] == 0);
+    CHECK(second[0] == 0);
+    CHECK(second[1] == both[1]);
 }

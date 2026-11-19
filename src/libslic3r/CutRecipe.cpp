@@ -70,8 +70,8 @@ bool CutRecipe::operator==(const CutRecipe& o) const
     if (thickness != o.thickness || thickness_offset != o.thickness_offset)
         return false;
     if (keep_upper != o.keep_upper || keep_lower != o.keep_lower || keep_as_parts != o.keep_as_parts ||
-        place_on_cut_upper != o.place_on_cut_upper || place_on_cut_lower != o.place_on_cut_lower ||
-        rotate_upper != o.rotate_upper || rotate_lower != o.rotate_lower)
+        apply_tac_joints != o.apply_tac_joints || place_on_cut_upper != o.place_on_cut_upper ||
+        place_on_cut_lower != o.place_on_cut_lower || rotate_upper != o.rotate_upper || rotate_lower != o.rotate_lower)
         return false;
     if (upper_visibility != o.upper_visibility || lower_visibility != o.lower_visibility)
         return false;
@@ -690,4 +690,13 @@ std::string cut_target_label(const ModelObject* object, size_t max_parts)
     label += ")";
     return label;
 }
+Transform3d cut_recipe_stand_in_matrix(const CutRecipe& recipe, const Transform3d& half_instance_matrix)
+{
+    if (!recipe.instance_linear_set)
+        return half_instance_matrix;
+    Transform3d out   = recipe.instance_linear;
+    out.translation() = half_instance_matrix.translation();
+    return out;
+}
+
 } // namespace Slic3r

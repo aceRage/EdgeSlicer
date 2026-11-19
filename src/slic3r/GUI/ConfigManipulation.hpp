@@ -91,12 +91,14 @@ public:
     void    check_chamber_minimal_temperature(DynamicPrintConfig* config);
     // Checks "layer_height" or "initial_layer_print_height" (opt_key) against the printer's layer height limits.
     bool    check_layer_height(DynamicPrintConfig* config, const std::string& opt_key = "layer_height");
-    bool    layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key = "layer_height");
+    bool    layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key = "layer_height",
+                                             const wxString& rack_nozzle = wxString());
     // Where a layer height (or initial layer height) stands against the printer limits. A limit <= EPSILON is "not set".
     // Zero: the value is 0 and a minimum is set (it is raised to the minimum without asking); TooHigh / TooLow: Adjust / Ignore dialog.
     enum class LayerHeightCheck { InRange, Zero, TooHigh, TooLow };
     static LayerHeightCheck classify_layer_height(double value, double min_limit, double max_limit);
-    void    layer_height_limits(double& min_layer_height, double& max_layer_height) const;
+    // rack_nozzle (optional): set to the finest rack nozzle the limits come from, empty when they are the printer preset's.
+    void    layer_height_limits(double& min_layer_height, double& max_layer_height, wxString* rack_nozzle = nullptr) const;
     void    set_is_BBL_Printer(bool is_bbl_printer) { is_BBL_Printer = is_bbl_printer; };
     void    set_reference_config(const DynamicPrintConfig *reference) { m_reference_config = reference; }
     // SLA print
@@ -110,6 +112,26 @@ public:
         m_support_material_overhangs_queried = queried;
     }
     int    show_spiral_mode_settings_dialog(bool is_object_config = false);
+
+    // EdgeSlicer: called when the user switches the support interface interlock on or changes its
+    // woven layers. When the top interface layers are too few for the weave, asks once to raise
+    // them to 1 + woven layers (Yes) or to turn the interlock off (No), so it cannot ask again for
+    // the same values. Returns true when the config was changed.
+    bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
+
+    // EdgeSlicer: the interlock and support filament matching cannot run together. Called when the
+    // user changes one of them (changed_key); when both are now on, asks once whether to keep the
+    // one just turned on (Yes: the other goes off) or not (No: it is reverted). Either answer leaves
+    // only one on, so it cannot ask again. Returns true when the config was changed.
+    bool    check_support_interlock_matching(DynamicPrintConfig* config, const std::string& changed_key);
+
+    // EdgeSlicer: called when the user changes a filament selector (changed_key). When the support
+    // interface now uses a filament other than the print's and the top Z distance is above 0,
+    // offers once to set it to 0. A No is remembered for that filament pair for the session
+    // (cleared by clear_session_prompts() when a project is loaded or created). Returns true when
+    // the config was changed.
+    bool    offer_support_top_z_zero(DynamicPrintConfig* config, const std::string& changed_key);
+    static void clear_session_prompts();
 
 private:
     bool get_temperature_range(DynamicPrintConfig *config, int &range_low, int &range_high);

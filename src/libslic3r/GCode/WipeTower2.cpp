@@ -36,6 +36,13 @@ static constexpr int    arc_fit_size                   = 20;
 static constexpr size_t LEGACY_NO_TOOL                 = static_cast<size_t>(std::numeric_limits<unsigned int>::max());
 #define SCALED_WIPE_TOWER_RESOLUTION (WIPE_TOWER_RESOLUTION / SCALING_FACTOR_INTERNAL)
 enum class LimitFlow { None, LimitPrintFlow, LimitRammingFlow };
+// Whether custom G-code sets pressure advance: Marlin M900, RepRapFirmware M572, Repetier M233, Klipper.
+static bool gcode_sets_pressure_advance(const std::string& gcode)
+{
+    return boost::icontains(gcode, "M900") || boost::icontains(gcode, "M572") || boost::icontains(gcode, "M233") ||
+           boost::icontains(gcode, "SET_PRESSURE_ADVANCE");
+}
+
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
 
 inline bool is_no_tool_sentinel(size_t tool)
@@ -830,19 +837,19 @@ public:
     WipeTowerWriter2& disable_linear_advance_value(float value = 0.0)
     {
         if (m_gcode_flavor == gcfRepRapSprinter || m_gcode_flavor == gcfRepRapFirmware)
-            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + std::to_string(value) + "\n");
+            m_gcode += (std::string("M572 D") + std::to_string(m_current_tool) + " S" + Slic3r::float_to_string_decimal_point(value, 4) + "\n");
         else if (m_gcode_flavor == gcfKlipper) {
             m_gcode += "SET_PRESSURE_ADVANCE ADVANCE=" + Slic3r::float_to_string_decimal_point(value, 4) + "\n"; // Snapmaker U1
         }
 
         else
-            m_gcode += "M900 K" + std::to_string(value) + "\n";
+            m_gcode += "M900 K" + Slic3r::float_to_string_decimal_point(value, 4) + "\n";
         return *this;
     }
 
     WipeTowerWriter2& switch_filament_monitoring(bool enable)
     {
-        flush_planner_queue();
+        m_gcode += flush_planner_queue_command(m_gcode_flavor);
         m_gcode += enable ? "M591 R\n" : "M591 S0\n";
         return *this;
     }
@@ -1102,7 +1109,10 @@ public:
     // Set extruder temperature, don't wait by default.
     WipeTowerWriter2& set_extruder_temp(int temperature, bool wait = false)
     {
-        flush_planner_queue();
+        // Sync the temperature change with motion. Edge has no comment/sync args on this helper
+        // (Orca #17246 added those for unsynced interface cooldowns); interface_after_wipe already
+        // writes GCodeWriter::set_temperature without a planner flush.
+        m_gcode += flush_planner_queue_command(m_gcode_flavor);
         m_gcode += "M" + std::to_string(wait ? 109 : 104) + " S" + std::to_string(temperature) + "\n";
         return *this;
     }
@@ -1159,7 +1169,9 @@ public:
 
     WipeTowerWriter2& flush_planner_queue()
     {
-        m_gcode += flush_planner_queue_command(m_gcode_flavor);
+        // Toolchange boundaries: on Klipper M400 here only stalls the toolhead over the tower.
+        if (m_gcode_flavor != gcfKlipper)
+            m_gcode += flush_planner_queue_command(m_gcode_flavor);
         return *this;
     }
 
@@ -1748,6 +1760,12 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].filament_minimal_purge_on_wipe_tower =
         get_value_at(config, config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, filament_id);
     m_filpar[idx].flat_iron_area                       = config.filament_tower_ironing_area.get_at(idx);
+    m_filpar[idx].pressure_advance_enabled =
+        get_value_at(config, config.enable_pressure_advance, ConfigFlowDomain::Filament, filament_id);
+    m_filpar[idx].pressure_advance = float(get_value_at(config, config.pressure_advance, ConfigFlowDomain::Filament, filament_id));
+    m_filpar[idx].pressure_advance_reset = m_filpar[idx].pressure_advance_enabled ||
+                                           gcode_sets_pressure_advance(config.filament_start_gcode.get_at(idx)) ||
+                                           gcode_sets_pressure_advance(config.change_filament_gcode.value);
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -2054,6 +2072,22 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
 
     WipeTower::ToolChangeResult result = construct_tcr(writer, false, old_tool, false);
     result.purge_volume                = wipe_volume;
+    // The gap get_all_wall_skip_points() cut into this layer's wall for this tool change: level with
+    // it, a line in from the block's start on the gap's side (the column the block's first moves take),
+    // in the frame the writer emits (as start_pos). Not for the Local-Z changes, which have no gap of
+    // their own.
+    if (m_use_gap_wall && tool_change != nullptr && m_layer_info != m_plan.end()) {
+        const auto  &changes  = m_layer_info->tool_changes;
+        const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+        if (!changes.empty() && tool_change >= changes.data() && tool_change < changes.data() + changes.size() &&
+            layer_id < m_wall_skip_points.size() && size_t(tool_change - changes.data()) < m_wall_skip_points[layer_id].size()) {
+            const Vec2f &gap = m_wall_skip_points[layer_id][size_t(tool_change - changes.data())];
+            const float  in  = initial_position.x() + m_perimeter_width;
+            const float  x   = gap.x() < m_wipe_tower_width / 2.f ? in : m_wipe_tower_width - in;
+            result.gap_entry     = writer.rotate(Vec2f(x, gap.y()));
+            result.has_gap_entry = true;
+        }
+    }
     return result;
 }
 
@@ -2224,11 +2258,14 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     // Orca: Do ramming when SEMM and ramming is enabled or when multi tool head when ramming is enabled on the multi tool.
     const bool do_ramming   = (m_semm && m_enable_filament_ramming) || m_filpar[m_current_tool].multitool_ramming;
     const bool cold_ramming = m_is_mk4mmu3;
+    // The ram's pressure advance is set back only by the slicer's own G-code. A filament whose pressure
+    // advance lives in the firmware or the start G-code keeps it: nothing could restore that value.
+    const bool change_pressure = m_change_pressure && m_filpar[m_current_tool].pressure_advance_reset;
 
     if (do_ramming) {
         writer.travel(ramming_start_pos); // move to starting position
         if (!m_is_mk4mmu3) {
-            if (m_change_pressure) {
+            if (change_pressure) {
                 writer.disable_linear_advance_value(m_change_pressure_value);
             }
         }
@@ -2348,7 +2385,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         float speed_inc = (final_speed - initial_speed) / (2.f * number_of_cooling_moves - 1.f);
 
         if (m_is_mk4mmu3) {
-            if (m_change_pressure) {
+            if (change_pressure) {
                 writer.disable_linear_advance_value(m_change_pressure_value);
             }
         }
@@ -2402,6 +2439,11 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
             writer.retract(_e, 2000);
     }
 
+    // Back to the filament's own pressure advance once it is unloaded (a toolchanger's old tool keeps it).
+    if (change_pressure && m_filpar[m_current_tool].pressure_advance_enabled &&
+        ((do_ramming && !m_is_mk4mmu3) || (cooling_will_happen && m_is_mk4mmu3)))
+        writer.disable_linear_advance_value(m_filpar[m_current_tool].pressure_advance);
+
     if (m_enable_filament_ramming)
         writer.append("; Ramming end\n");
 
@@ -2428,7 +2470,8 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     } else
         writer.set_position(pos);
 
-    writer.resume_preview().flush_planner_queue();
+    // Sync even on Klipper: [change_filament_gcode] and Tn must not run while the unload is still queued.
+    writer.resume_preview().append(flush_planner_queue_command(m_gcode_flavor));
 }
 
 // Orca #15144: tower-local X of the heat-up park beside the tower. Nearest x side first, then that
@@ -2510,7 +2553,7 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
 // temperatures (RepRapFirmware G10 + M116), where upstream always writes M109.
 void WipeTower2::wait_for_temp_on_tower(WipeTowerWriter2& writer, int temperature) const
 {
-    writer.flush_planner_queue();
+    writer.append(flush_planner_queue_command(m_gcode_flavor));
     writer.append(GCodeWriter::set_temperature(unsigned(temperature), m_gcode_flavor, true, -1, wait_for_temp_tag()));
 }
 
@@ -2561,7 +2604,7 @@ void WipeTower2::toolchange_Change(
     if (wait_for_temp_here && !wait_beside_tower)
         wait_for_temp_on_tower(writer, wait_for_temp);
 
-    writer.append("[deretraction_from_wipe_tower_generator]");
+    writer.append("[deretraction_from_wipe_tower_generator]\n");
 
     // The toolchange Tn command will be inserted later, only in case that the user does
     // not provide a custom toolchange gcode.
@@ -2944,7 +2987,11 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
             // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
-            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
+            // With sparse layers skipped G-code leaves out every layer but the first and those with a tool
+            // change (WipeTowerIntegration::tool_change), so count only those.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx, [this](size_t idx) {
+                return ! m_sparse_layers_skipped || idx == m_first_layer_idx || ! m_plan[idx].tool_changes.empty();
+            });
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative
@@ -3589,6 +3636,9 @@ void WipeTower2::interface_before_wipe(WipeTowerWriter2 &writer, const WipeTower
     if (m_interface.temp && fp.interface_temperature != fp.temperature &&
         !(m_wait_for_temp_on_wipe_tower && fp.interface_temperature > 0))
         writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, -1, "tower interface temperature"));
+    // Orca #12266: the normal temperature goes back on now, without a wait, so the nozzle cools during the purge.
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && m_interface.cooldown_during_tower)
+        writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, false, -1, "tower interface cool down during tower"));
 
     const Vec2f start  = writer.pos();
     bool        primed = false;
@@ -3623,7 +3673,7 @@ void WipeTower2::interface_after_wipe(WipeTowerWriter2 &writer, const WipeTowerI
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     // Back to the normal temperature; wait only if that means heating up.
-    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+    if (m_interface.temp && fp.interface_temperature != fp.temperature && !m_interface.cooldown_during_tower)
         writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, fp.temperature > fp.interface_temperature, -1,
                                                    "tower interface done, normal temperature"));
 }
@@ -3697,7 +3747,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
         // Orca #15035: like WipeTower::plan_tower_new(), extend the ribs instead of the tower when the
         // tower is smaller than the height-based stability minimum (what WipeTower::rib_footprint_side()
         // and so the pre-slice footprint estimate already assume).
-        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height);
+        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height, true);
         if (m_wipe_tower_depth + EPSILON < min_depth)
             m_rib_length = std::max(m_rib_length, min_depth * float(std::sqrt(2.f)));
     }

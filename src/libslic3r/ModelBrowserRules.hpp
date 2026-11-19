@@ -7,7 +7,7 @@
 // on its own (tests/libslic3r/test_model_browser_rules.cpp). The panel only carries the verdicts out.
 //
 // The browser is a separate, isolated WebView2 environment with no script bridge to the app. These
-// rules are the second line: it never loads a page on this computer or the local network (our page
+// rules are the second line: it never loads a page on this computer or a private network (our page
 // server and the phone hub live there), never runs another program for a link, and a model file it
 // downloads goes through the same safe download path and import as an "Open in" link.
 

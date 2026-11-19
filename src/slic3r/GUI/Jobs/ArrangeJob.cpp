@@ -5,6 +5,10 @@
 #include "libslic3r/MTUtils.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Print.hpp"
+
+#include <algorithm>
 
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -71,11 +75,41 @@ static WipeTower get_wipe_tower(const Plater &plater, int plate_idx)
     return WipeTower{plater.canvas3D()->get_wipe_tower_info(plate_idx)};
 }
 
-arrangement::ArrangePolygon get_wipetower_arrange_poly(WipeTower* tower)
+// Orca: a prime tower compacted by "No sparse layers" stays low, so the toolhead comes down beside it
+// at every tool change. Objects have to keep the toolhead radius from it, as they do from one another
+// when printing by object, so the arranger is given the tower grown by that much.
+// object_gap is the distance in mm the arranger keeps around every object anyway, which counts
+// towards that clearance. Returns by how much (scaled) the polygon now reaches past the tower's own
+// zone, which the arranger needs to find the tower's Y span again, or -1 if the tower is left as is.
+static coord_t grow_compacted_wipe_tower(arrangement::ArrangePolygon& ap, double object_gap = 0.)
+{
+    PrintConfig config;
+    config.apply(wxGetApp().preset_bundle->full_config(), true);
+    if (!config.wipe_tower_no_sparse_layers.value || ap.poly.contour.points.empty())
+        return -1;
+
+    const Polygons footprint = offset(ap.poly.contour, float(scale_(compacted_tower_footprint_padding(config, config.prime_tower_brim_width.value))));
+    if (footprint.empty())
+        return -1;
+    const CompactedTowerZone zone = compacted_wipe_tower_zone(config, footprint.front());
+    if (zone.empty())
+        return -1;
+    const coord_t  growth = scaled(std::max(0., zone.body_radius - object_gap));
+    const Polygons grown  = offset(zone.hull, float(growth), jtRound, scale_(0.1));
+    if (grown.empty())
+        return -1;
+    ap.poly.contour = grown.front();
+    return growth;
+}
+
+arrangement::ArrangePolygon get_wipetower_arrange_poly(WipeTower* tower, double object_gap = 0., coord_t* compacted_growth = nullptr)
 {
     ArrangePolygon ap = tower->get_arrange_polygon();
     ap.bed_idx = 0;
     ap.setter = NULL; // do not move wipe tower
+    const coord_t growth = grow_compacted_wipe_tower(ap, object_gap);
+    if (compacted_growth)
+        *compacted_growth = growth;
     return ap;
 }
 
@@ -332,6 +366,21 @@ arrangement::ArrangePolygon estimate_wipe_tower_info(int plate_index, std::set<i
     return arrange_poly;
 }
 
+// Orca: the gap in mm the arranger leaves around each of the objects it is about to place, as
+// update_selected_items_inflation() works it out: the spacing asked for, or else the room kept for
+// brims and tree supports.
+static double arranged_object_gap(const arrangement::ArrangeParams& params, const ArrangePolygons& selected)
+{
+    if (params.min_obj_distance != 0)
+        return unscale<double>(params.min_obj_distance) / 2.;
+    if (selected.empty())
+        return 0.;
+    const bool tree_support = std::any_of(selected.begin(), selected.end(), [](const ArrangePolygon& ap) { return ap.has_tree_support; });
+    const auto by_brim      = [](const ArrangePolygon& lhs, const ArrangePolygon& rhs) { return lhs.brim_width < rhs.brim_width; };
+    return tree_support ? std::max_element(selected.begin(), selected.end(), by_brim)->brim_width / 2. :
+                          std::min_element(selected.begin(), selected.end(), by_brim)->brim_width;
+}
+
 // 准备料塔。逻辑如下：
 // 1. 以下几种情况不需要料塔：
 //    1）料塔被禁用，
@@ -396,6 +445,8 @@ void ArrangeJob::prepare_wipe_tower()
     BOOST_LOG_TRIVIAL(info) << "arrange: need_wipe_tower=" << need_wipe_tower;
 
 
+    const double object_gap = arranged_object_gap(params, m_selected);
+
     ArrangePolygon    wipe_tower_ap;
     wipe_tower_ap.name = "WipeTower";
     wipe_tower_ap.is_virt_object = true;
@@ -417,7 +468,7 @@ void ArrangeJob::prepare_wipe_tower()
             continue;
         if (auto wti = get_wipe_tower(*m_plater, bedid)) {
             // wipe tower is already there
-            wipe_tower_ap = get_wipetower_arrange_poly(&wti);
+            wipe_tower_ap = get_wipetower_arrange_poly(&wti, object_gap, &params.compacted_tower_growth);
             wipe_tower_ap.bed_idx = bedid_unlocked;
             m_unselected.emplace_back(wipe_tower_ap);
         }
@@ -428,6 +479,7 @@ void ArrangeJob::prepare_wipe_tower()
                 extruder_ids.insert(plate_extruders.begin(), plate_extruders.end());
             }
             wipe_tower_ap = estimate_wipe_tower_info(bedid, extruder_ids);
+            params.compacted_tower_growth = grow_compacted_wipe_tower(wipe_tower_ap, object_gap);
             wipe_tower_ap.bed_idx = bedid_unlocked;
             m_unselected.emplace_back(wipe_tower_ap);
         }
@@ -491,12 +543,15 @@ void ArrangeJob::prepare_partplate() {
 
     // BBS
     if (auto wti = get_wipe_tower(*m_plater, current_plate_index)) {
-        ArrangePolygon&& ap = get_wipetower_arrange_poly(&wti);
+        ArrangePolygon&& ap = get_wipetower_arrange_poly(&wti, arranged_object_gap(params, m_selected), &params.compacted_tower_growth);
         m_unselected.emplace_back(std::move(ap));
     }
 
     // add the virtual object into unselect list if has
-    plate_list.preprocess_exclude_areas(m_unselected, current_plate_index + 1);
+    // EdgeSlicer: on every bed the arrange may use. Arranging one plate, bed 0 is that plate and
+    // what does not fit goes to beds 1, 2, ... (new plates after the existing ones), so the zones
+    // are needed there too, not only on beds up to the plate's index.
+    plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
 }
 
 //BBS: add partplate logic
@@ -530,6 +585,16 @@ void ArrangeJob::prepare()
         only_on_partplate = true;   // only arrange items on current plate
         prepare_partplate();
     }
+
+    // EdgeSlicer "Avoid nozzle reach zones": process() clips the bed to what every nozzle reaches.
+    // Only a shape that cannot be clipped gets the one-nozzle strips as fixed items on every bed
+    // (finalize() skips virtual objects, like the exclusion areas).
+    m_reach_areas = nozzle_reach_areas(m_plater);
+    const Points full_bed = get_bed_shape(*m_plater->config());
+    for (arrangement::ArrangePolygon &ap : nozzle_reach_fallback_blockers(m_reach_areas, full_bed, MAX_NUM_PLATES))
+        m_unselected.emplace_back(std::move(ap));
+    // The same for the big-item retry of the packer (params.excluded_regions, filled in process()).
+    m_reach_regions = nozzle_reach_fallback_blockers(m_reach_areas, full_bed, 1, scale_(1));
 
 
 #if SAVE_ARRANGE_POLY
@@ -611,8 +676,12 @@ void ArrangeJob::process(Ctl &ctl)
     update_selected_items_axis_align(m_selected, m_plater->config(), params);
 
     Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
+    // EdgeSlicer "Avoid nozzle reach zones": arrange on the part of the bed every nozzle reaches.
+    arrangement::clip_bed_to_nozzle_reach(bedpts, m_reach_areas);
 
     partplate_list.preprocess_exclude_areas(params.excluded_regions, 1, scale_(1));
+    for (arrangement::ArrangePolygon &ap : m_reach_regions)
+        params.excluded_regions.emplace_back(std::move(ap));
 
     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << bedpts[0].transpose() << ", " << bedpts[1].transpose() << ", " << bedpts[2].transpose() << ", " << bedpts[3].transpose();
 
@@ -722,11 +791,12 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     }
 
     //BBS: adjust the bed_index, create new plates, get the max bed_index
+    const int plates_before = plate_list.get_plate_count();
     for (ArrangePolygon& ap : m_selected) {
         //if (ap.bed_idx < 0) continue;  // bed_idx<0 means unarrangable
         //BBS: partplate postprocess
         if (only_on_partplate)
-            plate_list.postprocess_bed_index_for_current_plate(ap);
+            plate_list.postprocess_bed_index_for_current_plate(ap, plates_before);
         else
             plate_list.postprocess_bed_index_for_selected(ap);
 
@@ -859,6 +929,24 @@ double bed_stride_y(const Plater* plater) {
     return (1. + LOGICAL_BED_GAP) * beddepth;
 }
 
+ExtruderAreas nozzle_reach_areas(Plater *p)
+{
+    if (p == nullptr || p->canvas3D() == nullptr || p->printer_technology() != ptFFF)
+        return {};
+    if (!p->canvas3D()->get_arrange_settings().avoid_nozzle_reach_zones)
+        return {};
+    // Plater sets these only for a printer with two or more nozzles (nozzle_diameter).
+    return p->get_partplate_list().get_extruder_areas();
+}
+
+arrangement::ArrangePolygons nozzle_reach_fallback_blockers(const ExtruderAreas &areas, const Points &bed, int num_beds, coord_t inflation)
+{
+    Points clipped = bed;
+    if (arrangement::clip_bed_to_nozzle_reach(clipped, areas))
+        return {};
+    return arrangement::nozzle_reach_blockers(areas, num_beds, inflation);
+}
+
 // call before get selected and unselected
 arrangement::ArrangeParams init_arrange_params(Plater *p)
 {
@@ -871,6 +959,7 @@ arrangement::ArrangeParams init_arrange_params(Plater *p)
 
     params.clearance_height_to_rod             = print_config.extruder_clearance_height_to_rod.value;
     params.clearance_height_to_lid             = print_config.extruder_clearance_height_to_lid.value;
+    params.clearance_dist_to_rod               = print_config.extruder_clearance_dist_to_rod.value;
     // Bambu Studio arranges with extruder_clearance_max_radius (sequential_clearance_radius on Bambu Lab printers).
     params.clearance_radius                    = sequential_clearance_radius(print_config) + object_skirt_offset * 2;
     params.object_skirt_offset                 = object_skirt_offset;

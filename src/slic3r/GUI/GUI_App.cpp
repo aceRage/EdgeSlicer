@@ -1,6 +1,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
+#include "AmsTypes.hpp"
 #include "AmsUiPreview.hpp"
 #include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
@@ -32,6 +33,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 
 // Localization headers: include libslic3r version first so everything in this file
@@ -107,6 +109,7 @@
 #include "GUI_Utils.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
+#include "ProjectStrip.hpp"
 #include "slic3r/GUI/FlashForge/DeviceData.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
 #include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
@@ -169,6 +172,7 @@
 
 //BBS: DailyTip and UserGuide Dialog
 #include "WebGuideDialog.hpp"
+#include "PresetManagerDialog.hpp"
 #include "ReleaseNote.hpp"
 #include "PrivacyUpdateDialog.hpp"
 #include "ModelMall.hpp"
@@ -2159,7 +2163,10 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     BOOST_LOG_TRIVIAL(info) << "[download_plugin] get_url = " << download_url;
 
     // download
+    // download_url is whatever the resource endpoint above listed, and nothing re-checks it once
+    // curl starts following redirects. Keep the hops on https and off this machine's network.
     Slic3r::Http http = Slic3r::Http::get(download_url);
+    http.restrict_redirects(10);
     int reported_percent = 0;
     http.on_progress(
         [this, &pro_fn, cancel_fn, &result, &reported_percent, &err_msg](Slic3r::Http::Progress progress, bool& cancel) {
@@ -2652,6 +2659,13 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // How the dial ended, for the refused-access-code notice (LanAccessCodeWatch.hpp).
+                    if (obj && obj->is_lan_mode_printer()) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            m_device_manager->note_lan_dial_up(dev_id);
+                        else
+                            m_device_manager->note_lan_dial_ended(dev_id, msg);
+                    }
                     // The one "connected" line per connect, and the end of holding this
                     // selection's early requests: the held commands go out now, the held status
                     // requests are replaced by the pushall + get_version below.
@@ -3069,6 +3083,16 @@ void GUI_App::init_app_config()
     }
     MixedFilamentManager::set_auto_generate_enabled(app_config->get_bool("auto_generate_gradients"));
     set_logging_level(Slic3r::level_string_to_boost(app_config->get("log_severity_level")));
+    // EdgeSlicer, curved tops on any printer: the head values the user accepted the risk of (Plater::
+    // confirm_curved_tops_head_before_slice), handed to the slicer.
+    {
+        std::vector<std::string> keys;
+        if (app_config->has_section(CURVED_TOPS_ACK_SECTION))
+            for (const auto &kv : app_config->get_section(CURVED_TOPS_ACK_SECTION))
+                if (!kv.second.empty())
+                    keys.push_back(kv.first);
+        set_curved_tops_acknowledgements(keys);
+    }
 
 }
 
@@ -5648,20 +5672,8 @@ void GUI_App::ShowUserLogin(bool show)
 
 
 void GUI_App::ShowOnlyFilament() {
-    // BBS:Show NewUser Guide
-    try {
-        bool       res = false;
-        GuideFrame GuideDlg(this);
-        GuideDlg.SetStartPage(GuideFrame::GuidePage::BBL_FILAMENT_ONLY);
-        res = GuideDlg.run();
-        if (res) {
-            load_current_presets();
-
-            // BBS: remove SLA related message
-        }
-    } catch (std::exception &) {
-        // wxMessageBox(e.what(), "", MB_OK);
-    }
+    // The Filament manager replaced the guide's filament-only page.
+    run_preset_manager(PresetManagerKind::Filament);
 }
 
 
@@ -5768,6 +5780,20 @@ static void refresh_tree(wxWindow* window)
     window->Refresh();
     for (wxWindow* child : window->GetChildren())
         refresh_tree(child);
+}
+
+void GUI_App::theme_new_window(wxWindow *window)
+{
+    // Project strip P4 (owner re-test: a new project's sidebar section headers kept the light theme's grey labels): a
+    // Plater made after startup missed the colour pass the window got when it was themed (force_colors_update ->
+    // update_dark_children_ui on the main frame). The same pass, on that window's tree only.
+    if (window == nullptr)
+        return;
+#if defined(__WINDOWS__) && defined(_MSW_DARK_MODE)
+    update_scrolls(window);
+#endif
+    update_dark_children_ui(window);
+    window->Refresh();
 }
 
 void GUI_App::apply_theme_live()
@@ -5932,6 +5958,16 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
 
     if (dialog.ShowModal() == wxID_OK)
         input_file = dialog.GetPath();
+}
+
+wxString GUI_App::transition_tridid(int trid_id, bool rack_printer)
+{
+    if (rack_printer) {
+        const std::string label = GUI::AmsTypes::rack_tray_label(trid_id);
+        if (!label.empty())
+            return wxString::FromUTF8(label);
+    }
+    return transition_tridid(trid_id);
 }
 
 wxString GUI_App::transition_tridid(int trid_id)
@@ -8608,6 +8644,32 @@ void GUI_App::update_mode()
     //BBS plater()->update_menus();
 
     plater()->canvas3D()->update_gizmos_on_off_state();
+
+    // EdgeSlicer, curved tops P3: the developer overrides act only in Developer mode (Preferences), and only
+    // while the settings show Developer lines (user_mode "develop"): the same condition that shows the
+    // override lines (ConfigManipulation), so an override is never in force with its line hidden. The
+    // slicer reads the flag; Print::apply() re-plans a curved block when it changes (guard record), and
+    // every plate of every open project is invalidated so nothing planned the other way can be exported.
+    const bool developer = curved_tops_developer_lines_shown();
+    if (developer != curved_tops_developer_mode()) {
+        set_curved_tops_developer_mode(developer);
+        BOOST_LOG_TRIVIAL(info) << "Curved tops developer overrides " << (developer ? "allowed" : "ignored") << " (Developer mode "
+                                << (developer ? "on" : "off") << ")";
+        bool any = false;
+        if (mainframe != nullptr)
+            for (Plater *project : mainframe->project_platers())
+                if (project != nullptr) {
+                    project->invalidate_slices_for_developer_mode();
+                    any = true;
+                }
+        if (!any)
+            plater()->invalidate_slices_for_developer_mode();
+    }
+}
+
+bool GUI_App::curved_tops_developer_lines_shown()
+{
+    return app_config->get_bool("developer_mode") && get_mode() == comDevelop;
 }
 
 void GUI_App::update_internal_development() {
@@ -9235,6 +9297,9 @@ void GUI_App::MacOpenFiles(const wxArrayString &fileNames)
                 for (size_t i = 0; i < non_gcode_files.size(); ++i) {
                     input_files.push_back(non_gcode_files[i]);
                 }
+                // Project strip P3 (D7): with a single instance, project files go in as another project (or replace it).
+                if (mainframe != nullptr && mainframe->project_strip() != nullptr && mainframe->project_strip()->open_files_from_shell(input_files))
+                    return;
                 this->plater()->load_files(input_files);
             } else {
                 for (size_t i = 0; i < files.size(); ++i) {
@@ -9541,9 +9606,96 @@ bool GUI_App::may_switch_to_SLA_preset(const wxString& caption)
     return true;
 }
 
+bool GUI_App::run_preset_manager(PresetManagerKind kind)
+{
+    wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
+
+    // load_presets() (below) reads the selections back from the app config.
+    preset_bundle->export_selections(*app_config);
+    const std::map<std::string, std::string> enabled_before =
+        app_config->has_section(AppConfig::SECTION_FILAMENTS) ? app_config->get_section(AppConfig::SECTION_FILAMENTS) : std::map<std::string, std::string>();
+
+    PresetManagerDialog::Then then = PresetManagerDialog::Then::Nothing;
+    std::string               edit_preset_name;
+    {
+        PresetManagerDialog dlg(mainframe, kind);
+        if (!dlg.ok())
+            return false;
+        dlg.ShowModal();
+        then             = dlg.then();
+        edit_preset_name = dlg.edit_preset_name();
+    }
+
+    bool reloaded = false;
+    if (kind == PresetManagerKind::Filament) {
+        const std::map<std::string, std::string> enabled_now =
+            app_config->has_section(AppConfig::SECTION_FILAMENTS) ? app_config->get_section(AppConfig::SECTION_FILAMENTS) : std::map<std::string, std::string>();
+        // The ticks were applied while the dialog was open (visibility only). One full reload now, the way
+        // the guide's Confirm did it, with its single unsaved-changes prompt.
+        if (enabled_now != enabled_before) {
+            bool keep_changes = false;
+            if (check_and_keep_current_preset_changes(_L("Filaments changed"), _L("The enabled filaments changed and the presets are reloaded."),
+                                                      ActionButtons::KEEP | ActionButtons::SAVE, &keep_changes)) {
+                apply_enabled_filaments(*app_config, *preset_bundle, enabled_now, FilamentsReload::Full, {}, true);
+                if (keep_changes)
+                    apply_keeped_preset_modifications();
+                load_current_presets();
+                sidebar().update_nozzle_settings();
+                update_publish_status();
+                mainframe->refresh_plugin_tips();
+                m_fltviews.reload_all();
+                reloaded = true;
+            }
+            app_config->save();
+        }
+    } else {
+        // Hidden process presets were applied at once; keep them on disk too.
+        app_config->save();
+    }
+
+    // "Create new" and "Edit printers..." ran over the manager. "Edit" on one of a filament's presets
+    // (Edit printers...) closed it to open that preset's settings, as Plater::priv::on_modify_filament
+    // does; the settings window goes back to Edit printers... when it closes (set_editing_filament_id).
+    if (then == PresetManagerDialog::Then::EditPresetSettings && !edit_preset_name.empty()) {
+        if (Tab *tab = get_tab(Preset::Type::TYPE_FILAMENT)) {
+            params_dialog()->Popup();
+            tab->restore_last_select_item();
+            tab->set_just_edit(true);
+            tab->select_preset(edit_preset_name);
+            const Preset *edited = preset_bundle->filaments.find_preset(edit_preset_name, false);
+            if (edited != nullptr && !edited->is_compatible)
+                tab->select_preset(edit_preset_name);
+        }
+    }
+    // The row's edit button: that preset's settings tab, shown the way the sidebar's edit buttons show it
+    // (PlaterPresetComboBox::switch_to_tab). The settings window cannot be used under the modal manager,
+    // so the manager closed; when the settings are a window of their own it opens again (same page)
+    // when that window closes. Docked settings (no window to close) leave it closed.
+    if (then == PresetManagerDialog::Then::OpenPresetEditor && !edit_preset_name.empty()) {
+        const Preset::Type type = kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT;
+        if (Tab *tab = get_tab(type)) {
+            tab->select_preset(edit_preset_name);
+            if (tab->GetParent() == params_panel()) {
+                mainframe->select_tab(MainFrame::tp3DEditor);
+            } else {
+                params_dialog()->set_on_close_once([this, kind]() { run_preset_manager(kind); });
+                params_dialog()->Popup();
+                tab->OnActivate();
+            }
+            tab->restore_last_select_item();
+        }
+    }
+    return reloaded;
+}
+
 bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page)
 {
     wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
+
+    // "Add/Remove filaments" (the Filaments row gears, the item at the end of the filament combos) opens
+    // the Filament manager; the setup wizard keeps the guide's own filament page.
+    if (start_page == ConfigWizard::SP_FILAMENTS)
+        return run_preset_manager(PresetManagerKind::Filament);
 
     std::string strFinish = wxGetApp().app_config->get("firstguide", "finish");
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;

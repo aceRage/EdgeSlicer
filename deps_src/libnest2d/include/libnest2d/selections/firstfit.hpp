@@ -82,7 +82,8 @@ public:
             };
         }
 
-        std::sort(store_.begin(), store_.end(), sortfunc);
+        // Stable: items that compare equal (alike parts) keep their input order on every standard library.
+        std::stable_sort(store_.begin(), store_.end(), sortfunc);
 
         // debug: write down intitial order
         for (auto it = store_.begin(); it != store_.end(); ++it) {
@@ -115,8 +116,11 @@ public:
             double score_all_plates = 0, score_all_plates_best = std::numeric_limits<double>::max();
             typename Placer::PackResult result, result_best, result_firstfit;
             int j = 0;
+            // The placer leaves the item turned as its search ended; every bed starts from the item's own turn.
+            const auto initial_rotation = it->get().rotation();
             while(!was_packed && !cancelled()) {
                 for(; j < placers.size() && !was_packed && !cancelled(); j++) {
+                    it->get().rotation(initial_rotation);
                     result = placers[j].pack(*it, rem(it, store_));
                     score = result.score();
                     score_all_plates = score;
@@ -178,6 +182,16 @@ public:
                         placers[j - 1].clearItems([](const Item &itm) { return itm.isFixed() && !itm.is_wipe_tower; });
                         placers[j - 1].preload(fixed_bins[placers.size() - 1]);
                     }
+                }
+
+                if(!was_packed && placers.size() >= MAX_NUM_PLATES) {
+                    // Every bed there can be has been tried. An item that fits an empty bed but not
+                    // beside what is fixed on each of them (a prime tower) would otherwise open bed
+                    // after bed, past the plate limit, for as long as there are fixed items.
+                    it->get().binId(BIN_ID_UNFIT);
+                    if (this->unfitindicator_)
+                        this->unfitindicator_(it->get().name + " does not fit any of " + std::to_string(MAX_NUM_PLATES) + " beds");
+                    break;
                 }
 
                 if(!was_packed){

@@ -5,6 +5,9 @@
 	"from": "system",
 	"filament_id": "OFwJ0qu2",
 	"instantiation": "false",
+	"filament_adhesiveness_category": [
+		"800"
+	],
 	"cool_plate_temp": [
 		"0"
 	],

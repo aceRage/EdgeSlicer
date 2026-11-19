@@ -40,6 +40,8 @@ using namespace nlohmann;
 
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "sentry_wrapper/LocalMinidumpPolicy.hpp"
+#include <tbb/parallel_for.h>
 #include "common_func/common_func.hpp"
 
 
@@ -63,6 +65,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
 #include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -83,6 +86,7 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliNamedPresets.hpp"
 #include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
@@ -726,7 +730,7 @@ struct NamedPresets
     }
 
     // User preset: <datadir>/user/*/<type>/*.json whose "name" matches, flattened onto its parent.
-    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id)
+    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id, std::string* system_parent = nullptr)
     {
         const boost::filesystem::path root = boost::filesystem::path(data_dir()) / "user";
         if (!boost::filesystem::exists(root)) return false;
@@ -758,6 +762,7 @@ struct NamedPresets
                     out = parent->config;
                     out.apply(cfg, true);
                     if (filament_id.empty()) filament_id = parent->filament_id;
+                    if (system_parent) *system_parent = parent->name;
                 } else {
                     out = cfg;
                 }
@@ -772,20 +777,24 @@ struct NamedPresets
     std::string resolve_to_file(const std::string& name, Preset::Type t, const std::string& out_dir, int ordinal)
     {
         DynamicPrintConfig cfg;
-        std::string        filament_id;
+        std::string        filament_id, system_parent;
+        bool               is_user = false;
         if (const Preset* p = find_system(name, t)) {
             cfg         = p->config;
             filament_id = p->filament_id;
-        } else if (!find_user(name, t, cfg, filament_id)) {
+        } else if (find_user(name, t, cfg, filament_id, &system_parent)) {
+            is_user = true;
+        } else {
             return "";
         }
         cfg.erase(BBL_JSON_KEY_INHERITS);
+        const CliNamedPresetOrigin origin = cli_named_preset_origin(t == Preset::TYPE_PRINTER, is_user, system_parent);
         nlohmann::json j;
         j[BBL_JSON_KEY_TYPE]     = type_dir(t);
         j[BBL_JSON_KEY_NAME]     = name;
-        j[BBL_JSON_KEY_FROM]     = "system";
+        j[BBL_JSON_KEY_FROM]     = origin.from;
         j[BBL_JSON_KEY_VERSION]  = SLIC3R_VERSION;
-        j[BBL_JSON_KEY_INHERITS] = "";
+        j[BBL_JSON_KEY_INHERITS] = origin.inherits;
         if (t == Preset::TYPE_FILAMENT && !filament_id.empty()) j[BBL_JSON_KEY_FILAMENT_ID] = filament_id;
         for (const std::string& key : cfg.keys()) {
             const ConfigOption* opt = cfg.option(key);
@@ -1474,6 +1483,14 @@ int CLI::run(int argc, char **argv)
     if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "startup") == 0) {
         volatile int* p = nullptr;
         *p = 42; // the test crash (access violation / SIGSEGV)
+    }
+    // EDGESLICER_TEST_CRASH=workers is the slicing-crash shape: an access violation in several TBB worker threads at
+    // once (a parallel_for whose every item faults), which is what left 0-byte local dumps before fix/crash-dump-writer.
+    if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "workers") == 0) {
+        tbb::parallel_for(tbb::blocked_range<int>(0, 256, 1), [](const tbb::blocked_range<int>&) {
+            volatile int* p = nullptr;
+            *p = 42; // the test crash, on whichever worker runs this item
+        });
     }
 
 #ifdef __WXGTK__
@@ -2171,6 +2188,21 @@ int CLI::run(int argc, char **argv)
     if (normative_check_option)
         normative_check = normative_check_option->value;
 
+    // EdgeSlicer, curved tops P3: the CLI has no Developer mode; --curved-tops-dev-overrides stands in
+    // for it. Off unless given, so a project's curved_tops_dev_* values are ignored by default.
+    {
+        const ConfigOptionBool *dev_option = m_config.option<ConfigOptionBool>("curved_tops_dev_overrides");
+        Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
+        if (dev_option != nullptr && dev_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+        // Curved tops on any printer: the CLI's stand-in for the app's one-time acceptance of head values no curved
+        // print has checked. Never a preset or project key: a downloaded 3MF cannot carry it.
+        const ConfigOptionBool *accept_option = m_config.option<ConfigOptionBool>("curved_tops_accept_unverified");
+        Slic3r::set_curved_tops_accept_unverified(accept_option != nullptr && accept_option->value);
+        if (accept_option != nullptr && accept_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops may run on unverified print head values for this run (--curved-tops-accept-unverified)";
+    }
+
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");
     if (uptodate_option)
         up_config_to_date = uptodate_option->value;
@@ -2750,14 +2782,8 @@ int CLI::run(int argc, char **argv)
                 flush_and_exit(CLI_CONFIG_FILE_ERROR);
             }
             new_printer_name = config_name;
-            if (config_from == "system") {
-                new_printer_system_name = new_printer_name;
-                new_printer_config_is_system = true;
-            }
-            else {
-                new_printer_system_name = config.option<ConfigOptionString>("inherits", true)->value;
-                new_printer_config_is_system = false;
-            }
+            new_printer_system_name = cli_config_system_name(config_from, new_printer_name, config.option<ConfigOptionString>("inherits", true)->value);
+            new_printer_config_is_system = config_from == "system";
             config.set("printer_settings_id", new_printer_name, true);
 
             //get printer_model_id
@@ -3644,6 +3670,11 @@ int CLI::run(int argc, char **argv)
     //set the filament settings into print config
     if ((load_filament_count > 0) || (up_config_to_date))
     {
+        // The project's lists one value per filament, the one each filament reads, so that a preset's value written
+        // below at the filament's index is the one read for it (a project saved by the application keeps a
+        // filament's flow variants side by side).
+        if (!load_filaments_config.empty())
+            cli_flatten_filament_flow_variants(m_print_config, size_t(filament_count));
         for (int index = 0; index < load_filaments_config.size(); index++) {
             DynamicPrintConfig&  config = load_filaments_config[index];
             int filament_index = load_filaments_index[index];
@@ -3747,9 +3778,10 @@ int CLI::run(int argc, char **argv)
                         record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
                         flush_and_exit(CLI_CONFIG_FILE_ERROR);
                     }
-                    ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt);
-                    const ConfigOptionVectorBase* opt_vec_src = static_cast<const ConfigOptionVectorBase*>(source_opt);
-                    opt_vec_dst->set_at(opt_vec_src, filament_index-1, 0);
+                    // The preset's value for the filament's flow type (filament_volume_type), the list cut to the
+                    // filament count. Taking entry 0 printed a high-flow filament at its standard values, and a
+                    // project's longer list kept its old values past the filaments.
+                    cli_set_filament_preset_value(m_print_config, opt_key, config, size_t(filament_index - 1), size_t(filament_count));
                 }
             }
 
@@ -4015,6 +4047,14 @@ int CLI::run(int argc, char **argv)
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     m_print_config.apply(m_extra_config, true);
+    // A project the CLI exports must say these values differ from the presets, or the GUI puts
+    // them back to the system preset's on open (record_cli_overrides_as_different).
+    {
+        const size_t recorded = record_cli_overrides_as_different(m_print_config, m_extra_config, Preset::print_options(),
+                                                                  Preset::filament_options(), Preset::printer_options());
+        if (recorded > 0)
+            BOOST_LOG_TRIVIAL(info) << "command line settings recorded as different from the presets: " << recorded;
+    }
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
 
@@ -4067,6 +4107,7 @@ int CLI::run(int argc, char **argv)
         auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
             DynamicPrintConfig base;
             bool               has_base = false;
+            const bool         chosen   = !name.empty(); // named in the project / on the command line, not picked for its size
             std::string        filament_id_unused;
             if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
                 name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
@@ -4092,6 +4133,9 @@ int CLI::run(int argc, char **argv)
             }
             const auto it = edits.find(id);
             store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate, as in the GUI.
+            if (chosen && has_base)
+                set_nozzle_tool_layer_height(store, base);
             return true;
         };
 
@@ -4558,6 +4602,12 @@ int CLI::run(int argc, char **argv)
             plate_list.reset_size(current_printable_width, current_printable_depth, current_printable_height, true, true);
         }
     };
+    if (plate_data_src.size() > MAX_PLATE_COUNT)
+    {
+        BOOST_LOG_TRIVIAL(error) << boost::format("the project has %1% plates, the limit is %2%") % plate_data_src.size() % MAX_PLATE_COUNT;
+        record_exit_reson(outfile_dir, CLI_DATA_FILE_ERROR, 0, cli_errors[CLI_DATA_FILE_ERROR], sliced_info);
+        flush_and_exit(CLI_DATA_FILE_ERROR);
+    }
     if (plate_data_src.size() > 0)
     {
         partplate_list.load_from_3mf_structure(plate_data_src);
@@ -5301,6 +5351,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -5734,6 +5789,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -6808,7 +6868,8 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -7048,7 +7109,6 @@ int CLI::run(int argc, char **argv)
         // get type and color for platedata
         auto* filament_types = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_type"));
         const ConfigOptionStrings* filament_color = dynamic_cast<const ConfigOptionStrings *>(m_print_config.option("filament_colour"));
-        auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_ids"));
         const ConfigOptionFloats* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
         if (nozzle_diameter_option)
@@ -7067,8 +7127,10 @@ int CLI::run(int argc, char **argv)
             for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
                 std::string display_filament_type;
                 it->type  = m_print_config.get_filament_type(display_filament_type, it->id);
-                it->color = filament_color ? filament_color->get_at(it->id) : "#FFFFFF";
-                it->filament_id = filament_id?filament_id->get_at(it->id):"";
+                // A project need not carry every per-filament list (a Bambu project written by
+                // another tool may leave filament_ids out).
+                it->color       = m_print_config.filament_string_at("filament_colour", it->id, "#FFFFFF");
+                it->filament_id = m_print_config.filament_string_at("filament_ids", it->id, "");
             }
 
             if (!plate_data->plate_thumbnail.is_valid()) {
@@ -7654,18 +7716,14 @@ int CLI::run(int argc, char **argv)
             }
             // add wipe tower bounding box
             if (print->has_wipe_tower()) {
-                BBoxData data;
                 auto   wt_corners = print->first_layer_wipe_tower_corners();
                 // when loading gcode.3mf, wipe tower info may not be correct
                 if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
-                    bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    // Numbered by the plate being exported (the current plate is not it here), its
+                    // area and layer height set rather than left as the stack held them.
+                    BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, part_plate->get_index(),
+                                                                     float(print->config().initial_layer_print_height.value));
+                    bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
                     id_bboxes.emplace_back(std::move(data));
                 }
             }
@@ -8226,13 +8284,9 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
         default: assert(false); break;
     };
     // use --outputdir when available
-    file_name = object.name.empty()?object.input_file:object.name;
-    file_name = "obj_"+std::to_string(index)+"_"+file_name;
-    size_t pos = file_name.find_last_of(ext), ext_pos = file_name.size() - 1;
-    if (pos != ext_pos)
-        file_name += ext;
+    file_name = cli_object_file_name(object.name.empty() ? object.input_file : object.name, index, ext);
 
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name<< ", pos = "<<pos<<", ext_pos="<<ext_pos;
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name;
     if (path_dir.empty()) {
         std::string cmdline_param = m_config.opt_string("outputdir");
         if (! cmdline_param.empty()) {
@@ -8260,43 +8314,145 @@ static std::atomic<bool> g_dump_in_progress{false};
 // Opt-in, Windows, no network: when EDGESLICER_LOCAL_MINIDUMP=1, or when the exe runs from a C:/Dev/EdgeSlicerTest test copy, an
 // unhandled crash (access violation, abort, std::terminate, pure call, invalid CRT parameter) writes
 // <exe folder>/crash/EdgeSlicer_<pid>_<time>.dmp, to open with cdb / Visual Studio and the build tree's PDBs. Release builds
-// that do not opt in are unchanged; Sentry, when it is set up, still installs its own handler after this one.
+// that do not opt in are unchanged.
+//
+// How it runs (fix/crash-dump-writer, 2026-11-07: every dump of a slicing crash used to come out 0 bytes):
+//  - A crash in parallel slicing usually faults several TBB workers at once. The first one claims the dump; the others used
+//    to fall straight through to crashpad (or Windows Error Reporting), which terminated the process while the first was
+//    still inside MiniDumpWriteDump - so the file had been created but nothing was written. Later crashing threads now wait
+//    (bounded) until the dump is finished before they hand on.
+//  - The dump is written by a helper thread started here, as MiniDumpWriteDump's documentation recommends: the crashing
+//    thread's stack may be exhausted or corrupt, and dbghelp is loaded up front, not under a crash.
+//  - A failed write leaves no empty .dmp: the file is removed and <name>.failed.txt records the error instead.
+//  - The folder keeps at most local_minidump::kMaxFiles of these files (pruned at startup, oldest first; 0-byte leftovers go).
+//
+// With Sentry: the exe starts crashpad (initSentry) before it calls into this DLL, so this filter is installed on top of
+// crashpad's and runs FIRST. It writes the local dump, then hands the same exception to crashpad's filter, which writes its
+// own dump under <datadir>/SentryData/reports (or %LOCALAPPDATA%) and ends the process. abort() is chained the same way to
+// crashpad's SIGABRT handler. Heap corruption is the one case crashpad takes alone (its vectored handler runs before any
+// unhandled-exception filter), so it has no local dump. Without Sentry (or with it built out) the local dump is the only one,
+// and Windows Error Reporting ends the process afterwards.
 namespace {
-std::wstring g_local_dump_dir;
-std::atomic<bool> g_local_dump_written{false};
-LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+using Slic3r::local_minidump::kMaxFiles;
 
 typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
                                           PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
 
-void write_local_minidump(EXCEPTION_POINTERS *pointers)
+// How long a crashing thread waits for the dump before it gives up and lets the crash go on.
+constexpr DWORD kDumpWaitMs = 120 * 1000;
+
+std::wstring                 g_local_dump_dir;
+MiniDumpWriteDumpFn          g_minidump_write   = nullptr;
+HANDLE                       g_dump_request     = nullptr; // auto-reset: the crashing thread asks the helper for a dump
+HANDLE                       g_dump_finished    = nullptr; // manual-reset: the dump is written (or failed); stays set
+HANDLE                       g_dump_thread      = nullptr;
+std::atomic<DWORD>           g_dump_owner{0};             // id of the thread whose crash is being dumped; 0 = none yet
+EXCEPTION_POINTERS          *g_dump_pointers    = nullptr;
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter  = nullptr;
+void (*g_previous_abort_handler)(int)           = SIG_DFL;
+
+// Plain C: __try below cannot sit in a function that unwinds C++ objects.
+BOOL call_minidump_write(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *info, DWORD *error)
 {
-    if (g_local_dump_dir.empty() || g_local_dump_written.exchange(true))
+    BOOL ok = FALSE;
+    __try {
+        ok = g_minidump_write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, info, nullptr, nullptr);
+        *error = ok ? 0 : ::GetLastError();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok     = FALSE;
+        *error = GetExceptionCode();
+    }
+    return ok;
+}
+
+void write_failure_note(const wchar_t *dump_path, DWORD error)
+{
+    wchar_t note[MAX_PATH + 32];
+    if (swprintf(note, MAX_PATH + 32, L"%ls.failed.txt", dump_path) < 0)
         return;
-    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
-    if (dbghelp == nullptr)
+    HANDLE file = ::CreateFileW(note, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
         return;
-    auto write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
-    if (write == nullptr)
-        return;
+    char  text[96];
+    const int n = std::snprintf(text, sizeof(text), "MiniDumpWriteDump failed: 0x%08lX\r\n", static_cast<unsigned long>(error));
+    DWORD written = 0;
+    if (n > 0)
+        ::WriteFile(file, text, DWORD(n), &written, nullptr);
+    ::CloseHandle(file);
+}
+
+// Runs on the helper thread. Writes the dump of the thread recorded in g_dump_owner / g_dump_pointers.
+void write_dump_now()
+{
     ::CreateDirectoryW(g_local_dump_dir.c_str(), nullptr);
     SYSTEMTIME t;
     ::GetLocalTime(&t);
     wchar_t name[96];
-    swprintf(name, 96, L"\\EdgeSlicer_%lu_%04d%02d%02d_%02d%02d%02d.dmp", ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour,
-             t.wMinute, t.wSecond);
-    const std::wstring path = g_local_dump_dir + name;
-    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (Slic3r::local_minidump::format_name(name, 96, ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                                            t.wSecond) == 0)
+        return;
+    wchar_t path[MAX_PATH];
+    if (swprintf(path, MAX_PATH, L"%ls\\%ls", g_local_dump_dir.c_str(), name) < 0)
+        return;
+    HANDLE file = ::CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
         return;
     MINIDUMP_EXCEPTION_INFORMATION info;
-    info.ThreadId          = ::GetCurrentThreadId();
-    info.ExceptionPointers = pointers;
+    info.ThreadId          = g_dump_owner.load();
+    info.ExceptionPointers = g_dump_pointers;
     info.ClientPointers    = FALSE;
-    const MINIDUMP_TYPE type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
-                                             MiniDumpWithUnloadedModules | MiniDumpWithHandleData);
-    write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, pointers != nullptr ? &info : nullptr, nullptr, nullptr);
+    MINIDUMP_EXCEPTION_INFORMATION *pinfo = g_dump_pointers != nullptr ? &info : nullptr;
+    DWORD error = 0;
+    BOOL  ok    = call_minidump_write(file, MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs |
+                                                          MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                          MiniDumpWithHandleData),
+                                      pinfo, &error);
+    if (!ok) {
+        // Retry with the smallest useful dump (stacks, registers, modules) before giving up.
+        ::SetFilePointer(file, 0, nullptr, FILE_BEGIN);
+        ::SetEndOfFile(file);
+        DWORD error2 = 0;
+        ok = call_minidump_write(file, MiniDumpNormal, pinfo, &error2);
+    }
     ::CloseHandle(file);
+    if (!ok) {
+        ::DeleteFileW(path);
+        write_failure_note(path, error);
+    }
+}
+
+DWORD WINAPI dump_thread_main(LPVOID)
+{
+    for (;;) {
+        if (::WaitForSingleObject(g_dump_request, INFINITE) != WAIT_OBJECT_0)
+            return 0;
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
+}
+
+void write_local_minidump(EXCEPTION_POINTERS *pointers)
+{
+    if (g_local_dump_dir.empty() || g_minidump_write == nullptr)
+        return;
+    const DWORD self  = ::GetCurrentThreadId();
+    DWORD       owner = 0;
+    if (!g_dump_owner.compare_exchange_strong(owner, self)) {
+        // Already dumped (or dumping) this thread's own crash, e.g. terminate -> abort: never wait on ourselves.
+        if (owner == self || self == ::GetThreadId(g_dump_thread))
+            return;
+        // Another thread crashed first and its dump is being written: do not let this crash end the process under it.
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+        return;
+    }
+    g_dump_pointers = pointers;
+    if (g_dump_thread != nullptr && ::SetEvent(g_dump_request)) {
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+    } else {
+        // No helper thread: write from here, the way the first version did.
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
 }
 
 LONG WINAPI local_minidump_filter(EXCEPTION_POINTERS *pointers)
@@ -8314,6 +8470,38 @@ void dump_without_exception()
     }
 }
 
+void local_abort_handler(int sig)
+{
+    dump_without_exception();
+    // Hand abort() on to crashpad's handler (it dumps and ends the process) when Sentry installed one.
+    void (*previous)(int) = g_previous_abort_handler;
+    if (previous != SIG_DFL && previous != SIG_IGN && previous != SIG_ERR && previous != nullptr && previous != local_abort_handler)
+        previous(sig);
+}
+
+// Startup: drop empty dumps and keep the newest kMaxFiles - 1, so this run's dump still fits. Each file is deleted by its
+// own full path; nothing but our EdgeSlicer_*.dmp / *.dmp.failed.txt files is touched.
+void prune_local_minidumps(const std::wstring &dir)
+{
+    std::vector<Slic3r::local_minidump::FileEntry> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = ::FindFirstFileW((dir + L"\\EdgeSlicer_*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            continue;
+        Slic3r::local_minidump::FileEntry e;
+        e.name  = fd.cFileName;
+        e.size  = (std::uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        e.mtime = (std::uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        files.push_back(std::move(e));
+    } while (::FindNextFileW(find, &fd));
+    ::FindClose(find);
+    for (const std::wstring &name : Slic3r::local_minidump::files_to_remove(std::move(files), kMaxFiles - 1))
+        ::DeleteFileW((dir + L"\\" + name).c_str());
+}
+
 void install_local_minidumps()
 {
     wchar_t exe[MAX_PATH] = {};
@@ -8329,13 +8517,27 @@ void install_local_minidumps()
     const bool  test_copy = lower.find(L"/dev/edgeslicertest/") != std::wstring::npos;
     if ((!opted_in && !test_copy) || (env != nullptr && std::strcmp(env, "0") == 0))
         return;
-    g_local_dump_dir  = folder + L"\\crash";
+    // Load dbghelp now, not in a crashing process (where the loader lock may be held).
+    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr)
+        return;
+    g_minidump_write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (g_minidump_write == nullptr)
+        return;
+    g_dump_request  = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_dump_finished = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_dump_request == nullptr || g_dump_finished == nullptr)
+        return;
+    // Small stack: it only waits, then calls MiniDumpWriteDump. If it cannot start, the crashing thread writes the dump itself.
+    g_dump_thread = ::CreateThread(nullptr, 256 * 1024, dump_thread_main, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    g_local_dump_dir = folder + L"\\crash";
+    prune_local_minidumps(g_local_dump_dir);
     g_previous_filter = ::SetUnhandledExceptionFilter(local_minidump_filter);
     std::set_terminate([]() {
         dump_without_exception();
         std::abort();
     });
-    std::signal(SIGABRT, [](int) { dump_without_exception(); });
+    g_previous_abort_handler = std::signal(SIGABRT, local_abort_handler);
     _set_purecall_handler([]() {
         dump_without_exception();
         std::abort();

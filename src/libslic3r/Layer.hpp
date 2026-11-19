@@ -3,6 +3,7 @@
 
 #include "libslic3r.h"
 #include "AdaptiveLayerMerge.hpp"
+#include "ThinFeatures.hpp"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
 #include "SurfaceCollection.hpp"
@@ -71,6 +72,11 @@ public:
     // A region may hold several patches on one layer: disjoint group-top slabs after local Z-conflict
     // clipping, swallowed-span marker copies of those slabs, and orphan-suppression records.
     std::vector<AdaptiveMergePatch> adaptive_merge_patches;
+
+    // EdgeSlicer, thin feature notice (ThinFeatures.hpp): the thin spots the wall generator skipped or widened on
+    // this layer, one record per generator call that found any. Written by this layer's own thread in
+    // make_perimeters, merged per object afterwards. Runtime only; the overlay of design B3 can draw them.
+    std::vector<ThinFeatureLayer> thin_feature_layers;
 
     // collection of expolygons representing the bridged areas (thus not
     // needing support material)
@@ -260,6 +266,13 @@ public:
                     height = patch.merged_height;
         return height;
     }
+    // EdgeSlicer, curved tops (CurvedTops.cpp): set on the object's top layer when it carries the
+    // conformal layers. The planar layers under it were emptied on purpose (their material is in the
+    // curved block), so the empty Z span below is not a printability gap.
+    bool                    curved_tops_block { false };
+    // With curved_tops_block: the steepest facet slope (degrees) of the surfaces the block follows. The
+    // head clearance check lets the tip land meet the neighbouring bead up to this slope, no further.
+    float                   curved_tops_slope_deg { 0.f };
     // Mixed-layer-height band merge: true when this layer takes part in a merge and carries no extrusions of its
     // own. What it would have printed moved up into the group top, so the empty Z span is not a printability gap
     // and the layer above must not be reported as unsupported. A merged band that had nothing printable to begin
@@ -381,6 +394,31 @@ public:
 
     // for tree supports
     ExPolygons base_areas;
+
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 Layer.hpp:340-368): what the
+    // support merge plan (SupportMergePlan.cpp) decided for this layer. All of them stay 0 on every plate that
+    // prints through a single nozzle diameter, and on every layer the plan did not touch.
+    // 1-based filament this layer's support base was planned for while support_filament is 0 ("don't care"). Set only
+    // where the base was merged into a slab thicker than the object layers: that slab can no longer be extruded by an
+    // arbitrary nozzle. The areas facing the object keep their own height and are never pinned through this.
+    int                          planned_filament_id { 0 };
+    // Nozzle diameter of planned_filament_id. The support flows resolve their nozzle from support_filament, which is
+    // 0 here, so the toolpath generator has to be told which nozzle actually extrudes this base.
+    double                       planned_nozzle_diameter { 0. };
+    // Contact/interface counterpart. Set even on an unmerged thin layer when support_interface_filament is "don't
+    // care", so the exporter cannot pick a nozzle that is unable to print that layer height.
+    int                          planned_interface_filament_id { 0 };
+    double                       planned_interface_nozzle_diameter { 0. };
+    // Height of the merged base / interface slab when it differs from this layer's height: a layer whose print_z a
+    // fine interface shares takes the smallest height of the two (generate_support_layers), and a classic tree layer
+    // keeps base, roof and floor on one SupportLayer while only the base is folded. 0 = the layer height.
+    double                       base_slab_height { 0. };
+    double                       interface_slab_height { 0. };
+
+    // A merged slab covers the empty Z under it, like a merge group top of the object (Layer::effective_print_height).
+    coordf_t                    effective_print_height() const override {
+        return std::max({ Layer::effective_print_height(), coordf_t(base_slab_height), coordf_t(interface_slab_height) });
+    }
 
     // Edge (support highlight, phase 6): everything a classic tree support layer covers - base,
     // roof, the layer under the roof and floor (the protected areas below). Read only.

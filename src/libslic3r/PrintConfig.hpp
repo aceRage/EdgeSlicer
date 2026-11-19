@@ -449,6 +449,11 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
+// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp). P5 adds Spiral.
+enum CurvedTopsPattern {
+    ctpMonotonic, ctpConcentric, ctpSpiral
+};
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -468,6 +473,17 @@ enum class PerimeterGeneratorType
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
     Arachne
+};
+
+// EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, P2): how thin a line the walls may use for
+// features narrower than a wall. Off is the walls as they always were; the floors of the named levels are in
+// FineDetail.hpp. Custom takes thin_feature_line_width / thin_feature_min_size as set.
+enum class FineDetailLevel
+{
+    Off,
+    Balanced,
+    FineText,
+    Custom
 };
 
 // Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
@@ -969,6 +985,12 @@ enum CounterboreHoleBridgingOption {
      wtwRib
  };
 
+// Bambu Studio 2.9.1 prime_tower_side_scrape_face: the pair of tower walls the side scrape runs on.
+enum SideScrapeFace : int {
+    sssfLeftRight = 0,
+    sssfFrontBack
+};
+
 // Which prime tower tool changes count as a "tower interface" (a material printed onto a
 // different one) for the wipe_tower_interface_* options. Bambu Studio decides this per layer from
 // its per-adhesion-category block planner, which neither tower generator here has; these modes
@@ -1097,6 +1119,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
@@ -1105,8 +1128,10 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SideScrapeFace)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FineDetailLevel)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
@@ -1122,12 +1147,12 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 class DynamicPrintConfig;
 
 // While one of these is alive on a thread, configs loaded on that thread keep the shipped meaning
-// of two Bambu Studio keys that the vendor presets under resources/profiles carry:
-// enable_tower_interface_features is not fanned out into the wipe_tower_interface_* options
-// (PrintConfigDef::handle_legacy_composite) and prime_tower_skip_points is not read into
-// wipe_tower_wall_gap (Format/BambuKeyAliases.cpp). PresetBundle::load_vendor_configs_from_json
-// holds one, so the bundled system presets print exactly as before these mappings existed, while
-// a Bambu project, a Bambu preset the user imports and a loose preset file are still mapped.
+// of a Bambu Studio key that the vendor presets under resources/profiles carry:
+// prime_tower_skip_points is not read into wipe_tower_wall_gap (Format/BambuKeyAliases.cpp).
+// PresetBundle::load_vendor_configs_from_json holds one, so the bundled system presets print
+// exactly as before that mapping existed, while a Bambu project, a Bambu preset the user imports
+// and a loose preset file are still mapped. (enable_tower_interface_features used to be fanned out
+// into the wipe_tower_interface_* options here too; it is Bambu Studio's own switch again.)
 // Set kMapSystemPresetTowerKeys to true to map the bundled presets as well.
 class SystemPresetTowerKeysScope
 {
@@ -1139,7 +1164,7 @@ public:
     SystemPresetTowerKeysScope(const SystemPresetTowerKeysScope &) = delete;
     SystemPresetTowerKeysScope &operator=(const SystemPresetTowerKeysScope &) = delete;
 
-    // True while the keys above are to be left as the vendor preset has them.
+    // True while the key above is to be left as the vendor preset has it.
     static bool active() { return s_active; }
 
 private:
@@ -1320,6 +1345,11 @@ public:
 
     //BBS special case Support G/ Support W
     std::string get_filament_type(std::string &displayed_filament_type, int id = 0);
+    // Entry `id` of the per-filament text list `opt_key`, or `fallback` when the config has no such
+    // list or the list is empty: a project written by another tool may leave filament_ids out, and
+    // get_at() on an empty list reads past it. An index past the end reads the first entry, as
+    // get_at() does.
+    std::string filament_string_at(const std::string &opt_key, int id, const std::string &fallback) const;
 
     bool is_custom_defined();
 
@@ -1664,6 +1694,35 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                seam_prefer_part_joints))
     ((ConfigOptionFloat,               slice_closing_radius))
     ((ConfigOptionEnum<SlicingMode>,   slicing_mode))
+    // EdgeSlicer: curved (non-planar) top surfaces, see src/libslic3r/CurvedTops.cpp.
+    ((ConfigOptionBool,                curved_tops_enabled))
+    ((ConfigOptionInt,                 curved_tops_layers))
+    ((ConfigOptionFloat,               curved_tops_max_angle))
+    // EdgeSlicer, curved tops P4.
+    ((ConfigOptionFloat,               curved_tops_nozzle_tolerance))
+    ((ConfigOptionEnum<CurvedTopsPattern>, curved_tops_pattern))
+    // EdgeSlicer, curved tops P3: developer overrides (Developer mode only, see CurvedTops.hpp).
+    ((ConfigOptionFloat,               curved_tops_dev_angle_ceiling))
+    ((ConfigOptionFloat,               curved_tops_dev_head_lowest_part))
+    ((ConfigOptionFloat,               curved_tops_dev_clearance_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_flank_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_land_tolerance))
+    ((ConfigOptionFloat,               curved_tops_dev_reach_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_wipe_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_safe_lift))
+    ((ConfigOptionBool,                curved_tops_dev_contact_warning_only))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multiple_objects))
+    ((ConfigOptionBool,                curved_tops_dev_allow_by_object))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multi_filament))
+    ((ConfigOptionBool,                curved_tops_dev_allow_supports_in_reach))
+    ((ConfigOptionBool,                curved_tops_dev_allow_material_beside))
+    ((ConfigOptionBool,                curved_tops_dev_allow_z_contouring))
+    ((ConfigOptionBool,                curved_tops_dev_allow_raft))
+    ((ConfigOptionBool,                curved_tops_dev_allow_variable_layer_height))
+    ((ConfigOptionBool,                curved_tops_dev_allow_tall_skirt))
+    ((ConfigOptionBool,                curved_tops_dev_allow_unverified_head))
+    ((ConfigOptionBool,                curved_tops_dev_nozzle_tolerance_unrecorded))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))
@@ -1686,6 +1745,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 support_interface_interlock_beam_lines))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
+    // EdgeSlicer: the support interface filament's nozzle temperature, 0 = its own temperatures
+    // (Print::support_interface_temperatures()).
+    ((ConfigOptionInt,                 support_interface_nozzle_temperature))
     // Chameleon: when enabled, support material matches the filament of the model
     // geometry it touches or stands beside (interfaces/ironing/walls), instead of
     // always using the configured support filament.
@@ -1781,6 +1843,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_feature_size))
     ((ConfigOptionPercent,            initial_layer_min_bead_width))
     ((ConfigOptionPercent,            min_bead_width))
+    // EdgeSlicer (Fine detail P2, Cura's separate minimums): the line widths that decide when one wall line
+    // splits into two (odd) and when a centre line is added between two (even). 0 = min_bead_width, as before.
+    ((ConfigOptionPercent,            min_odd_wall_line_width))
+    ((ConfigOptionPercent,            min_even_wall_line_width))
 
     // Orca
     ((ConfigOptionFloat,              wall_maximum_resolution))
@@ -1991,6 +2057,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.
     ((ConfigOptionBool, detect_thin_wall))
+    // EdgeSlicer, Fine detail (P2): region keys, so a modifier can carry them. See FineDetail.hpp.
+    ((ConfigOptionEnum<FineDetailLevel>, fine_detail))
+    ((ConfigOptionPercent, thin_feature_line_width))
+    ((ConfigOptionPercent, thin_feature_min_size))
+    ((ConfigOptionFloat, fine_detail_speed))
     // Ultra: offset layers (interlocked half-layer-shifted odd walls)
     ((ConfigOptionBool, offset_layers))
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
@@ -2023,6 +2094,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 wipe_inward))
     ((ConfigOptionFloatOrPercent,        wipe_inward_distance))
     ((ConfigOptionBool,                 wipe_before_external_loop))
+    ((ConfigOptionBool,                 retract_after_outer_wall))
     ((ConfigOptionEnum<WallInfillOrder>, wall_infill_order))
     ((ConfigOptionBool,                 precise_outer_wall))
     ((ConfigOptionPercent,              bridge_density))
@@ -2070,6 +2142,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                zaa_min_z))
     ((ConfigOptionFloat,                zaa_minimize_perimeter_height))
     ((ConfigOptionBool,                 zaa_speed_scaling))
+    ((ConfigOptionFloat,                zaa_max_segment_rate))
 
     // Edge: a layer shorter than this (after the cooling slowdown) waits parked for the rest. 0 = off.
     ((ConfigOptionFloat,                min_layer_time_pause))
@@ -2165,6 +2238,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
+    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (Bambu Lab Type 1 towers)
+    ((ConfigOptionFloats,              filament_prime_volume_nc))   // Orca #14800: the prime after a hotend change on one extruder
+    // Orca #10780: the Type 1 tower purges each adhesiveness category into its own block.
+    ((ConfigOptionInts,                filament_adhesiveness_category))
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2175,6 +2252,17 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    // BBS 2.9.1: the tower's nozzle-change ramming (WipeTower::ramming): length rammed by the outgoing filament
+    // on an extruder change / a hotend change, the reverse travel after it, its volumetric speed (-1 = the
+    // filament's maximum), and the idle-travel cooling that replaces a zero-length ramming on hotend_as_extruder.
+    ((ConfigOptionFloats,              filament_change_length))
+    ((ConfigOptionFloats,              filament_change_length_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed_nc))
+    ((ConfigOptionBools,               filament_idle_travel_cooling_enabled))
+    ((ConfigOptionBools,               filament_pre_heating_enabled))  // BBS 2.9.1 H3C: pre-heat this filament's hotend
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
     // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.
     ((ConfigOptionFloatsNullable,      filament_retract_length_nc))
@@ -2380,6 +2468,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                nozzle_filament_process_slot))
     // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
     ((ConfigOptionStrings,             nozzle_filament_tool))
+    // H3C fix: per filament, the layer height of the process chosen for its nozzle, 0 = none (internal, NozzleProcess.hpp).
+    ((ConfigOptionFloatsOrPercents,    nozzle_layer_height))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))
@@ -2390,12 +2480,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              grab_length))
     ((ConfigOptionFloats,              hotend_cooling_rate))
     ((ConfigOptionFloats,              hotend_heating_rate))
+    ((ConfigOptionFloats,              hotend_cooling_rate_on_rack)) // BBS 2.9.1 H3C: idle hotend in the rack
     ((ConfigOptionBool,                enable_pre_heating))  // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     ((ConfigOptionInts,                nozzle_flush_dataset))
     ((ConfigOptionStrings,             filament_extruder_variant))
     ((ConfigOptionInts,                filament_self_index))
     ((ConfigOptionBool,                enable_filament_dynamic_map))
     ((ConfigOptionBool,                has_filament_switcher))
+    ((ConfigOptionBool,                handle_hotend_as_extruder)) // BBS 2.9.1 H3C: rack hotends keep their filament
     ((ConfigOptionEnum<PrimeVolumeMode>, prime_volume_mode))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
@@ -2404,10 +2496,39 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_nozzle_map))
 )
 
+// Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintTowerConfig,
+
+    // Bambu Studio 2.9.1 (H3C): tower speed on hotend_as_extruder printers, slowdown at the end of a tower
+    // visit, the purge-start line ironing and its speed, the side scrape after a tool change.
+    ((ConfigOptionFloat,              prime_tower_feedrate_factor))
+    ((ConfigOptionPercent,            prime_tower_tail_speed_factor))
+    ((ConfigOptionFloat,              prime_tower_tail_slowdown_volume))
+    ((ConfigOptionBool,               prime_tower_line_ironing))
+    ((ConfigOptionFloat,              prime_tower_ironing_speed))
+    ((ConfigOptionBool,               prime_tower_side_scrape))
+    ((ConfigOptionEnum<SideScrapeFace>, prime_tower_side_scrape_face))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_length))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_height))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_speed))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_wall_gap))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_point_spacing))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
+    // Per-row speed multipliers of the tower purge ("" = the built-in ramp), per filament.
+    ((ConfigOptionStrings,            filament_prime_tower_speed_factor_curve))
+    // Bambu Studio 2.9.1 tower interface features (enable_tower_interface_features): the firmware purge of a contact
+    // layer tool change (M620.13 L in the H2 / H3C change_filament_gcode), per filament.
+    ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
+    // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
+    ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
@@ -2454,6 +2575,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // by-object collision and arrange keep extruder_clearance_radius.
     ((ConfigOptionFloat,              extruder_clearance_max_radius))
     ((ConfigOptionFloat,              nozzle_height))
+    // EdgeSlicer, curved tops on any printer: the user's own print head values (HeadClearance.hpp, HeadUserValues).
+    ((ConfigOptionFloat,              head_nozzle_protrusion))
+    ((ConfigOptionFloat,              head_max_surface_angle))
+    ((ConfigOptionFloat,              head_nozzle_contact_record))
     ((ConfigOptionStrings,            extruder_colour))
     ((ConfigOptionPoints,             extruder_offset))
     ((ConfigOptionBools,              reduce_fan_stop_start_freq))
@@ -2512,6 +2637,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
     ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))
@@ -2575,6 +2701,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              prime_tower_line_width))
     ((ConfigOptionFloat,              prime_tower_wipe_speed))
     ((ConfigOptionFloat,              prime_tower_wipe_distance))
+    // Orca #10780 / #15035: Type 1 tower block planner (purge line gap, internal ribs, flat ironing).
+    ((ConfigOptionPercent,            prime_tower_infill_gap))
+    ((ConfigOptionBool,               prime_tower_enable_framework))
+    ((ConfigOptionBool,               prime_tower_flat_ironing))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
@@ -2586,8 +2716,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               wipe_tower_interface_run_in))
     ((ConfigOptionBool,               wipe_tower_interface_extra_prime))
     ((ConfigOptionEnum<TowerInterfaceTrigger>, wipe_tower_interface_trigger))
-    // Bambu Studio's single switch for its interface bundle. Load-only: handle_legacy_composite
-    // fans it out into the options above; nothing reads it otherwise.
+    // Bambu Studio 2.9.1's switch for its tower interface features on contact layers: the Type 1 tower
+    // (WipeTower) and change_filament_gcode (is_prime_tower_interface) read it. The options above stay
+    // off on that tower while it is on; WipeTower2 ignores it.
     ((ConfigOptionBool,               enable_tower_interface_features))
     ((ConfigOptionInts,               filament_tower_interface_print_temp))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))
@@ -2892,6 +3023,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 // P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
 bool has_nozzle_rack(const PrintConfig &config);
 
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament, so
+// a change to a hotend that already holds the next filament is a hotend swap, not an unload + load,
+// and needs no flush. True when the printer sets the key, or for a single extruder with a rack
+// (extruder_max_nozzle_count > 1), which also covers projects saved before the key was read.
+bool hotend_as_extruder(const PrintConfig &config);
+
 // Mixed nozzle sizes (Phase 1): map a 1-based FILAMENT index to the 0-based PHYSICAL extruder
 // (nozzle) that filament prints through. nozzle_diameter, min_layer_height / max_layer_height and
 // the rest of the per-extruder printer options are indexed by physical extruder, not by filament:
@@ -3112,6 +3249,15 @@ bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
 // a flush, which leaves the executable G-code byte-identical.
 std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
 
+// The 0-based toolhead a sliced plate's metadata (slice_info.config's <filament group_id>) reports
+// filament `filament_id` (0-based) on: identity_filament_map over ALL of the project's filaments
+// (filament_colour), the same map slice_info.config's filament_maps is written from. 0 where that
+// map says nothing (not an identical multi-toolhead machine, a negative id, an id past the
+// project's filaments). The map is indexed by filament number, so it must not be sized by the
+// number of filaments a plate uses: with filaments 2-7 of 7 used, a six-long map put filament 7
+// on toolhead 0.
+int identity_filament_group(const ConfigBase &cfg, int filament_id);
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
@@ -3121,6 +3267,11 @@ Points get_bed_shape(const SLAPrinterConfig &cfg);
 // validation, arrange, the plate's "object inside" check and the timelapse picker agree; see
 // bed_exclude_area_is_rectangles() in PrintConfig.cpp for the rule.
 bool bed_exclude_area_is_rectangles(const Pointfs &points);
+// OrcaSlicer #17209: whether a bed_exclude_area can be used at all. A rectangle list is valid; one
+// polygon must have finite points, a non-zero area and no crossing edges (edges may touch, so the
+// Kobra 3 ring with its zero-width connector stays valid). The readers below exclude nothing for
+// an invalid list, and the GUI refuses to take or load one.
+bool is_valid_bed_exclude_area(const Pointfs &points);
 // The excluded region as hole-free, counter-clockwise, scaled polygons (zero-area pieces dropped).
 Slic3r::Polygons bed_exclude_area_polygons(const Pointfs &points);
 // Unscaled boxes for the GUI, which works in boxes (PartPlate exclusion boxes, arrange's fixed

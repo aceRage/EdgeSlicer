@@ -275,3 +275,65 @@ TEST_CASE("Mutating slices at the Slice boundary cascades downstream", "[slicing
     };
     CHECK(fill_area(true) < fill_area(false));
 }
+
+// EdgeSlicer curved tops run the contouring step after the supports (Print::process). The
+// Contouring hook must fire where contouring actually completes: once per object, before the
+// SupportMaterial hook normally and after it for an object with curved tops on.
+TEST_CASE("Contouring hook fires once, after supports when curved tops run late", "[slicing_pipeline][CurvedTops]")
+{
+    using S = SlicingPipelineStepPlugin;
+    for (const bool curved_tops : {false, true}) {
+        DYNAMIC_SECTION("curved tops " << (curved_tops ? "on" : "off")) {
+            std::vector<S> steps;
+            Print::set_slicing_pipeline_hook_fn([&](Print&, const PrintObject* o, S s) {
+                if (o != nullptr)
+                    steps.push_back(s);
+            });
+            Print              print;
+            Model              model;
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+            config.set_key_value("curved_tops_enabled", new ConfigOptionBool(curved_tops));
+            init_print({cube20()}, print, model, config);
+            REQUIRE(print.objects().front()->curved_tops_after_support() == curved_tops);
+            print.process();
+            Print::set_slicing_pipeline_hook_fn(nullptr);
+
+            CHECK(std::count(steps.begin(), steps.end(), S::posContouring) == 1);
+            CHECK(std::count(steps.begin(), steps.end(), S::posSupportMaterial) == 1);
+            const auto contour = std::find(steps.begin(), steps.end(), S::posContouring);
+            const auto support = std::find(steps.begin(), steps.end(), S::posSupportMaterial);
+            REQUIRE(contour != steps.end());
+            REQUIRE(support != steps.end());
+            if (curved_tops)
+                CHECK(support < contour);
+            else
+                CHECK(contour < support);
+            // Contouring is always reported before the step that follows it in both orders.
+            const auto lift = std::find(steps.begin(), steps.end(), S::posDetectOverhangsForLift);
+            REQUIRE(lift != steps.end());
+            CHECK(contour < lift);
+        }
+    }
+}
+
+// The hook is read once per process() run, so replacing it while a slice runs is safe and the
+// running slice keeps the dispatcher it started with.
+TEST_CASE("Replacing the hook during a slice keeps the running slice's dispatcher", "[slicing_pipeline]")
+{
+    int first = 0, second = 0;
+    Print::set_slicing_pipeline_hook_fn([&](Print&, const PrintObject*, SlicingPipelineStepPlugin s) {
+        ++first;
+        if (s == SlicingPipelineStepPlugin::posSlice)
+            Print::set_slicing_pipeline_hook_fn([&](Print&, const PrintObject*, SlicingPipelineStepPlugin) { ++second; });
+    });
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+    init_print({cube20()}, print, model, config);
+    print.process();
+    Print::set_slicing_pipeline_hook_fn(nullptr);
+    CHECK(first > 1);
+    CHECK(second == 0);
+}

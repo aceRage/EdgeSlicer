@@ -326,7 +326,7 @@ int run_child(Channel& channel)
     if (hello.contains("data_dir") && hello["data_dir"].is_string()) {
         const std::string dir = hello["data_dir"].get<std::string>();
         child_diag("set_data_dir " + dir);
-        Slic3r::set_data_dir(dir);
+        Slic3r::set_data_dir_tolerant(dir);
     }
     if (hello.contains("resources_dir") && hello["resources_dir"].is_string())
         Slic3r::set_resources_dir(hello["resources_dir"].get<std::string>());

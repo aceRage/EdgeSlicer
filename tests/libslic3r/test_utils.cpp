@@ -1172,7 +1172,7 @@ TEST_CASE("copy_file reports the OS error when the destination cannot be written
 #endif // _WIN32
 }
 
-TEST_CASE("set_data_dir creates a path whose parents do not exist", "[utils]")
+TEST_CASE("set_data_dir_tolerant creates a path whose parents do not exist", "[utils]")
 {
     const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
                                             boost::filesystem::unique_path("edgeslicer_set_data_dir_%%%%%%%%");
@@ -1186,7 +1186,7 @@ TEST_CASE("set_data_dir creates a path whose parents do not exist", "[utils]")
         ~RestoreDataDir() { set_data_dir(prev); }
     } restore;
 
-    set_data_dir(nested.string());
+    set_data_dir_tolerant(nested.string());
     CHECK(data_dir() == nested.string());
     CHECK(boost::filesystem::is_directory(nested));
 

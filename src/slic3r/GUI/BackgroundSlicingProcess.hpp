@@ -114,6 +114,10 @@ public:
 
 	// BBS
 	void set_export_finished_event(int event_id) { m_event_export_finished_id = event_id; }
+	// Project strip P4 (one Plater per open project): the Plater this process belongs to gets its events, also while
+	// another project is shown. Null: the window's Plater (as before).
+	void set_owner(GUI::Plater *owner) { m_owner = owner; }
+	GUI::Plater *owner() const;
 
 	// Activate either m_fff_print or m_sla_print.
 	// Return true if changed.
@@ -308,6 +312,7 @@ private:
 	int                         m_event_export_began_id         = 0;
 	// wxWidgets command ID to be sent to the plater to inform that the G-code is exported end.
 	int							m_event_export_finished_id		= 0;
+	GUI::Plater                *m_owner                         = nullptr;
 
 };
 

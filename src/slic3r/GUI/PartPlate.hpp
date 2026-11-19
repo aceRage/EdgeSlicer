@@ -290,6 +290,9 @@ public:
     // full config (BambuStudio PartPlate::set_filament_maps / set_filament_map_mode).
     void set_manual_filament_map(const std::vector<int>& filament_map);
     void clear_manual_filament_map();
+    // The printer changed to another filament routing layout (PresetBundle::update_filament_routing_for_printer): the plate's
+    // map, manual grouping and dual-nozzle confirmation were made for the old printer's extruders. Returns whether any was set.
+    bool reset_filament_routing();
     // Empty unless this plate is in manual grouping.
     std::vector<int> get_manual_filament_map() const;
     // DualNozzleSync::Confirmation JSON (saved in the project; empty = never confirmed).
@@ -924,7 +927,10 @@ public:
 
     void postprocess_bed_index_for_selected(arrangement::ArrangePolygon& arrange_polygon);
     void postprocess_bed_index_for_unselected(arrangement::ArrangePolygon& arrange_polygon);
-    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon);
+    // Arranging only the current plate: bed 0 is that plate. With plates_before (the plate count before the
+    // arrangement), each further bed becomes a plate of its own after those, created when needed; without it
+    // (the CLI, which treats anything off the plate as a failure) it is put beside the last plate.
+    void postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before = -1);
 
     //postprocess an arrangement:;ArrangePolygon
     void postprocess_arrange_polygon(arrangement::ArrangePolygon& arrange_polygon, bool selected);

@@ -18,15 +18,25 @@
 #include <iostream>
 #include <new>
 #include <fstream>
+#include <mutex>
 
 namespace {
 
+std::mutex                       s_gcode_post_process_plugin_mutex;
 Slic3r::GCodePostProcessPluginFn s_gcode_post_process_plugin_fn;
+
+// A copy, so replacing or clearing the dispatcher while an export runs is safe.
+Slic3r::GCodePostProcessPluginFn gcode_post_process_plugin_fn()
+{
+    std::lock_guard<std::mutex> lock(s_gcode_post_process_plugin_mutex);
+    return s_gcode_post_process_plugin_fn;
+}
 
 }
 
 void Slic3r::set_gcode_post_process_plugin_fn(Slic3r::GCodePostProcessPluginFn fn)
 {
+    std::lock_guard<std::mutex> lock(s_gcode_post_process_plugin_mutex);
     s_gcode_post_process_plugin_fn = std::move(fn);
 }
 
@@ -254,7 +264,8 @@ static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy,
     const auto *post_process = config.opt<ConfigOptionStrings>("post_process");
     const auto *slicing_pipeline_plugin = config.opt<ConfigOptionStrings>("slicing_pipeline_plugin");
     const bool  have_scripts = post_process != nullptr && !post_process->values.empty();
-    const bool  have_plugins = s_gcode_post_process_plugin_fn && slicing_pipeline_plugin != nullptr &&
+    const Slic3r::GCodePostProcessPluginFn plugin_fn = gcode_post_process_plugin_fn();
+    const bool  have_plugins = plugin_fn && slicing_pipeline_plugin != nullptr &&
                               !slicing_pipeline_plugin->values.empty();
     if (!have_scripts && !have_plugins)
         return false;
@@ -350,7 +361,7 @@ static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy,
         if (have_plugins) {
             if (canceled && canceled())
                 throw CanceledException();
-            s_gcode_post_process_plugin_fn(path, host, output_name, config, canceled);
+            plugin_fn(path, host, output_name, config, canceled);
         }
         if (boost::filesystem::exists(path_output_name)) {
             try {

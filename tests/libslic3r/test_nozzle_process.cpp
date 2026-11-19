@@ -925,3 +925,113 @@ TEST_CASE("Bambu grouping printers take no filament nozzle assignment", "[Nozzle
     CHECK(b.full_config().option<ConfigOptionInts>("filament_nozzle_assignment")->values.empty());
     b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values.clear();
 }
+
+// ---- Owner bug 2026-11-08: a U1 with more filaments than toolheads, and a project carried between printer layouts ----------
+
+TEST_CASE("A filament's own tool reads back as its own tool when there are more filaments than tools", "[NozzleProcess][Assignment]")
+{
+    // While every filament has a tool of its own, the own tool is stored as 0 (unassigned) as before.
+    CHECK(filament_nozzle_assignment_value(2, 3, 4, 4) == 0);
+    CHECK(filament_nozzle_assignment_value(2, 1, 4, 4) == 1);
+    CHECK(filament_nozzle_assignment_value(2, 0, 4, 4) == 0);
+    // Six filaments on four tools: unassigned filaments follow filament_map, so the own tool is stored as itself.
+    CHECK(filament_nozzle_assignment_value(2, 3, 6, 4) == 3);
+    CHECK(filament_nozzle_assignment_value(3, 4, 6, 4) == 4);
+    CHECK(filament_nozzle_assignment_value(4, 2, 6, 4) == 2);
+
+    // The stale map of the owner's project (carried over from an H2C): filaments 3-6 on extruder 2.
+    const std::vector<int> fmap = { 1, 2, 2, 2, 2, 2 };
+    std::vector<int>       assignment(6, 0);
+    assignment[2] = filament_nozzle_assignment_value(2, 3, 6, 4);
+    assignment[3] = filament_nozzle_assignment_value(3, 4, 6, 4);
+    assignment    = filament_nozzle_assignment_stored(assignment);
+    CHECK(physical_extruder_for_filament(4, 6, fmap, 3, assignment) == 2); // T3
+    CHECK(physical_extruder_for_filament(4, 6, fmap, 4, assignment) == 3); // T4
+    CHECK(physical_extruder_for_filament(4, 6, fmap, 2, assignment) == 1); // T2, untouched
+}
+
+TEST_CASE("A U1 with six filaments puts filament 3 on T3 and filament 4 on T4", "[NozzleProcess][Assignment][PresetBundle]")
+{
+    PresetBundle &b = vendor_bundle("Snapmaker");
+    REQUIRE(b.printers.select_preset_by_name("Snapmaker U1 (0.4 nozzle)", true));
+    b.update_compatible(PresetSelectCompatibleType::Never);
+    REQUIRE(b.filament_nozzle_assignment_supported());
+    const std::vector<std::string> saved_filaments = b.filament_presets;
+    REQUIRE(!saved_filaments.empty());
+    b.filament_presets.assign(6, saved_filaments.front());
+    b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values.clear();
+    b.project_config.option<ConfigOptionInts>("filament_map", true)->values = { 1, 2, 2, 2, 2, 2 };
+
+    CHECK(b.filament_nozzles()[2] == 1); // T2 before: the stale map
+    CHECK(b.set_filament_nozzle(2, 3));
+    CHECK(b.set_filament_nozzle(3, 4));
+    const std::vector<size_t> tools = b.filament_nozzles();
+    CHECK(tools[0] == 0);
+    CHECK(tools[1] == 1);
+    CHECK(tools[2] == 2);
+    CHECK(tools[3] == 3);
+    CHECK(b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment")->values == std::vector<int>{ 0, 0, 3, 4 });
+
+    b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values.clear();
+    b.project_config.option<ConfigOptionInts>("filament_map", true)->values = { 1 };
+    b.filament_presets = saved_filaments;
+}
+
+TEST_CASE("Printers of another filament routing layout get a fresh filament map", "[NozzleProcess][Routing]")
+{
+    DynamicPrintConfig u1;
+    u1.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4,0.4,0.4" }, { "extruder_max_nozzle_count", "1,1,1,1" } });
+    DynamicPrintConfig h2c;
+    h2c.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" }, { "extruder_max_nozzle_count", "1,6" } });
+    DynamicPrintConfig h3c;
+    h3c.set_deserialize_strict({ { "nozzle_diameter", "0.4" }, { "extruder_max_nozzle_count", "9" }, { "single_extruder_multi_material", "1" } });
+    DynamicPrintConfig h2c_06 = h2c;
+    h2c_06.set_deserialize_strict({ { "nozzle_diameter", "0.6,0.6" } });
+    CHECK(filament_routing_layout(u1) != filament_routing_layout(h2c));
+    CHECK(filament_routing_layout(h2c) != filament_routing_layout(h3c));
+    CHECK(filament_routing_layout(u1) != filament_routing_layout(h3c));
+    CHECK(filament_routing_layout(h2c) == filament_routing_layout(h2c_06)); // another nozzle size keeps the project's map
+
+    DynamicPrintConfig project;
+    project.set_deserialize_strict({ { "filament_map", "1,2,2,1,1,1" },
+                                     { "filament_map_mode", "Manual" },
+                                     { "filament_rack_nozzle_slot", "0,2,3,0,0,0" },
+                                     { "filament_side_pin", "0,2" },
+                                     { "filament_rack_nozzle_diameter", "0,0.6" },
+                                     { "filament_nozzle_assignment", "0,0,0,0,2" },
+                                     { "extruder_ams_count", "1#1|4#0;1#0|4#2" },
+                                     { "extruder_nozzle_stats", "Standard#1;Standard#4" } });
+    CHECK(reset_filament_routing(project, 6));
+    CHECK(project.option<ConfigOptionInts>("filament_map")->values == std::vector<int>(6, 1));
+    CHECK(project.option("filament_map_mode")->getInt() == int(FilamentMapMode::fmmAutoForFlush));
+    CHECK(project.option<ConfigOptionInts>("filament_rack_nozzle_slot")->values == std::vector<int>{ 0 });
+    CHECK(project.option<ConfigOptionInts>("filament_side_pin")->values == std::vector<int>{ 0 });
+    CHECK(project.option<ConfigOptionFloats>("filament_rack_nozzle_diameter")->values == std::vector<double>{ 0. });
+    CHECK(project.option<ConfigOptionInts>("filament_nozzle_assignment")->values.empty());
+    CHECK(project.option<ConfigOptionStrings>("extruder_ams_count")->values.empty());
+    CHECK(project.option<ConfigOptionStrings>("extruder_nozzle_stats")->values.empty());
+    // Already fresh: nothing to do.
+    CHECK_FALSE(reset_filament_routing(project, 6));
+}
+
+TEST_CASE("Switching an H3C project to an H2C resets its rack pins and map, a nozzle size change does not", "[NozzleProcess][Routing][PresetBundle]")
+{
+    PresetBundle &b = vendor_bundle("BBL");
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+    b.note_filament_routing_layout();
+    CHECK_FALSE(b.update_filament_routing_for_printer()); // same printer
+    const size_t filaments = b.filament_presets.size();
+    b.project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 0, 2 };
+    b.project_config.option<ConfigOptionInts>("filament_map", true)->values = std::vector<int>(filaments, 1);
+
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2C 0.4 nozzle", true));
+    CHECK(b.update_filament_routing_for_printer());
+    CHECK(b.project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot")->values == std::vector<int>{ 0 });
+
+    // A pin made on the H2C survives a nozzle size change of the same printer.
+    b.project_config.option<ConfigOptionInts>("filament_side_pin", true)->values = { 2 };
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2C 0.6 nozzle", true));
+    CHECK_FALSE(b.update_filament_routing_for_printer());
+    CHECK(b.project_config.option<ConfigOptionInts>("filament_side_pin")->values == std::vector<int>{ 2 });
+    b.project_config.option<ConfigOptionInts>("filament_side_pin", true)->values = { 0 };
+}

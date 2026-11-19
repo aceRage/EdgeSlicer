@@ -9,6 +9,8 @@
 #include "ShortestPath.hpp"
 #include "VariableWidth.hpp"
 #include "Arachne/WallToolPaths.hpp"
+#include "FineDetail.hpp"
+#include "ThinFeatures.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "ExPolygonCollection.hpp"
 #include "Geometry.hpp"
@@ -17,6 +19,7 @@
 #include <cmath>
 #include <cassert>
 #include <functional>
+#include <map>
 #include <unordered_set>
 #include <thread>
 #include "libslic3r/AABBTreeLines.hpp"
@@ -689,19 +692,39 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                 }
             }
 
+            // Edge: Arachne lays the overhang part of a wall at the wall's own width: thick_polyline_to_multi_path keeps the
+            // overhang flow as it is only when it is a round, thick bridge. With thick bridges off the overhang flow is a
+            // wall's flow with the bridge flow ratio applied (LayerRegion::bridging_flow), and the ratio was lost with the
+            // width. Apply it to what Arachne laid, as the classic walls have it.
+            auto append_overhang = [&perimeter_generator](ExtrusionPaths &dst, const ClipperLib_Z::Paths &overhangs) {
+                const size_t first = dst.size();
+                extrusion_paths_append(dst, overhangs, erOverhangPerimeter, perimeter_generator.overhang_flow);
+                const Flow  &overhang_flow = perimeter_generator.overhang_flow;
+                const double ratio         = perimeter_generator.config->bridge_flow.value;
+                if (overhang_flow.bridge() || ratio <= 0. || ratio == 1.)
+                    return;
+                for (size_t i = first; i < dst.size(); ++i) {
+                    ExtrusionPath &path = dst[i];
+                    if (path.width <= path.height)
+                        continue; // Flow::with_flow_ratio() takes a flat extrusion
+                    const Flow flow = Flow(path.width, path.height, overhang_flow.nozzle_diameter()).with_flow_ratio(ratio);
+                    path.mm3_per_mm = flow.mm3_per_mm();
+                    path.width      = flow.width();
+                    path.height     = flow.height();
+                }
+            };
+
             // get overhang paths by checking what parts of this loop fall
             // outside the grown lower slices (thus where the distance between
             // the loop centerline and original lower slices is >= half nozzle diameter
             if (over_support_clip_paths.empty()) {
-                extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
-                    perimeter_generator.overhang_flow);
+                append_overhang(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference));
             } else {
                 // Ultra (over-support walls): the loop's OWN flow, not the bridging flow.
                 extrusion_paths_append(paths, clip_extrusion(extrusion_path, over_support_clip_paths, ClipperLib_Z::ctIntersection),
                     erOverSupportPerimeter,
                     is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
-                extrusion_paths_append(paths, clip_extrusion(extrusion_path, non_overhang_clip_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
-                    perimeter_generator.overhang_flow);
+                append_overhang(paths, clip_extrusion(extrusion_path, non_overhang_clip_paths, ClipperLib_Z::ctDifference));
             }
 
             // Reapply the nearest point search for starting point.
@@ -1144,8 +1167,10 @@ Polylines reconnect_polylines(const Polylines &polylines, double limit_distance)
     if (polylines.empty())
         return polylines;
 
-    std::unordered_map<size_t, Polyline> connected;
-    connected.reserve(polylines.size());
+    // An ordered map: the result is read out of it below, and has to come in the order of the input (ascending index)
+    // with every standard library. Out of an unordered_map it came last to first with libc++ and libstdc++ and first to
+    // last with the MSVC library, and that order decides the order the extra perimeters are printed in.
+    std::map<size_t, Polyline> connected;
     for (size_t i = 0; i < polylines.size(); i++) {
         if (!polylines[i].empty()) {
             connected.emplace(i, polylines[i]);
@@ -1296,6 +1321,10 @@ ExtrusionPaths sort_extra_perimeters(const ExtrusionPaths& extra_perims, int ind
                     reverse  = true;
                 }
             }
+            // This compares a squared distance with a length, but nothing depends on its outcome: next_idx was reset to
+            // null_idx before the search above, so that search started at path 0 (null_idx + 1 wraps around) and is the
+            // same search, from the same point, as the one at the top of the loop that runs when next_idx is cleared
+            // here. Both pick the same path and direction. Left as it is in PrusaSlicer and OrcaSlicer.
             if (dist > scaled(5.0)) {
                 next_idx = null_idx;
             }
@@ -1497,17 +1526,23 @@ std::tuple<std::vector<ExtrusionPaths>, Polygons> generate_extra_perimeters_over
                 if (!first_overhang_is_closed_and_anchored) {
                     std::reverse(overhang_region.begin(), overhang_region.end());
                 } else {
+                    // Start the loop at its point furthest onto the lower layer (the signed distance is negative inside).
+                    // The loop is a closed polyline, its last point repeats the first: drop that point before turning the
+                    // loop and close it again afterwards, or the old start stays in the path twice and the loop is left
+                    // open at its new start.
+                    Points &loop = overhang_region.front().polyline.points;
+                    loop.pop_back();
                     size_t min_dist_idx = 0;
                     double min_dist = std::numeric_limits<double>::max();
-                    for (size_t i = 0; i < overhang_region.front().polyline.size(); i++) {
-                        Point p = overhang_region.front().polyline[i];
-                        if (double d = lower_layer_aabb_tree.distance_from_lines<true>(p) < min_dist) {
+                    for (size_t i = 0; i < loop.size(); i++) {
+                        // The comparison must not be part of the initializer: "double d = distance < min_dist" made d 0 or 1.
+                        if (double d = lower_layer_aabb_tree.distance_from_lines<true>(loop[i]); d < min_dist) {
                             min_dist = d;
                             min_dist_idx = i;
                         }
                     }
-                    std::rotate(overhang_region.front().polyline.begin(), overhang_region.front().polyline.begin() + min_dist_idx,
-                                overhang_region.front().polyline.end());
+                    std::rotate(loop.begin(), loop.begin() + min_dist_idx, loop.end());
+                    loop.push_back(loop.front());
                 }
                 auto first_unanchored          = std::stable_partition(overhang_region.begin(), overhang_region.end(), is_anchored);
                 int  index_of_first_unanchored = first_unanchored - overhang_region.begin();
@@ -1655,6 +1690,38 @@ static void defer_unsupported_loops(const PerimeterGenerator &perimeter_generato
             loop->print_after_infill = true;
 }
 
+// EdgeSlicer, thin feature notice. Does Fine text lower either width of the thin-feature rule on this layer? Fine detail
+// does not act on the first layer (make_paths_params), so there it never does.
+bool PerimeterGenerator::fine_text_prints_thinner(coord_t bead_width_0, coord_t bead_width_x) const
+{
+    if (this->layer_id <= 0)
+        return false;
+    PrintRegionConfig fine = *this->config;
+    fine.fine_detail.value = FineDetailLevel::FineText;
+    const Arachne::WideningLimits now  = Arachne::widening_limits(Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config),
+                                                                  bead_width_0, bead_width_x, layer_height);
+    const Arachne::WideningLimits text = Arachne::widening_limits(Arachne::make_paths_params(this->layer_id, *object_config, *print_config, &fine),
+                                                                  bead_width_0, bead_width_x, layer_height);
+    return text.input_width < now.input_width || text.output_width < now.output_width;
+}
+
+void PerimeterGenerator::observe_thin_features(const ExPolygons &outline, const ThinFeatureLimits &limits, int hint,
+                                               coord_t bead_width_0, coord_t bead_width_x) const
+{
+    if (this->thin_features == nullptr)
+        return;
+    ThinFeatureLayer &layer  = *this->thin_features;
+    const size_t      before = layer.skipped.size() + layer.widened.size();
+    find_thin_features(outline, limits, layer);
+    if (layer.skipped.size() + layer.widened.size() == before)
+        return;
+    if (hint == 2) {
+        layer.can_print_thinner          = true;
+        layer.classic_without_thin_walls = true;
+    } else if (hint == 1 && this->fine_text_prints_thinner(bead_width_0, bead_width_x))
+        layer.can_print_thinner = true;
+}
+
 void PerimeterGenerator::process_classic()
 {
     group_region_by_fuzzify(*this);
@@ -1788,7 +1855,8 @@ void PerimeterGenerator::process_classic()
                 ExPolygons offsets_with_smaller_width;
                 if (i == 0) {
                     // look for thin walls
-                    if (this->config->detect_thin_wall) {
+                    // EdgeSlicer, Fine detail D4 (a): a region with Fine detail on detects thin walls too.
+                    if (FineDetail::classic_thin_walls(*this->config)) {
                         // the minimum thickness of a single loop is:
                         // ext_width/2 + ext_spacing/2 + spacing/2 + width/2
                         offsets = offset2_ex(last,
@@ -1804,6 +1872,9 @@ void PerimeterGenerator::process_classic()
                         // the maximum thickness of our thin wall area is equal to the minimum thickness of a single loop
                         for (ExPolygon &ex : expp)
                             ex.medial_axis(min_width, ext_perimeter_width + ext_perimeter_spacing2, &thin_walls);
+                        // EdgeSlicer, thin feature notice: thin-wall lines follow the feature down to nozzle / 3.
+                        if (this->thin_features != nullptr)
+                            this->observe_thin_features(last, ThinFeatureLimits{ min_width, 0, 2 * ext_perimeter_width }, 0, 0, 0);
                     } else {
                         coord_t ext_perimeter_smaller_width = this->smaller_ext_perimeter_flow.scaled_width();
                         for (const ExPolygon& expolygon : last) {
@@ -1816,11 +1887,17 @@ void PerimeterGenerator::process_classic()
                             if (offset_result.empty() &&
                                 expolygon.area() < (double)(ext_perimeter_width + ext_min_spacing_smaller) * scale_(narrow_loop_length_threshold)) {
                                 // BBS: for narrow external loop, use smaller line width
+                                // EdgeSlicer, thin feature notice: a narrow island prints from the smaller width up.
+                                if (this->thin_features != nullptr)
+                                    this->observe_thin_features(ExPolygons{ expolygon }, ThinFeatureLimits{ ext_perimeter_smaller_width, 0, 2 * ext_perimeter_width }, 2, 0, 0);
                                 ExPolygons temp_result = offset_ex(expolygon, -float(ext_perimeter_smaller_width / 2.));
                                 offsets_with_smaller_width.insert(offsets_with_smaller_width.end(), temp_result.begin(), temp_result.end());
                             }
                             else {
                                 //BBS: for not narrow loop, use normal external perimeter line width
+                                // EdgeSlicer, thin feature notice: the full external line has to fit.
+                                if (this->thin_features != nullptr)
+                                    this->observe_thin_features(ExPolygons{ expolygon }, ThinFeatureLimits{ ext_perimeter_width, 0, 2 * ext_perimeter_width }, 2, 0, 0);
                                 ExPolygons temp_result = offset_ex(expolygon, -float(ext_perimeter_width / 2.));
                                 offsets.insert(offsets.end(), temp_result.begin(), temp_result.end());
                             }
@@ -2335,6 +2412,48 @@ void PerimeterGenerator::add_infill_contour_for_arachne( ExPolygons        infil
     append(*this->fill_no_overlap, offset2_ex(union_ex(inner_pp), float(-min_perimeter_infill_spacing / 2.), float(+min_perimeter_infill_spacing / 2.)));
 }
 
+bool counterbore_outline_is_convex(const Polygon &outline)
+{
+    const Points &points = outline.points;
+    const size_t  count  = points.size();
+    if (count < 3)
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        const Vec2d a = points[(i + count - 1) % count].cast<double>();
+        const Vec2d b = points[i].cast<double>();
+        const Vec2d c = points[(i + 1) % count].cast<double>();
+        // Twice the area of the corner's triangle: over the length of its far side, how far the corner stands off
+        // that side.
+        if (cross2(Vec2d(b - a), Vec2d(c - b)) < -double(SCALED_EPSILON) * (c - a).norm())
+            return false;
+    }
+    return true;
+}
+
+// Counterbore hole bridging: of the areas of a region that have nothing under them, those with one of the region's
+// holes on their edge. A counterbore printed wide end down is a hole that narrows from the layer below: on the first
+// layer of its narrow part what has nothing under it lies round the narrow hole. An area with no hole on its edge is
+// an overhang or a bridge of another kind (a deck across two posts, a table top), whatever holes the region has
+// elsewhere, and is not for process_no_bridge.
+static ExPolygons unsupported_with_a_hole_on_the_edge(ExPolygons unsupported, const Polygons &holes)
+{
+    if (unsupported.empty() || holes.empty())
+        return {};
+    // A hole within this of an area is on its edge.
+    const float touching = float(scale_(0.01));
+    Polygons    plugs;
+    plugs.reserve(holes.size());
+    for (Polygon hole : holes) {
+        hole.make_counter_clockwise();
+        plugs.emplace_back(std::move(hole));
+    }
+    const Polygons beside = offset(plugs, touching);
+    unsupported.erase(std::remove_if(unsupported.begin(), unsupported.end(),
+                                     [&beside](const ExPolygon &area) { return intersection_ex(ExPolygons{area}, beside).empty(); }),
+                      unsupported.end());
+    return unsupported;
+}
+
 // Orca: sacrificial bridge layer algorithm ported from SuperSlicer
 void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perimeter_spacing, coord_t ext_perimeter_width)
 {
@@ -2354,6 +2473,9 @@ void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perim
             if (!unsupported.empty()) {
                 //remove small overhangs
                 ExPolygons unsupported_filtered = opening_ex(unsupported, perimeter_spacing);
+                // Keep only what a hole of this region borders: asking whether the region has a hole anywhere
+                // (below) took any bridge or overhang of a region with a hole in it for a counterbore.
+                unsupported_filtered = unsupported_with_a_hole_on_the_edge(std::move(unsupported_filtered), surface->expolygon.holes);
 
                 if (!unsupported_filtered.empty()) {
                     //to_draw.insert(to_draw.end(), last.begin(), last.end());
@@ -2397,7 +2519,7 @@ void PerimeterGenerator::process_no_bridge(Surfaces& all_surfaces, coord_t perim
                                     if (contour_bigger.size() == 1) poly_unsupp_bigger.contour = contour_bigger[0];
 
                                     //check convex, has some bridge, not overhang
-                                    if (contour_simplified.size() == 1 && contour_bigger.size() == 1 && contour_simplified[0].concave_points().size() == 0
+                                    if (contour_simplified.size() == 1 && contour_bigger.size() == 1 && counterbore_outline_is_convex(contour_simplified[0])
                                         && intersection_ex(bridgeable, ExPolygons{ poly_unsupp }).size() > 0
                                         && diff_ex(ExPolygons{ poly_unsupp_bigger }, union_ex(last, offset_ex(bridgeable, bridged_infill_margin + perimeter_spacing / 2)), ApplySafetyOffset::Yes).size() == 0
                                     ) {
@@ -2883,7 +3005,24 @@ void PerimeterGenerator::process_arachne()
     // topmost and first layers - sees the same answer.
     const bool only_one_wall_top         = this->config->only_one_wall_top && has_top_shell_layers(*this->config);
     const bool only_one_wall_first_layer = this->config->only_one_wall_first_layer && has_bottom_shell_layers(*this->config);
+
+    // EdgeSlicer, thin feature notice: what Arachne can not follow on this layer, in the model's own widths (observation
+    // only). A feature of model width w reaches Arachne as w less the shrink below, so it gets no line under
+    // input_width + shrink, and the line printed for the thinnest ones is output_width + the line's own overhang.
+    ThinFeatureLimits thin_limits;
+    const bool        observe_thin = this->thin_features != nullptr && this->config->wall_loops > 0;
+    if (observe_thin) {
+        const bool   precise = config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter;
+        const double shrink  = precise ? double(ext_perimeter_width - ext_perimeter_spacing) : 0.5 * double(ext_perimeter_width - ext_perimeter_spacing);
+        const Arachne::WideningLimits widening = Arachne::widening_limits(
+            Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config), ext_perimeter_spacing, perimeter_spacing, layer_height);
+        thin_limits.skip_width = widening.input_width + coord_t(std::lround(2. * shrink));
+        thin_limits.line_width = scaled<coord_t>(Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(widening.output_width), float(layer_height)));
+        thin_limits.min_length = 2 * ext_perimeter_width;
+    }
     for (const Surface& surface : all_surfaces) {
+        if (observe_thin)
+            this->observe_thin_features(ExPolygons{ surface.expolygon }, thin_limits, 1, ext_perimeter_spacing, perimeter_spacing);
         coord_t bead_width_0 = ext_perimeter_spacing;
         // detect how many perimeters must be generated for this island
         int loop_number = this->config->wall_loops + surface.extra_perimeters - 1; // 0-indexed loops
@@ -2907,7 +3046,8 @@ void PerimeterGenerator::process_arachne()
                        apply_precise_outer_wall? -float(ext_perimeter_width - ext_perimeter_spacing )
                                                  : -float(ext_perimeter_width / 2. - ext_perimeter_spacing / 2.));
         
-        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config);
+        // EdgeSlicer, Fine detail: the region config carries the level, so a modifier can set it.
+        Arachne::WallToolPathsParams input_params = Arachne::make_paths_params(this->layer_id, *object_config, *print_config, this->config);
         // Set params is_top_or_bottom_layer for adjusting short-wall removal sensitivity.
         input_params.is_top_or_bottom_layer = (is_bottom_layer || is_topmost_layer) ? true : false;
 
@@ -3383,7 +3523,10 @@ ExPolygons PerimeterGenerator::printable_slices(const ExPolygons &slices) const
     double min_width = *std::min_element(print_config->nozzle_diameter.values.begin(),
                                          print_config->nozzle_diameter.values.end()) / 3.;
     if (object_config->wall_generator.value == PerimeterGeneratorType::Arachne) {
-        const double min_feature_size = Arachne::make_paths_params(layer_id, *object_config, *print_config).min_feature_size;
+        // EdgeSlicer, Fine detail: the region's limit, which Fine text lowers (resolves low, as above).
+        const Arachne::WallToolPathsParams params = Arachne::make_paths_params(layer_id, *object_config, *print_config, config);
+        const double min_feature_size = params.thin_feature_size > 0.f ?
+            FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size) : params.min_feature_size;
         // Spiral vase can put a classic layer under an Arachne one, so there both limits apply.
         min_width = print_config->spiral_mode ? std::min(min_width, min_feature_size) : min_feature_size;
     }

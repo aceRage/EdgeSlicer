@@ -419,6 +419,38 @@ TEST_CASE("Ball & socket cut of a 20 mm cylinder", "[FlexiJoint]")
     }
 }
 
+// Triangles whose area is zero: two of their corners are the same point, or all three lie on
+// one line. A revolved profile that repeats a point makes a whole band of them.
+static size_t zero_area_triangles(const indexed_triangle_set &its)
+{
+    size_t n = 0;
+    for (const Vec3i32 &f : its.indices) {
+        const Vec3d a = its.vertices[f[0]].cast<double>();
+        const Vec3d b = its.vertices[f[1]].cast<double>();
+        const Vec3d c = its.vertices[f[2]].cast<double>();
+        if (0.5 * (b - a).cross(c - a).norm() < 1e-9)
+            ++ n;
+    }
+    return n;
+}
+
+TEST_CASE("The ball's body has no zero-area triangles", "[FlexiJoint]")
+{
+    // The ball's arc used to start on the point the neck had already ended on, so the revolved
+    // ball carried a band of one zero-area triangle pair per sector.
+    for (const FlexiJointParams &p : { ball_params(), flexi_auto_size(ball_params(), 6.), flexi_auto_size(ball_params(), 20.) }) {
+        REQUIRE(flexi_validate(p).empty());
+        const std::vector<indexed_triangle_set> bodies = flexi_male_bodies(p);
+        REQUIRE_FALSE(bodies.empty());
+        for (const indexed_triangle_set &its : bodies) {
+            INFO("outer radius " << p.outer_radius);
+            REQUIRE(zero_area_triangles(its) == 0);
+            REQUIRE(its_num_open_edges(its) == 0);
+            REQUIRE(its_volume(its) > 0.f);
+        }
+    }
+}
+
 // ------------------------------------------------------------------------- 3MF round trip
 
 TEST_CASE("A flexi jointed object survives a 3MF round trip", "[FlexiJoint]")
@@ -1122,6 +1154,123 @@ TEST_CASE("A flexi cut does not disable connectors on the next cut", "[FlexiJoin
     const CutHalves again = cut_with_joint(ring_params());
     REQUIRE(again.objects == 1);
     REQUIRE(again.volumes == 2);
+}
+
+// A cylinder of radius r and height h standing on z == 0, with a Flexi joint on the plane at
+// z == cut_z, cut there the way the gizmo cuts it.
+static void cut_cylinder_with_joint(const FlexiJointParams &p, double r, double h, double cut_z)
+{
+    Model        model;
+    ModelObject *mo = model.add_object();
+    ModelVolume *v  = mo->add_volume(TriangleMesh(its_make_cylinder(r, h, 2. * PI / 180.)));
+    v->set_type(ModelVolumeType::MODEL_PART);
+    mo->add_instance()->set_transformation(Geometry::Transformation());
+    CutConnector c;
+    c.pos        = Vec3d(0., 0., cut_z);
+    c.rotation_m = Transform3d::Identity();
+    c.radius     = flexi_outer_extent(p);
+    c.height     = flexi_protrusion_height(p);
+    c.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle);
+    c.flexi      = p;
+    add_flexi_joint_volume(mo, c, "Flexi joint-1");
+    Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., cut_z)),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepAsParts);
+    cut.perform_with_plane();
+}
+
+TEST_CASE("A Flexi joint that cannot be made refuses the cut", "[FlexiJoint]")
+{
+    // The refusal is a std::invalid_argument, which the Cut gizmo shows ("The cut could not be
+    // made.") and answers by leaving the object as it was. It used to be a log line, and the cut
+    // went on without the joint, or with half of it. A failed boolean takes the same way out; no
+    // input was found that makes both Manifold and mcut fail, so this checks the other reason:
+    // a plane 0.1 mm over the bed, whose lower face (gap/2 below it) is under the part.
+    {
+        const FlexiJointParams p = ring_params();
+        REQUIRE(0.5 * double(flexi_effective_gap(p)) > 0.1);
+        REQUIRE_THROWS_AS(cut_cylinder_with_joint(p, CYL_R, CYL_H, 0.1), std::invalid_argument);
+    }
+    // A joint that can be made still is.
+    REQUIRE_NOTHROW(cut_cylinder_with_joint(ring_params(), CYL_R, CYL_H, CUT_Z));
+}
+
+TEST_CASE("A Flexi joint is the only connector of its cut", "[FlexiJoint]")
+{
+    // A cut makes one Flexi joint. A second one, or any other connector with it, used to be
+    // dropped with a log line; the cut is refused instead, and the gizmo refuses it before.
+    const FlexiJointParams p = ring_params();
+    auto plug = [](const Vec3d &pos) {
+        CutConnector c;
+        c.pos        = pos;
+        c.rotation_m = Transform3d::Identity();
+        c.radius     = 1.f;
+        c.height     = 2.f;
+        c.attribs    = CutConnectorAttributes(CutConnectorType::Plug, CutConnectorStyle::Prism, CutConnectorShape::Circle);
+        return c;
+    };
+    auto joint = [&p](const Vec3d &pos) {
+        CutConnector c;
+        c.pos        = pos;
+        c.rotation_m = Transform3d::Identity();
+        c.radius     = flexi_outer_extent(p);
+        c.height     = flexi_protrusion_height(p);
+        c.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle);
+        c.flexi      = p;
+        return c;
+    };
+    auto cut_with = [&](const CutConnectors &connectors) {
+        Model        model;
+        ModelObject *mo = model.add_object();
+        ModelVolume *v  = mo->add_volume(TriangleMesh(its_make_cylinder(30., CYL_H, 2. * PI / 180.)));
+        v->set_type(ModelVolumeType::MODEL_PART);
+        mo->add_instance()->set_transformation(Geometry::Transformation());
+        int n = 0;
+        for (const CutConnector &c : connectors) {
+            const std::string name = "Connector-" + std::to_string(++ n);
+            if (c.attribs.type == CutConnectorType::FlexiJoint) {
+                add_flexi_joint_volume(mo, c, name);
+                continue;
+            }
+            // As GLGizmoCut3D::apply_cut_connectors() adds a plug.
+            ModelVolume *nv = mo->add_volume(TriangleMesh(its_make_cylinder(1., 1., 2. * PI / 36.)), ModelVolumeType::NEGATIVE_VOLUME);
+            nv->set_transformation(Geometry::translation_transform(c.pos) *
+                                   Geometry::scale_transform(Vec3d(c.radius, c.radius, c.height)));
+            nv->cut_info = { c.attribs.type, c.radius_tolerance, c.height_tolerance };
+            nv->name     = name;
+        }
+        Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., CUT_Z)),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepAsParts);
+        cut.perform_with_plane();
+    };
+
+    const Vec3d at(0., 0., CUT_Z), right(15., 0., CUT_Z);
+    REQUIRE_NOTHROW(cut_with({ joint(at) }));
+    REQUIRE_THROWS_AS(cut_with({ joint(at), joint(right) }), std::invalid_argument);
+    REQUIRE_THROWS_AS(cut_with({ joint(at), plug(right) }), std::invalid_argument);
+}
+
+TEST_CASE("The Cut gizmo's Flexi connector check", "[FlexiJoint]")
+{
+    // GLGizmoCut3D::can_perform_cut() and its warning line ask this.
+    auto of = [](std::initializer_list<CutConnectorType> types) {
+        CutConnectors out;
+        for (CutConnectorType t : types) {
+            CutConnector c;
+            c.attribs = CutConnectorAttributes(t, CutConnectorStyle::Prism, CutConnectorShape::Circle);
+            out.push_back(c);
+        }
+        return out;
+    };
+    using T = CutConnectorType;
+    REQUIRE(flexi_connectors_error(of({})).empty());
+    REQUIRE(flexi_connectors_error(of({ T::FlexiJoint })).empty());
+    REQUIRE(flexi_connectors_error(of({ T::Plug, T::Dowel, T::Snap })).empty());
+    // A TAC Joint with a Flexi joint has its own message.
+    REQUIRE(flexi_connectors_error(of({ T::FlexiJoint, T::TacJoint })).empty());
+    REQUIRE_FALSE(flexi_connectors_error(of({ T::FlexiJoint, T::FlexiJoint })).empty());
+    REQUIRE_FALSE(flexi_connectors_error(of({ T::FlexiJoint, T::Plug })).empty());
+    REQUIRE_FALSE(flexi_connectors_error(of({ T::Dowel, T::FlexiJoint })).empty());
+    REQUIRE_FALSE(flexi_connectors_error(of({ T::FlexiJoint, T::PushFit })).empty());
 }
 
 // ================================================================ phase 3: the Hinge
@@ -2072,6 +2221,92 @@ TEST_CASE("Thread cut of a 20 mm cylinder", "[FlexiJoint]")
 
     // The two flat faces are a Gap apart, exactly as for every other kind.
     REQUIRE(face_to_face_distance(h.upper, h.lower) == Approx(double(flexi_effective_gap(p))).margin(0.02));
+}
+
+// The threads the lead-in tests run on: the default, auto sized and a few variations of starts,
+// hand, lid side and start angle.
+static std::vector<FlexiJointParams> lead_in_cases()
+{
+    FlexiJointParams base;
+    base.kind = FlexiJointKind::Thread;
+    std::vector<FlexiJointParams> out{ base, flexi_auto_size(base, 20.), flexi_auto_size(base, 6.), thread_params() };
+    FlexiJointParams p = thread_params();
+    p.thread_starts    = 1;
+    p.thread_pitch     = 3.f;
+    p.thread_left_hand = true;
+    out.push_back(p);
+    p = thread_params();
+    p.thread_starts    = 3;
+    p.thread_pitch     = 9.f;
+    p.thread_lid_upper = false;
+    p.rotation         = 42.5f;
+    out.push_back(p);
+    p = flexi_auto_size(base, 12.);
+    p.thread_lid_upper  = false;
+    p.thread_left_hand  = true;
+    p.thread_turns      = 2.f;
+    p.thread_lead_turns = 0.25f;
+    out.push_back(p);
+    return out;
+}
+
+TEST_CASE("The thread's lead-in stays inside its groove", "[FlexiJoint]")
+{
+    // Each lid body less every relief of the body half, on the body half's side of the cut: what
+    // is left there is thread standing in the body half's material. The lead-in used to fade
+    // only the profile's radial offsets, so its root corners kept the full root width while
+    // moving outward, out past the flanks of the groove and through its clearance.
+    for (const FlexiJointParams &p : lead_in_cases()) {
+        INFO("major " << p.thread_major_dia << " pitch " << p.thread_pitch << " starts " << p.thread_starts
+             << " turns " << p.thread_turns << " lead " << p.thread_lead_turns << " lid upper " << p.thread_lid_upper);
+        REQUIRE(flexi_validate(p).empty());
+        const double face = 0.5 * double(flexi_effective_gap(p));
+        const std::vector<indexed_triangle_set> bodies  = p.thread_lid_upper ? flexi_upper_bodies(p) : flexi_lower_bodies(p);
+        const std::vector<indexed_triangle_set> reliefs = p.thread_lid_upper ? flexi_lower_reliefs(p) : flexi_upper_reliefs(p);
+        REQUIRE(bodies.size() == size_t(1 + thread_start_count(p)));
+        indexed_triangle_set side_its = its_make_cube(200., 200., 100.);
+        its_translate(side_its, Vec3f(-100.f, -100.f, p.thread_lid_upper ? float(-100. - face) : float(face)));
+        const TriangleMesh side(side_its);
+        double stray = 0.;
+        for (const indexed_triangle_set &its : bodies) {
+            TriangleMesh left(its);
+            bool         empty = false;
+            for (const indexed_triangle_set &r : reliefs) {
+                TriangleMesh out;
+                // An empty difference is the body wholly inside the reliefs.
+                if (!MeshBoolean::make_boolean_chain(left, TriangleMesh(r), "A_NOT_B", out, "test")) {
+                    empty = true;
+                    break;
+                }
+                left = std::move(out);
+            }
+            if (!empty)
+                stray += intersection_volume(left, side);
+        }
+        REQUIRE(stray < 1e-4);
+    }
+}
+
+TEST_CASE("The thread's lead-in ends on the core", "[FlexiJoint]")
+{
+    // The faded strand has to grow out of the core (the minor radius), not float off it: its
+    // two end points, where the profile has shrunk to nothing, lie on the core's surface.
+    for (const FlexiJointParams &p : lead_in_cases()) {
+        INFO("major " << p.thread_major_dia << " pitch " << p.thread_pitch << " starts " << p.thread_starts);
+        const std::vector<indexed_triangle_set> lid = p.thread_lid_upper ? flexi_upper_bodies(p) : flexi_lower_bodies(p);
+        REQUIRE(lid.size() == size_t(1 + thread_start_count(p)));
+        const double core = thread_minor_radius(p);
+        for (size_t i = 1; i < lid.size(); ++ i) {
+            const std::vector<Vec3f> &v = lid[i].vertices;
+            REQUIRE(v.size() > 2);
+            for (const Vec3f &end : { v.front(), v.back() })
+                REQUIRE(std::hypot(double(end.x()), double(end.y())) == Approx(core).margin(1e-3));
+            double rmin = std::numeric_limits<double>::max();
+            for (const Vec3f &q : v)
+                rmin = std::min(rmin, std::hypot(double(q.x()), double(q.y())));
+            REQUIRE(rmin >= core - 1e-3);
+        }
+    }
 }
 
 TEST_CASE("The thread unscrews: no collision anywhere along the helix", "[FlexiJoint]")

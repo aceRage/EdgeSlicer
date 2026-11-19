@@ -1,9 +1,12 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "BambuExport.hpp"
+#include "BambuMultiDiameter.hpp"
 #include "../Model.hpp"
 #include "../NozzleOverride.hpp"
 #include "../MixedFilament.hpp"
+#include "../MixedFilamentConfigRemap.hpp"
+#include "../MixedSublayer.hpp"
 #include "../Preset.hpp"
 #include "../CostOverrides.hpp"
 #include "../Utils.hpp"
@@ -398,6 +401,7 @@ static constexpr const char* FIRST_LAYER_TIME_ATTR = "first_layer_time";
 static constexpr const char* SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR = "support_material_on_wipe_tower";
 static constexpr const char* ENABLE_FILAMENT_DYNAMIC_MAP_ATTR = "enable_filament_dynamic_map";
 static constexpr const char* HAS_FILAMENT_SWITCHER_ATTR = "has_filament_switcher";
+static constexpr const char* MULTI_NOZZLE_DIAMETER_MODE_ATTR = "multi_nozzle_diameter_mode"; // BBS v02.09.01.70 bbs_3mf.cpp:383
 static constexpr const char* DEFAULT_AMS_TYPE_ATTR = "default_ams_type";
 static constexpr const char* SLICE_PREDICTION_ATTR = "prediction";
 static constexpr const char* SLICE_WEIGHT_ATTR = "weight";
@@ -854,6 +858,40 @@ static std::string join_int_list_comma(const std::vector<int>& values)
             stream << ",";
     }
     return stream.str();
+}
+
+// Mixed color sublayer P3 (D12): the highest 1-based filament id the project uses - painted states, object, part and
+// height-range filaments and every *_filament feature setting of the project, objects, parts and ranges. The Bambu
+// export writes mixed slots up to it only.
+static unsigned int bambu_mixed_max_used_filament_id(const Model &model, const DynamicPrintConfig &project)
+{
+    unsigned int max_id = 0;
+    auto from_config = [&max_id](const ConfigBase &config) {
+        for (const std::string &key : config.keys()) {
+            if (key != "extruder" && !boost::algorithm::ends_with(key, "_filament"))
+                continue;
+            if (const auto *opt = dynamic_cast<const ConfigOptionInt *>(config.option(key)); opt != nullptr && opt->value > 0)
+                max_id = std::max(max_id, unsigned(opt->value));
+        }
+    };
+    from_config(project);
+    for (const ModelObject *object : model.objects) {
+        from_config(object->config.get());
+        for (const ModelVolume *volume : object->volumes) {
+            from_config(volume->config.get());
+            for (int id : volume->get_extruders())
+                if (id > 0)
+                    max_id = std::max(max_id, unsigned(id));
+        }
+        for (const auto &range : object->layer_config_ranges)
+            from_config(range.second.get());
+    }
+    // Per-plate custom G-code: a tool change can name a mixed filament.
+    for (const auto &plate : model.plates_custom_gcodes)
+        for (const CustomGCode::Item &item : plate.second.gcodes)
+            if (item.type == CustomGCode::ToolChange && item.extruder > 0)
+                max_id = std::max(max_id, unsigned(item.extruder));
+    return max_id;
 }
 
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
@@ -1402,6 +1440,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // Edge also stamps its own and Snapmaker Orca 3MFs as From_BBS, so callers
         // that want a genuine BambuStudio project must use this flag, not From_BBS.
         bool m_is_bambu_studio_generator { false };
+        // Bambu Studio mixed filament slots converted to Edge mixed rows while the project config loaded
+        // (MixedSublayer.hpp). The model's ids are remapped once the objects are read.
+        BambuMixedImportResult m_bambu_mixed_import;
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1698,6 +1739,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_backup_path = model.get_backup_path();
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
+        // Bambu Studio mixed filament slots (MixedSublayer.hpp): the plates' per-filament nozzle maps lose the
+        // removed slots too.
+        if (result && m_bambu_mixed_import.converted) {
+            const BambuMixedImportResult &remap = m_bambu_mixed_import;
+            auto drop_removed = [&remap](std::vector<int> &values) {
+                if (values.size() != remap.old_slot_count)
+                    return;
+                for (auto it = remap.removed_slots.rbegin(); it != remap.removed_slots.rend(); ++it)
+                    values.erase(values.begin() + std::ptrdiff_t(*it));
+            };
+            for (PlateData *plate : plate_data_list)
+                if (plate != nullptr) {
+                    drop_removed(plate->filament_maps);
+                    drop_removed(plate->limit_filament_maps);
+                }
+        }
         is_bbl_3mf = m_is_bbl_3mf;
         if (is_bambu_studio)
             *is_bambu_studio = m_is_bambu_studio_generator;
@@ -2615,6 +2672,33 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             ++object_idx;
         }
 
+        // Bambu Studio mixed filament slots were removed from the filament list while the project config loaded:
+        // move every painted state and filament setting to its new id (physical ids above a removed slot shift
+        // down, a mixed slot becomes its Edge mixed row).
+        if (m_bambu_mixed_import.converted) {
+            const BambuMixedImportResult &remap = m_bambu_mixed_import;
+            size_t total = std::max(remap.old_slot_count, remap.new_physical_count);
+            for (unsigned int mapped : remap.id_remap)
+                total = std::max(total, size_t(mapped));
+            EnforcerBlockerStateMap state_map;
+            for (size_t i = 0; i < state_map.size(); ++i)
+                state_map[i] = EnforcerBlockerType(i);
+            for (size_t i = 1; i < remap.id_remap.size() && i < state_map.size(); ++i) {
+                const unsigned int mapped = remap.id_remap[i];
+                state_map[i] = (mapped == 0 || mapped >= state_map.size()) ? EnforcerBlockerType::NONE : EnforcerBlockerType(mapped);
+            }
+            for (ModelObject *mo : m_model->objects) {
+                remap_model_config_filament_ids(mo->config, remap.id_remap, total);
+                for (ModelVolume *mv : mo->volumes) {
+                    remap_model_config_filament_ids(mv->config, remap.id_remap, total);
+                    if (mv->type() == ModelVolumeType::MODEL_PART)
+                        mv->remap_extruder_ids(total, state_map);
+                }
+                for (auto &range : mo->layer_config_ranges)
+                    remap_model_config_filament_ids(range.second, remap.id_remap, total);
+            }
+        }
+
         const int max_filament_id = max_supported_filament_id_from_project_config(config);
         for (ModelObject* mo : m_model->objects) {
             const ConfigOptionInt* extruder_opt = dynamic_cast<const ConfigOptionInt*>(mo->config.option("extruder"));
@@ -3250,6 +3334,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             r.keep_upper         = rt.get<int>("<xmlattr>.keep_upper", 1) != 0;
             r.keep_lower         = rt.get<int>("<xmlattr>.keep_lower", 1) != 0;
             r.keep_as_parts      = rt.get<int>("<xmlattr>.keep_as_parts", 0) != 0;
+            r.apply_tac_joints   = rt.get<int>("<xmlattr>.apply_tac_joints", 0) != 0;
             r.place_on_cut_upper = rt.get<int>("<xmlattr>.place_on_cut_upper", 1) != 0;
             r.place_on_cut_lower = rt.get<int>("<xmlattr>.place_on_cut_lower", 0) != 0;
             r.rotate_upper       = rt.get<int>("<xmlattr>.rotate_upper", 0) != 0;
@@ -3592,9 +3677,41 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 add_error("Error load config from json:"+reason);
                 return true;
             }
+            // Mixed color sublayer (D3): Bambu Studio 2.9.1 mixed filament slots become Edge mixed rows. Edge does not
+            // define filament_is_mixed and friends, so they are read from the raw file.
+            m_bambu_mixed_import = BambuMixedImportResult();
+            try {
+                std::string json_text;
+                load_string_file(dest_file, json_text);
+                BambuMixedSlots slots;
+                if (parse_bambu_mixed_slots_json(json_text, slots) && slots.any_mixed()) {
+                    m_bambu_mixed_import = convert_bambu_mixed_slots(config, slots);
+                    if (const ConfigOptionDef *def = print_config_def.get("mixed_filament_definitions"); def != nullptr)
+                        for (const std::string &notice : m_bambu_mixed_import.notices) {
+                            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << notice;
+                            config_substitutions.substitutions.push_back(
+                                ConfigSubstitution{ def, notice, ConfigOptionUniquePtr(new ConfigOptionString("linear gradient")) });
+                        }
+                }
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": reading Bambu Studio mixed filaments failed: " << e.what();
+            }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
+            // AdaptiveLayerMerge step 5: Bambu Studio's multi_nozzle_diameter_mode / filament_diameter_map have no
+            // definition here (no switch, by owner decision), so the load above dropped them. Read them off the file,
+            // set the project's nozzles up from them and keep them off the unrecognized-key list.
+            {
+                boost::nowide::ifstream in(dest_file, std::ios::binary);
+                std::stringstream       text;
+                text << in.rdbuf();
+                const BambuMultiDiameter::ImportedKeys keys = BambuMultiDiameter::read_keys(text.str());
+                if (keys.any()) {
+                    const BambuMultiDiameter::ImportResult imported = BambuMultiDiameter::apply_import(config, keys);
+                    BambuMultiDiameter::forget_consumed_keys(config_substitutions.unrecogized_keys, keys, imported);
+                }
+            }
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
         return true;
@@ -6023,7 +6140,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             Transform3d volume_matrix_to_object = Transform3d::Identity();
-            bool        has_transform 		    = false;
+            bool        has_matrix              = false;
             int         shared_mesh_id          = object_id.second;
             if (volume_data)
             {
@@ -6032,7 +6149,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 for (const Metadata& metadata : volume_data->metadata) {
                     if (metadata.key == MATRIX_KEY) {
                         volume_matrix_to_object = Slic3r::Geometry::transform3d_from_string(metadata.value);
-                        has_transform 			= ! volume_matrix_to_object.isApprox(Transform3d::Identity(), 1e-10);
+                        has_matrix              = true;
                         found_count++;
                     }
                     else if (metadata.key == MESH_SHARED_KEY){
@@ -6132,10 +6249,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume = object.add_volume_with_shared_mesh(*shared_volume);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": line %1%, create volume using shared_mesh %2%")%__LINE__%shared_volume;
             }
-            // stores the volume matrix taken from the metadata, if present
-            if (has_transform)
-                volume->source.transform = Slic3r::Geometry::Transformation(volume_matrix_to_object);
-
             volume->calculate_convex_hull();
 
             //set transform from 3mf
@@ -6146,6 +6259,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 Vec3d shift = trangle_mesh.get_init_shift();
                 if (!shift.isApprox(Vec3d::Zero()))
                     volume->translate(shift);
+            }
+
+            // The "matrix" metadata is written as the volume's placement times its source transform (see the
+            // exporter); the mesh of this format is stored in the volume's own frame, so the source transform is
+            // the matrix with the placement just read taken back out. Stored whole, each save and open multiplied
+            // the placement into it once more.
+            if (has_matrix) {
+                const Transform3d source_transform = volume->get_matrix().inverse() * volume_matrix_to_object;
+                if (! source_transform.isApprox(Transform3d::Identity(), 1e-10))
+                    volume->source.transform = Slic3r::Geometry::Transformation(source_transform);
             }
 
             // recreate custom supports, seam and mmu segmentation from previously loaded attribute
@@ -7062,6 +7185,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // Export Bambu 3MF (StoreParams::bambu_compat): the project config converted once up front,
         // the context the per-object conversions need, and what was changed.
         bool m_bambu_compat { false };
+        // AdaptiveLayerMerge step 5: write Bambu Studio's multi_nozzle_diameter_mode / filament_diameter_map into the
+        // project settings (Format/BambuMultiDiameter.hpp). Set per export in save_model_to_file.
+        bool m_bambu_multi_diameter { false };
         // Names the CAD body blobs of one export uniquely.
         int  m_cad_body_count { 0 };
         // ... and the airbrush field blobs.
@@ -7186,12 +7312,91 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
+        // AdaptiveLayerMerge step 5: Bambu Studio's project-wide multi_nozzle_diameter_mode. A sliced plate in this
+        // export decides (Print::uses_multiple_nozzle_diameters()); a save without one falls back to the sizes the
+        // project's filaments are set to print with. Off on anything but a single-extruder rack, as in Bambu Studio.
+        m_bambu_multi_diameter = false;
+        if (store_params.config != nullptr && BambuMultiDiameter::single_extruder_rack(*store_params.config)) {
+            bool any_sliced = false, any_mixed = false;
+            for (const PlateData *plate : store_params.plate_data_list)
+                if (plate != nullptr && plate->is_sliced_valid) {
+                    any_sliced = true;
+                    any_mixed |= plate->uses_multiple_nozzle_diameters;
+                }
+            m_bambu_multi_diameter = any_sliced ? any_mixed : BambuMultiDiameter::config_uses_multiple_diameters(*store_params.config);
+        }
+
         m_bambu_compat = store_params.bambu_compat;
         m_bambu_report = BambuExport::Report();
         m_bambu_project.clear();
         if (m_bambu_compat && store_params.config != nullptr) {
-            m_bambu_ctx     = BambuExport::Context::from_project(*store_params.config);
-            m_bambu_project = BambuExport::convert_project(*store_params.config, m_bambu_ctx, m_bambu_report);
+            // Mixed color sublayer P3 (D12): the project's mixed rows become Bambu Studio mixed filament slots, appended
+            // after the physical ones in virtual id order, so the model's ids need no remap (MixedSublayer.hpp).
+            std::unique_ptr<DynamicPrintConfig> expanded;
+            BambuMixedExport                    mixed;
+            if (const auto *defs = store_params.config->option<ConfigOptionString>("mixed_filament_definitions");
+                defs != nullptr && !defs->value.empty() && store_params.model != nullptr) {
+                const unsigned int max_used = bambu_mixed_max_used_filament_id(*store_params.model, *store_params.config);
+                expanded = std::make_unique<DynamicPrintConfig>(*store_params.config);
+                mixed    = expand_bambu_mixed_slots(*expanded, max_used);
+                if (!mixed.any) {
+                    expanded.reset();
+                    const auto *colours = store_params.config->option<ConfigOptionStrings>("filament_colour");
+                    if (colours != nullptr && max_used > colours->values.size())
+                        m_bambu_report.notes.push_back("project: filament " + std::to_string(max_used) +
+                                                       " is a mixed filament that could not be written as a Bambu Studio slot");
+                    for (const std::string &note : mixed.notes)
+                        m_bambu_report.notes.push_back("project: " + note);
+                }
+            }
+            const DynamicPrintConfig &project = expanded ? *expanded : *store_params.config;
+            m_bambu_ctx     = BambuExport::Context::from_project(project);
+            m_bambu_project = BambuExport::convert_project(project, m_bambu_ctx, m_bambu_report);
+            if (mixed.any) {
+                auto bools = [](const std::vector<bool> &v) {
+                    BambuExport::Value out;
+                    out.vector = true;
+                    for (bool b : v)
+                        out.values.push_back(b ? "1" : "0");
+                    return out;
+                };
+                auto strings = [](const std::vector<std::string> &v) {
+                    BambuExport::Value out;
+                    out.vector  = true;
+                    out.strings = true;
+                    out.values  = v;
+                    return out;
+                };
+                m_bambu_project["filament_is_mixed"]                = bools(mixed.slots.is_mixed);
+                m_bambu_project["filament_mixed_components"]        = strings(mixed.slots.components);
+                m_bambu_project["filament_mixed_sublayer_ratios"]   = strings(mixed.slots.ratios);
+                m_bambu_project["filament_mixed_gradient"]          = bools(mixed.slots.gradient);
+                m_bambu_project["filament_mixed_gradient_range"]    = strings(mixed.slots.gradient_range);
+                m_bambu_project["filament_mixed_gradient_curve"]    = strings(mixed.slots.gradient_curve);
+                m_bambu_project["filament_mixed_gradient_per_part"] = bools(mixed.slots.gradient_per_part);
+                BambuExport::Value sublayer;
+                sublayer.values = { mixed.sublayer ? "1" : "0" };
+                m_bambu_project["enable_mixed_color_sublayer"] = sublayer;
+                m_bambu_report.converted.insert("filament_is_mixed");
+                m_bambu_report.notes.push_back("project: " + std::to_string(mixed.mixed_count) +
+                                               " EdgeSlicer mixed filament(s) written as Bambu Studio mixed filament slots");
+                for (const std::string &note : mixed.notes)
+                    m_bambu_report.notes.push_back("project: " + note);
+                // Bambu Studio's AMS layouts take at most 16 filaments on most printers; the slots are still written.
+                if (mixed.physical_count + mixed.mixed_count > 16)
+                    m_bambu_report.notes.push_back("project: " + std::to_string(mixed.physical_count + mixed.mixed_count) +
+                                                   " filaments including mixed slots; Bambu Studio may not load more than 16");
+            }
+            if (m_bambu_multi_diameter) {
+                BambuExport::Value mode;
+                mode.values = { "1" };
+                BambuExport::Value map;
+                map.vector  = true;
+                map.strings = true;
+                map.values  = BambuMultiDiameter::filament_diameter_map(project);
+                m_bambu_project[BambuMultiDiameter::MODE_KEY]         = mode;
+                m_bambu_project[BambuMultiDiameter::DIAMETER_MAP_KEY] = map;
+            }
         }
 
         if (auto info = store_params.model->model_info) {
@@ -7232,6 +7437,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     // backup mesh-only
+    // An object's name made fit for the name of its file in the package (and in the backup folder): the name is
+    // the user's, and a '/' or '\\' in it made a folder of it, ".." among them one level up. The name itself is
+    // kept as it is in the metadata.
+    static std::string object_file_name(const std::string &name)
+    {
+        return sanitize_filename(name);
+    }
+
     bool _BBS_3MF_Exporter::save_object_mesh(const std::string& temp_path, ModelObject const & object, int obj_id)
     {
         m_production_ext = true;
@@ -7241,7 +7454,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
 
-        auto filename = boost::format("3D/Objects/%s_%d.model") % object.name % obj_id;
+        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(object.name) % obj_id;
         std::string filepath = temp_path + "/" + filename.str();
         std::string filepath_tmp = filepath + ".tmp";
         boost::system::error_code ec;
@@ -7896,20 +8109,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             a += (int)thumbnail_data.pixels[4 * ((i + m) * thumbnail_data.width + j + n) + 3];
                         }
                     }
-                    r = std::clamp(0, r / sw / sh, 255);
-                    g = std::clamp(0, g / sw / sh, 255);
-                    b = std::clamp(0, b / sw / sh, 255);
-                    a = std::clamp(0, a / sw / sh, 255);
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 0] = (unsigned char)r;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 1] = (unsigned char)g;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 2] = (unsigned char)b;
-                    small_pixels[4 * (i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh) + 3] = (unsigned char)a;
+                    r = std::clamp(r / sw / sh, 0, 255);
+                    g = std::clamp(g / sw / sh, 0, 255);
+                    b = std::clamp(b / sw / sh, 0, 255);
+                    a = std::clamp(a / sw / sh, 0, 255);
+                    // Row i / sh (i steps by the step height), column j / sw.
+                    const size_t small_idx = 4 * (size_t(i / sh) * PLATE_THUMBNAIL_SMALL_WIDTH + size_t(j / sw));
+                    small_pixels[small_idx + 0] = (unsigned char)r;
+                    small_pixels[small_idx + 1] = (unsigned char)g;
+                    small_pixels[small_idx + 2] = (unsigned char)b;
+                    small_pixels[small_idx + 3] = (unsigned char)a;
                     //memcpy((void*)&small_pixels[4*(i / sw * PLATE_THUMBNAIL_SMALL_WIDTH + j / sh)], thumbnail_data.pixels.data() + 4*(i * thumbnail_data.width + j), 4);
                 }
             }
             size_t small_png_size = 0;
             void* small_png_data = tdefl_write_image_to_png_file_in_memory_ex((const void*)small_pixels.data(), PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT, 4, &small_png_size, MZ_DEFAULT_COMPRESSION, 1);
-            if (png_data != nullptr) {
+            res = false;
+            if (small_png_data != nullptr) {
                 std::string thumbnail_name = (boost::format("%1%_%2%_small.png") % local_path % (index + 1)).str();
                 res = mz_zip_writer_add_mem(&archive, thumbnail_name.c_str(), (const void*)small_png_data, small_png_size, MZ_NO_COMPRESSION);
                 mz_free(small_png_data);
@@ -7994,7 +8210,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 if (data._3mf_printer_thumbnail_small.empty()) {
                     if (plate_small_thumbnail_written)
-                        stream << "<Relationship Target=\"/Metadata/plate_1_small.png"
+                        stream << " <Relationship Target=\"/Metadata/plate_1_small.png"
                                << "\" Id=\"rel-5\" Type=\"http://schemas.bambulab.com/package/2021/cover-thumbnail-small\"/>\n";
                 } else {
                     stream << " <Relationship Target=\"/" << xml_escape(data._3mf_printer_thumbnail_small)
@@ -8257,7 +8473,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     auto & object_data = object_it->second;
 
                     if (m_split_model) {
-                        auto filename = boost::format("3D/Objects/%s_%d.model") % obj->name % backup_id;
+                        auto filename = boost::format("3D/Objects/%s_%d.model") % object_file_name(obj->name) % backup_id;
                         object_data.sub_path = "/" + filename.str();
                         object_paths.push_back(filename.str());
                     }
@@ -9207,6 +9423,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 to_write = &aligned;
             }
         }
+        // AdaptiveLayerMerge step 5: Bambu Studio's project keys for a job on several nozzle diameters
+        // (PresetBundle.cpp:77-78 on v02.09.01.70). Nothing is added otherwise, so other projects are written as before.
+        if (m_bambu_multi_diameter) {
+            if (to_write != &aligned)
+                aligned = config;
+            BambuMultiDiameter::add_project_keys(aligned, config);
+            to_write = &aligned;
+        }
 
         const std::string& temp_path = model.get_backup_path();
         std::string temp_file = temp_path + std::string("/") + "_temp_1.config";
@@ -9221,9 +9445,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add project embedded preset files
     bool _BBS_3MF_Exporter::_add_project_embedded_presets_to_archive(mz_zip_archive& archive, Model& model, std::vector<Preset*> project_presets)
     {
-        char buffer[1024];
-        snprintf(buffer, 1024, "; %s\n\n", header_slic3r_generated().c_str());
-        std::string out = buffer;
         int print_count = 0, filament_count = 0, printer_count = 0;
         const std::string& temp_path = model.get_backup_path();
 
@@ -9896,6 +10117,7 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
             rt.put("<xmlattr>.keep_upper",         r.keep_upper ? 1 : 0);
             rt.put("<xmlattr>.keep_lower",         r.keep_lower ? 1 : 0);
             rt.put("<xmlattr>.keep_as_parts",      r.keep_as_parts ? 1 : 0);
+            rt.put("<xmlattr>.apply_tac_joints", r.apply_tac_joints ? 1 : 0);
             rt.put("<xmlattr>.place_on_cut_upper", r.place_on_cut_upper ? 1 : 0);
             rt.put("<xmlattr>.place_on_cut_lower", r.place_on_cut_lower ? 1 : 0);
             rt.put("<xmlattr>.rotate_upper",       r.rotate_upper ? 1 : 0);
@@ -10177,7 +10399,14 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 // extruder prints with. Here that is the plate's: the project's sizes (P7, set by both the CLI and the GUI
                 // export path) and the rack nozzle the plate uses (P9). The printer preset's nozzle_diameter is only the
                 // fallback (owner report 2026-11-05: "0.4 | 0.4" in Bambu Connect for a 0.8 + 0.6 plate).
-                const std::string nozzle_diameters_str = slice_info_nozzle_diameters(*plate_data, &config);
+                std::string nozzle_diameters_str = slice_info_nozzle_diameters(*plate_data, &config);
+                // AdaptiveLayerMerge step 5: a plate in Bambu's multi-diameter mode (several nozzle sizes on one extruder's
+                // rack) reports the lowest-slot used filament's nozzle size once per extruder, as Bambu Studio 2.9.1 does
+                // (bbs_3mf.cpp:9100-9106 on v02.09.01.70).
+                const bool bambu_multi_diameter = BambuMultiDiameter::mode_for_job(plate_data->uses_multiple_nozzle_diameters, config);
+                if (bambu_multi_diameter)
+                    nozzle_diameters_str = BambuMultiDiameter::slice_info_nozzle_diameters(
+                        plate_data->slice_filaments_info, effective_nozzle_diameters(config).size(), nozzle_diameters_str);
 
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
@@ -10192,7 +10421,7 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << OUTSIDE_ATTR      << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->toolpath_outside << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_USED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_support_used << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LABEL_OBJECT_ENABLED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_label_object_enabled << "\"/>\n";
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->support_material_on_wipe_tower << "\"/>\n";
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << false << "\"/>\n"; // always false, as BambuStudio 24f90c04e (the H3C rejects true: HMS 0502-4010)
                 if (plate_data->nozzle_group_result)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ENABLE_FILAMENT_DYNAMIC_MAP_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->nozzle_group_result->is_support_dynamic_nozzle_map() << "\"/>\n";
                 else
@@ -10201,6 +10430,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     bool has_filament_switcher = config.has("has_filament_switcher") ? config.opt_bool("has_filament_switcher") : false;
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << HAS_FILAMENT_SWITCHER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << has_filament_switcher << "\"/>\n";
                 }
+                // AdaptiveLayerMerge step 5: Bambu Studio writes its multi-diameter switch here on every plate
+                // (bbs_3mf.cpp:9127 on v02.09.01.70). EdgeSlicer writes it only for a plate in that mode, so a
+                // single-diameter plate's slice_info is unchanged.
+                if (bambu_multi_diameter)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << MULTI_NOZZLE_DIAMETER_MODE_ATTR << "\" " << VALUE_ATTR << "=\"1\"/>\n";
 
                 // filament -> extruder map, 1 based. BBS always carries a full-length filament_map;
                 // this fork leaves it short on classic single-nozzle machines, so pad with 1 there.
@@ -10868,6 +11102,15 @@ private:
     }
 
     ~_BBS_Backup_Manager() {
+#ifdef _WIN32
+        // Runs among the DLL's static destructors, after ExitProcess has terminated the worker thread.
+        // If that thread died holding m_mutex, push_task() would wait forever. The thread is gone either way.
+        if (! m_mutex.try_lock()) {
+            m_thread.detach();
+            return;
+        }
+        m_mutex.unlock();
+#endif
         push_task({Exit});
         m_thread.join();
     }

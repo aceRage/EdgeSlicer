@@ -25,6 +25,7 @@
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/StaticBox.hpp"
 #include "ConnectPrinter.hpp"
+#include "SelectMachinePop.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/PlaterWorker.hpp"
 
@@ -342,6 +343,18 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     sizer_basic_right_info->Add(m_sizer_printer, 0, wxTOP, 0);
     sizer_basic_right_info->Add(0, 0, 0, wxTOP, FromDIP(4));
     sizer_basic_right_info->Add(m_text_printer_msg, 0, wxLEFT, 0);
+
+    // The selected LAN printer refused its saved code: open its name / access code dialog.
+    m_link_access_code = new wxHyperlinkCtrl(m_basic_panel, wxID_ANY, _L("The printer refused the access code. Re-enter it"), "");
+    m_link_access_code->SetFont(::Label::Body_12);
+    m_link_access_code->Bind(wxEVT_LEFT_DOWN, [this](auto &) {
+        const std::string dev_id = m_printer_last_select;
+        CallAfter([dev_id]() { open_printer_edit_dialog(dev_id); });
+    });
+    m_link_access_code->Bind(wxEVT_ENTER_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_HAND); });
+    m_link_access_code->Bind(wxEVT_LEAVE_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_ARROW); });
+    m_link_access_code->Hide();
+    sizer_basic_right_info->Add(m_link_access_code, 0, wxLEFT, 0);
 
 
     m_basicl_sizer->Add(m_sizer_thumbnail_area, 0, wxLEFT, 0);
@@ -967,7 +980,7 @@ void SelectMachineDialog::update_select_layout(MachineObject *obj)
         }
     }
 
-    if (obj && (obj->is_support_timelapse || bbl_caps_fallback) && is_show_timelapse()) {
+    if (obj && (obj->is_support_timelapse || bbl_caps_fallback)) {
         select_timelapse->Show();
         update_timelapse_enable_status();
     } else {
@@ -1043,8 +1056,23 @@ void SelectMachineDialog::finish_mode()
 }
 
 
+// The spool holders the slot picker offers: a two-extruder printer's 254 / 255, or a nozzle rack's
+// holders 255 down to 247 (the H3C; the picker keeps those a rack nozzle is fed from).
+static std::vector<AmsTray> mapping_spools(MachineObject* obj)
+{
+    if (!obj)
+        return {};
+    if (obj->is_rack_printer())
+        return obj->vir_slots;
+    return obj->external_spools();
+}
+
 void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &result)
 {
+    bool rack_printer = false;
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            rack_printer = obj->is_rack_printer();
     if (result.empty()) {
         BOOST_LOG_TRIVIAL(trace) << "ams_mapping result is empty";
         for (auto it = m_materialList.begin(); it != m_materialList.end(); it++) {
@@ -1069,7 +1097,7 @@ void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &res
                 wxColour ams_col;
 
                 if (f->tray_id >= 0) {
-                    ams_id = wxGetApp().transition_tridid(f->tray_id);
+                    ams_id = wxGetApp().transition_tridid(f->tray_id, rack_printer); // "1".."9" / "N-Ext" on the H3C
                     //ams_id = wxString::Format("%02d", f->tray_id + 1);
                 } else {
                     ams_id = "-";
@@ -1247,6 +1275,11 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
             if (auto *fm = bundle->project_config.option<ConfigOptionInts>("filament_map"))
                 in.nozzle_filament_map = fm->values;
     }
+    // Never a slot the printer cannot be sent to yet (the H3C's AMS 3H): BambuSendMapping::compose
+    // leaves such an entry unmapped, whatever picked it.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            in.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     return BambuSendMapping::compose(m_ams_mapping_result, m_filaments, in, mapping_array_str, mapping_array_str2, ams_mapping_info);
 }
 
@@ -1583,7 +1616,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         if (tray_it == ams_it->second->trayList.end() || !tray_it->second || !tray_it->second->is_exists)
             continue;
         AmsTray* t = tray_it->second;
-        r.tray_id        = it->second.ams_id * 4 + it->second.slot_id;
+        r.tray_id        = obj_->tray_index_of(it->second.ams_id, it->second.slot_id); // 28 + slot on the AMS 3H
         r.ams_id         = std::to_string(it->second.ams_id);
         r.slot_id        = std::to_string(it->second.slot_id);
         r.color          = t->color;
@@ -2172,9 +2205,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2238,9 +2272,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2250,7 +2285,7 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         DeviceManager::check_filaments_in_blacklist(filament_brand, filament_type, in_blacklist, action, info);
         
-        // The prohibitions are about feeding through an AMS (TPU, Bambu PET-CF/PA6-CF); a two-extruder
+        // The prohibitions are about feeding through an AMS (TPU; Bambu PET-CF/PA6-CF only warn); a two-extruder
         // job's filament on an external spool holder does not go through one (BambuStudio scopes
         // these blacklist entries to "slot": "ams").
         if (in_blacklist && action == "prohibition" && BambuSendMapping::is_external_spool(m_ams_mapping_result[i]))
@@ -3267,6 +3302,15 @@ void SelectMachineDialog::update_show_status()
         }
     }
     MachineObject* obj_ = dev->get_my_machine(m_printer_last_select);
+    // The selected LAN printer refused its saved access code on the last dial: offer to re-enter it.
+    if (m_link_access_code) {
+        const bool refused = obj_ && obj_->is_lan_mode_printer() && dev->lan_access_code_refused(obj_->dev_id);
+        if (refused != m_link_access_code->IsShown()) {
+            m_link_access_code->Show(refused);
+            Layout();
+            Fit();
+        }
+    }
     if (!obj_) {
         update_ams_check(nullptr);
         if (agent) {
@@ -3544,49 +3588,6 @@ void SelectMachineDialog::update_timelapse_enable_status()
     }
 }
 
-
-bool SelectMachineDialog::is_show_timelapse()
-{
-    auto compare_version = [](const std::string &version1, const std::string &version2) -> bool {
-        int i = 0, j = 0;
-        int max_size = std::max(version1.size(), version2.size());
-        while (i < max_size || j < max_size) {
-            int v1 = 0, v2 = 0;
-            while (i < version1.size() && version1[i] != '.') v1 = 10 * v1 + (version1[i++] - '0');
-            while (j < version2.size() && version2[j] != '.') v2 = 10 * v2 + (version2[j++] - '0');
-            if (v1 > v2) return true;
-            if (v1 < v2) return false;
-            ++i;
-            ++j;
-        }
-        return false;
-    };
-
-    std::string standard_version = "2.2.0";
-    PartPlate *plate      = m_plater->get_partplate_list().get_curr_plate();
-    fs::path   gcode_path = plate->get_tmp_gcode_path();
-
-    std::string   line;
-    std::ifstream gcode_file;
-    gcode_file.open(gcode_path.string());
-    if (gcode_file.fail()) {
-    } else {
-        bool is_version = false;
-        while (gcode_file >> line) {
-            if (is_version) {
-                if (compare_version(standard_version, line)) {
-                    gcode_file.close();
-                    return false;
-                }
-                break;
-            }
-            if (line == "Snapmaker Orca")
-                is_version = true;
-        }
-    }
-    gcode_file.close();
-    return true;
-}
 
 void SelectMachineDialog::reset_ams_material()
 {
@@ -3935,7 +3936,8 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(extruder));
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }
@@ -4361,7 +4363,8 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(fo.id));
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }

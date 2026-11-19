@@ -13,6 +13,8 @@
 
 #include <string>
 #include <map>
+#include <chrono>
+#include <set>
 #include <vector>
 
 #include "GUI_Utils.hpp"
@@ -55,6 +57,7 @@ class Tab;
 class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
+class ProjectStrip;
 class ParamsDialog;
 class SliceModePopup;
 class HomePanel;
@@ -126,6 +129,7 @@ class MainFrame : public DPIFrame
 #endif
     wxMenuItem* m_menu_item_reslice_now { nullptr };
     wxSizer*    m_main_sizer{ nullptr };
+    ProjectStrip* m_project_strip{ nullptr };
 
     size_t      m_last_selected_tab;
 
@@ -421,6 +425,23 @@ public:
     bool save_project_as(const wxString& filename = wxString());
 
     void        add_to_recent_projects(const wxString& filename);
+    // Project strip (tests/design_multi_project_sidebar.md): the open projects of this window; null in the G-code viewer.
+    ProjectStrip* project_strip() const { return m_project_strip; }
+    // Project strip P4: one live Plater per open project. m_plater (and wxGetApp().plater()) is the one shown; the others
+    // keep their model, undo history, slice and preview out of sight.
+    // A new hidden Plater for another project (built as the first one is at startup).
+    Plater*     create_project_plater();
+    // Shows that project's Plater in place of the shown one (the Prepare, Preview and Showcase tabs). The caller puts its
+    // presets back (ProjectStrip).
+    void        activate_plater(Plater *plater);
+    // Closes a hidden project's Plater: stops its slice and jobs, frees its GL data and its backup folder.
+    void        destroy_project_plater(Plater *plater);
+    const std::vector<Plater*>& project_platers() const { return m_platers; }
+    // The active project's name, file or unsaved state changed.
+    void        on_active_project_changed();
+    // Project strip P2 "Send...": the print / send action of Ctrl+Shift+G for the active project's plate. False when the plate
+    // cannot be printed yet (not sliced).
+    bool        send_current_plate();
     void        get_recent_projects(boost::property_tree::wptree &tree, int images);
     void        get_recent_projects(nlohmann::json& data, int images);
     void        open_recent_project(size_t file_id, wxString const & filename);
@@ -474,6 +495,15 @@ public:
     wxPanel*              m_mac_topbar_panel{ nullptr }; // macOS: the plain bar the UI theme's title bar colour goes on
     PrintHostQueueDialog* printhost_queue_dlg() { return m_printhost_queue_dlg; }
     Plater*               m_plater { nullptr };
+    // Project strip P4: every open project's Plater (m_plater among them), and the hidden ones that missed a window-wide
+    // refresh (DPI, colours, preferences) or were never shown yet: done when they are shown.
+    std::vector<Plater*>  m_platers;
+    // Hidden parent new project Platers are built in (create_project_plater), then reparented to the notebook.
+    wxPanel*              m_plater_nursery{ nullptr };
+    std::set<Plater*>     m_platers_fresh;
+    std::set<Plater*>     m_platers_need_rescale;
+    std::set<Plater*>     m_platers_need_recolour;
+    std::set<Plater*>     m_platers_need_settings;
     //BBS: GUI refactor
     // Lazily constructed tabs: the m_*_holder placeholders are the actual Notebook pages
     // (so the TabPosition indices and select_tab() are unaffected) and build the panel

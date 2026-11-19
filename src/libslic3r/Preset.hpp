@@ -65,6 +65,7 @@
 #define BBL_JSON_KEY_FAMILY                     "family"
 #define BBL_JSON_KEY_BED_MODEL                  "bed_model"
 #define BBL_JSON_KEY_BED_TEXTURE                "bed_texture"
+#define BBL_JSON_KEY_DEFAULT_BED_TYPE           "default_bed_type"
 #define BBL_JSON_KEY_HOTEND_MODEL               "hotend_model"
 #define BBL_JSON_KEY_DEFAULT_MATERIALS          "default_materials"
 #define BBL_JSON_KEY_MODEL_ID                   "model_id"
@@ -134,6 +135,9 @@ public:
         // Vendor & Printer Model specific print bed model & texture.
         std::string 			 	bed_model;
         std::string 				bed_texture;
+        // The plate a machine of this model starts on, as Bambu Studio keeps it in the machine model file
+        // ("Textured PEI Plate"). Read by Preset::get_default_bed_type for Bambu machines.
+        std::string                 default_bed_type;
         std::string                 hotend_model;
         // Where a Bambu machine puts the per-bed-type plate art, in mm of the bed ("x,y,w,h"), and the
         // suffix of its own bottom tab art ("n" -> bbl_bed_pte_bottom_n.svg). Empty when the machine
@@ -178,10 +182,15 @@ class Preset;
 // Helper to hold a profile with its vendor definition, where the vendor definition may have been extracted from a parent system preset.
 // The parent preset is only accessible through PresetCollection, therefore to allow definition of the various is_compatible_with methods
 // outside of the PresetCollection, this composite is returned by PresetCollection::get_preset_with_vendor_profile() when needed.
+class PresetCollection;
+
 struct PresetWithVendorProfile {
-	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor) : preset(preset), vendor(vendor) {}
+	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor, const PresetCollection *collection = nullptr) :
+		preset(preset), vendor(vendor), collection(collection) {}
 	const Preset 		&preset;
 	const VendorProfile *vendor;
+	// The collection of `preset`, to follow its "inherits" past its parent (is_compatible_with_printer); may be null.
+	const PresetCollection *collection;
 };
 
 // Note: it is imporant that map is used here rather than unordered_map,
@@ -602,6 +611,9 @@ public:
     // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
     const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
+    // The name clone_presets_for_printer() gives the copy of a preset named template_name for printer:
+    // the name up to the first " @" ("/" written "-"), then " @" and the printer's name.
+    static std::string name_for_printer_clone(const std::string &template_name, const std::string &printer);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
     bool clone_presets_for_filament(Preset const *const &     preset,
@@ -657,6 +669,21 @@ public:
     // Delete the current preset, activate the first visible preset.
     // returns true if the preset was deleted successfully.
     bool            delete_preset(const std::string& name);
+    // Renames a user preset (not a system, default, external or project preset): the preset keeps its
+    // config, filament_id, inherits and base_id; its file moves to the new name in the same folder (the
+    // old .json / .info go); the collection stays sorted; user presets that inherit it point at the new
+    // name and are saved; the selection (and the edited copy, edits kept) follows when it was selected.
+    // false, with the reason in *error, when the preset is not a user preset, the new name is taken or
+    // the file cannot be written; nothing changes then.
+    bool            rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error = nullptr);
+    // The user presets whose "inherits" names the preset.
+    std::vector<std::string> user_presets_inheriting(const std::string &name) const;
+    // The user presets made for one printer alone, as clone_presets_for_printer() makes them: every entry
+    // of their compatible_printers is that printer. These are counted and deleted with that printer when
+    // it is a stand-alone user printer. A system preset, a preset that also lists another printer, and one
+    // not limited by printer name (an empty list, or a compatible_printers_condition only) are kept, and so
+    // is every preset that a kept preset inherits from (a preset whose parent is gone does not load).
+    std::vector<Preset const *> get_user_presets_for_printer(const std::string &printer_name) const;
 
     // Enable / disable the "- default -" preset.
     void            set_default_suppressed(bool default_suppressed);
@@ -1017,6 +1044,40 @@ private:
     // Orca: used for validation only
     int m_errors = 0;
 };
+
+// The rules a preset name must follow, shared by the Save preset dialog and the preset managers' rename
+// (GUI-free; the GUI turns the issue into its message).
+struct PresetNameCheck
+{
+    enum class Level { Ok, Warning, Invalid };
+    enum class Issue {
+        None,
+        IllegalCharacters,  // one of preset_name_illegal_characters()
+        IllegalSuffix,      // contains "(modified)"
+        Reserved,           // "Default Setting" / "Default Filament" / "Default Printer"
+        SystemExists,       // a system or default preset has the name
+        Exists,             // a preset (compatible with the current printer) has the name
+        ExistsIncompatible, // a preset that is not compatible with the current printer has the name
+        Empty,
+        LeadingSpace,
+        TrailingSpace,
+        AliasName,          // the name of a system preset alias
+        PrinterSuffix,      // rename of a filament " @printer" variant: the edited part contains "@"
+    };
+    Level level = Level::Ok;
+    Issue issue = Issue::None;
+    bool  ok() const { return level != Level::Invalid; }
+};
+enum class PresetNameUse {
+    Save,   // saving: an existing user preset of that name is a warning (it is overwritten)
+    Rename, // renaming: no preset may have the name already (nothing is overwritten by a rename)
+};
+// "<>[]:/\|?*" and the double quote
+const char *preset_name_illegal_characters();
+// The checks of the Save preset dialog, in its order. current_name: the preset being saved or renamed
+// (its own name is not "taken").
+PresetNameCheck validate_preset_name(const PresetCollection &presets, const std::string &name, const std::string &current_name,
+                                     PresetNameUse use = PresetNameUse::Save);
 
 // Printer supports the FFF and SLA technologies, with different set of configuration values,
 // therefore this PresetCollection needs to handle two defaults.

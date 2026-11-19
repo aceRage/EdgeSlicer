@@ -348,7 +348,7 @@ void GLVolume::set_render_color()
     bool outside = is_outside || is_below_printbed();
 
     if (force_native_color || force_neutral_color) {
-#ifdef ENABBLE_OUTSIDE_COLOR
+#ifdef ENABLE_OUTSIDE_COLOR
         if (outside && shader_outside_printer_detection_enabled)
             set_render_color(OUTSIDE_COLOR);
         else {

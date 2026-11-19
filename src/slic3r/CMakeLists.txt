@@ -96,6 +96,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FillBedDialog.hpp
     GUI/HeightPatternDialog.cpp
     GUI/HeightPatternDialog.hpp
+    GUI/StartupSoundDialog.cpp
+    GUI/StartupSoundDialog.hpp
     GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
@@ -243,6 +245,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
+    GUI/Gizmos/GLGizmoSplitToFit.cpp
+    GUI/Gizmos/GLGizmoSplitToFit.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
     GUI/Gizmos/GLGizmoSculpt.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
@@ -304,6 +308,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/ProjectSessions.hpp
+    GUI/ProjectStrip.cpp
+    GUI/ProjectStrip.hpp
     GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
@@ -332,6 +339,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsDualLayout.hpp
     GUI/AmsDrying.cpp
     GUI/AmsDrying.hpp
+    GUI/AmsTypes.hpp
     GUI/AMSDryCtrlDialog.cpp
     GUI/AMSDryCtrlDialog.hpp
     GUI/AmsUiPreview.cpp
@@ -377,6 +385,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SliceBakeJob.hpp
     GUI/Jobs/StabilizerBakeJob.cpp
     GUI/Jobs/StabilizerBakeJob.hpp
+    GUI/Jobs/SplitToFitJob.cpp
+    GUI/Jobs/SplitToFitJob.hpp
     GUI/Jobs/SeamAutoPaintJob.cpp
     GUI/Jobs/SeamAutoPaintJob.hpp
     GUI/Jobs/QuadRemeshJob.cpp
@@ -493,6 +503,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MixedFilamentColorMapPanel.cpp
     GUI/MixedFilamentBadge.cpp
     GUI/MixedFilamentBadge.hpp
+    GUI/MixedSublayerUi.cpp
+    GUI/MixedSublayerUi.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp
@@ -577,6 +589,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/LanAccessCodeWatch.hpp
+    GUI/PopupRowIcons.hpp
     GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
@@ -590,6 +604,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
+    GUI/AmsMatch.cpp
+    GUI/AmsMatch.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp
@@ -1173,6 +1189,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LayerlingBrowserGtk.cpp
     GUI/LayerlingServer.cpp
     GUI/LayerlingServer.hpp
+    GUI/PresetManagerDialog.cpp
+    GUI/PresetManagerDialog.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)

@@ -428,7 +428,10 @@ Points resample_polygon(const Points &contour, double dist, std::vector<Resample
     		const Vec2d  v		 = pt_this - pt_prev;
 			const double l		 = v.norm();
     		const size_t n		 = size_t(ceil(l / dist));
-			const double l_step  = l / n;
+			// An edge of zero length (a point given twice) has n == 0. It adds no length: dividing by n would make
+			// l_step 0 / 0, and through the running sum below every curve_parameter after it NaN, which
+			// contour_distance2() reads as "no part of this contour is across from this point".
+			const double l_step  = (n == 0) ? 0. : l / n;
     		for (size_t i = 1; i < n; ++ i) {
 				double interpolation_parameter = double(i) / n;
     			Vec2d new_pt = pt_prev + v * interpolation_parameter;
@@ -564,7 +567,10 @@ ExPolygon elephant_foot_compensation(const ExPolygon &input_expoly, double min_c
 	else
 	{
 		EdgeGrid::Grid grid;
-		ExPolygon simplified = input_expoly.simplify(SCALED_EPSILON).front();
+		// The region is simplified by the callers below that take ExPolygons. Simplifying may part a region
+		// (one touching itself, or with a neck thinner than the tolerance); taking .front() of the pieces here
+		// dropped the rest of the region from the layer. BambuStudio 48368ed472, as in Snapmaker Orca.
+		ExPolygon simplified = input_expoly;
 		assert(validate_expoly_orientation(simplified));
 		BoundingBox bbox = get_extents(simplified.contour);
 		bbox.offset(SCALED_EPSILON);
@@ -628,8 +634,10 @@ ExPolygon  elephant_foot_compensation(const ExPolygon  &input, const Flow &exter
 ExPolygons elephant_foot_compensation(const ExPolygons &input, const Flow &external_perimeter_flow, const double compensation)
 {
 	ExPolygons out;
-	out.reserve(input.size());
-	for (const ExPolygon &expoly : input)
+	// Every piece a region simplifies to is compensated, see elephant_foot_compensation(const ExPolygon&, ...).
+	ExPolygons simplified_exps = expolygons_simplify(input, SCALED_EPSILON);
+	out.reserve(simplified_exps.size());
+	for (const ExPolygon &expoly : simplified_exps)
 		out.emplace_back(elephant_foot_compensation(expoly, external_perimeter_flow, compensation));
 	return out;
 }
@@ -637,8 +645,9 @@ ExPolygons elephant_foot_compensation(const ExPolygons &input, const Flow &exter
 ExPolygons elephant_foot_compensation(const ExPolygons &input, double min_contour_width, const double compensation)
 {
 	ExPolygons out;
-	out.reserve(input.size());
-	for (const ExPolygon &expoly : input)
+	ExPolygons simplified_exps = expolygons_simplify(input, SCALED_EPSILON);
+	out.reserve(simplified_exps.size());
+	for (const ExPolygon &expoly : simplified_exps)
 		out.emplace_back(elephant_foot_compensation(expoly, min_contour_width, compensation));
 	return out;
 }

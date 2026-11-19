@@ -25,8 +25,14 @@ class DynamicPrintConfig;
 std::vector<std::string> nozzle_process_preset_names(const ConfigBase &config);
 bool has_nozzle_process_presets(const ConfigBase &config);
 
+// One extruder with a declared nozzle rack of two or more positions (extruder_max_nozzle_count > 1): the H3C, Bambu Studio
+// 2.9.1's is_single_ext_multi_nozzle(). Its rack hotends are its tools.
+bool single_extruder_nozzle_rack(const ConfigBase &printer_config);
 // Whether the printer can take a process per nozzle: two or more physical extruders and not a single
-// nozzle fed by several filaments (single_extruder_multi_material).
+// nozzle fed by several filaments (single_extruder_multi_material), or (H3C) one extruder with a nozzle rack
+// (single_extruder_nozzle_rack, 2026-11-14 also a rack of one size): the extruder is tool T1, each other size of
+// its rack a P9 size tool ("T1:0.8"). Pass a config with the project's rack (extruder_rack_nozzle_override)
+// when there is one.
 bool supports_nozzle_processes(const ConfigBase &printer_config);
 
 // Per-nozzle process P2: whether filaments can be put on a nozzle of the user's choosing
@@ -35,6 +41,18 @@ bool supports_nozzle_processes(const ConfigBase &printer_config);
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config);
 // The stored assignment for `filaments` filaments, 0 = the filament's own nozzle; an all-0 list is stored empty.
 std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
+// The filament_nozzle_assignment entry for 0-based `filament` put on 1-based `tool`. 0 (unassigned) only when that reads back
+// as `tool`: the filament's own tool while there are no more filaments than tools. With more filaments than tools an
+// unassigned filament follows filament_map, so its own tool is stored as itself (owner bug 2026-11-08: a U1 with six
+// filaments could not put filament 3 on T3, the 0 read back as filament_map's T2).
+int filament_nozzle_assignment_value(size_t filament, int tool, size_t filament_count, size_t nozzle_count);
+
+// The printer's filament routing layout: extruder count, rack sizes, one nozzle fed by many filaments. The project's
+// filament -> extruder state (filament_map, side and rack pins, tool assignment, the synced device state) belongs to one
+// layout; a printer of another layout (H3C one extruder + rack, H2C two extruders, U1 four toolheads) must not inherit it.
+std::string filament_routing_layout(const ConfigBase &printer_config);
+// Back to the defaults for `filament_count` filaments: what a fresh project has on any printer. Returns whether anything changed.
+bool reset_filament_routing(DynamicConfig &project_config, size_t filament_count);
 
 // Copy each extruder's chosen process into that extruder's slots of per_nozzle_process_options() in
 // `config` (a full print config). sources[e] is extruder e's process, nullptr for the plate's process.
@@ -56,7 +74,7 @@ std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
 //   right after that extruder's slots; nozzle_filament_process_slot points the filament at it (process_config_idx).
 //   Without it the result is exactly P8's.
 // Returns false (config untouched but for an empty nozzle_filament_process_slot, nozzle_filament_tool and per-filament width
-// and region arrays) when no extruder has a source or the printer has fewer than two extruders.
+// and region arrays) when no extruder has a source or the printer takes no process per nozzle (supports_nozzle_processes).
 bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
                                const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
 
@@ -70,6 +88,12 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 // Returns whether an entry changed. Called by Print::apply() with the final config. Without sources the fill also empties the
 // per-filament arrays (a project file carries those of the fill it was saved with).
 bool realign_nozzle_filament_values(DynamicPrintConfig &config);
+// Mixed color sublayer (owner hand test on #937): the per-filament per-nozzle arrays (line widths, first-layer and fallback
+// widths, region values, layer heights, process slots) have one entry per physical filament. A mixed (virtual) filament
+// prints through its components' nozzle (nozzle_filament_of), so append one entry per mixed filament, copied from that
+// component's entry: a region painted or assigned with a mixed filament then takes its components' nozzle process.
+// No-op without per-nozzle processes or mixed filaments; arrays already longer than the physical count are left alone.
+bool extend_nozzle_filament_values_to_mixed(DynamicPrintConfig &config);
 
 // ---- Per-nozzle process P2: line widths per nozzle (design D8) ----
 //
@@ -97,6 +121,10 @@ void layer_height_limits_for_nozzles(const ConfigBase &printer_config, const std
 // Stamps the arrays into the role widths, each through the filament that prints the role (PrintRegion::extruder).
 void stamp_nozzle_line_widths(PrintRegionConfig &config);
 void stamp_nozzle_line_widths(PrintObjectConfig &config);
+// A painted region starts from its parent region's config, whose widths were stamped for the parent's filaments. Every
+// role the paint moved to another filament takes that filament's nozzle width, unless the parent's width was set on the
+// object, part, modifier or layer range instead of stamped (that one still wins). No-op without per-nozzle processes.
+void restamp_painted_nozzle_line_widths(PrintRegionConfig &painted, const PrintRegionConfig &parent);
 
 // The values a filament on extruder `extruder` reads for `key` in a filled config: what the G-code of
 // that extruder will use. Test and UI helper.
@@ -258,6 +286,29 @@ DynamicPrintConfig       nozzle_process_diff(const DynamicPrintConfig &edited, c
 // `plate`.
 DynamicPrintConfig       nozzle_tool_process(const DynamicPrintConfig &plate, const DynamicPrintConfig &base, const DynamicPrintConfig *edits);
 
+// ---- Layer height per nozzle (H3C fix 2026-11-06, on top of the AdaptiveLayerMerge band planner) ----
+//
+// layer_height stays plate-wide: the plate's layer height is the grid every object is sliced on, and the finest nozzle prints
+// it. On a plate whose filaments print through nozzles of different sizes a coarser nozzle stacks several grid layers into one
+// slab (PrintObject::compute_adaptive_merge_groups); by default as many as its size is to the finest nozzle's. A process CHOSEN
+// for that nozzle (not one picked automatically for its size) sets the slab height instead: its own layer_height, in whole grid
+// layers, held to the nozzle's printable window. So a 0.40 mm process on the 0.8 nozzle of a 0.2 mm plate prints 0.4 mm slabs,
+// and a 0.24 mm one prints every 0.2 mm layer.
+//
+// Records the layer height of `chosen` (the tool's chosen process) in `tool` (its effective process, nozzle_tool_process) as
+// nozzle_layer_height (one value) when it differs from the plate's layer height `tool` holds; removes it otherwise.
+void   set_nozzle_tool_layer_height(DynamicPrintConfig &tool, const ConfigBase &chosen);
+// Writes nozzle_layer_height of a full config: per filament the value its source process recorded, 0 = none; empty when no
+// filament's source has one. Called by fill_nozzle_process_slots(). Returns whether any entry is set.
+bool   fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                                 const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
+// The layer height 1-based `filament_id`'s chosen process asks for, 0 when none.
+double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id);
+// The band size of a nozzle coarser than the plate's finest one: `target_height` in whole `base_layer_height` layers, grown to
+// `min_height` and held to `max_height` as adaptive_layer_band_size() does; `ratio_band_size` (the size rule) when there is
+// no target. 1 = the nozzle prints every layer.
+size_t nozzle_process_band_size(double target_height, size_t ratio_band_size, double base_layer_height, double min_height, double max_height);
+
 // A process that may be picked automatically for a tool (one cut for its nozzle size and printer).
 struct NozzleProcessCandidate
 {
@@ -298,24 +349,34 @@ std::string nozzle_process_missing_error(const ConfigBase &config, size_t extrud
 std::string nozzle_size_group_id(size_t extruder, double diameter);
 // The 0-based extruder and the size of a "T<n>:<size>" id; false for any other id (a "T<n>" id included).
 bool        parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double &diameter);
+// H3C slot process groups (owner 2026-11-14): "T1.9", rack slot 9 of extruder 1 as a tool of its own (split_rack_slots,
+// ToolSlots.hpp: a slot a filament is pinned to, or of another nozzle type). Stored like a size tool's id.
+std::string nozzle_rack_slot_tool_id(size_t extruder, int slot);
+// The 0-based extruder and the 1-based slot of a "T<n>.<slot>" id; false for any other id.
+bool        parse_nozzle_rack_slot_tool_id(const std::string &id, size_t &extruder, int &slot);
+// Whether `id` names a rack tool: a size tool ("T2:0.6") or a slot tool ("T1.9").
+bool        is_nozzle_rack_tool_id(const std::string &id);
 
-// One entry of the Process tab's selector: an extruder (slot 0, its mounted size) or another nozzle size of its rack.
+// One entry of the Process tab's selector: an extruder (slot 0, its mounted size), another nozzle size of its rack, or (H3C) one
+// rack slot split off its size group.
 struct NozzleToolEntry
 {
     size_t extruder{ 0 };
-    int    slot{ 0 };      // 1-based index of the rack size, 0 = the extruder itself
+    int    slot{ 0 };      // 1-based index of the extruder's rack tools, 0 = the extruder itself
     double diameter{ 0. }; // the nozzle size (the project's)
+    int    rack_slot{ 0 }; // H3C: the 1-based rack slot of a slot tool ("T1.9"), 0 = a size group or the extruder
 };
-// The selector's entries in order: per extruder the extruder, then its rack's other sizes when it shows its rack.
+// The selector's entries in order: per extruder the extruder, then its rack's other sizes when it shows its rack, then (H3C) its
+// split rack slots. The extruder and the size groups cover the slots that are not split off.
 std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config);
 // The rack size entries only (in nozzle_tool_entries order).
 std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config);
-// "T1" or "T2:0.6".
+// "T1", "T2:0.6" or "T1.9".
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry);
-// "Left (T1)", "Right 0.6", "T2 0.6", "T3".
+// "Left (T1)", "Right 0.6", "T2 0.6", "T3", "T1 slot 9".
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry);
-// The size tool 1-based `filament_id` prints with ("T2:0.6"), "" when it prints with its extruder's process (no rack shown, or the
-// extruder's mounted size).
+// The rack tool 1-based `filament_id` prints with ("T2:0.6", "T1.9"), "" when it prints with its extruder's process (no rack
+// shown, or the extruder's mounted size and no split slot).
 std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int filament_id);
 // The tool a filament prints with, as messages name it and as jump ids carry it.
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id);

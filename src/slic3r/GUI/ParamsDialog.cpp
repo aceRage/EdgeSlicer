@@ -69,6 +69,11 @@ ParamsDialog::ParamsDialog(wxWindow * parent)
         }
 #endif
         wxGetApp().sidebar().finish_param_edit();
+        if (m_on_close_once) {
+            std::function<void()> cb = std::move(m_on_close_once);
+            m_on_close_once          = nullptr;
+            wxGetApp().CallAfter(cb);
+        }
     });
 
     //wxGetApp().UpdateDlgDarkUI(this);

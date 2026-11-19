@@ -980,6 +980,68 @@ void Model::duplicate_objects_grid(size_t x, size_t y, coordf_t dist)
     }
 }
 
+void Model::rotate_and_center_objects(double angle_z)
+{
+    // The common center of the placed objects, taken before anything changes. Objects without instances lie in the
+    // file's coordinates and turn around its origin.
+    BoundingBoxf3 placed_bb;
+    for (const ModelObject *object : this->objects)
+        for (size_t i = 0; i < object->instances.size(); ++i)
+            placed_bb.merge(object->instance_bounding_box(i));
+    const Vec3d center = placed_bb.defined ? Vec3d(placed_bb.center().x(), placed_bb.center().y(), 0.) : Vec3d::Zero();
+
+    if (angle_z != 0.) {
+        const Transform3d turn          = Geometry::rotation_transform(angle_z * Vec3d::UnitZ());
+        const Matrix3d    rotation      = turn.linear();
+        const Transform3d around_center = Geometry::translation_transform(center) * turn * Geometry::translation_transform(-center);
+        for (ModelObject *object : this->objects) {
+            // The volumes are shared by all instances, so they can take the rotation only if it commutes with the
+            // linear part (rotation, scale, mirror) of every instance; otherwise the instances take it.
+            // The tolerance only absorbs rounding: the instances' path is exact, so doubtful cases go there.
+            const auto commutes_with_turn = [&rotation](const ModelInstance *instance) {
+                const Matrix3d linear   = instance->get_matrix_no_offset().linear();
+                const double   residual = (linear * rotation - rotation * linear).cwiseAbs().maxCoeff();
+                return residual <= 1e-9 * std::max(1., linear.cwiseAbs().maxCoeff());
+            };
+            const bool commutes = std::all_of(object->instances.begin(), object->instances.end(), commutes_with_turn);
+            if (commutes) {
+                // Each volume turns around the object's origin together with its offset, so a multi-part object keeps
+                // its shape.
+                for (ModelVolume *volume : object->volumes)
+                    volume->set_transformation(turn * volume->get_matrix());
+                for (ModelInstance *instance : object->instances)
+                    instance->set_offset(center + rotation * (instance->get_offset() - center));
+            } else {
+                for (ModelInstance *instance : object->instances)
+                    instance->set_transformation(Geometry::Transformation(around_center * instance->get_matrix()));
+            }
+            object->invalidate_bounding_box();
+        }
+    }
+
+    for (ModelObject *object : this->objects) {
+        const BoundingBoxf3 bb = object->full_raw_mesh_bounding_box();
+        if (!bb.defined)
+            continue;
+        Vec3d shift = -bb.center();
+        if (object->instances.empty()) {
+            // Not placed yet: the shift is recorded for the parts merging and export, as center_around_origin() does.
+            // Z stays for the multi-part check, and the object is centered in full when it is placed.
+            shift.z() = 0.;
+            object->translate(shift);
+            object->origin_translation += shift;
+        } else {
+            object->translate(shift);
+            // The instances take the opposite shift, so the object stays where it is. origin_translation records only
+            // centering the instances do not compensate, so it does not change.
+            for (ModelInstance *instance : object->instances)
+                instance->set_offset(instance->get_offset() - instance->get_matrix_no_offset().linear() * shift);
+        }
+        object->invalidate_bounding_box();
+    }
+}
+
+
 bool Model::looks_like_multipart_object() const
 {
     if (this->objects.size() <= 1)
@@ -2429,13 +2491,19 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         if (volume->type() != ModelVolumeType::MODEL_PART)
             continue;
 
-        // splited volume should not be text object 
-        if (volume->text_configuration.has_value())
+        // splited volume should not be text object. Its emboss shape goes too, or the part reads as an SVG
+        // (is_svg(): an emboss shape and no text configuration).
+        if (volume->text_configuration.has_value()) {
             volume->text_configuration.reset();
+            volume->emboss_shape.reset();
+        }
 
         if (!is_multi_volume_object) {
             //BBS: not multi volume object, then split mesh.
             std::vector<TriangleMesh> volume_meshes = volume->mesh().split();
+            // An SVG part cut into pieces: no piece is the shape any more.
+            if (volume_meshes.size() > 1)
+                volume->emboss_shape.reset();
             int mesh_count = 0;
             for (TriangleMesh& mesh : volume_meshes) {
                 if (mesh.facets_count() < 3)
@@ -3189,9 +3257,12 @@ size_t ModelVolume::split(unsigned int max_extruders)
     if (meshes.size() <= 1)
         return 1;
 
-    // splited volume should not be text object
+    // splited volume should not be text object, nor an SVG one: no piece is the shape any more. With only the text
+    // configuration gone, a text part's emboss shape stayed on every piece, and the pieces read as SVG parts.
     if (text_configuration.has_value())
         text_configuration.reset();
+    if (emboss_shape.has_value())
+        emboss_shape.reset();
 
     size_t idx = 0;
     size_t ivolume = std::find(this->object->volumes.begin(), this->object->volumes.end(), this) - this->object->volumes.begin();
@@ -3234,9 +3305,13 @@ size_t ModelVolume::split(unsigned int max_extruders)
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
 
-        this->object->volumes[ivolume]->set_offset(Vec3d::Zero());
-        this->object->volumes[ivolume]->center_geometry_after_creation();
-        this->object->volumes[ivolume]->translate(offset);
+        ModelVolume *piece = this->object->volumes[ivolume];
+        piece->set_offset(Vec3d::Zero());
+        piece->center_geometry_after_creation();
+        // center_geometry_after_creation() moved the piece's mesh by -shift in the part's own frame and the part by
+        // +shift in the object's, which only puts it back where it was with no rotation, scale or mirror of the
+        // part's own. Move it by the shift as the part's own transformation turns and sizes it.
+        piece->set_offset(offset + piece->get_matrix_no_offset() * piece->get_offset());
         this->object->volumes[ivolume]->name = name + "_" + std::to_string(idx + 1);
         //BBS: always set the extruder id the same as original
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
@@ -3250,16 +3325,18 @@ size_t ModelVolume::split(unsigned int max_extruders)
         ++ idx;
     }
 
-    // discard volumes for which the convex hull was not generated or is degenerate
-    size_t i = 0;
-    while (i < this->object->volumes.size()) {
-        const std::shared_ptr<const TriangleMesh> &hull = this->object->volumes[i]->get_convex_hull_shared_ptr();
+    // Discard the pieces just made for which the convex hull was not generated or is degenerate. Only the pieces:
+    // the object's other parts are not this split's to delete (a flat part has an empty hull, and was deleted with
+    // the old loop over all volumes). The pieces are volumes [first_piece, ivolume]; go backwards so the indices
+    // stay valid, and keep the object, as this volume may be one of those deleted.
+    ModelObject *const owner       = this->object;
+    const size_t       first_piece = ivolume + 1 - idx;
+    for (size_t i = ivolume + 1; i-- > first_piece;) {
+        const std::shared_ptr<const TriangleMesh> &hull = owner->volumes[i]->get_convex_hull_shared_ptr();
         if (hull == nullptr || hull->its.vertices.empty() || hull->its.indices.empty()) {
-            this->object->delete_volume(i);
+            owner->delete_volume(i);
             --idx;
-            --i;
         }
-        ++i;
     }
 
     return idx;
@@ -3541,7 +3618,7 @@ static void get_real_filament_id(const unsigned char &id, std::string &result) {
 // implementation - including the split-triangle encoding for a face whose three corners land on
 // three different filaments, which is the interesting part.
 static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned char *vertex_filament_ids,
-                                            size_t vertex_count)
+                                            size_t vertex_count, unsigned char first_extruder_id)
 {
     enum VertexColorCase {
         _3_SAME_COLOR,
@@ -3570,6 +3647,7 @@ static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned 
     // `volume` is now a parameter.
     // the caller sets the volume's extruder before painting.
     auto face_count = volume->mesh().its.indices.size();
+    volume->mmu_segmentation_facets.reset();
     volume->mmu_segmentation_facets.reserve(face_count);
     if (volume->mesh().its.vertices.size() != vertex_count) {
         return false;
@@ -3579,7 +3657,7 @@ static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned 
         auto filament_id0 = vertex_filament_ids[face[0]];
         auto filament_id1 = vertex_filament_ids[face[1]];
         auto filament_id2 = vertex_filament_ids[face[2]];
-        if (filament_id0 <= 1 && filament_id1 <= 1 && filament_id2 <= 2) {
+        if (filament_id0 == first_extruder_id && filament_id1 == first_extruder_id && filament_id2 == first_extruder_id) {
             continue;
         }
         if (i == 0) {
@@ -3661,7 +3739,8 @@ bool Model::obj_import_vertex_color_deal(const std::vector<unsigned char> &verte
         if (obj->volumes.size() == 1) {
             auto volume = obj->volumes[0];
             volume->config.set("extruder", first_extruder_id);
-            return paint_volume_from_vertex_colors(volume, vertex_filament_ids.data(), vertex_filament_ids.size());
+            return paint_volume_from_vertex_colors(volume, vertex_filament_ids.data(), vertex_filament_ids.size(),
+                                                   first_extruder_id);
         }
     }
     return false;
@@ -3711,7 +3790,7 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
     for (ModelVolume *volume : obj->volumes) {
         const size_t count = volume->mesh().its.vertices.size();
         volume->config.set("extruder", first_extruder_id);
-        if (!paint_volume_from_vertex_colors(volume, vertex_filament_ids.data() + offset, count))
+        if (!paint_volume_from_vertex_colors(volume, vertex_filament_ids.data() + offset, count, first_extruder_id))
             return false;
         offset += count;
     }

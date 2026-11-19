@@ -303,7 +303,17 @@ static bool data_dir_is_access_denied(const boost::system::error_code& ec)
     return false;
 }
 
-void set_data_dir(const std::string& dir)
+void set_data_dir(const std::string &dir)
+{
+    g_data_dir = dir;
+    if (!g_data_dir.empty() && !boost::filesystem::exists(g_data_dir)) {
+       boost::filesystem::create_directory(g_data_dir);
+    }
+}
+
+// The sandboxed plugin helper (edge-plugin-host) only: under an AppContainer the data_dir status()
+// can be access denied, which must not abort the helper. Everyone else keeps set_data_dir().
+void set_data_dir_tolerant(const std::string& dir)
 {
     g_data_dir = dir;
     if (g_data_dir.empty())

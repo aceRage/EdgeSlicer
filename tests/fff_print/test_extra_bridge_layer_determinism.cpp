@@ -176,22 +176,22 @@ void check_repeatable(const char *extra_bridge_layer, const char *sparse_pattern
 
 } // namespace
 
-TEST_CASE("second external bridge layer is identical on one thread and on many", "[ExtraBridgeLayerDeterminism]")
+TEST_CASE("second external bridge layer is identical on one thread and on many", "[ExtraBridgeLayerDeterminism][slow]")
 {
     check_repeatable("external_bridge_only", "grid");
 }
 
-TEST_CASE("second internal bridge layer is identical on one thread and on many", "[ExtraBridgeLayerDeterminism]")
+TEST_CASE("second internal bridge layer is identical on one thread and on many", "[ExtraBridgeLayerDeterminism][slow]")
 {
     check_repeatable("internal_bridge_only", "grid");
 }
 
-TEST_CASE("both second bridge layers are identical on one thread and on many", "[ExtraBridgeLayerDeterminism]")
+TEST_CASE("both second bridge layers are identical on one thread and on many", "[ExtraBridgeLayerDeterminism][slow]")
 {
     check_repeatable("apply_to_all", "grid");
 }
 
-TEST_CASE("lightning anchor expansion is identical on one thread and on many", "[ExtraBridgeLayerDeterminism]")
+TEST_CASE("lightning anchor expansion is identical on one thread and on many", "[ExtraBridgeLayerDeterminism][slow]")
 {
     check_repeatable("disabled", "lightning");
     check_repeatable("apply_to_all", "lightning");

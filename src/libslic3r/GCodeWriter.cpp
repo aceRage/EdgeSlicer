@@ -988,23 +988,31 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         this->set_current_position_clear(true);
         return this->travel_to_xy(to_2d(point));
     }
-    else {
-        /*  In all the other cases, we perform an actual XYZ move and cancel
-            the lift. */
-        m_lifted = 0;
-    }
+    // A lifted nozzle that has to end lower travels at the lifted height and descends at the
+    // target, so it never sinks while crossing the print. (OrcaSlicer #16933)
+    // Ordinary retract-on-layer-change never reaches this: lift() only sets m_to_lift, and the
+    // pending-lift branch above already hops and travels at hop height. This split is for an
+    // already-applied hop (m_lifted) that force_z or a below-layer target would otherwise
+    // cancel into one combined XYZ move.
+    const bool descend_after_xy = m_lifted > EPSILON && point(2) < m_pos(2) - EPSILON && this->is_current_position_clear() &&
+        (to_2d(point) - to_2d(m_pos)).norm() > EPSILON;
+    /*  In all the other cases, we move to the target Z and cancel the lift: in a single XYZ move,
+        or XY first and then Z after a filament change or when coming down from a lift. */
+    m_lifted = 0;
     
     //BBS: take plate offset into consider
     Vec3d point_on_plate = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
     std::string out_string;
     GCodeG1Formatter w;
-    if (!this->is_current_position_clear())
+    if (!this->is_current_position_clear() || descend_after_xy)
     {
-        //force to move xy first then z after filament change
+        //force to move xy first then z after filament change, or when coming down from a lift
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
         this->seed_formatter_guard(w);
         w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        // The Z move happens at the target, so it is emitted and timed from there.
+        m_pos = Vec3d(dest_point.x(), dest_point.y(), m_pos(2));
         out_string = w.string() + _travel_to_z(point_on_plate.z(), comment) + this->restore_uncapped_z_feedrate();
     } else {
         GCodeG1Formatter w;
@@ -1313,14 +1321,14 @@ std::string GCodeWriter::_retract(double length, double restart_extra, const std
     return gcode;
 }
 
-std::string GCodeWriter::unretract()
+std::string GCodeWriter::unretract(double extra)
 {
     std::string gcode;
     
     if (FLAVOR_IS(gcfMakerWare))
         gcode = "M101 ; extruder on\n";
     
-    if (double dE = m_extruder->unretract(); !is_zero(dE)) {
+    if (double dE = m_extruder->unretract(extra); !is_zero(dE)) {
         if (this->config.use_firmware_retraction) {
             gcode += FLAVOR_IS(gcfMachinekit) ? "G23 ; unretract\n" : "G11 ; unretract\n";
             gcode += this->reset_e();

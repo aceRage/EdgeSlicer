@@ -39,12 +39,12 @@ if (SLIC3R_GUI)
     if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set (wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
         if (SLIC3R_WX_STABLE)
-            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl aui net media webview)
+            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl aui net media webview stc)
         else ()
-            find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core adv html gl aui net media webview)
+            find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core adv html gl aui net media webview stc)
         endif ()
     else ()
-        find_package(wxWidgets 3.1 REQUIRED COMPONENTS html adv gl core base webview aui net media)
+        find_package(wxWidgets 3.1 REQUIRED COMPONENTS stc html adv gl core base webview aui net media)
     endif ()
 
     if(UNIX)
@@ -54,6 +54,18 @@ if (SLIC3R_GUI)
     include(${wxWidgets_USE_FILE})
 
     find_package(JPEG QUIET)
+
+    if (WIN32 AND NOT wxWidgets_LIBRARIES MATCHES "scintilla")
+        # wx 3.1+ splits Scintilla into its own static lib that wxmsw*_stc depends on.
+        # FindwxWidgets does not add it, so link it after stc explicitly.
+        find_library(WX_SCINTILLA_LIBRARY NAMES wxscintilla wxscintillad
+                     HINTS ${wxWidgets_LIB_DIR} NO_DEFAULT_PATH)
+        if (WX_SCINTILLA_LIBRARY)
+            list(APPEND wxWidgets_LIBRARIES ${WX_SCINTILLA_LIBRARY})
+        else ()
+            message(WARNING "wxscintilla library not found in ${wxWidgets_LIB_DIR}")
+        endif ()
+    endif ()
 
     string(REGEX MATCH "wxpng" WX_PNG_BUILTIN ${wxWidgets_LIBRARIES})
     if (PNG_FOUND AND NOT WX_PNG_BUILTIN)

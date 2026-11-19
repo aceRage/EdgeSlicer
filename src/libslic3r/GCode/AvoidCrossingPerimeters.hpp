@@ -66,6 +66,8 @@ private:
     EdgeGrid::Grid m_grid_lslice;
     // Store all needed data for travels inside object
     Boundary m_internal;
+    // The layer m_internal was made from: the object's layer, or its support layer while the supports are printed.
+    const Layer *m_internal_layer { nullptr };
     // Store all needed data for travels outside object
     Boundary m_external;
 };

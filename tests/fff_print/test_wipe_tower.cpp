@@ -5,8 +5,11 @@
 #include <clocale>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -21,12 +24,15 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_data.hpp"
 
@@ -222,10 +228,10 @@ static std::string wipe_tower_regions(const std::string &gcode)
     return regions;
 }
 
-// A WipeTower2 (non-Bambu) two-filament print: outer wall in filament 2, the rest in filament 1,
-// so every layer runs the toolchange path and its flush_planner_queue(). Same shape as
-// test_print.cpp's "prepare and slice agree on the plate filaments" case (one apply keeps the tower).
-static std::string slice_two_filament_tower(const std::string &gcode_flavor, bool snapmaker_u1)
+// A two-filament print: outer wall in filament 2, the rest in filament 1, so every layer
+// runs the toolchange path and its flush_planner_queue(). Same shape as test_print.cpp's
+// "prepare and slice agree on the plate filaments" case (one apply keeps the tower).
+static DynamicPrintConfig two_filament_tower_config(const std::string &gcode_flavor, bool snapmaker_u1)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -248,7 +254,11 @@ static std::string slice_two_filament_tower(const std::string &gcode_flavor, boo
     config.set_deserialize_strict({ { "gcode_flavor", gcode_flavor } });
     if (snapmaker_u1)
         config.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    return config;
+}
 
+static std::string slice_two_filament_tower(const DynamicPrintConfig &config)
+{
     Print print;
     Model model;
     init_print({TestMesh::cube_20x20x20}, print, model, config);
@@ -256,19 +266,70 @@ static std::string slice_two_filament_tower(const std::string &gcode_flavor, boo
     return Test::gcode(print);
 }
 
+static std::string slice_two_filament_tower(const std::string &gcode_flavor, bool snapmaker_u1)
+{
+    return slice_two_filament_tower(two_filament_tower_config(gcode_flavor, snapmaker_u1));
+}
+
+// change_filament_gcode for the Klipper sections: a marker comment, so no slicer output changes.
+static const char *const toolchange_mark = "; TOOLCHANGE_MARK\n";
+
+// On Klipper the tower syncs motion only right before a temperature command and, with
+// `sync_before_change`, once per toolchange at the end of the unload, so change_filament_gcode
+// can't run while the unload is still queued. Any other M400 just stalls the toolhead.
+static bool m400_only_where_needed(const std::string &gcode, bool sync_before_change)
+{
+    bool synced = false; // a bare M400 since the last change_filament_gcode
+    std::istringstream lines(gcode);
+    for (std::string line, prev; std::getline(lines, line); prev = line) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (prev == "M400" && line.rfind("M104", 0) != 0 && line.rfind("M109", 0) != 0) {
+            if (!sync_before_change || synced)
+                return false;
+            synced = true;
+        }
+        if (line.find("; TOOLCHANGE_MARK") != std::string::npos) {
+            if (sync_before_change && !synced)
+                return false;
+            synced = false;
+        }
+    }
+    return true;
+}
+
 TEST_CASE("The wipe tower's toolchange planner flush follows the gcode flavor", "[WipeTower][KlipperFlush]")
 {
     SECTION("klipper") {
-        const std::string tower = wipe_tower_regions(slice_two_filament_tower("klipper", false));
+        const std::string tower_type = GENERATE(as<std::string>{}, "type1", "type2");
+        CAPTURE(tower_type);
+        DynamicPrintConfig config = two_filament_tower_config("klipper", false);
+        config.set_deserialize_strict({ { "wipe_tower_type", tower_type }, { "change_filament_gcode", toolchange_mark } });
+        const std::string tower = wipe_tower_regions(slice_two_filament_tower(config));
         REQUIRE_FALSE(tower.empty());
-        CHECK_THAT(tower, Catch::Matchers::Contains("M400"));
-        CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S"));
+        CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S0"));
+        // Only type2 syncs at the end of the unload; type1's toolchange_Unload is compiled out.
+        CHECK(m400_only_where_needed(tower, tower_type == std::string("type2")));
     }
     SECTION("marlin") {
         const std::string tower = wipe_tower_regions(slice_two_filament_tower("marlin", false));
         REQUIRE_FALSE(tower.empty());
         CHECK_THAT(tower, Catch::Matchers::Contains("G4 S0"));
         CHECK_THAT(tower, !Catch::Matchers::Contains("M400"));
+    }
+    SECTION("klipper, single extruder multi material") {
+        // The SEMM path changes the temperature inside the tower; the sync before M104 must stay.
+        DynamicPrintConfig config = two_filament_tower_config("klipper", false);
+        config.set_deserialize_strict({
+            { "single_extruder_multi_material", "1" },
+            { "change_filament_gcode",          toolchange_mark },
+            { "nozzle_temperature",             "200,220" },
+            { "nozzle_temperature_initial_layer", "200,220" },
+        });
+        const std::string tower = wipe_tower_regions(slice_two_filament_tower(config));
+        REQUIRE_FALSE(tower.empty());
+        CHECK_THAT(tower, Catch::Matchers::Contains("M400\nM104"));
+        CHECK(m400_only_where_needed(tower, true));
     }
 }
 
@@ -914,6 +975,147 @@ TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", 
     }
 }
 
+// The tower entry goes in through the wall's gap, not across the wall beside it. With the purge start
+// staggered (wipe_tower_stagger_toolchange_start, on in the U1 profiles) the gap is cut at the staggered
+// row (get_all_wall_skip_points), up to 16 rows past where the block starts (tcr.start_pos), and the
+// route was aimed at the block start, so the nozzle crossed the wall up to a few mm beside the gap. With
+// three filaments a layer has two tool changes and the first lays the wall (finish_layer), so the second
+// entry crosses a wall of its own layer; with z_hop 0 the nozzle is at that wall's height.
+TEST_CASE("The tower entry crosses the wall only through its gap when the purge start is staggered", "[WipeTower][SkipPoints]")
+{
+    const int  filaments = GENERATE(2, 3);
+    const int  angle     = GENERATE(0, 90);
+    DYNAMIC_SECTION(filaments << " filaments, rotation " << angle) {
+        DynamicPrintConfig config = wait_for_temp_config(false);
+        config.set_num_extruders(filaments);
+        config.set_num_filaments(filaments);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = std::vector<double>(filaments, 1.75);
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = std::vector<double>(filaments, 0.4);
+        config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+        config.option<ConfigOptionStrings>("filament_colour")->values.resize(filaments);
+        config.set_deserialize_strict({
+            { "wipe_tower_wall_type", "rectangle" },
+            { "wipe_tower_wall_gap", "1" },
+            { "wipe_tower_stagger_toolchange_start", "1" },
+            { "wipe_tower_rotation_angle", angle },
+            { "prime_tower_brim_width", "0" },
+            { "filament_multitool_ramming", filaments == 2 ? "0,0" : "0,0,0" },
+            { "z_hop", filaments == 2 ? "0,0" : "0,0,0" },
+            { "wipe_tower_x", "120" },
+            { "wipe_tower_y", "60" },
+            { "wall_filament", "1" },
+            { "outer_wall_filament", "2" },
+            { "sparse_infill_filament", filaments == 2 ? "1" : "3" },
+            { "solid_infill_filament", filaments == 2 ? "1" : "3" },
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.has_wipe_tower());
+        const std::string gcode = Test::gcode(print);
+
+        REQUIRE(print.wipe_tower_data().wipe_tower_mesh_data.has_value());
+        Polygon envelope = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+        envelope.rotate(double(angle) * M_PI / 180.);
+        envelope.translate(Point::new_scale(120., 60.));
+        BoundingBox near_tower = get_extents(envelope);
+        near_tower.offset(scale_(1.));
+        const Eigen::Rotation2Dd to_local(-double(angle) * M_PI / 180.);
+
+        struct Move { Vec2d a, b; double z; bool extrudes; };
+        std::vector<Move> moves;
+        {
+            Vec2d  pos(0., 0.);
+            double z = 0.;
+            for (const std::string &line : split_lines(gcode)) {
+                if (line.rfind("G1 ", 0) != 0)
+                    continue;
+                Vec2d  next     = pos;
+                bool   extrudes = false;
+                std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+                for (std::string w; words >> w;) {
+                    if (w.size() < 2)
+                        continue;
+                    if (w[0] == 'X' || w[0] == 'Y')
+                        (w[0] == 'X' ? next.x() : next.y()) = std::atof(w.c_str() + 1);
+                    else if (w[0] == 'Z')
+                        z = std::atof(w.c_str() + 1);
+                    else if (w[0] == 'E' && std::atof(w.c_str() + 1) > 0.)
+                        extrudes = true;
+                }
+                if (next != pos)
+                    moves.push_back({ pos, next, z, extrudes });
+                pos = next;
+            }
+        }
+        auto on_tower = [&near_tower](const Vec2d &p) { return near_tower.contains(Point::new_scale(p.x(), p.y())); };
+        // Each layer's tower wall: the tower's lines along the edges of the box round that layer's tower
+        // lines, in tower-local axes (a rectangle wall).
+        std::map<long, std::vector<const Move *>> tower_lines;
+        for (const Move &m : moves)
+            if (m.extrudes && on_tower(m.a) && on_tower(m.b))
+                tower_lines[std::lround(m.z * 1000.)].push_back(&m);
+        auto wall_of = [&](long layer) {
+            std::vector<std::pair<Vec2d, Vec2d>> wall;
+            BoundingBoxf box;
+            for (const Move *m : tower_lines[layer]) {
+                box.merge(to_local * m->a);
+                box.merge(to_local * m->b);
+            }
+            auto on_edge = [&box](const Vec2d &p) {
+                return std::min({ std::abs(p.x() - box.min.x()), std::abs(p.x() - box.max.x()), std::abs(p.y() - box.min.y()),
+                                  std::abs(p.y() - box.max.y()) }) < 0.05;
+            };
+            for (const Move *m : tower_lines[layer]) {
+                const Vec2d a = to_local * m->a, b = to_local * m->b;
+                if (on_edge(a) && on_edge(b) && (std::abs(a.x() - b.x()) < 0.05 || std::abs(a.y() - b.y()) < 0.05))
+                    wall.emplace_back(m->a, m->b);
+            }
+            return wall;
+        };
+        auto crosses = [](const Vec2d &p, const Vec2d &q, const Vec2d &a, const Vec2d &b, Vec2d &at) {
+            const Vec2d  r = q - p, s = b - a;
+            const double den = cross2(r, s);
+            if (std::abs(den) < 1e-12)
+                return false;
+            const double t = cross2(Vec2d(a - p), s) / den, u = cross2(Vec2d(a - p), r) / den;
+            at = p + t * r;
+            return t > 1e-6 && t < 1. - 1e-6 && u > 1e-6 && u < 1. - 1e-6;
+        };
+
+        // The entries: runs of travels from off the tower to the tower, then extruding on it. Each one's
+        // crossings of that layer's wall.
+        int entries = 0, across_the_wall = 0;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            if (moves[i].extrudes || on_tower(moves[i].a))
+                continue;
+            size_t k = i;
+            while (k < moves.size() && !moves[k].extrudes)
+                ++k;
+            if (k == moves.size() || !on_tower(moves[k].a) || !on_tower(moves[k].b)) {
+                i = k;
+                continue;
+            }
+            ++entries;
+            const long layer = std::lround(moves[k].z * 1000.);
+            for (const auto &[a, b] : wall_of(layer))
+                for (size_t j = i; j < k; ++j) {
+                    Vec2d at;
+                    if (crosses(moves[j].a, moves[j].b, a, b, at)) {
+                        ++across_the_wall;
+                        INFO("layer z " << moves[k].z << ": the travel " << moves[j].a.transpose() << " -> " << moves[j].b.transpose()
+                                        << " at z " << moves[j].z << " crosses the wall line " << a.transpose() << " -> " << b.transpose()
+                                        << " at " << at.transpose());
+                        CHECK(false);
+                    }
+                }
+            i = k;
+        }
+        REQUIRE(entries > 0);
+        CHECK(across_the_wall == 0);
+    }
+}
+
 // Orca #16789: the Type1 tower's HEIGHT/WIDTH tags keep a decimal point in any locale.
 
 // Switches this thread's numeric locale to one whose decimal separator is a comma,
@@ -985,12 +1187,51 @@ static DynamicPrintConfig wipe_tower_prime_config()
     return config;
 }
 
-// Type1 is the Bambu planner (is_BBL_printer). Test::slice cannot set that flag, and
-// a brand-new Print's first apply() can clear enable_prime_tower when it still sees
-// one filament. Two objects with different extruders plus a second apply keep the tower.
-static std::string slice_with_prime_tower(const DynamicPrintConfig &config)
+// init_print's auto_assign_extruders writes volume extruder=1, and that stamp overwrites
+// print-level wall/infill filaments. Set the feature filaments on the volume after that
+// so both tools actually print. Walls filament 2, infill filament 1, matching Orca #17204.
+static void set_object_filaments(ModelObject *object, int wall, int infill)
 {
+    object->config.set("wall_filament", wall);
+    object->config.set("outer_wall_filament", wall);
+    object->config.set("sparse_infill_filament", infill);
+    object->config.set("solid_infill_filament", infill);
+    if (object->volumes.empty())
+        return;
+    ModelVolume *volume = object->volumes.front();
+    volume->config.set("extruder", 0);
+    volume->config.set("wall_filament", wall);
+    volume->config.set("outer_wall_filament", wall);
+    volume->config.set("sparse_infill_filament", infill);
+    volume->config.set("solid_infill_filament", infill);
+}
+
+static void set_both_filaments(Model &model)
+{
+    for (ModelObject *object : model.objects)
+        set_object_filaments(object, 2, 1);
+}
+
+TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal locale", "[WipeTower]")
+{
+    const bool is_bbl = GENERATE(false, true);
+    CAPTURE(is_bbl);
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    // GCodeProcessor parses these values with the C locale: a comma makes it log an error and
+    // ignore the tag, leaving the extrusion width and height it assumes to its own defaults.
+    CommaNumericLocale    comma;
+    CNumericLocalesSetter restore;
+    if (!comma.apply() || is_decimal_separator_point()) {
+        // Catch2 v2 has no SKIP(). Succeed-and-return is the skip this suite uses
+        // (see test_printgcode.cpp): the case does not fail, and NoAssertions does not fire.
+        SUCCEED("skipped: no locale with a comma decimal separator is installed");
+        return;
+    }
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({{"wipe_tower_type", "type1"}});
     Print print;
+    print.is_BBL_printer() = is_bbl;
     Model model;
     ModelObject *first = model.add_object();
     first->name        = "cube-a.stl";
@@ -1004,42 +1245,25 @@ static std::string slice_with_prime_tower(const DynamicPrintConfig &config)
     second->ensure_on_bed();
     second->volumes.front()->config.set("extruder", 2);
     print.apply(model, config);
-    print.is_BBL_printer() = true;
+    print.is_BBL_printer() = is_bbl;
     print.apply(model, config);
     print.set_status_silent();
-    REQUIRE(print.has_wipe_tower());
-    return gcode(print);
-}
-
-TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal locale", "[WipeTower]")
-{
-    // GCodeProcessor parses these values with the C locale: a comma makes it log an error and
-    // ignore the tag, leaving the extrusion width and height it assumes to its own defaults.
-    CommaNumericLocale    comma;
-    CNumericLocalesSetter restore;
-    if (!comma.apply() || is_decimal_separator_point()) {
-        // Catch2 v2 has no SKIP(). Succeed-and-return is the skip this suite uses
-        // (see test_printgcode.cpp): the case does not fail, and NoAssertions does not fire.
-        SUCCEED("skipped: no locale with a comma decimal separator is installed");
-        return;
-    }
-    const std::string gcode = slice_with_prime_tower(wipe_tower_prime_config());
-    // Type1 (WipeTower, not WipeTower2) is the only writer that uses to_string-style tags.
-    REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
-    // WipeTowerWriter forces the BBL flag, so the tower writes these spellings on every printer.
-    // By the time the test asks, export has reset the flag for this Klipper config and
-    // reserved_tag() would hand back the main G-code's ";HEIGHT:" / ";WIDTH:" instead.
+    print.process();
+    std::string tower_gcode;
+    for (const auto &layer : print.wipe_tower_data().tool_changes)
+        for (const auto &change : layer)
+            tower_gcode += change.gcode;
+    REQUIRE_FALSE(tower_gcode.empty());
     // The width and height tags are both written by the writer's constructor, before the
-    // tower's start tag, so scan the whole slice.
-    // MSVC: a lambda cannot capture a function-local constexpr unless it is static.
-    static constexpr const char height_tag[] = "; LAYER_HEIGHT: ";
-    static constexpr const char width_tag[]  = "; LINE_WIDTH: ";
-    size_t                      heights      = 0;
-    size_t                      widths       = 0;
-    std::istringstream          lines(gcode);
+    // tower's start tag, so scan the complete tower blocks without the model's tags.
+    const std::string height_tag = is_bbl ? "; LAYER_HEIGHT: " : ";HEIGHT:";
+    const std::string width_tag  = is_bbl ? "; LINE_WIDTH: " : ";WIDTH:";
+    size_t            heights    = 0;
+    size_t            widths     = 0;
+    std::istringstream lines(tower_gcode);
     for (std::string line; std::getline(lines, line);) {
-        const bool is_height = line.compare(0, sizeof(height_tag) - 1, height_tag) == 0;
-        const bool is_width  = line.compare(0, sizeof(width_tag) - 1, width_tag) == 0;
+        const bool is_height = line.compare(0, height_tag.size(), height_tag) == 0;
+        const bool is_width  = line.compare(0, width_tag.size(), width_tag) == 0;
         if (!is_height && !is_width)
             continue;
         if (is_height)
@@ -1054,5 +1278,436 @@ TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal lo
     // Six decimals match std::to_string / "%.6f". A later switch to default
     // float_to_string_decimal_point (six significant digits) would still pass
     // the comma scan on "0.3" and break C-locale G-code identity.
-    CHECK(gcode.find("; LAYER_HEIGHT: 0.300000") != std::string::npos);
+    CHECK(tower_gcode.find(height_tag + "0.300000") != std::string::npos);
+}
+
+TEST_CASE("Tower consumption is classified separately for each printer kind", "[WipeTower][Regression]")
+{
+    const auto row = GENERATE(table<bool, const char *>({
+        {false, "type1"}, {false, "type2"}, {true, "type1"}
+    }));
+    const bool is_bbl = std::get<0>(row);
+    const char *tower_type = std::get<1>(row);
+    CAPTURE(is_bbl, tower_type);
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({{"wipe_tower_type", tower_type}});
+    Print print;
+    print.is_BBL_printer() = is_bbl;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = is_bbl;
+    print.apply(model, config);
+    print.set_status_silent();
+
+    GCodeProcessor::s_IsBBLPrinter = !is_bbl;
+    print.process();
+
+    GCodeProcessorResult result;
+    gcode(print, result);
+    const auto &statistics = result.print_statistics;
+    REQUIRE(statistics.wipe_tower_volumes_per_extruder.size() == 2);
+    for (size_t filament_id : {size_t(0), size_t(1)}) {
+        CAPTURE(filament_id);
+        REQUIRE(statistics.wipe_tower_volumes_per_extruder.count(filament_id) == 1);
+        CHECK(statistics.wipe_tower_volumes_per_extruder.at(filament_id) > 0.);
+        REQUIRE(statistics.model_volumes_per_extruder.count(filament_id) == 1);
+        CHECK(statistics.model_volumes_per_extruder.at(filament_id) > 0.);
+    }
+}
+
+// Two cubes at 0.2 mm layers with precise Z height on: the 20 mm cube stays on the 0.2 mm grid, and
+// precise Z height spreads the other's gap to `short_height` over its last five layers, moving them
+// off the grid. Slices and exports the plate; the emitter throws if it loses step with the tower.
+// Both filaments print on every layer of both cubes (walls 2, infill 1), matching Orca #17204, so
+// every off-grid layer has a wipe tower and join_layer can fire. A second apply after the volume
+// filament stamp is what keeps enable_prime_tower: the first apply from init_print still sees one
+// volume extruder and normalize_fdm_2 would otherwise clear it.
+static std::string slice_precise_z_objects(DynamicPrintConfig config, const char *tower_type, const std::vector<double> &heights, Print &print)
+{
+    config.set_deserialize_strict({
+        {"precise_z_height", "1"},
+        {"wipe_tower_type", tower_type},
+        {"wipe_tower_x", "15"},
+        {"wipe_tower_y", "15"},
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
+        // Type2 reserves ramming depth that Type1 (Bambu) does not; the sliver
+        // join assertion is on wipe depth staying under 30 mm, not ramming.
+        {"enable_filament_ramming", "0"},
+    });
+    const bool is_bbl = std::string(tower_type) == "type1";
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    for (double height : heights)
+        meshes.emplace_back(TriangleMesh(make_cube(20., 20., height)));
+    init_print(std::move(meshes), print, model, config);
+    set_both_filaments(model);
+    print.is_BBL_printer() = is_bbl;
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+    std::string out;
+    REQUIRE_NOTHROW(out = gcode(print));
+    CHECK_FALSE(out.empty());
+    return out;
+}
+
+static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *tower_type, double short_height, Print &print)
+{
+    return slice_precise_z_objects(std::move(config), tower_type, {20., short_height}, print);
+}
+
+static std::vector<double> tower_extrusion_z(const std::string &gcode)
+{
+    std::vector<double> zs;
+    bool                in_tower = false;
+    GCodeReader         parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view raw = line.raw();
+        if (raw.rfind(";TYPE:", 0) == 0 || raw.rfind("; FEATURE: ", 0) == 0)
+            in_tower = raw.find("Prime tower") != std::string_view::npos;
+        else if (in_tower && line.extruding(self) && (line.has_x() || line.has_y()))
+            zs.emplace_back(self.z());
+    });
+    return zs;
+}
+
+static size_t count_joined_layers(const Print &print)
+{
+    size_t joined = 0;
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering)
+        joined += lt.joins_wipe_tower_layer_below() ? 1 : 0;
+    return joined;
+}
+
+TEST_CASE("A layer less than the minimum layer height above another prints its tool changes on the tower layer below", "[WipeTower]")
+{
+    const char  *tower_type   = GENERATE("type1", "type2");
+    const double short_height = GENERATE(10.004, 10.15);
+    CAPTURE(tower_type, short_height);
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({{"min_layer_height", "0.07"}, {"layer_height", "0.2"}, {"initial_layer_print_height", "0.2"}});
+
+    Print print;
+    const std::string out = slice_precise_z_pair(config, tower_type, short_height, print);
+
+    CHECK(count_joined_layers(print) > 0);
+    std::vector<double> tower_layer_z;
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering)
+        if (lt.joins_wipe_tower_layer_below())
+            CHECK(lt.print_z - lt.wipe_tower_print_z < 0.07);
+        else if (lt.has_wipe_tower)
+            tower_layer_z.emplace_back(lt.print_z);
+    CHECK(print.wipe_tower_data().depth < 30.f);
+
+    const std::vector<double> zs = tower_extrusion_z(out);
+    REQUIRE_FALSE(zs.empty());
+    size_t off_layer = 0;
+    for (double z : zs)
+        if (std::none_of(tower_layer_z.begin(), tower_layer_z.end(), [z](double t) { return std::abs(z - t) < 0.002; }))
+            ++off_layer;
+    CHECK(off_layer == 0);
+
+    BoundingBox tower_box(print.first_layer_wipe_tower_corners());
+    tower_box.offset(scaled(5.));
+    size_t descents = 0, off_tower = 0;
+    double layer_z  = 0.;
+    GCodeReader parser;
+    parser.parse_buffer(out, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view raw = line.raw();
+        // Type1 on a Bambu printer writes "; Z_HEIGHT:", everyone else writes ";Z:".
+        if (raw.rfind(";Z:", 0) == 0)
+            layer_z = std::stod(std::string(raw.substr(3)));
+        else if (raw.rfind("; Z_HEIGHT:", 0) == 0)
+            layer_z = std::stod(std::string(raw.substr(11)));
+        else if (line.has_z() && ! line.has_x() && ! line.has_y() && line.z() < layer_z - 1e-3) {
+            ++descents;
+            if (! tower_box.contains(Point(scaled(self.x()), scaled(self.y())))) {
+                INFO("descent to Z " << line.z() << " at X " << self.x() << " Y " << self.y() << ", layer Z " << layer_z);
+                ++off_tower;
+            }
+        }
+    });
+    CHECK(descents > 0);
+    CHECK(off_tower == 0);
+}
+
+TEST_CASE("A run of joined layers never spans more than the minimum layer height", "[WipeTower]")
+{
+    // Three cubes with precise Z height: near the top the 10.05 and 10.1 mm cubes' layers sit 0.04 to
+    // 0.05 mm apart, each under the 0.07 mm minimum but together over it. Measuring each gap from the
+    // layer just below instead of from the tower layer chained them all onto one tower layer, and the
+    // next tower layer came out up to a whole layer too thick. The gap counts from the tower layer.
+    const char *tower_type = GENERATE("type1", "type2");
+    CAPTURE(tower_type);
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({{"min_layer_height", "0.07"}, {"layer_height", "0.2"}, {"initial_layer_print_height", "0.2"}});
+
+    Print print;
+    slice_precise_z_objects(config, tower_type, {20., 10.05, 10.1}, print);
+
+    CHECK(count_joined_layers(print) > 0);
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering) {
+        if (lt.joins_wipe_tower_layer_below()) {
+            INFO("joined layer at " << lt.print_z << " onto the tower layer at " << lt.wipe_tower_print_z);
+            CHECK(lt.print_z - lt.wipe_tower_print_z < 0.07);
+        } else if (lt.has_wipe_tower) {
+            INFO("tower layer at " << lt.print_z);
+            CHECK(lt.wipe_tower_layer_height < 0.2 + 0.07);
+        }
+    }
+}
+
+TEST_CASE("Layers sliced at the printer's minimum layer height keep their own tower layers", "[WipeTower]")
+{
+    const char *tower_type = GENERATE("type1", "type2");
+    CAPTURE(tower_type);
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.08"},
+        {"initial_layer_print_height", "0.08"},
+        {"min_layer_height", "0.08"},
+        {"wipe_tower_type", tower_type},
+    });
+
+    Print print;
+    Model model;
+    config.set_deserialize_strict({
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
+    });
+    init_print({make_cube(20., 20., 20.)}, print, model, config);
+    set_both_filaments(model);
+    print.is_BBL_printer() = std::string(tower_type) == "type1";
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE_NOTHROW(gcode(print));
+    CHECK(count_joined_layers(print) == 0);
+}
+
+TEST_CASE("A joined layer that keeps its filament leaves finishing the tower layer to the one that changed", "[WipeTower]")
+{
+    const char *tower_type = GENERATE("type1", "type2");
+    const int   filament   = GENERATE(1, 2);
+    CAPTURE(tower_type, filament);
+    DynamicPrintConfig config = wipe_tower_prime_config();
+
+    Print print;
+    Model model;
+    config.set_deserialize_strict({
+        {"precise_z_height", "1"},
+        {"wipe_tower_type", tower_type},
+        {"min_layer_height", "0.07"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
+    });
+    init_print({make_cube(20., 20., 20.), make_cube(20., 20., 10.004)}, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    // The 20 mm cube prints both filaments on every layer; the short one only `filament`.
+    // Setting both objects to filament 1 used to make normalize_fdm_2 clear the tower.
+    set_object_filaments(model.objects[0], 2, 1);
+    set_object_filaments(model.objects[1], filament, filament);
+    print.is_BBL_printer() = std::string(tower_type) == "type1";
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE_NOTHROW(gcode(print));
+
+    size_t       keeps_filament = 0;
+    unsigned int last           = (unsigned int) -1;
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering) {
+        if (lt.joins_wipe_tower_layer_below() && lt.extruders.size() == 1 && lt.extruders.front() == last)
+            ++keeps_filament;
+        if (! lt.extruders.empty())
+            last = lt.extruders.back();
+    }
+    CHECK(keeps_filament > 0);
+}
+
+TEST_CASE("Smooth timelapse prints each tower layer's wall once when a layer joins it", "[WipeTower]")
+{
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"timelapse_type", "1"},
+        {"min_layer_height", "0.07"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+
+    Print print;
+    slice_precise_z_pair(config, "type1", 10.004, print);
+    CHECK(count_joined_layers(print) > 0);
+}
+
+TEST_CASE("The final purge travel lifts before moving even with z_hop_when_prime off", "[WipeTower]")
+{
+    // Snapmaker #1150: z_hop_when_prime gates the lift on a normal tower approach. The final
+    // purge is not a tool change (new_extruder_id < 0), so with that flag off the nozzle used
+    // to travel to the tower at print height. Type2 is the path that still emits the purge.
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"wipe_tower_type", "type2"},
+        {"z_hop_when_prime", "0,0"},
+        {"z_hop_types", "Normal Lift,Normal Lift"},
+        {"z_hop", "0.4,0.4"},
+        // travel_to() and retract()'s "lift Z" comments are omitted unless this is on.
+        {"gcode_comments", "1"},
+        {"enable_filament_ramming", "1"},
+    });
+    Print print;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.has_wipe_tower());
+    const std::string out = gcode(print);
+    REQUIRE_FALSE(out.empty());
+
+    const size_t last_travel = out.rfind("Travel to a Wipe Tower");
+    REQUIRE(last_travel != std::string::npos);
+    // retract() only arms the hop; the dedicated Z move is written on the next travel as
+    // "lift Z" / "normal lift Z", immediately before this comment.
+    const size_t from   = last_travel > 400 ? last_travel - 400 : 0;
+    const std::string window = out.substr(from, last_travel - from);
+    CHECK(window.find("lift Z") != std::string::npos);
+}
+
+// A single extruder multi-material print with two filaments whose ram sets pressure advance to
+// ramming_pressure_advance_value (enable_change_pressure_when_wiping).
+static std::string slice_ramming_pressure_advance(const std::vector<std::pair<std::string, std::string>> &keys)
+{
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"wipe_tower_type", "type2"},
+        {"gcode_flavor", "marlin2"},
+        {"enable_filament_ramming", "1"},
+        {"enable_change_pressure_when_wiping", "1"},
+        {"ramming_pressure_advance_value", "0.02"},
+        {"pressure_advance", "0.05,0.06"},
+    });
+    for (const auto &[key, value] : keys)
+        config.set_deserialize_strict(key, value);
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    set_both_filaments(model);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.has_wipe_tower());
+    return gcode(print);
+}
+
+// The K values of the M900 lines, in order.
+static std::vector<std::string> m900_values(const std::string &gcode)
+{
+    std::vector<std::string> values;
+    for (const std::string &line : split_lines(gcode))
+        if (line.rfind("M900 K", 0) == 0)
+            values.emplace_back(line.substr(6, line.find_first_of(" ;", 6) - 6));
+    return values;
+}
+
+TEST_CASE("The ram changes a pressure advance that the filament start G-code sets", "[WipeTower][RammingPressureAdvance]")
+{
+    // Prusa's profiles: the filament start G-code sets pressure advance after every tool change,
+    // so the ram keeps its own value as upstream does. The tower writes it with four decimals like
+    // the G-code writer, not std::to_string's six.
+    const std::string out = slice_ramming_pressure_advance({
+        {"enable_pressure_advance", "0,0"},
+        {"filament_start_gcode", "\"M900 K0.04\";\"M900 K0.04\""},
+    });
+    const std::vector<std::string> values = m900_values(out);
+    CHECK(std::count(values.begin(), values.end(), "0.0200") > 0);
+    CHECK(std::count(values.begin(), values.end(), "0.04") > 0);
+}
+
+// The ram sets ramming_pressure_advance_value and nothing set it back: a filament whose pressure
+// advance lives in the firmware or the machine start G-code kept the ramming value for the rest of
+// the print. The tower now changes it only when the slicer's G-code sets it again, and returns a
+// profile's own value once the filament is unloaded.
+TEST_CASE("The ram's pressure advance is set back to the filament's own value", "[WipeTower][RammingPressureAdvance]")
+{
+    const std::string out = slice_ramming_pressure_advance({{"enable_pressure_advance", "1,1"}});
+    const std::vector<std::string> lines = split_lines(out);
+    int rams = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+            continue;
+        size_t end = i;
+        while (end < lines.size() && lines[end].find("; CP TOOLCHANGE END") == std::string::npos)
+            ++end;
+        // The tool rammed out is the one active before the block.
+        int old_tool = -1;
+        for (size_t j = i; j-- > 0;)
+            if (is_tool_line(lines[j])) {
+                old_tool = std::stoi(lines[j].substr(1));
+                break;
+            }
+        std::vector<std::string> block_values;
+        size_t                   tool_line = end;
+        for (size_t j = i; j < end; ++j) {
+            if (is_tool_line(lines[j])) {
+                tool_line = j;
+                break;
+            }
+            if (lines[j].rfind("M900 K", 0) == 0)
+                block_values.emplace_back(lines[j].substr(6));
+        }
+        if (block_values.empty() || old_tool < 0 || tool_line == end)
+            continue;
+        ++rams;
+        CAPTURE(i, old_tool);
+        // Four decimals, as the G-code writer's own pressure advance.
+        CHECK(block_values.front() == "0.0200");
+        // Before the tool change: back to the rammed filament's own value.
+        CHECK(block_values.back() == (old_tool == 0 ? "0.0500" : "0.0600"));
+    }
+    CHECK(rams > 0);
+}
+
+TEST_CASE("The ram leaves a pressure advance the slicer does not set alone", "[WipeTower][RammingPressureAdvance]")
+{
+    // No profile value and no pressure advance command in the slicer's G-code: the printer's own
+    // value could never be restored, so the ram must not change it.
+    const std::string out = slice_ramming_pressure_advance({{"enable_pressure_advance", "0,0"}});
+    REQUIRE(out.find("; CP TOOLCHANGE UNLOAD") != std::string::npos);
+    CHECK(m900_values(out).empty());
 }

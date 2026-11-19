@@ -4,6 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include "../AABBTreeLines.hpp"
 #include "../ClipperUtils.hpp"
 #include "../EdgeGrid.hpp"
@@ -2903,6 +2907,145 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
         }
         polylines = std::move(all_polylines);
     }
+}
+
+// Orca: from OrcaSlicer #16492, which also calls it on all sparse infill before the extrusions are made. EdgeSlicer
+// takes only the function (that call changes every sparse infill and is held with #16492, owner decision OD-W2);
+// here it rejoins the closed rings that clipping cuts at their first point (OrcaSlicer #17334).
+void join_close_ends(Polylines &polylines, double max_gap, bool can_reverse)
+{
+    const size_t n = polylines.size();
+    if (n < 2 || max_gap <= 0.)
+        return;
+    static constexpr size_t npos = size_t(-1);
+    // End 2 * i is the first point of polyline i, 2 * i + 1 its last.
+    auto end_point = [&polylines](size_t e) -> const Point & { return (e & 1) ? polylines[e >> 1].points.back() : polylines[e >> 1].points.front(); };
+    // Ends in cells of max_gap, so the ends within max_gap of one are in its cell or the eight around it.
+    auto cell_of = [max_gap](const Point &p) { return Vec2i64(int64_t(std::floor(p.x() / max_gap)), int64_t(std::floor(p.y() / max_gap))); };
+    auto key     = [](const Vec2i64 &c) { return (uint64_t(c.x()) << 32) ^ uint64_t(uint32_t(c.y())); };
+    std::unordered_map<uint64_t, std::vector<size_t>> grid;
+    for (size_t e = 0; e < 2 * n; ++ e)
+        if (polylines[e >> 1].size() >= 2)
+            grid[key(cell_of(end_point(e)))].push_back(e);
+
+    // The end of a polyline that comes last along its overall direction, taken along the dominant axis.
+    std::vector<char> backwards(n, 0);
+    for (size_t i = 0; i < n; ++ i)
+        if (polylines[i].size() >= 2) {
+            const Vec2d dir = (polylines[i].points.back() - polylines[i].points.front()).cast<double>();
+            backwards[i] = std::abs(dir.x()) >= std::abs(dir.y()) ? dir.x() < 0. : dir.y() < 0.;
+        }
+    auto trailing = [&backwards](size_t e) { return bool(e & 1) != bool(backwards[e >> 1]); };
+    // Ends that meet first, then shortest gaps between leading ends, then the others: the copies of neighboring multiline
+    // groups are all joined at the same side, which leaves their open ends next to each other rather than on alternating walls.
+    std::vector<std::tuple<bool, bool, double, size_t, size_t>> gaps;
+    for (const auto &[cell_key, ends] : grid) {
+        const Vec2i64 c = cell_of(end_point(ends.front()));
+        for (int64_t dx = -1; dx <= 1; ++ dx)
+            for (int64_t dy = -1; dy <= 1; ++ dy)
+                if (auto it = grid.find(key(c + Vec2i64(dx, dy))); it != grid.end())
+                    for (size_t a : ends)
+                        for (size_t b : it->second)
+                            if (a < b && (a >> 1) != (b >> 1) && (can_reverse || (a & 1) != (b & 1)))
+                                if (const double d = (end_point(a) - end_point(b)).cast<double>().norm(); d <= max_gap)
+                                    gaps.emplace_back(d > SCALED_EPSILON, d > SCALED_EPSILON && (trailing(a) || trailing(b)), d, a, b);
+    }
+    if (gaps.empty())
+        return;
+    std::sort(gaps.begin(), gaps.end());
+
+    std::vector<size_t> partner(2 * n, npos), parent(n);
+    std::iota(parent.begin(), parent.end(), 0);
+    auto find = [&parent](size_t i) {
+        while (parent[i] != i)
+            i = parent[i] = parent[parent[i]];
+        return i;
+    };
+    // A join may not cross a line or another join; touching them at its own ends is fine, as where a line ends on another.
+    // Only the segments through a cell next to a candidate join can cross one.
+    std::unordered_set<uint64_t> near_gaps;
+    for (const auto &[apart, trail, d, a, b] : gaps)
+        for (size_t e : { a, b })
+            for (int64_t dx = -1; dx <= 1; ++ dx)
+                for (int64_t dy = -1; dy <= 1; ++ dy)
+                    near_gaps.insert(key(cell_of(end_point(e)) + Vec2i64(dx, dy)));
+    Lines near_lines;
+    for (const Polyline &pl : polylines)
+        for (size_t i = 1; i < pl.size(); ++ i) {
+            const Vec2i64 c0 = cell_of(pl.points[i - 1]), c1 = cell_of(pl.points[i]);
+            const Vec2i64 lo = c0.cwiseMin(c1), hi = c0.cwiseMax(c1);
+            bool is_near = (hi - lo).maxCoeff() > 3;
+            for (int64_t x = lo.x(); x <= hi.x() && ! is_near; ++ x)
+                for (int64_t y = lo.y(); y <= hi.y() && ! is_near; ++ y)
+                    is_near = near_gaps.count(key(Vec2i64(x, y))) > 0;
+            if (is_near)
+                near_lines.emplace_back(pl.points[i - 1], pl.points[i]);
+        }
+    const AABBTreeLines::LinesDistancer<Line> lines(std::move(near_lines));
+    auto crosses = [&](size_t a, size_t b) {
+        const Vec2d  p = end_point(a).cast<double>(), q = end_point(b).cast<double>();
+        const double length = (q - p).norm();
+        if (length <= 2. * SCALED_EPSILON)
+            return false;
+        const Vec2d dir = (q - p) / length;
+        const Line  inner(Point((p + SCALED_EPSILON * dir).cast<coord_t>()), Point((q - SCALED_EPSILON * dir).cast<coord_t>()));
+        if (! lines.get_lines().empty() && ! lines.intersections_with_line<false>(inner).empty())
+            return true;
+        const Vec2i64 c = cell_of(end_point(a));
+        for (int64_t dx = -3; dx <= 3; ++ dx)
+            for (int64_t dy = -3; dy <= 3; ++ dy)
+                if (auto it = grid.find(key(c + Vec2i64(dx, dy))); it != grid.end())
+                    for (size_t e : it->second)
+                        if (partner[e] != npos && Geometry::segments_intersect(inner.a, inner.b, end_point(e), end_point(partner[e])))
+                            return true;
+        return false;
+    };
+    for (const auto &[apart, trail, d, a, b] : gaps)
+        if (partner[a] == npos && partner[b] == npos && find(a >> 1) != find(b >> 1) && ! crosses(a, b)) {
+            partner[a] = b;
+            partner[b] = a;
+            parent[find(a >> 1)] = find(b >> 1);
+        }
+
+    // Walk each group from a polyline with a free end, entering the next polyline at the end joined to the last one.
+    Polylines         out;
+    std::vector<char> done(n, 0);
+    auto walk = [&](size_t first_end) {
+        Polyline joined;
+        for (size_t e = first_end; e != npos;) {
+            Polyline &pl = polylines[e >> 1];
+            done[e >> 1] = 1;
+            if (e & 1)
+                pl.reverse();
+            joined.points.insert(joined.points.end(), pl.points.begin() + (! joined.empty() && joined.points.back() == pl.points.front()), pl.points.end());
+            e = partner[e ^ 1];
+        }
+        out.emplace_back(std::move(joined));
+    };
+    for (size_t i = 0; i < n; ++ i)
+        if (! done[i] && partner[2 * i] == npos)
+            walk(2 * i);
+    for (size_t i = 0; i < n; ++ i)
+        if (! done[i] && partner[2 * i + 1] == npos)
+            walk(2 * i + 1);
+    polylines = std::move(out);
+}
+
+// EdgeSlicer: the closed rings among the paths are clipped on their own, and the two pieces of each ring that meet at its
+// first point are joined back (OrcaSlicer #17334). Without a closed ring this is intersection_pl().
+Polylines intersection_pl_rejoining_rings(const Polylines &polylines, const ExPolygons &clip)
+{
+    auto is_ring = [](const Polyline &pl) { return pl.size() > 3 && pl.first_point() == pl.last_point(); };
+    if (std::none_of(polylines.begin(), polylines.end(), is_ring))
+        return intersection_pl(polylines, clip);
+    Polylines open, rings;
+    for (const Polyline &pl : polylines)
+        (is_ring(pl) ? rings : open).emplace_back(pl);
+    Polylines out        = intersection_pl(open, clip);
+    Polylines ring_parts = intersection_pl(rings, clip);
+    join_close_ends(ring_parts, SCALED_EPSILON, true);
+    append(out, std::move(ring_parts));
+    return out;
 }
 
 } // namespace Slic3r

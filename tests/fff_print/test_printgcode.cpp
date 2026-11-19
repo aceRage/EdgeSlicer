@@ -32,7 +32,7 @@ std::regex perimeters_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; perimeter");
 std::regex infill_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; infill");
 std::regex skirt_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; skirt");
 
-SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
+SCENARIO( "PrintGCode basic functionality", "[PrintGCode][slow]") {
     GIVEN("A default configuration and a print test object") {
         WHEN("the output is executed with no support material") {
             Slic3r::Print print;
@@ -362,6 +362,77 @@ TEST_CASE("BBL time_lapse_gcode is emitted once per layer", "[PrintGCode][Timela
     SECTION("i3 machine keeps its traditional placement: still one block per layer") {
         std::string gcode = slice_bbl("i3", marker);
         REQUIRE(count(gcode, "\n;TEST_TIMELAPSE ") == count(gcode, "\n;TEST_LAYER_CHANGE "));
+    }
+}
+
+// Bambu Lab A1 (i3, traditional timelapse) with a Bambu (Type1) tower: on a layer with a tower the
+// photo is taken before the tower's tool change. Above the tower's top there is nothing for the
+// tower to print, and those layers must take their photo as a single-colour layer does. They were
+// still marked as tower layers (the gap filling that keeps tower layers within max_layer_height
+// reached past the top), so they waited for tower work that never came and had no photo at all.
+TEST_CASE("A1 timelapse photo on every layer above the tower's top", "[PrintGCode][Timelapse][WipeTower]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({
+        { "printer_structure",          "i3" },
+        { "wipe_tower_type",            "type1" },
+        { "timelapse_type",             "0" },
+        { "time_lapse_gcode",           ";TEST_TIMELAPSE layer={layer_num}" },
+        { "layer_change_gcode",         ";TEST_LAYER_CHANGE [layer_num]" },
+        { "machine_start_gcode",        "" },
+        { "machine_end_gcode",          "" },
+        { "brim_type",                  "no_brim" },
+        { "skirt_loops",                0 },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "max_layer_height",           "0.28,0.28" },
+    });
+    // A 20 mm cube in filament 1 and a 4 mm one in filament 2: the second colour ends at 4 mm.
+    Print print;
+    Model model;
+    ModelObject *tall = model.add_object();
+    tall->name        = "tall.stl";
+    tall->add_volume(mesh(TestMesh::cube_20x20x20));
+    tall->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    tall->ensure_on_bed();
+    ModelObject *low = model.add_object();
+    low->name        = "low.stl";
+    TriangleMesh low_mesh = mesh(TestMesh::cube_20x20x20);
+    low_mesh.scale(Vec3f(1.f, 1.f, 0.2f));
+    low->add_volume(low_mesh);
+    low->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    low->ensure_on_bed();
+    low->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.has_wipe_tower());
+    const std::string gcode = Test::gcode(print);
+
+    // The tower stops part way up.
+    const size_t tower_layers = print.wipe_tower_data().tool_changes.size();
+    REQUIRE(tower_layers > 0);
+    REQUIRE(tower_layers < 50);
+
+    size_t layers = 0;
+    for (size_t pos = gcode.find("\n;TEST_LAYER_CHANGE "); pos != std::string::npos; pos = gcode.find("\n;TEST_LAYER_CHANGE ", pos + 1))
+        ++layers;
+    REQUIRE(layers == 100);
+    for (size_t layer = 0; layer < layers; ++layer) {
+        CAPTURE(layer);
+        const std::string photo = "\n;TEST_TIMELAPSE layer=" + std::to_string(layer) + "\n";
+        const size_t      first = gcode.find(photo);
+        CHECK(first != std::string::npos);
+        if (first != std::string::npos)
+            CHECK(gcode.find(photo, first + 1) == std::string::npos);
     }
 }
 
@@ -2964,5 +3035,102 @@ TEST_CASE("Cyclic tool-change ordering: wipe tower plan and G-code export agree"
             current = tool;
         }
         CHECK(changes >= 3 * 8 + 2);
+    }
+}
+
+// BambuStudio #11965: in spiral vase mode BambuStudio's travel_to() moved in XY only, so a filament change G-code
+// that lifted Z after the raft left the first object layer printing at the lifted Z. Orca's travel_to() always
+// travels with travel_to_xyz() to the layer's nominal Z (its spiral-vase XY-only branch is disabled), so this
+// is already right here; the cases below are the upstream test, adapted, to keep it that way.
+namespace {
+struct SpiralRaftGCodeResult
+{
+    double first_model_extrusion_z { -1. };
+    double highest_z_before_model  { 0. };
+    double nominal_model_layer_z   { 0. };
+    bool   model_z_is_continuous   { true };
+};
+
+SpiralRaftGCodeResult spiral_raft_gcode_result(const std::string &change_filament_gcode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "spiral_mode",                true },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops",                 1 },
+        { "top_shell_layers",           0 },
+        { "bottom_shell_layers",        1 },
+        { "sparse_infill_density",      "0%" },
+        { "raft_layers",                2 },
+        { "enable_prime_tower",         false },
+        { "support_filament",           2 },
+        { "support_interface_filament", 2 },
+        { "wall_filament",              1 },
+        { "sparse_infill_filament",     1 },
+        { "solid_infill_filament",      1 },
+        { "retraction_length",          "0" },
+        { "skirt_loops",                0 },
+        { "gcode_comments",             true },
+        { "machine_start_gcode",        "T[initial_tool]\n" },
+        { "change_filament_gcode",      change_filament_gcode }
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const std::string gcode = Test::gcode(print);
+
+    SpiralRaftGCodeResult result;
+    result.nominal_model_layer_z = print.objects().front()->layers().front()->print_z;
+    int    current_tool           = -1;
+    bool   raft_tool_seen         = false;
+    double last_model_extrusion_z = -1.;
+    GCodeReader reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd().size() > 1 && line.cmd().front() == 'T') {
+            current_tool = atoi(line.cmd().data() + 1);
+            raft_tool_seen |= current_tool == 1;
+        }
+        const bool model_extrusion = raft_tool_seen && current_tool == 0 && line.extruding(self) && line.dist_XY(self) > 0.;
+        if (result.first_model_extrusion_z < 0.) {
+            result.highest_z_before_model = std::max(result.highest_z_before_model, double(self.z()));
+            if (model_extrusion)
+                result.first_model_extrusion_z = self.z();
+        }
+        if (model_extrusion) {
+            if (last_model_extrusion_z >= 0.) {
+                const double z_step = self.z() - last_model_extrusion_z;
+                result.model_z_is_continuous &= z_step >= -EPSILON && z_step <= 0.21;
+            }
+            last_model_extrusion_z = self.z();
+        }
+    });
+    return result;
+}
+} // namespace
+
+TEST_CASE("Spiral vase restores object layer Z after a raft tool change", "[PrintGCode][SpiralVase][BBS11965]")
+{
+    SECTION("tool change ends at an elevated clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 X5 F12000\nG1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
+    }
+    SECTION("tool change does not alter Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("T[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.model_z_is_continuous);
+    }
+    SECTION("tool change leaves the XY position unknown at clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
     }
 }

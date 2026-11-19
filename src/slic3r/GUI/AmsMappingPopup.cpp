@@ -18,6 +18,7 @@
 #include <wx/clipbrd.h>
 #include <wx/control.h>
 #include <wx/dcgraph.h>
+#include <wx/display.h>
 #include <wx/graphics.h>
 #include <miniz.h>
 #include <algorithm>
@@ -411,9 +412,19 @@ void MaterialItem::doRender(wxDC &dc)
 
      Bind(wxEVT_SHOW, [this](wxShowEvent& e) {
          if (e.IsShown() && m_parent_item) {
-             wxPoint pos = m_parent_item->ClientToScreen(wxPoint(0, 0));
-             pos.y += m_parent_item->GetRect().height;
-             this->Move(pos);
+             // Below the filament, kept on its display's work area (flipped above when it does not
+             // fit below): the AMS 3H's nine-slot row makes the picker about 520 DIP wide.
+             const wxPoint anchor_pos = m_parent_item->ClientToScreen(wxPoint(0, 0));
+             const wxSize  anchor_size = m_parent_item->GetSize();
+             int           display_idx = wxDisplay::GetFromWindow(m_parent_item);
+             if (display_idx == wxNOT_FOUND)
+                 display_idx = 0;
+             const wxRect work = wxDisplay(display_idx).GetClientArea();
+             const wxSize popup_size = GetSize();
+             const auto   p = GUI::AmsTypes::mapping_popup_origin({anchor_pos.x, anchor_pos.y, anchor_size.x, anchor_size.y},
+                                                                  popup_size.x, popup_size.y,
+                                                                  {work.x, work.y, work.width, work.height});
+             this->Move(wxPoint(p.x, p.y));
          }
      });
  }
@@ -512,7 +523,8 @@ void AmsMapingPopup::update_ams_data_multi_machines()
     Fit();
 }
 
-void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const std::vector<AmsTray>& ext_spools, int only_physical_extruder)
+void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const std::vector<AmsTray>& ext_spools, int only_physical_extruder,
+                                     const std::vector<std::pair<int, int>>& rack_bound, bool multi_extruder)
 { 
     std::map<std::string, Ams *>::iterator ams_iter;
     BOOST_LOG_TRIVIAL(trace) << "ams_mapping total count " << amsList.size();
@@ -525,6 +537,7 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
     m_amsmapping_container_list.clear();
     m_amsmapping_container_sizer_list.clear();
     m_mapping_item_list.clear();
+    bool any_left = false;
 
     for (ams_iter = amsList.begin(); ams_iter != amsList.end(); ams_iter++) {
 
@@ -534,14 +547,12 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
         // A filament sliced for one extruder is only offered that extruder's AMS units.
         if (only_physical_extruder >= 0 && nozzle_id != only_physical_extruder)
             continue;
+        // A rack AMS (the H3C's AMS 3H): its slots are named 28 + slot and only those a rack nozzle is
+        // fed from are offered (Bambu Studio's hotend mapping).
+        const bool rack_unit = ams_iter->second->is_rack();
 
         if (ams_type >=1 || ams_type <= 3) { //1:ams 2:ams-lite 3:n3f
 
-            auto sizer_mapping_list = new wxBoxSizer(wxHORIZONTAL);
-            auto ams_mapping_item_container = new MappingContainer(this);
-            ams_mapping_item_container->SetSizer(sizer_mapping_list);
-            ams_mapping_item_container->Layout();
-            
             m_has_unmatch_filament = false;
 
             BOOST_LOG_TRIVIAL(trace) << "ams_mapping ams id " << ams_iter->first.c_str();
@@ -555,6 +566,13 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
                 TrayData td;
 
                 td.id = ams_indx * AMS_TOTAL_COUNT + atoi(tray_data->id.c_str());
+                if (rack_unit) {
+                    const int slot = atoi(tray_data->id.c_str());
+                    if (std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ams_indx, slot)) == rack_bound.end())
+                        continue; // no rack nozzle is fed from it now
+                    td.id   = GUI::AmsTypes::mapping_tray_index(ams_type, ams_indx, slot);
+                    td.rack = true;
+                }
 
                 if (!tray_data->is_exists) {
                     td.type = EMPTY;
@@ -581,9 +599,14 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
                 tray_datas.push_back(td);
             }
 
+            // Sized for the slots it shows: the AMS 3H's nine on one wider row (Bambu Studio
+            // MappingContainer), every four-slot unit and the AMS HT at the usual 230 DIP.
+            auto sizer_mapping_list = new wxBoxSizer(wxHORIZONTAL);
+            auto ams_mapping_item_container = new MappingContainer(this, int(tray_datas.size()));
+            ams_mapping_item_container->SetSizer(sizer_mapping_list);
+            ams_mapping_item_container->Layout();
             ams_mapping_item_container->Show();
             add_ams_mapping(tray_datas, ams_mapping_item_container, sizer_mapping_list);
- 
 
             m_amsmapping_container_sizer_list.push_back(sizer_mapping_list);
             m_amsmapping_container_list.push_back(ams_mapping_item_container);
@@ -594,6 +617,7 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
             }
             else if (nozzle_id == 1) {
                 m_sizer_ams_left->Add(ams_mapping_item_container, 0, wxALIGN_CENTER, 0);
+                any_left = true;
             }
            
 
@@ -608,8 +632,13 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
     // (BambuStudio AmsMapingPopup::update_mapping_items + add_ext_ams_mapping: tray id = ams id =
     // 254 / 255, slot 0; a holder without an identified spool shows "?" and can still be picked).
     for (const AmsTray& ext : ext_spools) {
-        const int ext_id   = atoi(ext.id.c_str());
-        const int physical = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+        const int  ext_id      = atoi(ext.id.c_str());
+        // A nozzle rack's holder (H3C, 255 down to 247) feeds the one toolhead: offered when a rack
+        // nozzle is fed from it.
+        const bool rack_holder = !rack_bound.empty() && GUI::AmsTypes::is_rack_virtual_slot(ext_id);
+        if (rack_holder && std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ext_id, 0)) == rack_bound.end())
+            continue;
+        const int physical = rack_holder ? 0 : BambuExtruderMap::external_spool_physical_extruder(ext_id);
         if (physical < 0 || (only_physical_extruder >= 0 && physical != only_physical_extruder))
             continue;
         AmsTray  tray = ext;
@@ -617,6 +646,7 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
         td.id      = ext_id;
         td.ams_id  = ext_id;
         td.slot_id = 0;
+        td.rack    = rack_holder;
         if (!tray.is_tray_info_ready()) {
             td.type = THIRD;
         } else {
@@ -638,12 +668,19 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const 
         m_amsmapping_container_list.push_back(ams_mapping_item_container);
         // main (physical 0) = right
         (physical == 0 ? m_sizer_ams_right : m_sizer_ams_left)->Add(ams_mapping_item_container, 0, wxALIGN_CENTER | wxTOP, FromDIP(4));
+        any_left = any_left || physical != 0;
     }
+    // Something in the left column (an extruder count not reported yet) keeps both headings.
+    multi_extruder = multi_extruder || any_left;
 
+    // One extruder (X1C, the H3C's nozzle rack): everything sits in the right column under one
+    // "AMS" heading (Bambu Studio AmsMapingPopup::update, extruder_num == 1).
     if (m_left_ams_title)
-        m_left_ams_title->Show(only_physical_extruder < 0 || only_physical_extruder == 1);
-    if (m_right_ams_title)
-        m_right_ams_title->Show(only_physical_extruder < 0 || only_physical_extruder == 0);
+        m_left_ams_title->Show(multi_extruder && (only_physical_extruder < 0 || only_physical_extruder == 1));
+    if (m_right_ams_title) {
+        m_right_ams_title->SetLabel(multi_extruder ? _L("Right AMS") : _L("AMS"));
+        m_right_ams_title->Show(!multi_extruder || only_physical_extruder < 0 || only_physical_extruder == 0);
+    }
 
     Layout();
     Fit();
@@ -667,7 +704,9 @@ std::vector<TrayData> AmsMapingPopup::parse_ams_mapping(std::map<std::string, Am
             AmsTray* tray_data = tray_iter->second;
             TrayData td;
 
-            td.id = ams_indx * AMS_TOTAL_COUNT + atoi(tray_data->id.c_str());
+            // 28 + slot on the AMS 3H (the number its mapping result carries), ams * 4 + slot otherwise.
+            td.id   = GUI::AmsTypes::mapping_tray_index(ams_group->type, ams_indx, atoi(tray_data->id.c_str()));
+            td.rack = ams_group->is_rack();
 
             if (!tray_data->is_exists) {
                 td.type = EMPTY;
@@ -752,7 +791,7 @@ void AmsMapingPopup::add_ams_mapping(std::vector<TrayData> tray_data, wxWindow* 
 
         //sizer_mapping_item->Add(number, 0, wxALIGN_CENTER_HORIZONTAL, 0);
         //sizer_mapping_item->Add(m_mapping_item, 0, wxALIGN_CENTER_HORIZONTAL, 0);
-        m_mapping_item->set_tray_index(wxGetApp().transition_tridid(tray_data[i].id));
+        m_mapping_item->set_tray_index(wxGetApp().transition_tridid(tray_data[i].id, tray_data[i].rack));
         sizer->Add(0,0,0,wxRIGHT,FromDIP(6));
         sizer->Add(m_mapping_item, 0, wxTOP, FromDIP(1));
     }
@@ -796,7 +835,7 @@ void AmsMapingPopup::paintEvent(wxPaintEvent &evt)
 
 void MappingItem::send_event(int fliament_id) 
 {
-    auto number = wxGetApp().transition_tridid(m_tray_data.id);
+    auto number = wxGetApp().transition_tridid(m_tray_data.id, m_tray_data.rack);
     wxCommandEvent event(EVT_SET_FINISH_MAPPING);
     event.SetInt(m_tray_data.id);
 
@@ -1329,7 +1368,7 @@ bool AmsIntroducePopup::ProcessLeftDown(wxMouseEvent& event) {
 }
 
 
-MappingContainer::MappingContainer(wxWindow* parent)
+MappingContainer::MappingContainer(wxWindow* parent, int slots_num)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
 {
 #ifdef __WINDOWS__
@@ -1340,8 +1379,10 @@ MappingContainer::MappingContainer(wxWindow* parent)
 
     ams_mapping_item_container = create_scaled_bitmap("ams_mapping_container", this, 78);
 
-    SetMinSize(wxSize(FromDIP(230), FromDIP(78)));
-    SetMaxSize(wxSize(FromDIP(230), FromDIP(78)));
+    m_slots_num   = slots_num;
+    const int w   = FromDIP(GUI::AmsTypes::mapping_container_width_dip(slots_num));
+    SetMinSize(wxSize(w, FromDIP(78)));
+    SetMaxSize(wxSize(w, FromDIP(78)));
 }
 
 MappingContainer::~MappingContainer()
@@ -1378,7 +1419,24 @@ void MappingContainer::render(wxDC& dc)
 
 void MappingContainer::doRender(wxDC& dc)
 {
-    dc.DrawBitmap(ams_mapping_item_container, 0, 0);
+    const wxBitmap& bmp = ams_mapping_item_container;
+    // Bitmap sizes in pixels, drawing positions in the window's own units (they differ on a Retina Mac).
+    const double sf = bmp.GetScaleFactor() > 0. ? bmp.GetScaleFactor() : 1.;
+    const int    W = GetSize().x, bw = int(bmp.GetWidth() / sf), bh = int(bmp.GetHeight() / sf);
+    const int    cap = FromDIP(20), strip = FromDIP(40), badge = FromDIP(30);
+    if (W <= bw || bw < cap * 2 + strip + badge) {
+        dc.DrawBitmap(bmp, 0, 0);
+        return;
+    }
+    // A row wider than the 230 DIP frame (the AMS 3H's nine slots): the frame's two ends, its plain
+    // middle repeated in between, and its centre badge kept in the middle.
+    auto part = [&bmp, sf, bh](int x, int w) { return bmp.GetSubBitmap(wxRect(int(x * sf), 0, int(w * sf), int(bh * sf))); };
+    const wxBitmap middle = part(cap, strip);
+    for (int x = cap; x < W - cap; x += strip)
+        dc.DrawBitmap(middle, x, 0);
+    dc.DrawBitmap(part(0, cap), 0, 0);
+    dc.DrawBitmap(part(bw - cap, cap), W - cap, 0);
+    dc.DrawBitmap(part((bw - badge) / 2, badge), (W - badge) / 2, 0);
 }
 
 AmsReplaceMaterialDialog::AmsReplaceMaterialDialog(wxWindow* parent)
@@ -1507,6 +1565,10 @@ void AmsReplaceMaterialDialog::update_machine_obj(MachineObject* obj)
             for (auto tray_info : ams_info.second->trayList) {
                 int tray_id_int = atoi(tray_info.first.c_str());
                 tray_id_int =  ams_id_int + tray_id_int;
+                // Only the four-slot AMS units 0..3 have a place here: an AMS HT (128+) or the H3C's
+                // AMS 3H (32) wrote past the end of the array.
+                if (tray_id_int < 0 || tray_id_int >= 4 * 4)
+                    continue;
                 tray_list[tray_id_int] = tray_info.second;
             }
         }

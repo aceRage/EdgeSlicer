@@ -45,6 +45,8 @@ std::string tray_display_name(int ams_id, int slot_id);
 // AMS HT units and "Ext" for the external spool. Only "Ext" marks an external spool, which
 // the grouping treats differently; an AMS HT is an ordinary AMS slot.
 std::string tray_name(int ams_id, int slot_id);
+// A rack AMS slot's name: "1".."9".
+std::string rack_tray_name(int slot_id);
 
 // One AMS tray of the printer report as PresetBundle::filament_ams_list holds it
 // (Sidebar::build_filament_ams_list): key = ams_id * 4 + slot_id, as BambuStudio keys it and as
@@ -56,7 +58,9 @@ struct AmsListEntry
     int         key{ -1 };
     std::string tray_name;
 };
-AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id);
+// rack_ams: a slot of a rack AMS (the H3C's AMS 3H): same key, named by its number, "1".."9",
+// as Bambu Studio labels it (DevFilaSystem get_slot_name).
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id, bool rack_ams = false);
 
 struct MappedTray
 {

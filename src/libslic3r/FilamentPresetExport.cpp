@@ -1,5 +1,7 @@
 #include "FilamentPresetExport.hpp"
 
+#include <boost/algorithm/string/trim.hpp>
+
 #include <map>
 
 #include "Preset.hpp"
@@ -12,7 +14,25 @@ std::string filament_group_name(const std::string &base_preset_name)
     const size_t at = base_preset_name.find_last_of('@');
     if (at == std::string::npos)
         return base_preset_name;
-    return base_preset_name.substr(0, at == 0 ? 0 : at - 1);
+    // The text before the '@' without the spaces before it. It cut one character, meant for the space of
+    // " @", so "PLA@U1" came out "PL".
+    std::string name = base_preset_name.substr(0, at);
+    boost::trim_right(name);
+    return name;
+}
+
+std::string filament_bundle_vendor(const std::string &base_preset_name)
+{
+    const size_t at      = base_preset_name.find_last_of('@');
+    std::string  printer = at == std::string::npos ? std::string() : base_preset_name.substr(at + 1);
+    boost::trim(printer);
+    const size_t space = printer.find(' ');
+    if (space != std::string::npos)
+        printer = printer.substr(0, space);
+    // A filament whose base preset names no printer ("My PLA", a user root) got no vendor and was left out of
+    // the .orca_filament without a word. The folder is only a grouping in the archive (import reads the files
+    // by their own names), so such filaments go in one of their own.
+    return printer.empty() ? std::string("Custom") : printer;
 }
 
 UserPresetsByPrinter collect_user_filament_presets(PresetBundle &bundle)

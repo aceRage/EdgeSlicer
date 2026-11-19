@@ -97,6 +97,19 @@ inline bool migrate(std::set<std::string> &keys, const std::set<std::string> &cu
     return changed;
 }
 
+// A user preset renamed (its key is its full name): the star moves to the new key. Returns true when the
+// old key was a favourite (and so the set changed).
+inline bool rename_key(std::set<std::string> &keys, const std::string &old_key, const std::string &new_key)
+{
+    if (old_key.empty() || new_key.empty() || old_key == new_key || keys.erase(old_key) == 0)
+        return false;
+    keys.insert(new_key);
+    return true;
+}
+
+// A user preset deleted: its star goes. Returns true when it was a favourite.
+inline bool remove_key(std::set<std::string> &keys, const std::string &key) { return !key.empty() && keys.erase(key) > 0; }
+
 // Adds the key when it is missing and removes it when present. Returns the new state.
 inline bool toggle(std::set<std::string> &keys, const std::string &key)
 {

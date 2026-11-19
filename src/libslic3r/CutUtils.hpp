@@ -151,6 +151,14 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
 
+// Why a cut with these connectors cannot be made, as far as Flexi joints go: a cut makes one
+// Flexi joint and no other connector beside it. Empty when there is no Flexi joint, or one on
+// its own. `other_connectors` leaves out TAC Joints, which are refused with a Flexi joint by a
+// message of their own. The message is marked for translation (L()) but not translated.
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors);
+// The same for the connectors placed in the Cut gizmo.
+std::string flexi_connectors_error(const CutConnectors& connectors);
+
 // Append the NEGATIVE_VOLUME that carries a push-fit Pin into `mo` before the cut runs. Its mesh
 // is the pin itself in mm (pushfit_preview_body), its transform the connector frame (pos,
 // rotation_m, z_angle; no scale). The cut builds the pin object and both holes from
@@ -160,6 +168,23 @@ ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, 
 // TAC Joint meshes already have their physical dimensions and clearance. Never apply the
 // generic connector radius/height scaling to these reference meshes.
 ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
+// The unit mesh of a plain connector - Plug, Dowel or Snap - before it is scaled by (radius,
+// radius, height): a prism or a frustum with the shape's number of sides, or the snap. Moved out
+// of GLGizmoCut3D::get_connector_mesh() (Split to Fit P2) so connectors can be baked headless;
+// the gizmo still builds its Flexi, Pin and TAC previews itself and calls this for the rest.
+indexed_triangle_set cut_connector_unit_mesh(const CutConnectorAttributes& attributes,
+                                             float snap_space_proportion = 0.3f, float snap_bulge_proportion = 0.15f);
+
+// Turn mo->cut_connectors into connector volumes, ready for a Cut: a NEGATIVE_VOLUME per Plug /
+// Dowel / Snap (cut_connector_unit_mesh() at pos * rotation_m * z_angle, scaled by radius, radius,
+// height), and the Flexi / Pin / TAC volumes from add_*_volume(). Names are `connector_name`-<n>
+// (the TAC Joint's "TAC Joint-<n>"), numbered on from mo->cut_id's connector count, which grows by
+// the number baked; mo->cut_connectors is cleared. Moved verbatim from
+// GLGizmoCut3D::apply_cut_connectors() (Split to Fit P2), which now calls it, so the Cut tool's
+// output is unchanged. The snap proportions are the gizmo's (its defaults here).
+void bake_cut_connectors(ModelObject* mo, const std::string& connector_name,
+                         float snap_space_proportion = 0.3f, float snap_bulge_proportion = 0.15f);
 
 // A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
 // from its object frame to the frame the halves' meshes are built in (the source object's frame
@@ -197,11 +222,22 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
 // right after the cut, while they still ARE the cut frame. No-op without a recipe.
 void cut_recipe_record_half_frame(ModelObject& half);
 
-enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
+enum class ModelObjectCutAttribute : int {
+    KeepUpper,
+    KeepLower,
+    KeepAsParts,
+    FlipUpper,
+    FlipLower,
+    PlaceOnCutUpper,
+    PlaceOnCutLower,
+    CreateDowels,
+    InvalidateCutInfo,
     // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
     // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
     // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
-    KeepPaint };
+    KeepPaint,
+    ApplyTacJoints
+};
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
 
@@ -333,6 +369,34 @@ public:
     static float calculate_groove_width(const Cut::Groove& groove, const float plane_radius);
 
 }; // namespace Cut
+
+// ---------------------------------------------------------------------------
+// Decisions of the Cut gizmo, kept here so they can be tested without the GUI.
+// ---------------------------------------------------------------------------
+
+// The negative volume a Plug, Dowel or Snap connector is cut with: `unit_mesh` (the gizmo's unit
+// shape, get_connector_mesh()) added to `mo` and placed at the connector the way the gizmo draws it
+// (position, frame, Rotation, radius x radius x height). The mesh is centred on the middle of its
+// HEIGHT only: the gizmo draws the shape about its axis, and a shape whose box is not centred on
+// the axis (a triangle) must not move sideways.
+ModelVolume* add_cut_connector_volume(ModelObject& mo, indexed_triangle_set unit_mesh, const CutConnector& connector);
+
+// The points a Plug, Dowel or Snap connector's outline is tested against the cut contour with, in
+// the connector's own frame (before its rotation_m and position): its shape at its radius, turned
+// by its Rotation as the gizmo draws it. 60 points for a circle.
+std::vector<Vec3f> cut_connector_outline(const CutConnector& connector);
+
+// The dovetail depth the Cut gizmo first offers for an object with bounding box `bb`, mm: a
+// sixtieth of the box's three sides together, at least 1 mm. From the object only, never from
+// the camera.
+float cut_groove_default_depth(const BoundingBoxf3& bb);
+
+// The objects "Edit cut" replaces when it is opened on objects[selected]: the indices of every
+// object of that cut, `selected` among them, in model order. A cut with a cut_id (connectors, a
+// dovetail) is found by it. A plain cut carries none, so its other half is the one other object
+// with an equal recipe; when there is more than one (the same cut made twice), the two cuts cannot
+// be told apart and only `selected` is returned.
+std::vector<size_t> edit_cut_objects(const ModelObjectPtrs& objects, size_t selected);
 
 } // namespace Slic3r
 

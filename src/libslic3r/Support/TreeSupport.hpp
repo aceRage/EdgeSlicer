@@ -467,6 +467,12 @@ private:
      */
     void draw_circles();
 
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4): fold the drawn base areas onto the slab partition of the
+    // support merge plan (SupportMergePlan.cpp), so a coarse nozzle prints the sparse base once per slab, on the slab
+    // top, at the slab height. Roofs, floors and the gap areas stay on the fine grid. A no-op unless the plate prints
+    // through more than one nozzle diameter.
+    void fold_base_areas_multi_diameter();
+
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.
      *

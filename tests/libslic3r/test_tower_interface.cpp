@@ -117,6 +117,8 @@ DynamicPrintConfig machine_config(const Machine &m, std::initializer_list<Config
         { "prime_tower_brim_width", 3 },
         { "wipe_tower_wall_type", "rectangle" },
         { "gcode_comments", 0 },
+        // These cases are about the Edge options; Bambu's own switch (on in the H2D presets) would take them over.
+        { "enable_tower_interface_features", 0 },
     });
     if (m.generic)
         cfg.set_deserialize_strict({ { "printer_model", "Generic" } });
@@ -326,7 +328,7 @@ TEST_CASE("A run-in start is kept on the printable bed", "[TowerInterface]")
 // Off: nothing changes
 // ---------------------------------------------------------------------------------------------------
 
-TEST_CASE("With the tower interface options off, the per-filament values change nothing", "[TowerInterface]")
+TEST_CASE("With the tower interface options off, the per-filament values change nothing", "[TowerInterface][slow]")
 {
     for (const Machine *m : all_machines) {
         DYNAMIC_SECTION(m->name)
@@ -595,67 +597,50 @@ TEST_CASE("Two filaments of one material are an interface only for every tool ch
 // Bambu Studio import and export
 // ---------------------------------------------------------------------------------------------------
 
-TEST_CASE("Bambu Studio's enable_tower_interface_features maps onto the three options", "[TowerInterface][Config]")
+TEST_CASE("Bambu Studio's enable_tower_interface_features is read as it is", "[TowerInterface][Config]")
 {
-    SECTION("true turns on the three options and the wall gaps, at material changes")
+    SECTION("a Bambu preset that turns it on keeps it on and leaves the three options alone")
     {
         const DynamicPrintConfig cfg = load_json_text("bambu_on.json", R"({ "name": "bambu", "from": "User",
             "enable_tower_interface_features": "1", "prime_tower_skip_points": "0",
             "filament_tower_interface_pre_extrusion_dist": ["12"] })");
-        CHECK(cfg.opt_bool("wipe_tower_interface_temp"));
-        CHECK(cfg.opt_bool("wipe_tower_interface_run_in"));
-        CHECK(cfg.opt_bool("wipe_tower_interface_extra_prime"));
-        CHECK(cfg.opt_enum<TowerInterfaceTrigger>("wipe_tower_interface_trigger") == titMaterialChange);
-        CHECK(cfg.opt_bool("wipe_tower_wall_gap"));
-        // Neutralised, so a re-save cannot re-arm the migration once the user turns them off.
-        CHECK_FALSE(cfg.opt_bool("enable_tower_interface_features"));
-        CHECK(cfg.option<ConfigOptionFloats>("filament_tower_interface_pre_extrusion_dist")->get_at(0) == Approx(12.));
-    }
-    SECTION("false leaves ours alone")
-    {
-        const DynamicPrintConfig cfg = load_json_text("bambu_off.json", R"({ "name": "bambu", "from": "User",
-            "enable_tower_interface_features": "0", "prime_tower_skip_points": "0" })");
+        CHECK(cfg.opt_bool("enable_tower_interface_features"));
         CHECK_FALSE(cfg.has("wipe_tower_interface_temp"));
         CHECK_FALSE(cfg.has("wipe_tower_interface_run_in"));
         CHECK_FALSE(cfg.has("wipe_tower_interface_extra_prime"));
         // prime_tower_skip_points is our wall gap.
         CHECK_FALSE(cfg.opt_bool("wipe_tower_wall_gap"));
+        CHECK_THAT(cfg.option<ConfigOptionFloats>("filament_tower_interface_pre_extrusion_dist")->get_at(0), Catch::Matchers::WithinAbs(12., 1e-9));
     }
-    SECTION("a file that already has our options keeps them")
+    SECTION("off stays off")
     {
-        const DynamicPrintConfig cfg = load_json_text("ours.json", R"({ "name": "ours", "from": "User",
-            "enable_tower_interface_features": "1", "wipe_tower_interface_temp": "0" })");
-        CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_temp"));
-        CHECK_FALSE(cfg.has("wipe_tower_interface_run_in"));
+        const DynamicPrintConfig cfg = load_json_text("bambu_off.json", R"({ "name": "bambu", "from": "User",
+            "enable_tower_interface_features": "0" })");
+        CHECK_FALSE(cfg.opt_bool("enable_tower_interface_features"));
+        CHECK_FALSE(cfg.has("wipe_tower_interface_temp"));
     }
-    SECTION("a migrated config saved and loaded again does not migrate again")
+    SECTION("a config an earlier build migrated keeps its options")
     {
-        DynamicPrintConfig cfg = load_json_text("first.json", R"({ "name": "bambu", "from": "User", "enable_tower_interface_features": "1" })");
-        // The user turns the options off; a diff-serialized save drops the defaults.
-        cfg.erase("wipe_tower_interface_temp");
-        cfg.erase("wipe_tower_interface_run_in");
-        cfg.erase("wipe_tower_interface_extra_prime");
-        cfg.erase("wipe_tower_interface_trigger");
-        std::string saved = "{ \"name\": \"resaved\", \"from\": \"User\"";
-        for (const std::string &key : cfg.keys())
-            saved += ", \"" + key + "\": \"" + cfg.opt_serialize(key) + "\"";
-        saved += " }";
-        const DynamicPrintConfig again = load_json_text("again.json", saved);
-        CHECK_FALSE(again.has("wipe_tower_interface_temp"));
+        const DynamicPrintConfig cfg = load_json_text("migrated.json", R"({ "name": "ours", "from": "User",
+            "enable_tower_interface_features": "0", "wipe_tower_interface_temp": "1", "wipe_tower_interface_run_in": "1" })");
+        CHECK_FALSE(cfg.opt_bool("enable_tower_interface_features"));
+        CHECK(cfg.opt_bool("wipe_tower_interface_temp"));
+        CHECK(cfg.opt_bool("wipe_tower_interface_run_in"));
     }
 }
 
 TEST_CASE("The bundled vendor presets keep their shipped behaviour", "[TowerInterface][Config]")
 {
-    // 50 BBL (H2D / H2C / X2D) and 9 Flashforge Creator 5 process presets carry
+    // 66 BBL (H2D / H2C / X2D / H3C) and 9 Flashforge Creator 5 process presets carry
     // enable_tower_interface_features = 1; the Creator 5 ones also prime_tower_skip_points = 0.
     const std::string ff_c5 = (fs::path(profiles_dir()) / "Flashforge" / "process" / "0.20mm Standard @FF C5.json").string();
-    SECTION("loaded as a file, they would map")
+    SECTION("loaded as a file, the skip points map onto the wall gap")
     {
         DynamicPrintConfig cfg;
         REQUIRE(load_json(ff_c5, cfg));
-        CHECK(cfg.opt_bool("wipe_tower_interface_run_in"));
-        CHECK(cfg.opt_bool("wipe_tower_wall_gap"));
+        CHECK_FALSE(cfg.opt_bool("wipe_tower_wall_gap"));
+        CHECK(cfg.opt_bool("enable_tower_interface_features"));
+        CHECK_FALSE(cfg.has("wipe_tower_interface_run_in"));
     }
     SECTION("loaded as vendor presets, they do not")
     {
@@ -666,15 +651,20 @@ TEST_CASE("The bundled vendor presets keep their shipped behaviour", "[TowerInte
         CHECK_FALSE(cfg.has("wipe_tower_wall_gap"));
         CHECK(cfg.opt_bool("enable_tower_interface_features"));
     }
-    SECTION("the H2D system process preset")
+    SECTION("the H2D and H3C system process presets turn Bambu's interface features on, as in Bambu Studio")
     {
         PresetBundle &b = vendor_bundle("BBL");
-        REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H2D", true));
-        const DynamicPrintConfig &cfg = b.prints.get_selected_preset().config;
-        CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_temp"));
-        CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_run_in"));
-        CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_extra_prime"));
-        CHECK(cfg.opt_bool("enable_tower_interface_features")); // Bambu's value, kept, not mapped
+        for (const char *name : { "0.20mm Standard @BBL H2D", "0.20mm Standard @BBL H3C", "0.20mm Standard @BBL H2C" }) {
+            INFO(name);
+            REQUIRE(b.prints.select_preset_by_name(name, true));
+            const DynamicPrintConfig &cfg = b.prints.get_selected_preset().config;
+            CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_temp"));
+            CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_run_in"));
+            CHECK_FALSE(cfg.opt_bool("wipe_tower_interface_extra_prime"));
+            CHECK(cfg.opt_bool("enable_tower_interface_features"));
+        }
+        REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X1C", true));
+        CHECK_FALSE(b.prints.get_selected_preset().config.opt_bool("enable_tower_interface_features"));
     }
 }
 
@@ -683,7 +673,7 @@ TEST_CASE("Export Bambu 3MF writes the interface switch from the three options",
     auto export_with = [](std::initializer_list<ConfigBase::SetDeserializeItem> items, BambuExport::Report &report) {
         DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
         cfg.set_deserialize_strict({ { "enable_prime_tower", "1" },
-                                     { "enable_tower_interface_features", "1" }, // a stale Bambu value is never written
+                                     { "enable_tower_interface_features", "0" },
                                      { "filament_tower_interface_print_temp", "245" },
                                      { "filament_tower_interface_pre_extrusion_dist", "8" },
                                      { "filament_tower_interface_pre_extrusion_length", "1.5" } });
@@ -730,6 +720,13 @@ TEST_CASE("Export Bambu 3MF writes the interface switch from the three options",
         CHECK_FALSE(has_note(report));
         CHECK(value(out, "prime_tower_skip_points") == "0");
     }
+    {
+        // Bambu's own switch goes out as it is.
+        BambuExport::Report       report;
+        const BambuExport::Config out = export_with({ { "enable_tower_interface_features", "1" } }, report);
+        CHECK(value(out, "enable_tower_interface_features") == "1");
+        CHECK_FALSE(has_note(report));
+    }
 }
 
 TEST_CASE("A Bambu 3MF round trip maps the interface switch both ways", "[TowerInterface][3mf]")
@@ -775,13 +772,12 @@ TEST_CASE("A Bambu 3MF round trip maps the interface switch both ways", "[TowerI
             for (Preset *p : presets)
                 delete p;
             CHECK(is_bbl); // read as a Bambu Studio project
-            // The trigger is ours only: Bambu's switch comes back at material changes.
+            // Our options are not in Bambu's vocabulary: they come back as Bambu's own switch (contact layers).
             if (on) {
-                CHECK(back.opt_bool("wipe_tower_interface_temp"));
-                CHECK(back.opt_bool("wipe_tower_interface_run_in"));
-                CHECK(back.opt_bool("wipe_tower_interface_extra_prime"));
-                CHECK(back.opt_enum<TowerInterfaceTrigger>("wipe_tower_interface_trigger") == titMaterialChange);
+                CHECK(back.opt_bool("enable_tower_interface_features"));
+                CHECK_FALSE((back.has("wipe_tower_interface_temp") && back.opt_bool("wipe_tower_interface_temp")));
             } else {
+                CHECK_FALSE((back.has("enable_tower_interface_features") && back.opt_bool("enable_tower_interface_features")));
                 CHECK_FALSE((back.has("wipe_tower_interface_temp") && back.opt_bool("wipe_tower_interface_temp")));
                 CHECK_FALSE((back.has("wipe_tower_interface_run_in") && back.opt_bool("wipe_tower_interface_run_in")));
             }

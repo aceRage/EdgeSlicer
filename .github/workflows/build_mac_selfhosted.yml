@@ -118,11 +118,28 @@ jobs:
           free_gb=$(df -g "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
           echo "free disk: ${free_gb} GB  cores: $(sysctl -n hw.ncpu)"
           if [ "$free_gb" -lt 40 ]; then echo "::error::less than 40 GB free"; missing=1; fi
+          # The prebuilt deps' installed curl-config, .pc and .cmake files record the SDK folder they were
+          # built against. Older trees name a versioned one (MacOSX27.0.sdk) that an Xcode update removes,
+          # and the slicer build then fails an hour in (2.4.9.1, 2026-11-10). Fail here instead.
+          sdk_re='/[^][ ";:'"'"'()]*/SDKs/MacOSX[0-9.]*[.]sdk'
+          deps_root="$HOME/edgeslicer-deps/build"
+          for a in arm64 x86_64; do
+            [ -d "$deps_root/$a/OrcaSlicer_dep/usr/local" ] || continue
+            for sdk in $(find "$deps_root/$a/OrcaSlicer_dep/usr/local" \( -name '*.cmake' -o -name '*.pc' -o -name '*-config' \) -type f -print0 \
+                           | xargs -0 grep -hoE "$sdk_re" 2>/dev/null | sort -u); do
+              if [ ! -d "$sdk" ]; then
+                echo "::error::the $a deps name $sdk, which this Xcode no longer has. Rebuild the deps from scratch (move $deps_root aside and dispatch with refresh_deps) or repoint the deps' text files to MacOSX.sdk."
+                missing=1
+              fi
+            done
+          done
           exit $missing
 
       - uses: lukka/get-cmake@latest
         with:
-          cmakeVersion: "~3.28.0"  # CMake 4 refuses some deps' old CMake files
+          # CMake 4 refuses some deps' old CMake files. 3.31: the version the runner's deps tree was
+          # rebuilt with on 2026-11-11 (and this Mac's local builds use), so a refresh reuses its caches.
+          cmakeVersion: "~3.31.0"
 
       - name: Link the persistent deps tree into the workspace
         shell: bash
@@ -158,6 +175,16 @@ jobs:
           for a in arm64 x86_64; do
             if [ ! -d "$MAC_DEPS_ROOT/$a/OrcaSlicer_dep/usr/local/lib" ]; then refresh=true; echo "reason: no $a tree"; fi
           done
+          # A refresh reuses the per-arch CMake caches, which record the SDK folder too.
+          if [ "$refresh" = true ]; then
+            for a in arm64 x86_64; do
+              sdk=$(sed -n 's/^CMAKE_OSX_SYSROOT:[A-Z]*=//p' "$MAC_DEPS_ROOT/$a/CMakeCache.txt" 2>/dev/null || true)
+              if [ -n "$sdk" ] && [ ! -d "$sdk" ]; then
+                echo "::error::the $a deps cache names $sdk, which this Xcode no longer has; a refresh would fail. Move $MAC_DEPS_ROOT aside for a from-scratch rebuild."
+                exit 1
+              fi
+            done
+          fi
           echo "refresh=$refresh" >> "$GITHUB_OUTPUT"
           echo "want_stamp=$want" >> "$GITHUB_OUTPUT"
 

@@ -271,6 +271,38 @@ TEST_CASE("Curved cut: a Dowel on a dome gets the whole dowel as a socket in eac
 
 // ------------------------------------------------------------------------ drawn cut
 
+TEST_CASE("TAC sockets are applied directly on curved and drawn cuts", "[TACJoint][TACApplyMesh][CutConnectorSurface]")
+{
+    const bool     drawn      = GENERATE(false, true);
+    const auto     attachment = GENERATE(TacJointAttachment::Separate, TacJointAttachment::Upper, TacJointAttachment::Lower);
+    Model          model;
+    auto*          object = surface_cube(model);
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(40.);
+    sheet.at(2, 2)       = 1.;
+    DrawCutStroke stroke = top_arc(40.0, std::asin(15.0 / 40.0));
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    const DrawCutParams params = through_params();
+    auto                c      = drawn ? surface_tac(draw_cut_surface_point(stroke, params, stroke.length() / 3., 15.),
+                                 draw_cut_surface_frame(stroke, params, stroke.length() / 3., 15.)) :
+                                         surface_tac(curved_cut_sheet_point(sheet, 0., 0.), curved_cut_sheet_frame(sheet, 0., 0.));
+    c.tac_joint.attachment     = attachment;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(), surface_attrs() | ModelObjectCutAttribute::ApplyTacJoints);
+    const auto& result = drawn ? cut.perform_with_draw_stroke(stroke, params) : cut.perform_with_curved_sheet(sheet);
+    REQUIRE(result.size() == (attachment == TacJointAttachment::Separate ? 3 : 2));
+    REQUIRE(all_closed(result));
+    double total = 0.;
+    for (size_t i = 0; i < 2; ++i) {
+        REQUIRE(result[i]->volumes.size() == 1);
+        REQUIRE(result[i]->volumes.front()->is_model_part());
+        REQUIRE_FALSE(result[i]->volumes.front()->cut_info.is_tac_joint());
+        total += its_mass_properties(result[i]->raw_mesh().its).volume;
+    }
+    REQUIRE(total < 26999.);
+    REQUIRE(total > 26700.);
+}
+
 TEST_CASE("Drawn cut: TAC Joint and Pin on a drawn strip give closed halves, sockets and parts",
           "[CutConnectorSurface][DrawCut][TACAttachment]")
 {

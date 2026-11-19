@@ -2,16 +2,20 @@
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
 #include "BambuSetupNoticeDialog.hpp"
+#include "MixedSublayerUi.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/WipeTowerInterface.hpp"
 #include "WipeTowerDialog.hpp"
 
 #include "Search.hpp"
 #include "OG_CustomCtrl.hpp"
+
+#include <array>
 
 #include <wx/app.h>
 #include <wx/button.h>
@@ -70,6 +74,11 @@
 // #include "BonjourDialog.hpp"
 // Ultra (support sets): the Support-set row on the Support page.
 #include "libslic3r/SupportSet.hpp"
+// "Use Bambu defaults" on the Prime tower group.
+#include "libslic3r/PrimeTowerDefaults.hpp"
+#include "libslic3r/FineDetail.hpp"
+// The row's label, also its handle: a widget-only row has no option key for get_line() (TabPrint::tower_defaults_line).
+static const char* const TOWER_DEFAULTS_ROW_LABEL = L("Bambu defaults");
 #include "GUI_Factories.hpp"
 #include "SupportGroupsDialog.hpp"
 #include "SupportSetEditDialog.hpp"
@@ -85,6 +94,8 @@
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
 #include "CostsDialog.hpp"
+#include "StartupSoundDialog.hpp"
+#include "libslic3r/GCode/StartupSound.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
 #include <wx/textdlg.h>
@@ -2607,6 +2618,18 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     }
 
+    // EdgeSlicer, Fine detail (D1): choosing Balanced / Fine text writes its values into the raw keys, editing a raw
+    // key under a named level makes it Custom (FineDetail::changes_for_edit). Through ConfigManipulation::apply(), so
+    // object and modifier settings (TabPrintModel::reload_config) store the written keys too.
+    if (dynamic_cast<TabPrint*>(this) != nullptr && m_config->has("fine_detail")) {
+        const DynamicPrintConfig changes = FineDetail::changes_for_edit(*m_config, opt_key);
+        if (!changes.empty()) {
+            DynamicPrintConfig new_conf = *m_config;
+            new_conf.apply(changes);
+            m_config_manipulation.apply(m_config, &new_conf);
+        }
+    }
+
     if (opt_key == "gcode_flavor" && m_type == Preset::TYPE_PRINTER) {
         if (auto printer_tab = dynamic_cast<TabPrinter*>(this))
             printer_tab->on_gcode_flavor_changed();
@@ -2864,27 +2887,25 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         m_config_manipulation.apply(m_config, &new_conf);
     }
 
-    // BBS popup a message to ask the user to set optimum parameters for support interface if support materials are used
-    if (opt_key == "support_interface_filament") {
-        int interface_filament_id = m_config->opt_int("support_interface_filament") - 1; // the displayed id is based from 1, while internal id is based from 0
-        if (is_support_filament(interface_filament_id) && !(m_config->opt_float("support_top_z_distance") == 0 && m_config->opt_float("support_interface_spacing") == 0 &&
-                                                            m_config->opt_enum<SupportMaterialInterfacePattern>("support_interface_pattern") == SupportMaterialInterfacePattern::smipRectilinearInterlaced)) {
-            wxString msg_text = _L("When using support material for the support interface, we recommend the following settings:\n"
-                                   "0 top Z distance, 0 interface spacing, interlaced rectilinear pattern and disable independent support layer height");
-            msg_text += "\n\n" + _L("Change these settings automatically?\n"
-                                    "Yes - Change these settings automatically\n"
-                                    "No  - Do not change these settings for me");
-            MessageDialog      dialog(wxGetApp().plater(), msg_text, "Suggestion", wxICON_WARNING | wxYES | wxNO);
-            DynamicPrintConfig new_conf = *m_config;
-            if (dialog.ShowModal() == wxID_YES) {
-                new_conf.set_key_value("support_top_z_distance", new ConfigOptionFloat(0));
-                new_conf.set_key_value("support_interface_spacing", new ConfigOptionFloat(0));
-                new_conf.set_key_value("support_interface_pattern", new ConfigOptionEnum<SupportMaterialInterfacePattern>(SupportMaterialInterfacePattern::smipRectilinearInterlaced));
-                new_conf.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
-                m_config_manipulation.apply(m_config, &new_conf);
-            }
+    // BBS popup a message to ask the user to set optimum parameters for support interface if support materials are used.
+    // EdgeSlicer: offered for any interface filament other than the print's, once per filament pair
+    // per session (a No is remembered), and never while the top Z distance itself is edited.
+    if (opt_key == "support_interface_filament" || opt_key == "wall_filament") {
+        if (m_config_manipulation.offer_support_top_z_zero(m_config, opt_key))
             wxGetApp().plater()->update();
-        }
+    }
+
+    // EdgeSlicer: switching the interlock on (or raising its woven layers) offers once to raise the
+    // interface layers to 1 + woven layers; No turns the interlock off.
+    // Interlock and support filament matching cannot run together: turning one on while the other
+    // is on asks which to keep; the layer check runs only if the interlock is still on after that.
+    if (opt_key == "support_interface_interlock" || opt_key == "support_interface_interlock_layers" ||
+        opt_key == "support_filament_matching") {
+        bool changed = m_config_manipulation.check_support_interlock_matching(m_config, opt_key);
+        if (opt_key != "support_filament_matching")
+            changed |= m_config_manipulation.check_support_interlock_interface_layers(m_config);
+        if (changed)
+            wxGetApp().plater()->update();
     }
 
     if(opt_key == "make_overhang_printable"){
@@ -3042,6 +3063,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     const bool refresh_mixed_filament_panel =
         (m_type == Preset::TYPE_PRINT && opt_key == "mixed_filament_component_bias_enabled") ||
+        // Mixed color sublayer P2: the sidebar's sub-layer badges and broken-row marks follow the two process
+        // defaults (refreshed below, after dithering_local_z_mode reached project_config).
+        (m_type == Preset::TYPE_PRINT && (opt_key == "enable_mixed_color_sublayer" || opt_key == "dithering_local_z_mode")) ||
         (m_type == Preset::TYPE_FILAMENT && opt_key == "filament_type");
 
     // Keep Mixed Filaments global settings in sync with project_config. In
@@ -3245,9 +3269,32 @@ void Tab::on_presets_changed()
     // Per-nozzle process P1: another printer brings its own remembered per-nozzle processes; a changed
     // nozzle drops the processes that no longer fit it. Before the process tab reloads its nozzle switch.
     if (m_type == Preset::TYPE_PRINTER) {
+        // Owner bug 2026-11-08: a printer of another filament routing layout (H3C -> H2C -> U1) starts from a fresh project's
+        // filament map, pins and tool assignment; the plates' maps and dual-nozzle confirmations go with them. First, so the
+        // remembered nozzles restored below are not reset.
+        if (wxGetApp().preset_bundle->update_filament_routing_for_printer()) {
+            for (PartPlate *plate : wxGetApp().plater()->get_partplate_list().get_plate_list())
+                if (plate != nullptr && plate->reset_filament_routing())
+                    plate->update_slice_result_valid_state(false);
+            wxGetApp().CallAfter([]() {
+                if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+                    plater->sidebar().update_filament_tool_buttons();
+            });
+        }
         // Per-nozzle process P7 first: the processes that fit a nozzle depend on the size it carries in this project.
-        wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
+        // Owner bugs 2026-11-06: another printer model (startup included) gets its remembered nozzles back (rack slots, sizes,
+        // flow types). The sidebar was updated above, before they were back: the nozzle UI, filament lists and Tabs follow.
+        const bool rack_restored = wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
         wxGetApp().preset_bundle->update_nozzle_processes_for_printer(*wxGetApp().app_config);
+        // Owner bug 2026-11-07: a switch from another model can land on that printer's nozzle variant (H2S 0.8 -> H3C 0.8 with a
+        // rack of 0.4 nozzles): the variant then follows the restored extruder size (#911), so the Plate's processes fit it.
+        if (rack_restored)
+            wxGetApp().CallAfter([]() {
+                if (Plater *plater = wxGetApp().plater(); plater != nullptr) {
+                    plater->sidebar().on_nozzle_sizes_changed();
+                    plater->sidebar().follow_nozzle_sizes_with_printer_variant();
+                }
+            });
     }
 
     // Printer selected at the Printer tab, update "compatible" marks at the print and filament selectors.
@@ -3464,6 +3511,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_inward", "quality_settings_seam#wipe-inward");
         optgroup->append_single_option_line("wipe_inward_distance", "quality_settings_seam#wipe-inward");
         optgroup->append_single_option_line("wipe_before_external_loop","quality_settings_seam#wipe-before-external");
+        optgroup->append_single_option_line("retract_after_outer_wall", "quality_settings_seam#retract-after-outer-wall");
 
 
         optgroup = page->new_optgroup(L("Precision"), L"param_precision");
@@ -3501,17 +3549,58 @@ void TabPrint::build()
         optgroup->append_single_option_line("zaa_min_z", "quality_settings_z_contouring#minimum-z-height");
         optgroup->append_single_option_line("zaa_dont_alternate_fill_direction", "quality_settings_z_contouring#dont-alternate-fill-direction");
         optgroup->append_single_option_line("zaa_speed_scaling", "quality_settings_z_contouring#constant-flow-speed-scaling");
+        optgroup->append_single_option_line("zaa_max_segment_rate", "quality_settings_z_contouring");
+        // EdgeSlicer: curved tops (experimental, off by default).
+        optgroup->append_single_option_line("curved_tops_enabled");
+        optgroup->append_single_option_line("curved_tops_layers");
+        optgroup->append_single_option_line("curved_tops_max_angle");
+        optgroup->append_single_option_line("curved_tops_nozzle_tolerance");
+        optgroup->append_single_option_line("curved_tops_pattern");
 
+        // EdgeSlicer, curved tops P3: developer overrides. Every line is comDevelop, so the whole group
+        // shows only in Developer mode; the slicer ignores the values outside it (CurvedTops.hpp).
+        optgroup = page->new_optgroup(L("Curved tops - developer overrides"), L"param_z_contouring");
+        for (const char *key : { "curved_tops_dev_angle_ceiling", "curved_tops_dev_head_lowest_part", "curved_tops_dev_clearance_margin",
+                                 "curved_tops_dev_flank_margin", "curved_tops_dev_land_tolerance", "curved_tops_dev_reach_margin",
+                                 "curved_tops_dev_speed_cap", "curved_tops_dev_wipe_speed_cap", "curved_tops_dev_safe_lift",
+                                 "curved_tops_dev_contact_warning_only", "curved_tops_dev_allow_multiple_objects",
+                                 "curved_tops_dev_allow_by_object", "curved_tops_dev_allow_multi_filament",
+                                 "curved_tops_dev_allow_supports_in_reach", "curved_tops_dev_allow_material_beside",
+                                 "curved_tops_dev_allow_z_contouring", "curved_tops_dev_allow_raft",
+                                 "curved_tops_dev_allow_variable_layer_height", "curved_tops_dev_allow_tall_skirt",
+                                 "curved_tops_dev_allow_unverified_head", "curved_tops_dev_nozzle_tolerance_unrecorded" })
+            optgroup->append_single_option_line(key);
+
+        // EdgeSlicer, Fine detail P1 (design B, D5): the one "Wall generator" group is split by what the settings do to
+        // the print. Keys are unchanged; the old labels stay searchable (Search.cpp).
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
+
+        optgroup = page->new_optgroup(L("Thin features"), L"param_wall_generator");
+        optgroup->append_single_option_line("fine_detail", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("thin_feature_line_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("thin_feature_min_size", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("fine_detail_speed", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("initial_layer_min_bead_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
+        if (m_type == Preset::TYPE_PRINT) {
+            // The percent values above in millimetres for the printer's nozzle (a full-width note line, as the
+            // filament price note: OG_CustomCtrl draws a labelled line from its first option).
+            Line fine_detail_note_line = Line{ "", "" };
+            fine_detail_note_line.full_width = 1;
+            fine_detail_note_line.widget = [this](wxWindow* parent) { return fine_detail_note_create_widget(parent); };
+            optgroup->append_line(fine_detail_note_line);
+        }
+
+        optgroup = page->new_optgroup(L("Wall count changes"), L"param_wall_generator");
+        optgroup->append_single_option_line("min_odd_wall_line_width", "quality_settings_wall_generator#arachne");
+        optgroup->append_single_option_line("min_even_wall_line_width", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_filter_deviation", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_transition_length", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_distribution_count", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("initial_layer_min_bead_width", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_bead_width", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_feature_size", "quality_settings_wall_generator#arachne");
-        optgroup->append_single_option_line("min_length_factor", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_maximum_resolution", "quality_settings_wall_generator#arachne");
         optgroup->append_single_option_line("wall_maximum_deviation", "quality_settings_wall_generator#arachne");
 
@@ -3781,6 +3870,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Support filament"), L"param_support_filament");
         optgroup->append_single_option_line("support_filament", "support_settings_filament#base");
         optgroup->append_single_option_line("support_interface_filament", "support_settings_filament#interface");
+        // EdgeSlicer: the interface filament's temperature (design_support_upgrades_2026-11-14 1B).
+        optgroup->append_single_option_line("support_interface_nozzle_temperature");
         // I3 fix: wire support_filament_matching into the GUI, mirroring Part
         // 1's brim_filament_source wiring at Tab.cpp:2650 (same pattern: no wiki
         // fragment yet, comAdvanced). Without this the setting was invisible/unsettable
@@ -3880,6 +3971,16 @@ void TabPrint::build()
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Prime tower"), L"param_tower");
         optgroup->append_single_option_line("enable_prime_tower", "multimaterial_settings_prime_tower");
+        // "Use Bambu defaults" (tests/design_prime_tower_menu_rework.md 5): a labelled widget-only row, shown by
+        // TabPrint::tower_defaults_update_row() on a Bambu printer with the tower on. Process tab only: the object / part
+        // tabs derive from TabPrint, and their build() drops option-less rows anyway.
+        if (m_type == Preset::TYPE_PRINT) {
+            Line tower_defaults_line = Line{ TOWER_DEFAULTS_ROW_LABEL,
+                                             L("Sets the prime tower settings of this process to Bambu Studio's defaults for the "
+                                               "selected printer. Lists every change before applying it. Filament settings are not changed.") };
+            tower_defaults_line.widget = [this](wxWindow* parent) { return tower_defaults_create_widget(parent); };
+            optgroup->append_line(tower_defaults_line);
+        }
         optgroup->append_single_option_line("prime_tower_width", "multimaterial_settings_prime_tower#width");
         optgroup->append_single_option_line("prime_volume", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_brim_width", "multimaterial_settings_prime_tower#brim-width");
@@ -3894,6 +3995,24 @@ void TabPrint::build()
         // Bambu Studio 2.9.1 (Tab.cpp:3415-3419).
         optgroup->append_single_option_line("prime_tower_acceleration", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_line_width", "multimaterial_settings_prime_tower");
+        // Orca #10780 / #15035: Type 1 tower block planner.
+        optgroup->append_single_option_line("prime_tower_infill_gap", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_flat_ironing", "multimaterial_settings_prime_tower");
+        // Bambu Studio 2.9.1 (Tab.cpp:3406-3430): H3C tower speed, tail slowdown, line ironing, side scrape.
+        optgroup->append_single_option_line("prime_tower_line_ironing", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_ironing_speed", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_feedrate_factor", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_tail_speed_factor", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_tail_slowdown_volume", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_face", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_length", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_height", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_speed", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_wall_gap", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_point_spacing", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_side_scrape_along_length", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
@@ -3905,7 +4024,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_sparse_layers_combination", "multimaterial_settings_prime_tower#combine-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
-        // Tower interface options (per-filament values on the filament Multimaterial page).
+        // Tower interface features: Bambu Studio 2.9.1's switch (Type 1 tower, contact layers), then the Edge options
+        // (per-filament values on the filament Multimaterial page). Kept together for a later master toggle.
+        optgroup->append_single_option_line("enable_tower_interface_features", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("enable_tower_interface_cooldown_during_tower", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_extra_prime", "multimaterial_settings_prime_tower");
@@ -3962,6 +4084,20 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Color Mixing (Experimental)"), L"param_mixed_color");
         optgroup->append_single_option_line("dithering_local_z_mode");
+        {
+            // Mixed color sublayer P2 (design_mixed_color_sublayer.md 3g): Bambu Studio's toggle (Quality > Layer height
+            // there), kept in one place only, next to Subdivide Mix Layer. It is the default for mixed rows whose
+            // sub-layer method is Auto; the row's own method (Edit Mix > Sub-layers) wins.
+            Option sublayer = optgroup->get_option("enable_mixed_color_sublayer");
+            sublayer.opt.label   = L("Mixed color sublayer (Bambu ratio)");
+            sublayer.opt.tooltip = L("Print every layer of a mixed filament once per filament: Ratio makes one pass per colour, "
+                                     "each as thick as that colour's share of the mix (Bambu Studio's mixed color sublayer). "
+                                     "Subdivide Mix Layer instead prints thin passes clamped to the mixed filament height bounds.\n\n"
+                                     "This is the default for mixed filaments whose sub-layer method is Auto. Subdivide Mix Layer "
+                                     "takes precedence when both are enabled. On a single-nozzle printer every pass is a filament "
+                                     "change with a flush.");
+            optgroup->append_single_option_line(sublayer);
+        }
         optgroup->append_single_option_line("dithering_local_z_whole_objects");
         optgroup->append_single_option_line("dithering_local_z_infill");
 
@@ -4107,12 +4243,8 @@ void TabPrint::create_tool_selector()
         const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
         wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
     };
-    m_tool_chips->on_height_changed = [this]() {
-        if (m_tool_panel != nullptr) {
-            m_tool_panel->Layout();
-            Layout();
-        }
-    };
+    // The chips wrapped onto more (or fewer) rows: the whole header grows or shrinks, not only this panel.
+    m_tool_chips->on_height_changed = [this]() { relayout_tool_selector(true); };
     m_tool_chips->Hide();
     m_tool_row->Add(m_tool_chips, 1, wxALIGN_CENTER_VERTICAL);
     // Per-nozzle process P9 (owner hand test 2026-11-02): the way back. One process for every nozzle again: the per-nozzle choices
@@ -4155,7 +4287,9 @@ std::vector<wxString> TabPrint::tool_selector_labels() const
         const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
         if (!ref.valid)
             continue;
-        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter);
+        // H3C slot process groups: a slot tool's chip shows its own tile, a size group's the tiles not split off it.
+        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter, ref.rack_slot,
+                                                m_preset_bundle->nozzle_split_rack_slots(ref.extruder));
         labels.push_back(from_u8(chip.size + " " + chip.flow) + "\t" + from_u8(chip.tiles));
     }
     return labels;
@@ -4192,6 +4326,14 @@ void TabPrint::refresh_tool_selector()
         return;
     const std::vector<wxString> labels = tool_selector_labels();
     const bool                  available = !labels.empty();
+    // Owner hand test 2026-11-06 (H3C): what is shown before this refresh. When it changes (the chips and "Reset choices" come
+    // or go as a filament moves to a nozzle of another size), the header changes height and the sidebar is laid out again.
+    auto shown_state = [this]() {
+        return std::array<bool, 4>{ m_tool_panel->IsShown(), m_tool_chips != nullptr && m_tool_chips->IsShown(),
+                                    m_tool_expand_btn != nullptr && m_tool_expand_btn->IsShown(),
+                                    m_tool_collapse_btn != nullptr && m_tool_collapse_btn->IsShown() };
+    };
+    const std::array<bool, 4> shown_before = shown_state();
     // P9: the tool of each entry after Plate.
     std::vector<size_t> tool_ids = available ? m_preset_bundle->nozzle_selector_tools() : std::vector<size_t>();
     tool_ids.resize(labels.empty() ? 0 : labels.size() - 1);
@@ -4262,8 +4404,30 @@ void TabPrint::refresh_tool_selector()
     m_tool_note->Hide();
     m_tool_panel->Show(available);
     mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
+    relayout_tool_selector(shown_state() != shown_before);
+}
+
+void TabPrint::relayout_tool_selector(bool header_changed)
+{
+    if (m_tool_panel == nullptr)
+        return;
+    // InvalidateBestSize runs up the parent chain, so the Tab's best height follows the panel's (taller with the chips, back
+    // to the preset combo's height without them).
+    m_tool_panel->InvalidateBestSize();
     m_tool_panel->Layout();
     Layout();
+    if (!header_changed)
+        return;
+    // The Tab sits at its best height in the ParamsPanel's sizer: a Layout() of the Tab alone keeps its old height, so the
+    // preset combo and page tabs were pushed out of view (chips shown) or a gap stayed (chips hidden) until the Global /
+    // Objects switch laid the sidebar out. Do that layout here.
+    if (wxWindow *parent = GetParent(); parent != nullptr) {
+        parent->InvalidateBestSize();
+        parent->Layout();
+    }
+    if (wxGetApp().plater() != nullptr && GetParent() == wxGetApp().params_panel())
+        wxGetApp().sidebar().relayout_params_section();
+    Refresh();
 }
 
 void TabPrint::use_one_process()
@@ -4299,8 +4463,15 @@ bool TabPrint::tool_sizes_mixed() const
     if (m_preset_bundle == nullptr)
         return false;
     // Different nozzle sizes on the extruders, or a rack with other sizes (size tools).
-    return has_mixed_nozzle_diameters(m_preset_bundle->effective_nozzle_diameters()) ||
-           m_preset_bundle->nozzle_tool_count() > m_preset_bundle->effective_nozzle_diameters().size();
+    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
+    if (has_mixed_nozzle_diameters(nozzles))
+        return true;
+    // H3C slot process groups: a slot split off for its pin or its nozzle type has the extruder's size; only another size counts.
+    for (size_t tool = nozzles.size(); tool < m_preset_bundle->nozzle_tool_count(); ++tool)
+        if (const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
+            ref.valid && ref.extruder < nozzles.size() && !same_nozzle_diameter(ref.diameter, nozzles[ref.extruder]))
+            return true;
+    return false;
 }
 
 std::string TabPrint::shown_tool_id() const
@@ -4712,12 +4883,234 @@ wxSizer* TabPrint::support_set_create_widget(wxWindow* parent)
     return vsizer;
 }
 
+// ---------------------------------------------------------------------------------------------
+// "Use Bambu defaults": the button row in the Prime tower group of the Multimaterial page.
+// tests/design_prime_tower_menu_rework.md section 5 (owner, 2026-11-16: the button only).
+// ---------------------------------------------------------------------------------------------
+
+wxSizer* TabPrint::tower_defaults_create_widget(wxWindow* parent)
+{
+    auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
+    auto* button = new Button(parent, _L("Use Bambu defaults"));
+    m_tower_defaults_btn = button;
+    tower_defaults_size_button();
+    button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        // After the click, as the Extruder page's "Extruder settings" button does: the dialog and the reload run outside
+        // the button's own event.
+        wxGetApp().CallAfter([this]() { on_tower_defaults(); });
+    });
+    sizer->Add(button, 0, wxALIGN_CENTER_VERTICAL);
+    return sizer;
+}
+
+void TabPrint::tower_defaults_size_button()
+{
+    auto* button = dynamic_cast<Button*>(m_tower_defaults_btn.get());
+    if (button == nullptr)
+        return;
+    // The house style for a button next to parameter boxes (as the Dependencies and ramming "Set..." buttons): Body_14,
+    // 26 DIP high, the theme's regular colours. Re-applied on DPI and theme changes, which is where it reads the theme.
+    button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+    // That style is a fixed 120 x 26 DIP box, which clipped "Use Bambu defaults" (owner hand test of #1080) and would clip
+    // longer translations. Size it to its label plus the Choice / Expanded buttons' 12 DIP side padding, never narrower
+    // than the option fields in the column below (Field::def_width_wider() em, the Width field), keeping the 26 DIP height.
+    button->SetPaddingSize(button->FromDIP(wxSize(12, 0)));
+    wxSize size = button->GetMinSize(); // label + padding, at least 120 x 26 DIP (Button::messureSize)
+    size.SetWidth(std::max(size.GetWidth(), Field::def_width_wider() * em_unit(button->GetParent())));
+    button->SetMinSize(size);
+    button->SetSize(button->GetMinSize());
+}
+
+void TabPrint::msw_rescale()
+{
+    // Before the option groups re-position their controls (Tab::msw_rescale -> Page::msw_rescale).
+    tower_defaults_size_button();
+    Tab::msw_rescale();
+}
+
+void TabPrint::sys_color_changed()
+{
+    tower_defaults_size_button(); // the style's colours depend on the theme
+    Tab::sys_color_changed();
+}
+
+Line* TabPrint::tower_defaults_line()
+{
+    if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr)
+        return nullptr;
+    const wxString label = _(TOWER_DEFAULTS_ROW_LABEL);
+    for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
+        for (const Line& line : group->get_lines())
+            // Only a widget-only row: an option row with the same label (none today) is never taken for it.
+            if (!line.is_separator() && line.get_options().empty() && line.widget != nullptr && line.label == label)
+                return const_cast<Line*>(&line);
+    return nullptr;
+}
+
+const Preset* TabPrint::tower_defaults_source() const
+{
+    if (m_presets == nullptr || m_preset_bundle == nullptr)
+        return nullptr;
+    if (const Preset* parent = m_presets->get_selected_preset_parent(); parent != nullptr && parent->is_system)
+        return parent;
+    // A detached user process (no system parent): the printer's own default process, if it is a system preset.
+    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    if (const ConfigOptionString* name = printer.option<ConfigOptionString>("default_print_profile"); name != nullptr && !name->value.empty())
+        if (const Preset* preset = m_presets->find_preset(name->value, false); preset != nullptr && preset->is_system)
+            return preset;
+    return nullptr;
+}
+
+void TabPrint::tower_defaults_update_row()
+{
+    Line* line = tower_defaults_line();
+    if (line == nullptr) // not this tab, or not the Multimaterial page
+        return;
+    const bool is_bbl    = m_preset_bundle != nullptr && m_preset_bundle->is_bbl_vendor();
+    const bool tower_on  = m_config != nullptr && m_config->has("enable_prime_tower") && m_config->opt_bool("enable_prime_tower");
+    line->toggle_visible = PrimeTowerDefaults::offered(is_bbl, tower_on);
+
+    wxWindow* btn = m_tower_defaults_btn; // null once the page's controls are gone
+    if (btn == nullptr)
+        return;
+    // A nozzle's own process (the per-nozzle selector or a nozzle chip) is not what the system preset describes.
+    const bool nozzle_view = !selected_nozzle_process().empty() || (m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0);
+    const Preset* source   = nozzle_view ? nullptr : tower_defaults_source();
+    btn->Enable(source != nullptr);
+    if (nozzle_view)
+        btn->SetToolTip(_L("Not available while a nozzle's own process is shown. Show the plate's process first."));
+    else if (source == nullptr)
+        btn->SetToolTip(_L("No Bambu system process was found for this preset or printer, so there are no defaults to apply."));
+    else
+        btn->SetToolTip(format_wxstr(_L("Set the prime tower settings to Bambu Studio's defaults, taken from \"%1%\". "
+                                                         "Filament settings are not changed."), from_u8(source->name)));
+}
+
+// One value as the confirm dialog shows it: an enum by its label, a bool as On / Off, a number with its unit.
+static wxString tower_default_value_text(const ConfigOptionDef* def, const ConfigOption* opt)
+{
+    if (opt == nullptr)
+        return wxEmptyString;
+    if (opt->type() == coBool)
+        return opt->getBool() ? _L("On") : _L("Off");
+    const std::string value = opt->serialize();
+    if (opt->type() == coEnum && def != nullptr) {
+        for (size_t i = 0; i < def->enum_values.size() && i < def->enum_labels.size(); ++i)
+            if (def->enum_values[i] == value)
+                return _(def->enum_labels[i]);
+        return from_u8(value);
+    }
+    wxString text = from_u8(value);
+    const bool plain_number = opt->type() == coFloat || opt->type() == coInt || opt->type() == coFloats || opt->type() == coInts;
+    if (plain_number && def != nullptr && !def->sidetext.empty())
+        text += " " + _(def->sidetext);
+    return text;
+}
+
+void TabPrint::on_tower_defaults()
+{
+    if (m_type != Preset::TYPE_PRINT || m_config == nullptr)
+        return;
+    const Preset* source = tower_defaults_source();
+    if (source == nullptr || !selected_nozzle_process().empty() || (m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0))
+        return; // the button is disabled then; the click was queued before the state changed
+
+    const DynamicPrintConfig         defaults = PrimeTowerDefaults::bambu_tower_defaults(source->config);
+    const std::vector<std::string>   changed  = PrimeTowerDefaults::changed_keys(*m_config, defaults);
+    const wxString                   title    = _L("Use Bambu defaults");
+    if (changed.empty()) {
+        MessageDialog(this, _L("The prime tower already uses Bambu's defaults."), title, wxOK | wxICON_INFORMATION).ShowModal();
+        return;
+    }
+
+    wxString msg = format_wxstr(_L("Set the prime tower to Bambu Studio's defaults for this printer, taken from \"%1%\"?"),
+                                from_u8(source->name));
+    msg += "\n\n" + _L("These process settings will change:") + "\n";
+    bool wall_type_changes = false;
+    for (const std::string& key : changed) {
+        const ConfigOptionDef* def   = print_config_def.get(key);
+        const wxString         label = def != nullptr && !def->label.empty() ? _(def->label) : from_u8(key);
+        msg += "- " + label + ": " + tower_default_value_text(def, m_config->option(key)) + " -> " +
+               tower_default_value_text(def, defaults.option(key)) + "\n";
+        wall_type_changes |= key == "wipe_tower_wall_type";
+    }
+    if (wall_type_changes)
+        msg += "\n" + _L("Wall type becomes Rib, Bambu Studio's default: the tower gets four ribs and a nearly square "
+                         "cross-section, so its shape and its footprint on the plate change.");
+    msg += "\n\n" + _L("Filament settings (for example the tower interface temperature and the prime volume) are not changed.");
+    msg += "\n" + _L("There is no undo: each changed setting gets a revert arrow, and discarding the process changes "
+                     "goes back too.");
+
+    MessageDialog dlg(this, msg, title, wxOK | wxCANCEL | wxICON_QUESTION);
+    dlg.SetButtonLabel(wxID_OK, _L("Apply"), true);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    // Only the changed keys, in one load_config() call: it marks the preset and each changed row as modified (revert
+    // arrows) and runs update() once, as the support sets and the 3D view's tower move do.
+    this->load_config(PrimeTowerDefaults::changes_to_apply(*m_config, defaults));
+    // Rows the new values show or hide (the rib rows after Wall type = Rib), as on_value_change() does.
+    if (m_active_page)
+        m_active_page->update_visibility(m_mode, true);
+}
+
+wxSizer* TabPrint::fine_detail_note_create_widget(wxWindow* parent)
+{
+    auto* vsizer = new wxBoxSizer(wxVERTICAL);
+    // One short fixed line, so the page never changes height; the live paragraph is its hover text.
+    m_fine_detail_note = new wxStaticText(parent, wxID_ANY, _L("(i) Values on this printer: hover for details"));
+    m_fine_detail_note->SetName(_L("Values on this printer"));
+    m_fine_detail_note->SetFont(wxGetApp().normal_font());
+    vsizer->Add(m_fine_detail_note, 0, wxEXPAND);
+    update_fine_detail_note();
+    return vsizer;
+}
+
+// EdgeSlicer, Fine detail P1: the Thin features percent values in millimetres for the printer's smallest nozzle, and the
+// width each prints as at the process layer height (what the preview's Line width view shows).
+void TabPrint::update_fine_detail_note()
+{
+    if (m_fine_detail_note == nullptr || m_config == nullptr || m_preset_bundle == nullptr)
+        return;
+    PrintConfig printer;
+    printer.apply(m_preset_bundle->printers.get_edited_preset().config, true);
+    const double nozzle = min_physical_nozzle_diameter(printer);
+    const FineDetail::Millimetres mm = FineDetail::millimetres(*m_config, nozzle);
+    const bool arachne = m_config->has("wall_generator") &&
+                         m_config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
+    auto f2   = [](double v) { return wxString::Format("%.2f", v); };
+    auto line = [&mm](double spacing) { return FineDetail::line_width(spacing, mm.layer_height); };
+
+    wxString text = wxString::Format(_L("On this printer (%s mm nozzle, %s mm layers):"), f2(mm.nozzle), f2(mm.layer_height));
+    if (arachne) {
+        text += "\n" + wxString::Format(_L("Skip features thinner than: %s mm."), f2(mm.skip_thinner_than));
+        text += "\n" + wxString::Format(_L("Thinnest line: %s mm, printed as a %s mm line."), f2(mm.thinnest_line), f2(line(mm.thinnest_line)));
+        text += "\n" + wxString::Format(_L("Thinnest line, first layer: %s mm."), f2(mm.thinnest_line_first_layer));
+        if (mm.fine_detail_line > 0.)
+            text += "\n" + wxString::Format(_L("Fine detail: thin features down to a %s mm line, skipped under %s mm."),
+                                            f2(line(mm.fine_detail_line)), f2(mm.fine_detail_skip));
+        text += "\n" + wxString::Format(_L("Odd / even wall minimums: %s / %s mm."), f2(mm.odd_minimum), f2(mm.even_minimum));
+    } else if (mm.fine_detail_line > 0.) {
+        text += "\n" + _L("Classic walls: Fine detail prints thin parts as one line of their own width, from a third of the nozzle.");
+    } else {
+        text += "\n" + _L("Classic walls: these settings are for Arachne; turn on Fine detail or Detect thin wall to print thin parts.");
+    }
+    // The paragraph is the hover text (live: nozzle, layer height, wall generator and level), also the help text a
+    // screen reader can read; the visible line stays one line long.
+    if (m_fine_detail_note->GetHelpText() == text)
+        return;
+    m_fine_detail_note->SetHelpText(text);
+    m_fine_detail_note->SetToolTip(text);
+}
+
 void TabPrint::update_description_lines()
 {
     Tab::update_description_lines();
 
     if (m_preset_bundle->printers.get_selected_preset().printer_technology() == ptSLA)
         return;
+
+    update_fine_detail_note();
 
     if (m_active_page && m_active_page->title() == "Layers and perimeters" &&
         m_recommended_thin_wall_thickness_description_line && m_top_bottom_shell_thickness_explanation)
@@ -4754,6 +5147,12 @@ void TabPrint::toggle_options()
         // (Edge: the U1 takes its three plates).
         toggle_option("curr_bed_type", PlateBedTypes::supports_bed_type_choice(PlateBedTypes::allowed_bed_types(
                                            m_preset_bundle->printers.get_edited_preset().config, m_preset_bundle->is_bbl_vendor())));
+        // Mixed color sublayer P2 (Bambu Studio TabPrintPlate::update_mixed_filament_seq_state, Tab.cpp:4227): a Ratio
+        // row orders its own passes inside every layer, so the plate's first / other layer sequences are locked while
+        // any mixed row prints as Ratio.
+        const bool ratio_rows = MixedSublayerUi::any_ratio_row(m_preset_bundle->mixed_filaments, MixedSublayerUi::process_defaults(*m_preset_bundle));
+        toggle_option("first_layer_sequence_choice", !ratio_rows);
+        toggle_option("other_layers_sequence_choice", !ratio_rows);
     }
 
     Field *field = m_active_page->get_field("support_style");
@@ -4842,6 +5241,9 @@ void TabPrint::toggle_options()
     disable_fields_of_nozzle_process();
     // Per-nozzle process P8: Plate / tool field states.
     apply_tool_field_states();
+    // "Use Bambu defaults": shown on a Bambu printer with the tower on. Its callers refresh the row visibility afterwards
+    // (Page::update_visibility), as for ConfigManipulation's toggle_line.
+    tower_defaults_update_row();
 }
 
 void TabPrint::update()
@@ -4894,6 +5296,7 @@ void TabPrint::clear_pages()
 
     m_recommended_thin_wall_thickness_description_line = nullptr;
     m_top_bottom_shell_thickness_explanation = nullptr;
+    m_fine_detail_note = nullptr;
 
     // Ultra (support sets): the page owns these windows, so drop the pointers with it. The three
     // icon buttons registered themselves in Tab::m_scaled_buttons for the DPI / dark-mode passes,
@@ -4911,6 +5314,8 @@ void TabPrint::clear_pages()
     m_support_set_note   = nullptr;
     m_support_set_names.clear();
     m_support_set_page_was_active = false;
+    // "Use Bambu defaults": the page owns the button.
+    m_tower_defaults_btn.Release();
 }
 
 
@@ -5908,6 +6313,8 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_soluble");
         // BBS
         optgroup->append_single_option_line("filament_is_support");
+        // Orca #10780 (Bambu Studio Tab.cpp): developer mode only.
+        optgroup->append_single_option_line("filament_adhesiveness_category");
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
@@ -5942,6 +6349,7 @@ void TabFilament::build()
         // its tower settings.
         optgroup->append_single_option_line("filament_cooling_before_tower");
         optgroup->append_single_option_line("filament_tower_ironing_area");
+        optgroup->append_single_option_line("filament_prime_tower_speed_factor_curve");
         Line line = { L("Recommended nozzle temperature"), L("Recommended nozzle temperature range of this filament. 0 means no set") };
         line.append_option(optgroup->get_option("nozzle_temperature_range_low"));
         line.append_option(optgroup->get_option("nozzle_temperature_range_high"));
@@ -6002,6 +6410,10 @@ void TabFilament::build()
             DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
 
             update_dirty();
+            // The target against the material's safe chamber temperature. Asked of "chamber_temperatures" (Bambu
+            // Studio's name for the key) in the bed temperature group's handler, it never ran.
+            if (opt_key == "chamber_temperature")
+                m_config_manipulation.check_chamber_temperature(&filament_config);
             if (opt_key == "chamber_minimal_temperature" || opt_key == "chamber_temperature")
                 m_config_manipulation.check_chamber_minimal_temperature(&filament_config);
 
@@ -6092,9 +6504,6 @@ void TabFilament::build()
             }
             else if (opt_key == "nozzle_temperature_initial_layer") {
                 m_config_manipulation.check_nozzle_temperature_initial_layer_range(&filament_config, int(flow_variant_view_index()));
-            }
-            else if (opt_key == "chamber_temperatures") {
-                m_config_manipulation.check_chamber_temperature(&filament_config);
             }
 
             on_value_change(opt_key, value);
@@ -6228,6 +6637,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_tower_interface_print_temp");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_dist");
         optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_length");
+        optgroup->append_single_option_line("filament_tower_interface_purge_volume");
 
         optgroup = page->new_optgroup(L("Tool change parameters with single extruder MM printers"), "param_toolchange");
         optgroup->append_single_option_line("filament_loading_speed_start", "semm");
@@ -6263,6 +6673,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
+        // #1052 review S2 (owner): what a Bambu Lab prime tower primes after a change to this filament (the
+        // process "Prime volume" is greyed out there); the hotend-change value only on a hotend rack (H2C).
+        optgroup->append_single_option_line("filament_prime_volume");
+        optgroup->append_single_option_line("filament_prime_volume_nc");
         // BBS: flush settings and extruder-change long retraction (BBL machines such as H2D). Upstream
         // shows these on its own "Multi Filament" page, in this order; this group is the fork's nearest
         // equivalent. Only one flush temperature line shows: the Fast one when the project's
@@ -6272,6 +6686,27 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_flush_volumetric_speed");
         optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
         optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
+        // BBS 2.9.1 (Tab.cpp 4829-4844, 4933-4936): the prime tower's nozzle-change ramming of the outgoing
+        // filament (two-nozzle and rack printers), extruder change and hotend change side by side.
+        {
+            Line ramming_line = { L("Filament ramming length"), L("Filament length used in ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_change_length"));
+            ramming_line.append_option(optgroup->get_option("filament_change_length_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Travel time after ramming"), L("A reverse travel movement after ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_travel_time_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Ramming volumetric speed"), L("The maximum volumetric speed for ramming, where -1 means using the maximum volumetric speed.") };
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed"));
+            ramming_line.append_option(optgroup->get_option("filament_ramming_volumetric_speed_nc"));
+            optgroup->append_line(ramming_line);
+            ramming_line = { L("Precooling target temperature"), L("Precooling target temperature during ramming.") };
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature"));
+            ramming_line.append_option(optgroup->get_option("filament_pre_cooling_temperature_nc"));
+            optgroup->append_line(ramming_line);
+            optgroup->append_single_option_line("filament_idle_travel_cooling_enabled");
+        }
 
     page = add_options_page(L("Dependencies"), "advanced");
         optgroup = page->new_optgroup(L("Compatible printers"), "param_dependencies_printers");
@@ -6809,7 +7244,7 @@ void TabFilament::toggle_options()
         } else if (support_multi_bed_types) {
             // u1 has 7 plates
             toggle_line("supertack_plate_temp_initial_layer", true);
-            toggle_line("cool_plate_temp", true);
+            toggle_line("supertack_plate_temp", true);
             toggle_line("cool_plate_temp_initial_layer", true);
             toggle_line("cool_plate_temp", true);
             toggle_line("textured_cool_plate_temp_initial_layer", true);
@@ -6879,6 +7314,23 @@ void TabFilament::toggle_options()
         const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
+        // Bambu Studio 2.9.1 (Tab.cpp:5276-5281): the firmware interface purge exists where Bambu offers the tower
+        // interface features, multi-extruder and hotend-as-extruder printers. The other interface rows also serve
+        // the Edge interface options on every printer and stay.
+        toggle_line("filament_tower_interface_purge_volume", TowerInterface::bambu_features_supported(cfg));
+
+        // #1052 review S2: shown where they are used, the mirror of the process "Prime volume" grey-out
+        // (WipeTower::bambu_prime_volume() on Bambu Lab printers). The hotend-change prime needs a hotend change on
+        // one extruder: a rack that is not driven as separate extruders (H2C, not H3C).
+        const auto *rack_counts = cfg.option<ConfigOptionInts>("extruder_max_nozzle_count");
+        const auto *nozzles     = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+        const auto *as_extruder = cfg.option<ConfigOptionBool>("handle_hotend_as_extruder");
+        const bool  rack        = rack_counts != nullptr &&
+                          std::any_of(rack_counts->values.begin(), rack_counts->values.end(), [](int c) { return c > 1; });
+        const bool  hotend_as_extruder = (as_extruder != nullptr && as_extruder->value) ||
+                                        (rack && nozzles != nullptr && nozzles->values.size() == 1 && rack_counts->values.size() == 1);
+        toggle_line("filament_prime_volume", is_BBL_printer);
+        toggle_line("filament_prime_volume_nc", is_BBL_printer && rack && !hotend_as_extruder);
     }
 
     // Per-nozzle process P5: with a nozzle size selected, only the values that can differ per nozzle are editable.
@@ -7087,6 +7539,13 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("extruder_clearance_height_to_rod");
         optgroup->append_single_option_line("extruder_clearance_height_to_lid");
 
+        // EdgeSlicer, curved tops on any printer (tests/design_curved_tops_any_printer.md, 5.1): the print head values the
+        // curved-tops planner and the head contact check need on a printer EdgeSlicer has no checked head data for.
+        optgroup = page->new_optgroup(L("Head clearance"), "param_extruder_clearence");
+        optgroup->append_single_option_line("head_nozzle_protrusion");
+        optgroup->append_single_option_line("head_max_surface_angle");
+        optgroup->append_single_option_line("head_nozzle_contact_record");
+
         optgroup = page->new_optgroup(L("Adaptive bed mesh"), "param_adaptive_mesh");
         optgroup->append_single_option_line("bed_mesh_min", "adaptive-bed-mesh");
         optgroup->append_single_option_line("bed_mesh_max", "adaptive-bed-mesh");
@@ -7124,6 +7583,7 @@ void TabPrinter::build_fff()
         optgroup = page->new_optgroup(L("Machine start G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+            update_sound_widgets();
         };
         optgroup->edit_custom_gcode = edit_custom_gcode_fn;
         option = optgroup->get_option("machine_start_gcode");
@@ -7131,10 +7591,18 @@ void TabPrinter::build_fff()
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
+        {
+            // Startup sound (tests/design_startup_sounds.md): a MIDI file -> the M1006 tune above.
+            Line startup_sound_line = Line{ "", "" };
+            startup_sound_line.full_width = 1;
+            startup_sound_line.widget = [this](wxWindow* parent) { return sound_create_widget(parent, false); };
+            optgroup->append_line(startup_sound_line);
+        }
 
         optgroup = page->new_optgroup(L("Machine end G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+            update_sound_widgets();
         };
         optgroup->edit_custom_gcode = edit_custom_gcode_fn;
         option = optgroup->get_option("machine_end_gcode");
@@ -7142,6 +7610,13 @@ void TabPrinter::build_fff()
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
+        {
+            // Ending sound: the same, for the M1006 tune in the end G-code above.
+            Line ending_sound_line = Line{ "", "" };
+            ending_sound_line.full_width = 1;
+            ending_sound_line.widget = [this](wxWindow* parent) { return sound_create_widget(parent, true); };
+            optgroup->append_line(ending_sound_line);
+        }
 
         optgroup              = page->new_optgroup(L("Printing by object G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, optgroup](const t_config_option_key &opt_key, const boost::any &value) {
@@ -8030,6 +8505,69 @@ void TabPrinter::clear_pages()
     Tab::clear_pages();
     m_reset_to_filament_color = nullptr;
     m_rate_note = nullptr;
+    m_sound_btn[0] = m_sound_btn[1] = nullptr;
+    m_sound_note[0] = m_sound_note[1] = nullptr;
+}
+
+static const char* sound_gcode_key(bool end) { return end ? "machine_end_gcode" : "machine_start_gcode"; }
+
+wxSizer* TabPrinter::sound_create_widget(wxWindow* parent, bool end)
+{
+    const int em = em_unit(parent);
+    auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* btn = new Button(parent, (end ? _L("Ending sound") : _L("Startup sound")) + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(end ? _L("Make the tune this printer plays when a print finishes from a MIDI file")
+                        : _L("Make the tune this printer plays at the start of a print from a MIDI file"));
+    btn->Bind(wxEVT_BUTTON, [this, end](wxCommandEvent&) { edit_sound(end); });
+    hsizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxTOP, em / 2);
+    m_sound_btn[end] = btn;
+    m_sound_note[end] = new wxStaticText(parent, wxID_ANY,
+        _L("Replaces the M1006 tune (from \"M1006 S1\" to \"M1006 W\") in the G-code above."));
+    m_sound_note[end]->SetFont(wxGetApp().normal_font());
+    hsizer->Add(m_sound_note[end], 1, wxALIGN_CENTER_VERTICAL | wxTOP, em / 2);
+    update_sound_widgets();
+    return hsizer;
+}
+
+// Only G-code that already plays an M1006 tune gets the button: the printer's firmware understands
+// M1006 (the stock X1, A1, A2L, P2S, H2, H3 and X2D start and end G-code do; P1P/P1S and X1E have
+// none), and the tune has a known place to go. No tune is ever inserted where there was none.
+void TabPrinter::update_sound_widgets()
+{
+    if (m_config == nullptr)
+        return;
+    for (int i = 0; i < 2; ++i) {
+        const bool end = i == 1;
+        if (m_sound_btn[i] == nullptr || !m_config->has(sound_gcode_key(end)))
+            continue;
+        const bool show = StartupSound::has_tune_block(m_config->opt_string(sound_gcode_key(end)));
+        if (m_sound_btn[i]->IsShown() == show)
+            continue;
+        m_sound_btn[i]->Show(show);
+        if (m_sound_note[i] != nullptr)
+            m_sound_note[i]->Show(show);
+        if (wxWindow* parent = m_sound_btn[i]->GetParent())
+            parent->Layout();
+    }
+}
+
+void TabPrinter::edit_sound(bool end)
+{
+    if (m_config == nullptr)
+        return;
+    StartupSoundDialog dlg(this, end ? StartupSoundDialog::Target::End : StartupSoundDialog::Target::Start);
+    if (dlg.ShowModal() != wxID_OK || dlg.tune_block().empty())
+        return;
+    std::string gcode = m_config->opt_string(sound_gcode_key(end));
+    if (!StartupSound::replace_tune_block(gcode, dlg.tune_block())) {
+        MessageDialog(this, end ? _L("Machine end G-code has no M1006 tune to replace.") : _L("Machine start G-code has no M1006 tune to replace."),
+                      end ? _L("Ending sound") : _L("Startup sound"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    set_custom_gcode(sound_gcode_key(end), gcode);
+    update_dirty();
+    update();
 }
 
 wxSizer* TabPrinter::rate_note_create_widget(wxWindow* parent)
@@ -8341,6 +8879,7 @@ void TabPrinter::toggle_options()
         update_rack_controls(e);
     // Per-nozzle process P7: so do the project nozzle size pickers.
     update_project_nozzle_sizes();
+    update_sound_widgets();
 
     //BBS: whether the preset is Bambu Lab printer
     bool is_BBL_printer = false;
@@ -8420,7 +8959,7 @@ void TabPrinter::toggle_options()
 
         // when using firmware retraction, firmware decides retraction length
         bool use_firmware_retraction = m_config->opt_bool("use_firmware_retraction");
-        toggle_option("retract_length", !use_firmware_retraction, i);
+        toggle_option("retraction_length", !use_firmware_retraction, at("retraction_length"));
 
         // user can customize travel length if we have retraction length or we"re using
         // firmware retraction
@@ -8441,49 +8980,21 @@ void TabPrinter::toggle_options()
 
         // some options only apply when not using firmware retraction
         vec.resize(0);
-        vec = {"retraction_speed", "deretraction_speed", "retract_before_wipe", "retract_after_wipe",
-               "retract_length", "retract_restart_extra", "wipe_distance"};
+        vec = {"retraction_speed", "deretraction_speed", "retract_restart_extra", "wipe_distance"};
         for (auto el : vec)
             //BBS
             toggle_option(el, retraction && !use_firmware_retraction, at(el.c_str()));
 
         bool wipe = retraction && m_config->opt_bool("wipe", at("wipe"));
         // Orca (#11015): before and after shares add up to at most 100%.
+        // Orca #17302: a firmware retraction happens entirely before the wipe, whatever the split is set to.
         {
             const auto percent_at = [this, &at](const char *key) {
                 const auto *opt = m_config->option<ConfigOptionPercents>(key);
                 return opt == nullptr || opt->values.empty() ? 0. : opt->get_at(size_t(at(key)));
             };
-            toggle_option("retract_before_wipe", wipe && !is_approx(percent_at("retract_after_wipe"), 100.), at("retract_before_wipe"));
-            toggle_option("retract_after_wipe", wipe && !is_approx(percent_at("retract_before_wipe"), 100.), at("retract_after_wipe"));
-        }
-        // Orca (#13812): wiping with firmware retraction is fine as long as the whole retraction is done before the wipe.
-        const auto* retract_before_wipe_opt = static_cast<const ConfigOptionPercents*>(m_config->option("retract_before_wipe"));
-        const size_t retract_before_wipe_idx = size_t(at("retract_before_wipe"));
-        const double retract_before_wipe = retract_before_wipe_opt->values.empty() ? 100. :
-            retract_before_wipe_opt->values[std::min(retract_before_wipe_idx, retract_before_wipe_opt->values.size() - 1)];
-        if (use_firmware_retraction && wipe && retract_before_wipe < 100.0) {
-            //wxMessageDialog dialog(parent(),
-            MessageDialog dialog(parent(),
-                _(L("The Retract before wipe option could be only 100% when using the Firmware Retraction mode.\n"
-                    "\nShall I set it to 100% in order to enable Firmware Retraction?")),
-                _(L("Firmware Retraction")), wxICON_WARNING | wxYES | wxNO);
-
-            DynamicPrintConfig new_conf = *m_config;
-            if (dialog.ShowModal() == wxID_YES) {
-                auto wipe = static_cast<ConfigOptionBools*>(m_config->option("wipe")->clone());
-                auto retract_before_wipe = static_cast<ConfigOptionPercents*>(m_config->option("retract_before_wipe")->clone());
-                for (size_t w = 0; w < wipe->values.size(); w++)
-                    wipe->values[w] = false;
-                for (size_t w = 0; w < retract_before_wipe->values.size(); w++)
-                    retract_before_wipe->values[w] = 100.0;
-                new_conf.set_key_value("wipe", wipe);
-                new_conf.set_key_value("retract_before_wipe", retract_before_wipe);
-            }
-            else {
-                new_conf.set_key_value("use_firmware_retraction", new ConfigOptionBool(false));
-            }
-            load_config(new_conf);
+            toggle_option("retract_before_wipe", wipe && !use_firmware_retraction && !is_approx(percent_at("retract_after_wipe"), 100.), at("retract_before_wipe"));
+            toggle_option("retract_after_wipe", wipe && !use_firmware_retraction && !is_approx(percent_at("retract_before_wipe"), 100.), at("retract_after_wipe"));
         }
         // BBS
         toggle_option("wipe_distance", wipe, at("wipe_distance"));
@@ -8494,7 +9005,9 @@ void TabPrinter::toggle_options()
         toggle_option("retract_restart_extra_toolchange", have_multiple_extruders && toolchange_retraction, at("retract_restart_extra_toolchange"));
 
         toggle_option("long_retractions_when_cut", !use_firmware_retraction && m_config->opt_int("enable_long_retraction_when_cut"), at("long_retractions_when_cut"));
-        toggle_line("retraction_distances_when_cut#0", m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
+        // The line of this extruder's page, keyed by the value it edits (not #0, which is on the first page only).
+        toggle_line("retraction_distances_when_cut#" + std::to_string(at("retraction_distances_when_cut")),
+                    m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
         //toggle_option("retraction_distances_when_cut", m_config->opt_bool("long_retractions_when_cut",i),i);
 
         toggle_option("travel_slope", m_config->opt_enum("z_hop_types", at("z_hop_types")) != ZHopType::zhtNormal, at("travel_slope"));
@@ -9087,24 +9600,19 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
             // Obtain compatible filament and process presets for printers
             if (m_preset_bundle && m_presets->get_preset_base(current_preset) == &current_preset && printer_tab && !current_preset.is_system) {
                 delete_third_printer = true;
-                for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            filament_presets.push_front(preset);
+                // Only the user presets made for this printer alone go with it: not the vendor's presets, nor
+                // the person's presets shared with other printers or made for every printer.
+                auto collect = [&current_preset](PresetCollection &presets, std::deque<Preset> &collected) {
+                    for (const Preset *preset : presets.get_user_presets_for_printer(current_preset.name)) {
+                        if (preset->inherits() != "")
+                            collected.push_front(*preset);
                         else
-                            filament_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
+                            collected.push_back(*preset);
+                        if (!preset->setting_id.empty()) { presets.set_sync_info_and_save(preset->name, preset->setting_id, "delete", 0); }
                     }
-                }
-                for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                    if (preset.is_compatible && !preset.is_default) {
-                        if (preset.inherits() != "")
-                            process_presets.push_front(preset);
-                        else
-                            process_presets.push_back(preset);
-                        if (!preset.setting_id.empty()) { m_preset_bundle->filaments.set_sync_info_and_save(preset.name, preset.setting_id, "delete", 0); }
-                    }
-                }
+                };
+                collect(m_preset_bundle->filaments, filament_presets);
+                collect(m_preset_bundle->prints, process_presets);
             }
             if (!current_preset.setting_id.empty()) {
                 m_presets->set_sync_info_and_save(current_preset.name, current_preset.setting_id, "delete", 0);
@@ -9930,7 +10438,62 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
 }
 
 // Called for a currently selected preset.
-void Tab::delete_preset()
+bool delete_user_preset_by_name(Preset::Type type, std::string delete_preset_name, std::string &selected_preset_name)
+{
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("select preset, name %1%") % delete_preset_name;
+    if (delete_preset_name.empty()) return false;
+
+    // Find an alternate preset to be selected after the current preset is deleted.
+    if (type != Preset::TYPE_FILAMENT && type != Preset::TYPE_PRINT) return false;
+    PresetCollection &m_presets = type == Preset::TYPE_FILAMENT ? static_cast<PresetCollection &>(wxGetApp().preset_bundle->filaments) : wxGetApp().preset_bundle->prints;
+    if (delete_preset_name == selected_preset_name) {
+        const std::deque<Preset> &presets     = m_presets.get_presets();
+        size_t                    idx_current = m_presets.get_idx_selected();
+
+        // Find the visible preset.
+        size_t idx_new = idx_current;
+        if (idx_current > presets.size()) idx_current = presets.size();
+        if (idx_current < 0) idx_current = 0;
+        if (idx_new < presets.size())
+            for (; idx_new < presets.size() && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); ++idx_new)
+                ;
+        if (idx_new == presets.size())
+            for (idx_new = idx_current - 1; idx_new > 0 && (presets[idx_new].name == delete_preset_name || !presets[idx_new].is_visible); --idx_new)
+                ;
+        selected_preset_name = presets[idx_new].name;
+        BOOST_LOG_TRIVIAL(info) << boost::format("cause by delete current ,choose the next visible, idx %1%, name %2%") % idx_new % selected_preset_name;
+    }
+
+    try {
+        // BBS delete preset
+        Preset *need_delete_preset = m_presets.find_preset(delete_preset_name);
+        if (!need_delete_preset || need_delete_preset->name != delete_preset_name || !need_delete_preset->is_user()) {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't find delete preset and name: %1%") % delete_preset_name;
+            return false;
+        }
+        if (!need_delete_preset->setting_id.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "delete preset = " << need_delete_preset->name << ", setting_id = " << need_delete_preset->setting_id;
+            m_presets.set_sync_info_and_save(need_delete_preset->name, need_delete_preset->setting_id, "delete", 0);
+            wxGetApp().delete_preset_from_cloud(need_delete_preset->setting_id);
+        } else {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" can't preset setting id is empty and name: %1%") % delete_preset_name;
+        }
+        if (m_presets.get_edited_preset().name == delete_preset_name) {
+            m_presets.discard_current_changes();
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("delete preset dirty and cancelled");
+        }
+        m_presets.delete_preset(need_delete_preset->name);
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " preset has been deleted, and preset name is: " << delete_preset_name;
+    } catch (const std::exception &ex) {
+        // FIXME add some error reporting!
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("found exception when delete: %1% and preset name: %%") % ex.what() % delete_preset_name;
+        return false;
+    }
+
+    return true;
+}
+
+void Tab::delete_preset(bool confirmed)
 {
     auto current_preset = m_presets->get_selected_preset();
     // Don't let the user delete the ' - default - ' configuration.
@@ -9945,22 +10508,20 @@ void Tab::delete_preset()
         is_base_preset = true;
         if (current_preset.type == Preset::Type::TYPE_PRINTER && !current_preset.is_system) { //Customize third-party printers
             Preset &current_preset = m_presets->get_selected_preset();
-            int filament_preset_num    = 0;
-            int process_preset_num     = 0;
-            for (const Preset &preset : m_preset_bundle->filaments.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { filament_preset_num++; }
-            }
-            for (const Preset &preset : m_preset_bundle->prints.get_presets()) {
-                if (preset.is_compatible && !preset.is_default) { process_preset_num++; }
-            }
+            // The same presets select_preset() deletes along with the printer.
+            const int filament_preset_num = int(m_preset_bundle->filaments.get_user_presets_for_printer(current_preset.name).size());
+            const int process_preset_num  = int(m_preset_bundle->prints.get_user_presets_for_printer(current_preset.name).size());
 
-            DeleteConfirmDialog
-                dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
-                    wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
-                                     filament_preset_num, process_preset_num));
-            int res = dlg.ShowModal();
-            if (res != wxID_OK) return;
-            confirm_delete_third_party_printer = true;
+            // With nothing attached, the plain delete confirmation below is asked instead.
+            if (filament_preset_num + process_preset_num > 0) {
+                DeleteConfirmDialog
+                    dlg(parent(), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Delete"),
+                        wxString::Format(_L("%d Filament Preset and %d Process Preset is attached to this printer. Those presets would be deleted if the printer is deleted."),
+                                         filament_preset_num, process_preset_num));
+                int res = dlg.ShowModal();
+                if (res != wxID_OK) return;
+                confirm_delete_third_party_printer = true;
+            }
         }
         int count = 0;
         wxString presets;
@@ -9972,8 +10533,9 @@ void Tab::delete_preset()
         if (count > 0) {
             msg = _L("Presets inherited by other presets cannot be deleted!");
             msg += "\n";
-            msg += _L_PLURAL("The following presets inherit this preset.",
-                            "The following preset inherits this preset.", count);
+            // Singular first, plural second (gettext's order); they were the other way round.
+            msg += _L_PLURAL("The following preset inherits this preset.",
+                            "The following presets inherit this preset.", count);
             wxString title = from_u8((boost::format(_utf8(L("%1% Preset"))) % action).str()); // action + _(L(" Preset"));
             MessageDialog(parent(), msg + presets, title, wxOK | wxICON_ERROR).ShowModal();
             return;
@@ -10024,7 +10586,9 @@ void Tab::delete_preset()
     if (is_base_preset && (current_preset.type == Preset::Type::TYPE_FILAMENT) && action == _utf8(L("Delete"))) {
         msg += from_u8(_u8L("Are you sure to delete the selected preset? \nIf the preset corresponds to a filament currently in use on your printer, please reset the filament information for that slot."));
     } else {
-        msg += from_u8((boost::format(_u8L("Are you sure to %1% the selected preset?")) % action).str());
+        // The action is always Delete here, and filling "%1%" with the capitalised button word read
+        // "Are you sure to Delete the selected preset?"; the sentence of its own has translations.
+        msg += _L("Are you sure to delete the selected preset?");
     }
 
     //BBS: add project embedded preset logic and refine is_external
@@ -10032,7 +10596,7 @@ void Tab::delete_preset()
     //action = current_preset.is_external ? _utf8(L("Remove")) : _utf8(L("Delete"));
     // TRN  Remove/Delete
     wxString title = from_u8((boost::format(_utf8(L("%1% Preset"))) % action).str());  //action + _(L(" Preset"));
-    if (current_preset.is_default || !(confirm_delete_third_party_printer ||
+    if (current_preset.is_default || !(confirm_delete_third_party_printer || confirmed ||
         //wxID_YES != wxMessageDialog(parent(), msg, title, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal())
         wxID_YES == MessageDialog(parent(), msg, title, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal()))
         return;

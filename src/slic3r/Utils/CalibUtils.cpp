@@ -741,6 +741,7 @@ bool CalibUtils::calib_generic_PA(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
@@ -955,6 +956,7 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config.set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
     print_config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
@@ -1014,6 +1016,7 @@ void CalibUtils::calib_retraction(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 

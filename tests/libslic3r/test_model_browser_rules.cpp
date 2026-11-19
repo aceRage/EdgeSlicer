@@ -41,7 +41,7 @@ TEST_CASE("Model browser: sites are text-only shortcuts on https", "[ModelBrowse
     CHECK(site_for_url("not a url") == nullptr);
 }
 
-TEST_CASE("Model browser: this computer and the local network are blocked", "[ModelBrowser]")
+TEST_CASE("Model browser: this computer and a private network are blocked", "[ModelBrowser]")
 {
     const std::vector<std::string> blocked = {
         "localhost", "LOCALHOST", "localhost.", "app.localhost", "127.0.0.1", "127.1", "2130706433", "0x7f000001", "0x7f.1",

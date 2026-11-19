@@ -7,9 +7,11 @@ add_executable(${_TEST_NAME}_tests
     qidi_send_policy_tests.cpp
     slot_send_policy_tests.cpp
     printhost_error_tests.cpp
+    print_host_secrets_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
+    print_host_sending_tests.cpp
     plugin_guard_tests.cpp
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_lifecycle.cpp>
     $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_install.cpp>
@@ -45,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
     home_tab_tests.cpp
     home_plugins_tests.cpp
     main_tabs_tests.cpp
+    project_sessions_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
     library_index_tests.cpp
@@ -86,6 +89,8 @@ add_executable(${_TEST_NAME}_tests
     mqtt_teardown_tests.cpp
     mqtt_connect_refused_tests.cpp
     first_request_gate_tests.cpp
+    lan_access_code_watch_tests.cpp
+    popup_row_icons_tests.cpp
     bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
     bambu_net_info_tests.cpp
@@ -105,16 +110,19 @@ add_executable(${_TEST_NAME}_tests
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     plate_cut_membership_tests.cpp
+    plate_duplicate_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp
     plate_recentre_tests.cpp
+    plate_arrange_overflow_tests.cpp
     bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
     change_opt_value_tests.cpp
     option_group_line_tests.cpp
+    layer_range_edit_tests.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
     bambu_connect_tests.cpp
@@ -126,6 +134,7 @@ add_executable(${_TEST_NAME}_tests
     page_server_security_tests.cpp
     login_result_page_tests.cpp
     sentry_scrub_tests.cpp
+    local_minidump_tests.cpp
     login_diagnostics_tests.cpp
     login_ticket_gate_tests.cpp
     stream_page_icon_tests.cpp
@@ -134,6 +143,7 @@ add_executable(${_TEST_NAME}_tests
     nozzle_info_tests.cpp
     device_controls_tests.cpp
     bambu_fans_tests.cpp
+    bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp
@@ -147,6 +157,7 @@ add_executable(${_TEST_NAME}_tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
     theme_live_tests.cpp
     bambu_send_diagnosis_tests.cpp
+    ams_match_tests.cpp
     win_firewall_tests.cpp
     bambu_setup_notice_tests.cpp
     saved_printers_tests.cpp
@@ -174,6 +185,8 @@ add_executable(${_TEST_NAME}_tests
     teardown_join_tests.cpp
     slice_v1_tests.cpp
     paint_v1_tests.cpp
+    mixed_sublayer_ui_tests.cpp
+    flushing_volumes_dialog_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -279,19 +292,16 @@ endif ()
 # lives in <prefix>/include/msvc rather than <prefix>/include, and only wxWidgets_USE_FILE adds it.
 # find_package(wxWidgets) runs in src/, whose variables do not reach this sibling directory, so it
 # is repeated here - it is cached, so this costs nothing.
-find_package(wxWidgets 3.1 QUIET COMPONENTS html adv gl core base webview aui net media)
+find_package(wxWidgets 3.1 QUIET COMPONENTS stc html adv gl core base webview aui net media)
 if (wxWidgets_FOUND)
     # Set on the target, not through wxWidgets_USE_FILE: that one calls include_directories(),
     # which only affects targets created after it, and this target already exists above.
     target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE ${wxWidgets_DEFINITIONS})
 endif ()
-# chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
-# slice_v1_tests.cpp compares the /result producer with the JSON fixtures next to it.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICE_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/slice_v1")
-# paint_v1_tests.cpp compares the paint_v1 producers with the fixtures next to it (PAINT_V1_WRITE_FIXTURES=1 rewrites them).
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE PAINT_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/paint_v1")
+# SLIC3R_TEST_RESOURCES_DIR (the shipped resources/), SLICE_V1_FIXTURES_DIR and PAINT_V1_FIXTURES_DIR
+# (the JSON fixtures next to slice_v1_tests.cpp / paint_v1_tests.cpp) come from tests/edge_test_paths.hpp
+# through test_common, not from -D values: see tests/CMakeLists.txt.
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

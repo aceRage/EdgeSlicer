@@ -705,10 +705,9 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
         out["filament_self_index"]       = ints_value(target_filament.ids);
     }
 
-    // Bambu Studio has one switch, enable_tower_interface_features, for the bundle our three tower
-    // interface options split up (GCode/WipeTowerInterface.hpp). It is written from them, never from
-    // the Bambu value a loaded file kept: on when any of them is, since Bambu Studio can only turn
-    // on the whole bundle. The per-filament values keep Bambu's key names and go out as they are.
+    // enable_tower_interface_features is Bambu Studio's own switch here as well (Type 1 tower, contact layers) and goes
+    // out as it is. Our three tower interface options are a split-up version of the same bundle Bambu Studio can only
+    // turn on whole: any of them on writes the switch on too.
     if (scope == Scope::Project || scope == Scope::Print) {
         std::vector<std::string> on;
         bool                     present = false;
@@ -718,11 +717,13 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
                 if (opt->getBool())
                     on.emplace_back(key);
             }
-        if (present) {
+        const ConfigOption *native    = cfg.option("enable_tower_interface_features");
+        const bool          native_on = native != nullptr && native->getBool();
+        if (present || native != nullptr) {
             Value v;
-            v.values = { on.empty() ? "0" : "1" };
+            v.values = { (native_on || ! on.empty()) ? "1" : "0" };
             out["enable_tower_interface_features"] = v;
-            if (! on.empty() && on.size() < 3)
+            if (! native_on && ! on.empty() && on.size() < 3)
                 local.notes.push_back(where + ": enable_tower_interface_features written as on although only " + join(on, ", ") +
                                       " is on: Bambu Studio turns on its whole tower interface bundle (interface temperature, run-in, "
                                       "extra prime, interface wall gaps and, on the H2 series, a firmware purge)");

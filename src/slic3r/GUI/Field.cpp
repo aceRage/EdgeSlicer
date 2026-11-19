@@ -755,6 +755,15 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
                 set_value(text_value, true);
                 show_error(m_parent, format_wxstr(_L("Invalid format. Expected vector format: \"%1%\""),"XxY, XxY, ..." ));
             }
+            // OrcaSlicer #17209: refuse a crossing or zero-area exclusion polygon and keep the old value.
+            else if (m_opt_id == "bed_exclude_area" && out_values.size() > 1 && !is_valid_bed_exclude_area(out_values)) {
+                wxString text_value;
+                if (!m_value.empty())
+                    text_value = get_thumbnails_string(boost::any_cast<std::vector<Vec2d>>(m_value));
+                set_value(text_value, true);
+                show_error(m_parent, _L("The excluded bed area is invalid. It must be a simple, non-self-intersecting polygon."));
+                break;
+            }
         }
 
         m_value = out_values;

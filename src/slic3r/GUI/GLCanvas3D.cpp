@@ -31,6 +31,7 @@
 #include "Plater.hpp"
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
+#include "MixedSublayerUi.hpp"
 #include "Theme.hpp"
 #include "GUI_ObjectList.hpp"
 #include "ParamsPanel.hpp"
@@ -728,6 +729,22 @@ void GLCanvas3D::LayersEditing::render_variable_layer_height_dialog(const GLCanv
     if (imgui.button(_L("Reset")))
         wxPostEvent((wxEvtHandler*)canvas.get_wxglcanvas(), SimpleEvent(EVT_GLCANVAS_RESET_LAYER_HEIGHT_PROFILE));
 
+    // Mixed color sublayer P2 (Bambu Studio GLCanvas3D.cpp:484): an object with mixed color sublayers (Ratio rows)
+    // splits each of its variable layers by the mix, so very thin layers give very thin passes.
+    if (m_model_object != nullptr && wxGetApp().preset_bundle != nullptr) {
+        const PresetBundle &bundle = *wxGetApp().preset_bundle;
+        if (MixedSublayerUi::object_uses_ratio_rows(*m_model_object, bundle.mixed_filaments, bundle.filament_presets.size(),
+                                                    MixedSublayerUi::process_defaults(bundle))) {
+            ImGui::Separator();
+            const float wrap = std::max(ImGui::GetWindowContentRegionMax().x - ImGui::GetCursorPosX(), imgui.scaled(10.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_ORANGE_LIGHT);
+            imgui.text_wrapped(_L("Mixed color sublayer is on for this object. With variable layer height each pass is a share of "
+                                  "a thinner or thicker layer, which may affect print quality."),
+                               wrap);
+            ImGui::PopStyleColor();
+        }
+    }
+
     GLCanvas3D::LayersEditing::s_overlay_window_width = ImGui::GetWindowSize().x;
     imgui.end();
     ImGui::PopStyleVar(2);
@@ -1214,8 +1231,15 @@ void GLCanvas3D::Labels::render(const std::vector<const ModelInstance*>& sorted_
         float x = 0.0f;
         float y = 0.0f;
         if (camera.get_type() == Camera::EType::Perspective) {
-            x = (0.5f + 0.001f * 0.5f * (float)screen_box_center(0)) * viewport[2];
-            y = (0.5f - 0.001f * 0.5f * (float)screen_box_center(1)) * viewport[3];
+            // world_to_screen is an affine transform and leaves out the division by w, which in perspective is
+            // how far in front of the eye the point is. 0.001 stood in for it: right for a point 1000 in front
+            // of the eye, where the camera's target is by default, and for no other, so a label slid off its
+            // object the nearer or further the object was than the target.
+            const double w = -owner.eye_center_z;
+            if (w <= 0.0)
+                continue; // behind the eye
+            x = (0.5f + 0.5f * (float)(screen_box_center(0) / w)) * viewport[2];
+            y = (0.5f - 0.5f * (float)(screen_box_center(1) / w)) * viewport[3];
         } else {
             x = (0.5f + 0.5f * (float)screen_box_center(0)) * viewport[2];
             y = (0.5f - 0.5f * (float)screen_box_center(1)) * viewport[3];
@@ -1816,6 +1840,8 @@ void GLCanvas3D::load_arrange_settings()
     load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff_seq_print.allow_multi_materials_on_same_plate);
     load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff.avoid_extrusion_cali_region);
     load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff_seq_print.avoid_extrusion_cali_region);
+    load_bool("avoid_nozzle_reach_zones",            m_arrange_settings_fff.avoid_nozzle_reach_zones);
+    load_bool("avoid_nozzle_reach_zones",            m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones);
 
     //BBS: add specific arrange settings
     m_arrange_settings_fff_seq_print.is_seq_print = true;
@@ -3668,6 +3694,13 @@ void GLCanvas3D::render(bool only_init)
     //BBS: add enable_render
     if (!m_enable_render)
         return;
+    // Project strip P4 (owner crash 2026-11-07, two Recent projects back to back): a Plater is built with no app Plater
+    // set (MainFrame::create_project_plater, as at startup), and its constructor's update() renders the Assemble canvas.
+    // At startup GL is not ready yet so that render returned early; with GL up it reached init() ->
+    // on_change_color_mode() -> wxGetApp().plater()->get_notification_manager() on null. Nothing renders until a Plater
+    // is the app's (the canvas initialises at its first render once shown).
+    if (wxGetApp().plater() == nullptr)
+        return;
 
     // ensures this canvas is current and initialized
     if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
@@ -5116,6 +5149,7 @@ void GLCanvas3D::bind_event_handlers()
                         down = false;
                 }
                 m_navigator_dragging = false;
+                m_mouse.down_on_toolbar = false;
                 render();
             });
         m_event_handlers_bound = true;
@@ -6161,6 +6195,12 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
     m_dirty = true;
 }
 
+// ORCA true when the pressed button is the only one held, so no other drag is in progress
+static bool is_only_one_button_down(const wxMouseEvent& evt)
+{
+    return int(evt.LeftIsDown()) + int(evt.MiddleIsDown()) + int(evt.RightIsDown()) + int(evt.Aux1IsDown()) + int(evt.Aux2IsDown()) == 1;
+}
+
 void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 {
     if (!m_initialized || !_set_current())
@@ -6304,6 +6344,26 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         }
         m_dirty = true;
     };
+
+    // ORCA a press on toolbar empty areas must not reach the 3D scene (selection, camera, painting...).
+    // Swallow it with the drags and the release that follow, wherever the mouse goes.
+    if (m_mouse.down_on_toolbar) {
+        const bool button_event = evt.ButtonDown() || evt.ButtonUp() || evt.ButtonDClick();
+        // all buttons released, also covers a release that never reached this handler. Clears down_on_toolbar
+        if (!evt.ButtonIsDown(wxMOUSE_BTN_ANY) && !evt.ButtonDown() && !evt.ButtonDClick())
+            mouse_up_cleanup();
+        if (button_event || evt.Dragging())
+            return;
+    }
+    else if (!mouse_in_layer_editing && (evt.ButtonDown() || evt.ButtonDClick()) && is_only_one_button_down(evt) &&
+             !m_gizmos.is_mouse_over_toolbar_icon(pos.cast<double>()) && _is_mouse_over_top_toolbar(pos.cast<double>())) {
+        m_mouse.down_on_toolbar = true;
+        m_mouse.set_start_position_2D_as_invalid();
+        m_mouse.set_start_position_3D_as_invalid();
+        if (!has_mouse_capture()) // keep getting the release when it happens outside the canvas
+            m_canvas->CaptureMouse();
+        return;
+    }
 
     if (!mouse_in_layer_editing && m_gizmos.on_mouse(evt)) {
         if (m_gizmos.is_running()) {
@@ -7692,6 +7752,7 @@ void GLCanvas3D::mouse_up_cleanup()
     m_mouse.dragging = false;
     m_mouse.ignore_left_up = false;
     m_mouse.ignore_right_up = false;
+    m_mouse.down_on_toolbar = false;
     m_dirty = true;
 
     if (m_canvas->HasCapture())
@@ -8132,6 +8193,25 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         settings_out.avoid_extrusion_cali_region = false;
     }
 
+    // EdgeSlicer: only on printers with strips of the bed one nozzle alone reaches (H2D, H2C, X2D).
+    // Not cleared elsewhere: the stored choice comes back with such a printer, and arrange reads
+    // it only when the printer has the strips.
+    if (ptech == ptFFF) {
+        const ExtruderAreas &reach_areas = wxGetApp().plater()->get_partplate_list().get_extruder_areas();
+        if (reach_areas.multi() && reach_areas.has_exclusive_regions()) {
+            if (imgui->bbl_checkbox(_L("Avoid nozzle reach zones"), settings_out.avoid_nozzle_reach_zones)) {
+                appcfg->set("arrange", "avoid_nozzle_reach_zones", settings_out.avoid_nozzle_reach_zones);
+                // One stored value for both FFF modes, like the calibration-region option.
+                m_arrange_settings_fff.avoid_nozzle_reach_zones          = settings_out.avoid_nozzle_reach_zones;
+                m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones = settings_out.avoid_nozzle_reach_zones;
+            }
+            if (ImGui::IsItemHovered())
+                imgui->tooltip(_L("Keep arranged objects out of the hatched strips that only one nozzle can reach, "
+                                  "so every object can be printed with either nozzle."),
+                               imgui->scaled(20.f));
+        }
+    }
+
     // Align to Y axis. Only enable this option when auto rotation not enabled
     {
         if (settings_out.enable_rotation) {  // do not allow align to Y axis if rotation is enabled
@@ -8169,6 +8249,9 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         appcfg->erase("arrange", rot_key);
         appcfg->erase("arrange", multi_material_key);
         appcfg->erase("arrange", avoid_extrusion_key);
+        appcfg->erase("arrange", "avoid_nozzle_reach_zones");
+        m_arrange_settings_fff.avoid_nozzle_reach_zones          = false;
+        m_arrange_settings_fff_seq_print.avoid_nozzle_reach_zones = false;
     }
     ImGui::PopStyleVar(1);
     imgui->end();
@@ -9598,7 +9681,9 @@ bool GLCanvas3D::_set_shown_canvas_current()
     // can be current. Prefer the on-screen canvas so GTK hidden/unrealized SetCurrent does not fail,
     // and so a frame already in render() does not switch drawables. Canvases share one wxGLContext.
     // Fall back to this canvas (CLI / unit / shown-canvas SetCurrent failed).
-    Plater* plater = wxGetApp().plater();
+    // Project strip P4: the Plater on screen (MainFrame's); wxGetApp().plater() may be a hidden project rendering its
+    // slice thumbnails.
+    Plater* plater = wxGetApp().mainframe != nullptr && wxGetApp().mainframe->plater() != nullptr ? wxGetApp().mainframe->plater() : wxGetApp().plater();
     if (plater != nullptr) {
         GLCanvas3D* shown = plater->get_current_canvas3D();
         if (shown != nullptr && shown != this && shown->_set_current())
@@ -10855,7 +10940,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         default:
         case BuildVolume_Type::Convex:
         case BuildVolume_Type::Custom: {
-            m_volumes.set_print_volume({ static_cast<int>(type),
+            // -1: neither a rectangle (0) nor a circle (1), so the shader tests nothing against it. `type` was
+            // passed here, which in this function is the render pass (opaque 0, transparent 1, all 2), not the
+            // build volume's type: on a bed of another shape the transparent pass tested against a circle of
+            // radius FLT_MAX about (-FLT_MAX, -FLT_MAX) and darkened every volume that is partly off the bed.
+            m_volumes.set_print_volume({ -1,
                 { -FLT_MAX, -FLT_MAX, FLT_MAX, FLT_MAX },
                 { -FLT_MAX, FLT_MAX } }
             );
@@ -11608,14 +11697,21 @@ void GLCanvas3D::_render_gizmos_overlay()
     }
 }
 
+float GLCanvas3D::get_top_toolbar_width() const
+{
+    return m_main_toolbar.get_width() + m_separator_toolbar.get_width() + m_gizmos.get_scaled_total_width() + m_assemble_view_toolbar.get_width();
+}
+
+float GLCanvas3D::get_top_toolbar_height() const
+{
+    return std::max({ (float)m_main_toolbar.get_height(), m_gizmos.get_scaled_total_height(), (float)m_assemble_view_toolbar.get_height() });
+}
+
 int GLCanvas3D::get_main_toolbar_offset() const
 {
     const float cnv_width              = get_canvas_size().get_width();
     const float collapse_toolbar_width = get_collapse_toolbar_width() * 2;
-    const float gizmo_width            = m_gizmos.get_scaled_total_width();
-    const float assemble_width         = m_assemble_view_toolbar.get_width();
-    const float separator_width        = m_separator_toolbar.get_width();
-    const float toolbar_total_width    = m_main_toolbar.get_width() + separator_width + gizmo_width + assemble_width + collapse_toolbar_width;
+    const float toolbar_total_width    = get_top_toolbar_width() + collapse_toolbar_width;
 
     if (cnv_width < toolbar_total_width) {
         return is_collapse_toolbar_on_left() ? collapse_toolbar_width : 0;
@@ -12138,6 +12234,29 @@ void GLCanvas3D::_render_separator_toolbar_left() const
 
     m_separator_toolbar.set_position(top, left);
     m_separator_toolbar.render(*this,GLToolbarItem::SeparatorLine);
+}
+
+// ORCA is mouse over the top toolbar area
+bool GLCanvas3D::_is_mouse_over_top_toolbar(const Vec2d& mouse_pos) const
+{
+    float left, width, height;
+    if (m_canvas_type == ECanvasType::CanvasAssembleView) {
+        if (!m_gizmos.is_enabled() || m_gizmos.get_selectable_icons_cnt() == 0)
+            return false;
+        // same as GLGizmosManager::do_render_overlay()
+        left   = 0.5f * (float)get_canvas_size().get_width() + 0.5f * m_paint_toolbar_width;
+        width  = m_gizmos.get_scaled_total_width();
+        height = m_gizmos.get_scaled_total_height();
+    } else {
+        if (!m_main_toolbar.is_enabled())
+            return false;
+        left   = (float)get_main_toolbar_offset();
+        width  = get_top_toolbar_width();
+        height = get_top_toolbar_height();
+    }
+
+    return left <= (float)mouse_pos.x() && (float)mouse_pos.x() <= left + width &&
+           0.f  <= (float)mouse_pos.y() && (float)mouse_pos.y() <= height;
 }
 
 void GLCanvas3D::_render_collapse_toolbar() const

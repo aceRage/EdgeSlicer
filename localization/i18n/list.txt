@@ -142,6 +142,7 @@ src/slic3r/GUI/wxMediaCtrl2.cpp
 src/slic3r/GUI/WebUserLoginDialog.cpp
 src/slic3r/GUI/WebSMUserLoginDialog.cpp
 src/slic3r/GUI/WebGuideDialog.cpp
+src/slic3r/GUI/PresetManagerDialog.cpp
 src/slic3r/GUI/KBShortcutsDialog.hpp
 src/slic3r/GUI/KBShortcutsDialog.cpp
 src/slic3r/GUI/ReleaseNote.cpp
@@ -216,6 +217,8 @@ src/slic3r/GUI/PrintHostDevicesDialog.cpp
 src/slic3r/GUI/PrinterWebView.cpp
 src/slic3r/GUI/RemoteSend.cpp
 src/slic3r/Utils/ElegooLink.cpp
+src/slic3r/GUI/Gizmos/GLGizmoSplitToFit.cpp
+src/slic3r/GUI/Jobs/SplitToFitJob.cpp
 src/slic3r/GUI/PluginPermissionValidation.cpp
 src/slic3r/GUI/PluginsInspectorLogic.cpp
 src/slic3r/GUI/PluginsInspectorDialog.cpp

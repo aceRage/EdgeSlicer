@@ -225,7 +225,7 @@ TEST_CASE("a grouped classic tree support is identical across several thread cou
     }
 }
 
-TEST_CASE("a grouped organic tree support is identical across several thread counts", "[TreeSupportDeterminism][support_groups]")
+TEST_CASE("a grouped organic tree support is identical across several thread counts", "[TreeSupportDeterminism][support_groups][slow]")
 {
     const SupportDigest reference = slice_with_threads(1, "organic", true);
     require_real_support(reference);
@@ -236,7 +236,7 @@ TEST_CASE("a grouped organic tree support is identical across several thread cou
     }
 }
 
-TEST_CASE("an ungrouped organic tree support is identical across several thread counts", "[TreeSupportDeterminism]")
+TEST_CASE("an ungrouped organic tree support is identical across several thread counts", "[TreeSupportDeterminism][slow]")
 {
     // The control for the two above: whatever the group code does, the path every existing project
     // takes has to stay where it is.

@@ -15,6 +15,9 @@
 //	   Slic3r::GUI::Tab::Preset;
 //	       - Single preset item: name, file is default or external.
 
+// wx/weakref.h (via wx/meta/convertible.h) uses std::is_base_of without including <type_traits>;
+// GCC 15 (the Flatpak SDK) rejects it when nothing has pulled that header in first.
+#include <type_traits>
 #include <wx/weakref.h>
 #include <wx/panel.h>
 #include <wx/notebook.h>
@@ -404,7 +407,9 @@ public:
 	                        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep);
 	//void		save_preset(std::string name = std::string(), bool detach = false);
 
-	void		delete_preset();
+	// confirmed: the caller asked the user already (the preset managers' "Used by..." prompt); presets
+	// other presets inherit are still refused.
+	void		delete_preset(bool confirmed = false);
 	void		toggle_show_hide_incompatible();
 	void		update_show_hide_incompatible_button();
 	void		update_ui_from_settings();
@@ -586,6 +591,8 @@ public:
 	void		toggle_options() override;
 	void		update() override;
 	void		clear_pages() override;
+	void		msw_rescale() override;
+	void		sys_color_changed() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 	// Per-nozzle process P2: the Speed page header's note lists the filaments on each nozzle; refresh it after a
 	// filament's nozzle assignment changed.
@@ -619,6 +626,9 @@ private:
 	bool					m_tools_expanded    = false; // the user opened the selector on a printer whose tools all match
 	bool					m_tool_marks_shown  = false; // the plate-wide fields carry the "(Plate)" mark
 	void					create_tool_selector();
+	// Lays the selector out; with header_changed (something shown or hidden, the chips' height changed) the ParamsPanel and
+	// the sidebar too, as the Global / Objects switch does.
+	void					relayout_tool_selector(bool header_changed);
 	std::vector<wxString>	tool_selector_labels() const;
 	bool					tool_selector_expanded() const;
 	// On Plate (selector open): the per-tool fields are greyed out. On a tool: the plate-wide fields carry "(Plate)".
@@ -627,6 +637,11 @@ private:
 
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;
+
+	// EdgeSlicer, Fine detail P1: "= x mm on this nozzle" for the percent keys of the Thin features group.
+	wxStaticText*	m_fine_detail_note = nullptr;
+	wxSizer*		fine_detail_note_create_widget(wxWindow* parent);
+	void			update_fine_detail_note();
 
 	// Ultra (support sets): the "Support set" row at the top of the Support page. A support set
 	// is not a preset - Apply copies its values into the edited process settings through
@@ -663,6 +678,24 @@ private:
 	void		on_support_set_save_as();
 	void		on_support_set_delete();
 	void		on_support_set_groups();
+
+	// "Use Bambu defaults" (Multimaterial page, Prime tower group; tests/design_prime_tower_menu_rework.md 5).
+	// A labelled widget-only row (no option), like the Extruder page's "Nozzles in this project" row. get_line(opt_key)
+	// cannot find a row without an option, so tower_defaults_line() looks it up by its label on the active page.
+	// The keys and values are libslic3r/PrimeTowerDefaults; applying goes through Tab::load_config(), so the changed rows
+	// show as modified with their revert arrows, exactly like hand edits.
+	// Weak: switching pages destroys the page's controls without going through clear_pages().
+	wxWeakRef<wxWindow> m_tower_defaults_btn;
+	wxSizer*	tower_defaults_create_widget(wxWindow* parent);
+	// Style and size of the button: the label's width (DPI-scaled, translation-safe), at least the option fields' width.
+	void		tower_defaults_size_button();
+	Line*		tower_defaults_line();
+	// The Bambu system process the values come from: the edited preset's system parent, else the printer's
+	// default_print_profile. nullptr when neither is a system preset.
+	const Preset* tower_defaults_source() const;
+	// Shows the row on a Bambu printer with the tower on, and enables the button when it can act.
+	void		tower_defaults_update_row();
+	void		on_tower_defaults();
 };
 
 class TabPrintModel : public TabPrint
@@ -832,6 +865,13 @@ private:
     // Under Time cost: which machine rate slicing uses (yours from Costs, or the preset's) and why.
     wxStaticText*       m_rate_note                     {nullptr};
     wxSizer*            rate_note_create_widget(wxWindow* parent);
+    // Under Machine start / end G-code: the "Startup sound" / "Ending sound" buttons, each shown when
+    // that G-code has an M1006 tune. Index 0 = start, 1 = end.
+    wxWindow*           m_sound_btn[2]                  {nullptr, nullptr};
+    wxStaticText*       m_sound_note[2]                 {nullptr, nullptr};
+    wxSizer*            sound_create_widget(wxWindow* parent, bool end);
+    void                update_sound_widgets();
+    void                edit_sound(bool end);
     // Per-nozzle process P5: under each extruder's Rack nozzle diameters, what is wrong with the text (or nothing).
     std::map<size_t, std::pair<wxWeakRef<wxTextCtrl>, wxWeakRef<wxStaticText>>> m_rack_controls; // extruder -> (text box, problem)
     void                update_rack_error(size_t extruder, const std::string& text);
@@ -937,6 +977,13 @@ public:
 	void		clear_pages() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptSLA; }
 };
+
+// Deletes a user preset that is not the selected one of its collection (the selected one goes through
+// Tab::delete_preset): cloud sync flag, discards edits when it was the edited one, removes its files.
+// When it is the selected preset, selected_preset_name becomes the next visible preset for the caller
+// to select. Filament and process presets (moved out of CreatePresetsDialog.cpp, where the filament
+// editor uses it). Returns false when it was not deleted.
+bool delete_user_preset_by_name(Preset::Type type, std::string delete_preset_name, std::string &selected_preset_name);
 
 } // GUI
 } // Slic3r

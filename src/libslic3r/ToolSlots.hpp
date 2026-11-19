@@ -110,6 +110,13 @@ std::vector<double> filament_rack_pin_choices(const ConfigBase &config, unsigned
 // filament_rack_nozzle_diameter with 0-based `filament` pinned to `diameter` (0 = its extruder's nozzle), sized for
 // `filaments`; { 0 } (the unused value) when nothing is pinned.
 std::vector<double> set_filament_rack_pin(std::vector<double> pins, size_t filament, size_t filaments, double diameter);
+// Mixed (virtual) filaments have no nozzle of their own: their passes print with their component filaments. The
+// filament whose nozzle a 1-based `filament_id` resolves to: itself for a physical filament, and for a mixed filament
+// (an id past the physical ones, mixed_filament_definitions) the component that prints through the finest nozzle
+// (its pin / rack slot / filament_map decide which; components of one diameter all give the same answer). Every
+// per-filament nozzle lookup below (diameter, extruder, rack pin and slot, the per-nozzle process tool) goes through
+// it, so a mixed filament reads its components' nozzle, not extruder 1's. Ids it cannot resolve are returned as given.
+unsigned int nozzle_filament_of(const ConfigBase &config, unsigned int filament_id);
 // The rack nozzle size filament `filament_id` (1-based) is pinned to, 0 when none.
 double filament_rack_pin(const ConfigBase &config, unsigned int filament_id);
 // The nozzle diameter 1-based `filament_id` prints with, on any config: its physical extruder's
@@ -194,6 +201,16 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id);
 // the n-th nozzle of the slot's kind.
 int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot);
 
+// H3C slot process groups (owner 2026-11-14): on a single extruder with a nozzle rack (H3C), the rack slots that are tools of
+// their own on the Process tab (id "T1.<slot>"), sorted: every slot a filament is pinned to (filament_rack_nozzle_slot) and
+// every slot whose nozzle type differs from the extruder's (the TPU285 slot). The other slots stay in their size group ("T1",
+// "T1:0.6"). Empty on any other printer (the H2C keeps its size groups as before).
+std::vector<int> split_rack_slots(const ConfigBase &config, size_t extruder);
+// The split rack slot (1-based) 1-based `filament_id` prints with, 0 when none: its pin when that slot is split, else (unpinned)
+// the first split slot that nobody is pinned to whose type the filament needs (a 2.85 mm filament: TPU285; a High Flow
+// filament: High Flow).
+int filament_split_rack_slot(const ConfigBase &config, unsigned int filament_id);
+
 // Send-time check (the printer's reported rack).
 struct RackSlotUse
 {
@@ -214,6 +231,13 @@ std::vector<std::string> rack_slot_send_problems(const ConfigBase &config, const
 // extruder the mounted nozzle first and then the rack positions in order. An extruder that reports fewer than two nozzles
 // keeps its `current` text; an all-empty result is returned empty.
 std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<double>> &mounted_then_rack, const std::vector<std::string> &current);
+// The same with each nozzle's type (owner bug 2026-11-07, H3C: size AND type per slot). `extruder_types` is the project's
+// nozzle_volume_type per extruder: a slot without ":<type>" takes it (extruder_rack_nozzles), so a slot of that type is written
+// bare and every other slot names its type. `capacity` (extruder_max_nozzle_count per extruder; missing = no limit) caps an
+// extruder's slots, and an extruder of capacity 1 (no rack) keeps its `current` text.
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity);
 
 // ---- 4. Per-nozzle filament values ------------------------------------------------------------------------------
 

@@ -1,9 +1,12 @@
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutRecipe.hpp>
+#include <libslic3r/CutUtils.hpp>
 #include <libslic3r/Format/bbs_3mf.hpp>
+#include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Preset.hpp>
+#include <libslic3r/TriangleSelector.hpp>
 #include <libslic3r/Utils.hpp>
 #include <libslic3r/miniz_extension.hpp>
 #include <cereal/archives/binary.hpp>
@@ -114,6 +117,203 @@ CutRecipe recipe(const CutConnector& c)
 }
 } // namespace
 
+TEST_CASE("An editable TAC cut retains its mesh application choice in 3MF and undo", "[TACJoint][TACApplyMesh][TACPersistence]")
+{
+    const bool apply = GENERATE(false, true);
+    Model      source;
+    auto*      object         = fixture(source);
+    auto       original       = recipe(tac_connector());
+    original.apply_tac_joints = apply;
+    object->cut_recipe        = original;
+    Model loaded;
+    round_trip(source, loaded, "apply_mesh");
+    REQUIRE(loaded.objects.front()->cut_recipe.has_value());
+    REQUIRE(loaded.objects.front()->cut_recipe->apply_tac_joints == apply);
+    std::stringstream stream;
+    {
+        cereal::BinaryOutputArchive ar(stream);
+        ar(original);
+    }
+    CutRecipe restored;
+    {
+        cereal::BinaryInputArchive ar(stream);
+        ar(restored);
+    }
+    REQUIRE(restored.apply_tac_joints == apply);
+    REQUIRE(restored == original);
+    restored.apply_tac_joints = !apply;
+    REQUIRE(restored != original);
+}
+
+TEST_CASE("A legacy TAC recipe leaves automatic mesh application disabled", "[TACJoint][TACApplyMesh][TACPersistence]")
+{
+    Model source;
+    auto* object                = fixture(source);
+    object->cut_recipe          = recipe(tac_connector());
+    object->cut_recipe->version = 8;
+    Model loaded;
+    round_trip(source, loaded, "legacy_apply_mesh",
+               [&](const std::string& path) { rewrite_metadata(path, "Metadata/cut_recipe.xml", "apply_tac_joints", std::nullopt); });
+    REQUIRE(loaded.objects.front()->cut_recipe.has_value());
+    REQUIRE(loaded.objects.front()->cut_recipe->valid());
+    REQUIRE_FALSE(loaded.objects.front()->cut_recipe->apply_tac_joints);
+}
+
+TEST_CASE("A saved TAC recipe rebuilds both full halves with real sockets", "[TACJoint][TACApplyMesh][TACPersistence][TACReedit]")
+{
+    const size_t selected_half = GENERATE(size_t(0), size_t(1));
+    auto         cube          = its_make_cube(30., 30., 30.);
+    for (auto& p : cube.vertices)
+        p -= Vec3f::Constant(15.f);
+    Model source;
+    auto* object = source.add_object();
+    object->name = "TAC recipe source";
+    object->add_volume(TriangleMesh(cube));
+    object->add_instance();
+    object->cut_id.init();
+    auto connector      = tac_connector();
+    connector.tac_joint = TacJointParams{};
+    connector.pos       = Vec3d::Zero();
+    connector.z_angle   = 0.f;
+    connector.radius    = 2.7f;
+    connector.height    = 11.f;
+    CutRecipe original;
+    original.mesh = TriangleMesh(cube);
+    cut_recipe_connectors_from_model({connector}, original.connectors);
+    add_tac_joint_volume(object, connector, "TAC Joint");
+    const auto attributes = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::CreateDowels;
+    Cut        first(object, 0, Transform3d::Identity(), attributes);
+    const auto& first_result = first.perform_with_plane();
+    REQUIRE(first_result.size() == 3);
+    Model saved;
+    for (size_t i = 0; i < first_result.size(); ++i) {
+        auto* half = saved.add_object(*first_result[i]);
+        if (i < 2) {
+            half->cut_recipe = original;
+            cut_recipe_record_half_frame(*half);
+        }
+    }
+    Model loaded;
+    round_trip(saved, loaded, "reedit_apply_both");
+    REQUIRE(loaded.objects.size() == 3);
+    REQUIRE(loaded.objects[selected_half]->has_cut_recipe());
+    CutRecipe edited        = *loaded.objects[selected_half]->cut_recipe;
+    edited.apply_tac_joints = true;
+    // Edit cut uses the saved original, not the already shortened selected half.
+    REQUIRE(edited.mesh.bounding_box().size().z() == Approx(30.));
+    Model proxy_model;
+    auto* proxy = proxy_model.add_object();
+    proxy->add_volume(TriangleMesh(edited.mesh), ModelVolumeType::MODEL_PART, false);
+    proxy->add_instance();
+    cut_recipe_connectors_to_model(edited.connectors, proxy->cut_connectors);
+    REQUIRE(proxy->cut_connectors.size() == 1);
+    add_tac_joint_volume(proxy, proxy->cut_connectors.front(), "TAC Joint");
+    Cut         recut(proxy, 0, Transform3d::Identity(), attributes | ModelObjectCutAttribute::ApplyTacJoints);
+    const auto& result = recut.perform_with_plane();
+    REQUIRE(result.size() == 3);
+    for (size_t half = 0; half < 2; ++half) {
+        REQUIRE(result[half]->volumes.size() == 1);
+        REQUIRE(result[half]->volumes.front()->is_model_part());
+        auto body = result[half]->raw_mesh();
+        body.transform(result[half]->instances.front()->get_transformation().get_matrix(), true);
+        REQUIRE(body.bounding_box().size().z() == Approx(15.));
+        REQUIRE(its_num_open_edges(body.its) == 0);
+        REQUIRE(its_mass_properties(body.its).volume < 13499.);
+        REQUIRE(its_mass_properties(body.its).volume > 13200.);
+        // An independent probe inside each expected socket must hit no material.
+        TriangleMesh probe(its_make_cube(.2, .2, .2));
+        probe.translate(-.1f, -.1f, half == 0 ? 2.f : -2.f);
+        std::vector<TriangleMesh> intersections;
+        REQUIRE(MeshBoolean::mfd::make_boolean(body, probe, intersections, "INTERSECTION"));
+        double occupied = 0.;
+        for (const auto& piece : intersections)
+            occupied += std::abs(its_mass_properties(piece.its).volume);
+        REQUIRE(occupied < 1e-9);
+        auto assembled = result[half]->raw_mesh();
+        assembled.transform(result[half]->instances.front()->get_assemble_transformation().get_matrix(), true);
+        // Removing the last socket volume must keep the body in its source frame.
+        REQUIRE((assembled.bounding_box().min - body.bounding_box().min).norm() < 1e-5);
+        REQUIRE((assembled.bounding_box().max - body.bounding_box().max).norm() < 1e-5);
+    }
+    const auto pin = result.back()->raw_mesh();
+    REQUIRE(pin.bounding_box().size().x() == Approx(4.09).margin(1e-4));
+    REQUIRE(pin.bounding_box().size().y() == Approx(11.).margin(1e-4));
+    REQUIRE(pin.bounding_box().size().z() == Approx(3.34).margin(1e-4));
+    REQUIRE(its_mass_properties(pin.its).volume == Approx(128.85036).epsilon(1e-5));
+}
+
+TEST_CASE("Applied TAC halves retain their source frames and painting after reload",
+          "[TACJoint][TACApplyMesh][TACPersistence][TACReedit][CutPaint]")
+{
+    const auto attachment = GENERATE(TacJointAttachment::Separate, TacJointAttachment::Upper, TacJointAttachment::Lower);
+    auto       cube       = its_make_cube(30., 30., 30.);
+    for (auto& p : cube.vertices)
+        p -= Vec3f::Constant(15.f);
+    Model source;
+    auto* object = source.add_object();
+    auto* body   = object->add_volume(TriangleMesh(cube));
+    body->set_offset(Vec3d(3., -2., 2.));
+    object->add_instance();
+    object->cut_id.init();
+    TriangleSelector painting(body->mesh());
+    for (size_t i = 0; i < body->mesh().its.indices.size(); ++i)
+        if (its_face_normal(body->mesh().its, int(i)).x() > .9f)
+            painting.set_facet(int(i), EnforcerBlockerType::Extruder2);
+    body->mmu_segmentation_facets.set_data(painting.serialize());
+    auto connector                 = tac_connector();
+    connector.tac_joint            = TacJointParams{};
+    connector.tac_joint.attachment = attachment;
+    CutRecipe original;
+    original.mesh                = object->raw_mesh();
+    original.apply_tac_joints    = true;
+    original.instance_linear_set = true;
+    cut_recipe_connectors_from_model({connector}, original.connectors);
+    add_tac_joint_volume(object, connector, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::CreateDowels |
+                ModelObjectCutAttribute::ApplyTacJoints | ModelObjectCutAttribute::KeepPaint);
+    const auto& result = cut.perform_with_plane();
+    Model       saved;
+    for (size_t half = 0; half < 2; ++half) {
+        auto* copy       = saved.add_object(*result[half]);
+        copy->cut_recipe = original;
+        cut_recipe_record_half_frame(*copy);
+    }
+    Model loaded;
+    round_trip(saved, loaded, "applied_source_frames");
+    REQUIRE(loaded.objects.size() == 2);
+    for (const auto* half : loaded.objects) {
+        REQUIRE(half->volumes.size() == 1);
+        REQUIRE(half->has_cut_recipe());
+        const auto& r = *half->cut_recipe;
+        REQUIRE(r.half_part_matrices.size() == 1);
+        auto in_source = half->volumes.front()->mesh();
+        in_source.transform(r.half_part_matrices.front(), true);
+        CHECK(in_source.bounding_box().min.x() == Approx(-12.));
+        CHECK(in_source.bounding_box().max.x() == Approx(18.));
+        // Use the same placement contract as Edit cut: recover the original
+        // object's pose from the selected half and its recorded source frame.
+        const Transform3d proxy_pose = half->instances.front()->get_matrix() * half->volumes.front()->get_matrix() *
+                                       r.half_part_matrices.front().inverse();
+        auto reopened = r.mesh;
+        reopened.transform(proxy_pose, true);
+        CHECK((reopened.bounding_box().min - original.mesh.bounding_box().min).norm() < 1e-4);
+        CHECK((reopened.bounding_box().max - original.mesh.bounding_box().max).norm() < 1e-4);
+    }
+    Model      proxy;
+    auto*      uncut = proxy.add_object()->add_volume(TriangleMesh(original.mesh), ModelVolumeType::MODEL_PART, false);
+    const auto carry = carry_cut_painting_to_uncut({loaded.objects[0], loaded.objects[1]}, Transform3d::Identity(), *uncut);
+    REQUIRE(carry.had_paint);
+    REQUIRE(carry.carried);
+    const auto painted = uncut->mmu_segmentation_facets.get_facets(*uncut, EnforcerBlockerType::Extruder2);
+    double     area    = 0.;
+    for (const auto& f : painted.indices)
+        area += .5 * (painted.vertices[f[1]] - painted.vertices[f[0]]).cross(painted.vertices[f[2]] - painted.vertices[f[0]]).norm();
+    REQUIRE(area == Approx(900.).epsilon(.01));
+    for (const auto& p : painted.vertices)
+        REQUIRE(p.x() == Approx(18.).margin(1e-3));
+}
+
 // Dropping a new member from copy/equality or cereal must break these assertions:
 // the actual undo payloads must retain parameters and notice a one-field edit.
 TEST_CASE("TAC connector definitions and volume undo payloads retain every parameter", "[TACJoint][TACPersistence]")
@@ -195,7 +395,7 @@ TEST_CASE("A TAC recipe retains its type, pose and parameters in a project", "[T
     REQUIRE(loaded.objects.size() == 1);
     REQUIRE(loaded.objects.front()->cut_recipe.has_value());
     const CutRecipe& r = *loaded.objects.front()->cut_recipe;
-    REQUIRE(r.version == 8);
+    REQUIRE(r.version == 9);
     std::vector<CutConnector> connectors;
     cut_recipe_connectors_to_model(r.connectors, connectors);
     REQUIRE(connectors.size() == 1);

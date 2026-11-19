@@ -34,6 +34,23 @@ enum Position : int {
 // The three pages that host the plater (one wxPanel added three times).
 constexpr bool hosts_plater(int tab) { return tab == Editor3D || tab == Preview || tab == Showcase; }
 
+// The tab a project switch (or close, or a new project) lands on: the one the user was on.
+//   before        - the notebook index of the selected page before the switch (-1 when unknown).
+//   index_of_page - where that same page window is now (-1 when it is gone).
+//   page_count    - the notebook's page count now.
+// The three plater pages and Home never move. The Device page (Monitor) is swapped for another window when the next
+// project's printer has another kind of device page (and wx then moves the selection to the page before it: Showcase),
+// so it is kept by position. Pages that follow it (Calibration comes and goes with the printer kind, the Layerling tab
+// is optional) are found by their window. A page that is gone falls back to Prepare.
+constexpr int tab_after_switch(int before, int index_of_page, int page_count)
+{
+    return before < 0 ? int(Editor3D)
+         : hosts_plater(before) || before == Home ? before
+         : before == Monitor ? (page_count > Monitor ? int(Monitor) : int(Editor3D))
+         : (index_of_page >= 0 && index_of_page < page_count) ? index_of_page
+         : int(Editor3D);
+}
+
 // The names web pages use with sw_SwitchTab. -1 for an unknown name.
 inline int tab_from_name(const std::string &name)
 {

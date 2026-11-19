@@ -88,6 +88,9 @@ public:
     // instance has loaded the project and shown this view). Fills `report`; returns the exit code.
     int run_render_job(const Showcase::RenderRequest &request, Showcase::RenderReport &report);
 
+    // Project strip: a video export reads the current plate frame by frame, so a project switch waits for it.
+    bool is_rendering_video() const { return m_video.job != nullptr; }
+
 private:
     Showcase::Project       &project();
     int                      current_plate() const;

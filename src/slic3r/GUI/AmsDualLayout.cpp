@@ -64,7 +64,12 @@ bool fun2_supports_remote_dry(const std::string &fun2_hex) { return flag_bits_no
 
 bool is_virtual_slot(const std::string &ams_id)
 {
-    return ams_id == std::to_string(VIRTUAL_SLOT_MAIN) || ams_id == std::to_string(VIRTUAL_SLOT_DEPUTY);
+    if (ams_id == std::to_string(VIRTUAL_SLOT_MAIN) || ams_id == std::to_string(VIRTUAL_SLOT_DEPUTY))
+        return true;
+    // A nozzle rack's holders (H3C): one per rack position, 253 down to 247 beside 255 and 254.
+    char      *end = nullptr;
+    const long v   = std::strtol(ams_id.c_str(), &end, 10);
+    return end != ams_id.c_str() && *end == '\0' && v >= 247 && v <= 253;
 }
 
 int extruder_of_virtual_slot(int virtual_slot_id, int extruder_count)
@@ -101,12 +106,20 @@ std::vector<Side> group_units(const std::vector<UnitRef> &units, int extruder_co
         return int(sides.size()) - 1;
     };
 
+    // More spool holders than extruders (a nozzle rack's, H3C): number them as Bambu Studio does.
+    int holders = 0;
+    for (const UnitRef &u : units)
+        if (is_virtual_slot(u.ams_id))
+            ++holders;
+    const bool numbered = holders > std::max(1, extruder_count);
+
     for (const UnitRef &u : units) {
         UnitRef unit = u;
         if (is_virtual_slot(unit.ams_id)) {
-            unit.type        = UNIT_EXT_SPOOL;
-            unit.slot_count  = 1;
-            unit.extruder_id = extruder_of_virtual_slot(std::atoi(unit.ams_id.c_str()), extruder_count);
+            unit.type         = UNIT_EXT_SPOOL;
+            unit.slot_count   = 1;
+            unit.extruder_id  = extruder_of_virtual_slot(std::atoi(unit.ams_id.c_str()), extruder_count);
+            unit.numbered_ext = numbered;
         }
         if (unit.slot_count < 1)
             unit.slot_count = 1;
@@ -119,6 +132,8 @@ std::vector<Side> group_units(const std::vector<UnitRef> &units, int extruder_co
             const bool a_ext = a.type == UNIT_EXT_SPOOL, b_ext = b.type == UNIT_EXT_SPOOL;
             if (a_ext != b_ext)
                 return !a_ext;
+            if (a_ext && b_ext) // holders 255 down: "1-Ext" first
+                return numeric_id(a.ams_id) > numeric_id(b.ams_id);
             return numeric_id(a.ams_id) < numeric_id(b.ams_id);
         });
 
@@ -164,8 +179,17 @@ int side_of_unit(const std::vector<Side> &sides, const std::string &ams_id)
 
 std::string slot_label(const UnitRef &unit, int slot_index)
 {
-    if (unit.type == UNIT_EXT_SPOOL || is_virtual_slot(unit.ams_id))
+    if (unit.type == UNIT_EXT_SPOOL || is_virtual_slot(unit.ams_id)) {
+        if (unit.numbered_ext) {
+            const long id = numeric_id(unit.ams_id);
+            if (id >= 247 && id <= 255)
+                return std::to_string(256 - id) + "-Ext";
+        }
         return "Ext";
+    }
+    // A rack AMS (AMS 3H): its slots by number, as Bambu Studio's get_slot_name.
+    if (unit.type == UNIT_RACK_A || unit.type == UNIT_RACK_B)
+        return std::to_string(slot_index + 1);
     const long id = numeric_id(unit.ams_id);
     if (id == std::numeric_limits<long>::max() || id < 0)
         return "?";

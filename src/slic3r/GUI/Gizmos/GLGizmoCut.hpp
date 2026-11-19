@@ -784,6 +784,7 @@ class GLGizmoCut3D : public GLGizmoBase
     // cost, because the stored mesh roughly doubles the 3MF size of a cut object.
     // With it OFF nothing is recorded and the cut behaves exactly as before.
     bool m_keep_cut_editable{ true };
+    bool m_apply_tac_joints{false};
 
     // THE RE-EDIT SESSION.
     //
@@ -1143,6 +1144,7 @@ protected:
     // Bit mask: scale, side clearance, end clearance, offset. Reset/type changes use all fields.
     void   sync_tac_joint_params(CutConnectors& connectors, unsigned fields = 0x1f);
     void   render_tac_joint_inputs(CutConnectors& connectors);
+    void   render_tac_joint_mesh_checkbox();
     void   update_tac_joint_models(const CutConnectors& connectors);
     bool   tac_joint_outside_body(const CutConnector& connector, const Vec3d& world_pos) const;
     bool   render_pushfit_mm_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);

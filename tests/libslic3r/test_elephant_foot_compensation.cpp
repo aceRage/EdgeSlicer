@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <cmath>
 #include <iostream>
 #include <boost/filesystem.hpp>
 
@@ -606,5 +607,218 @@ SCENARIO("Elephant foot compensation", "[ElephantFoot]") {
                 REQUIRE(is_efc_result_smaller(expoly_compensated, expoly));
             }
         }
+	}
+}
+
+// Internals of ElephantFootCompensation.cpp that its header does not declare. ResampledPoint has to stay
+// the same as it is defined there.
+namespace Slic3r {
+	struct ResampledPoint {
+		ResampledPoint(size_t idx_src, bool interpolated, double curve_parameter) : idx_src(idx_src), interpolated(interpolated), curve_parameter(curve_parameter) {}
+
+		size_t		idx_src;
+		// Is this point interpolated or initial?
+		bool 		interpolated;
+		// Euclidean distance along the curve from the 0th point.
+		double		curve_parameter;
+	};
+	Points resample_polygon(const Points &contour, double dist, std::vector<ResampledPoint> &resampled_point_parameters);
+}
+
+static Point efc_mm(double x, double y)
+{
+	return Point(coord_t(std::llround(scale_(x))), coord_t(std::llround(scale_(y))));
+}
+
+// The mean width in mm of what is left of a region between two heights, over a stretch of that length.
+static double efc_mean_width(const ExPolygon &region, double y_low, double y_high)
+{
+	ExPolygon band;
+	band.contour.points = { efc_mm(-100., y_low), efc_mm(100., y_low), efc_mm(100., y_high), efc_mm(-100., y_high) };
+	return unscale<double>(unscale<double>(area(intersection_ex(ExPolygons{ region }, ExPolygons{ band })))) / (y_high - y_low);
+}
+
+TEST_CASE("Elephant foot compensation: a point given twice adds no length to the resampled outline", "[ElephantFoot]") {
+	// A 10 mm square, resampled to a point every 0.5 mm: 20 points an edge, 40 mm round.
+	const Points square = { efc_mm(0, 0), efc_mm(10, 0), efc_mm(10, 10), efc_mm(0, 10) };
+	const double perimeter = scale_(40.);
+
+	auto check = [perimeter](const Points &contour, size_t expected_points) {
+		std::vector<ResampledPoint> params;
+		Points resampled = resample_polygon(contour, scale_(0.5), params);
+		REQUIRE(resampled.size() == expected_points);
+		REQUIRE(params.size() == expected_points);
+		// The length along the outline is a number at every point, never runs backwards, and ends at the whole length.
+		// Before the fix an edge of no length made its step 0 / 0, and every length from there on NaN.
+		double prev = 0.;
+		for (const ResampledPoint &p : params) {
+			REQUIRE(std::isfinite(p.curve_parameter));
+			REQUIRE(p.curve_parameter >= prev);
+			prev = p.curve_parameter;
+		}
+		REQUIRE(params.back().curve_parameter == Approx(perimeter));
+	};
+
+	SECTION("no repeated point") {
+		check(square, 80);
+	}
+	SECTION("a corner given twice") {
+		Points contour = square;
+		contour.insert(contour.begin() + 2, contour[1]);
+		check(contour, 81);
+	}
+	SECTION("the first point given again at the end, as in a closed path") {
+		Points contour = square;
+		contour.push_back(contour.front());
+		check(contour, 81);
+	}
+	SECTION("a corner given three times") {
+		Points contour = square;
+		contour.insert(contour.begin() + 3, 2, contour[2]);
+		check(contour, 82);
+	}
+}
+
+TEST_CASE("Elephant foot compensation: a region given with a repeated point is compensated like the region without it", "[ElephantFoot]") {
+	// A 20 x 6 mm bar with a tooth 1 mm wide standing on it. The tooth is wider than an external perimeter needs
+	// (0.857 mm with this flow) but not by twice the compensation, so it may only give up what it has to spare:
+	// it comes out 0.857 mm wide. Where the lengths along the outline are NaN, nothing of the tooth's own outline
+	// counts as being across from a point, the tooth is taken for a wide part and loses 0.2 mm on each side.
+	const Flow   flow(0.45f, 0.2f, 0.4f);
+	const double min_contour_width = double(flow.width() + flow.spacing());
+	ExPolygon comb;
+	comb.contour.points = { efc_mm(0, 0), efc_mm(20, 0), efc_mm(20, 6), efc_mm(10.5, 6), efc_mm(10.5, 14), efc_mm(9.5, 14), efc_mm(9.5, 6), efc_mm(0, 6) };
+
+	const ExPolygon expected = elephant_foot_compensation(comb, flow, 0.2);
+	REQUIRE(efc_mean_width(expected, 8., 12.) == Approx(min_contour_width).margin(0.002));
+
+	auto check = [&](const ExPolygon &with_repeat) {
+		// The region alone: nothing simplifies it first, the repeated point reaches the resampling.
+		// A corner given twice is measured once for each of its two sides, so the outline next to it may differ
+		// a little from the one without the repeat (0.08 mm2 at the foot of the tooth); a tooth taken for a wide
+		// part would be 2 mm2 short.
+		const ExPolygon alone = elephant_foot_compensation(with_repeat, flow, 0.2);
+		CHECK(efc_mean_width(alone, 8., 12.) == Approx(min_contour_width).margin(0.002));
+		CHECK(unscale<double>(unscale<double>(alone.area())) == Approx(unscale<double>(unscale<double>(expected.area()))).margin(0.2));
+		// As the slicer calls it, on the regions of a layer: simplifying takes the repeat out first.
+		const ExPolygons of_layer    = elephant_foot_compensation(ExPolygons{ with_repeat }, flow, 0.2);
+		const ExPolygons of_layer_ok = elephant_foot_compensation(ExPolygons{ comb }, flow, 0.2);
+		REQUIRE(of_layer.size() == 1);
+		REQUIRE(of_layer_ok.size() == 1);
+		CHECK(expolygons_match(of_layer.front(), of_layer_ok.front()));
+		CHECK(efc_mean_width(of_layer.front(), 8., 12.) == Approx(min_contour_width).margin(0.002));
+	};
+
+	SECTION("the first point given again at the end") {
+		ExPolygon with_repeat = comb;
+		with_repeat.contour.points.push_back(with_repeat.contour.points.front());
+		check(with_repeat);
+	}
+	SECTION("a corner at the foot of the tooth given twice") {
+		ExPolygon with_repeat = comb;
+		with_repeat.contour.points.insert(with_repeat.contour.points.begin() + 4, with_repeat.contour.points[3]);
+		check(with_repeat);
+	}
+}
+
+TEST_CASE("Elephant foot compensation: every piece of a region that simplifying parts is kept", "[ElephantFoot]") {
+	const Flow flow(0.45f, 0.2f, 0.4f);
+
+	SECTION("two squares that share a corner, given as one outline") {
+		ExPolygon region;
+		region.contour.points = { efc_mm(0, 0), efc_mm(10, 0), efc_mm(10, 10), efc_mm(20, 10), efc_mm(20, 20), efc_mm(10, 20), efc_mm(10, 10), efc_mm(0, 10) };
+		REQUIRE(region.simplify(SCALED_EPSILON).size() == 2);
+
+		ExPolygons compensated = elephant_foot_compensation(ExPolygons{ region }, flow, 0.2);
+		// Before the fix only the first square came back; the other was gone from the layer.
+		REQUIRE(compensated.size() == 2);
+		ExPolygon lower_left, upper_right;
+		lower_left.contour.points  = { efc_mm(0.2, 0.2), efc_mm(9.8, 0.2), efc_mm(9.8, 9.8), efc_mm(0.2, 9.8) };
+		upper_right.contour.points = { efc_mm(10.2, 10.2), efc_mm(19.8, 10.2), efc_mm(19.8, 19.8), efc_mm(10.2, 19.8) };
+		const bool first_is_lower_left = compensated.front().contour.points.front().x() < efc_mm(10., 0.).x();
+		CHECK(expolygons_match(compensated[first_is_lower_left ? 0 : 1], lower_left));
+		CHECK(expolygons_match(compensated[first_is_lower_left ? 1 : 0], upper_right));
+	}
+
+	SECTION("a dumbbell whose neck is thinner than the simplify tolerance") {
+		// Two 10 mm squares 10 mm apart, joined by a neck 0.08 um wide at its ends and 0.02 um wide in the middle,
+		// where its lower side rises 0.15 um and its upper side 0.09 um. Simplifying by 0.1 um keeps the rise of
+		// the lower side and straightens the upper side, which then runs below it: the neck is cut through.
+		const coord_t y = efc_mm(5., 0.).x();
+		ExPolygon dumbbell;
+		dumbbell.contour.points = {
+			efc_mm(0, 0), efc_mm(10, 0), efc_mm(10, 5), Point(efc_mm(15., 0.).x(), y + 150), efc_mm(20, 5), efc_mm(20, 0), efc_mm(30, 0), efc_mm(30, 10), efc_mm(20, 10),
+			Point(efc_mm(20., 0.).x(), y + 80), Point(efc_mm(15., 0.).x(), y + 170), Point(efc_mm(10., 0.).x(), y + 80), efc_mm(10, 10), efc_mm(0, 10) };
+		REQUIRE(dumbbell.contour.is_counter_clockwise());
+		const size_t pieces = dumbbell.simplify(SCALED_EPSILON).size();
+		REQUIRE(pieces >= 2);
+
+		ExPolygons compensated = elephant_foot_compensation(ExPolygons{ dumbbell }, flow, 0.2);
+		// Before the fix one piece came back and the other square was gone, 100 mm2 of the layer.
+		REQUIRE(compensated.size() == pieces);
+		// Both squares are there: each about what 0.2 mm off every side leaves of it (92.16 mm2) or more. A piece that
+		// carries the remains of the neck may come back as it was, where shrinking it gives more than one region.
+		ExPolygon left_square, right_square;
+		left_square.contour.points  = { efc_mm(0, 0), efc_mm(10, 0), efc_mm(10, 10), efc_mm(0, 10) };
+		right_square.contour.points = { efc_mm(20, 0), efc_mm(30, 0), efc_mm(30, 10), efc_mm(20, 10) };
+		const double left  = unscale<double>(unscale<double>(area(intersection_ex(compensated, ExPolygons{ left_square }))));
+		const double right = unscale<double>(unscale<double>(area(intersection_ex(compensated, ExPolygons{ right_square }))));
+		CHECK(left  >= 92.);
+		CHECK(left  <= 100.);
+		CHECK(right >= 92.);
+		CHECK(right <= 100.);
+	}
+}
+
+TEST_CASE("Elephant foot compensation: ordinary shapes come out as they did", "[ElephantFoot]") {
+	// What these gave before the pieces of a simplified region were all kept: with 0.2 mm of compensation every
+	// side moves in by 0.2 mm, corners stay sharp, a hole grows by 0.2 mm, and the points added along the sides
+	// for measuring are gone again.
+	const Flow flow(0.45f, 0.2f, 0.4f);
+	auto compensated = [&flow](const ExPolygon &region) { return elephant_foot_compensation(ExPolygons{ region }, flow, 0.2); };
+
+	SECTION("a square") {
+		ExPolygon region, expected;
+		region.contour.points   = { efc_mm(0, 0), efc_mm(20, 0), efc_mm(20, 20), efc_mm(0, 20) };
+		expected.contour.points = { efc_mm(0.2, 0.2), efc_mm(19.8, 0.2), efc_mm(19.8, 19.8), efc_mm(0.2, 19.8) };
+		ExPolygons out = compensated(region);
+		REQUIRE(out.size() == 1);
+		CHECK(expolygons_match(out.front(), expected));
+	}
+	SECTION("an L") {
+		ExPolygon region, expected;
+		region.contour.points   = { efc_mm(0, 0), efc_mm(20, 0), efc_mm(20, 10), efc_mm(10, 10), efc_mm(10, 20), efc_mm(0, 20) };
+		expected.contour.points = { efc_mm(0.2, 0.2), efc_mm(19.8, 0.2), efc_mm(19.8, 9.8), efc_mm(9.8, 9.8), efc_mm(9.8, 19.8), efc_mm(0.2, 19.8) };
+		ExPolygons out = compensated(region);
+		REQUIRE(out.size() == 1);
+		CHECK(expolygons_match(out.front(), expected));
+	}
+	SECTION("a square with a hole") {
+		ExPolygon region, expected;
+		region.contour.points   = { efc_mm(0, 0), efc_mm(20, 0), efc_mm(20, 20), efc_mm(0, 20) };
+		region.holes.emplace_back(Points{ efc_mm(7, 7), efc_mm(7, 13), efc_mm(13, 13), efc_mm(13, 7) });
+		expected.contour.points = { efc_mm(0.2, 0.2), efc_mm(19.8, 0.2), efc_mm(19.8, 19.8), efc_mm(0.2, 19.8) };
+		expected.holes.emplace_back(Points{ efc_mm(6.8, 6.8), efc_mm(6.8, 13.2), efc_mm(13.2, 13.2), efc_mm(13.2, 6.8) });
+		ExPolygons out = compensated(region);
+		REQUIRE(out.size() == 1);
+		CHECK(expolygons_match(out.front(), expected));
+	}
+	SECTION("a strip too thin to give anything up") {
+		// 1 mm wide: narrower than an external perimeter's 0.857 mm plus twice the compensation. Left as it is.
+		ExPolygon region;
+		region.contour.points = { efc_mm(0, 0), efc_mm(30, 0), efc_mm(30, 1), efc_mm(0, 1) };
+		ExPolygons out = compensated(region);
+		REQUIRE(out.size() == 1);
+		CHECK(expolygons_match(out.front(), region));
+	}
+	SECTION("a bar with a thin tooth") {
+		// The tooth keeps the width an external perimeter needs, the bar gives up all 0.2 mm.
+		ExPolygon region;
+		region.contour.points = { efc_mm(0, 0), efc_mm(20, 0), efc_mm(20, 6), efc_mm(10.5, 6), efc_mm(10.5, 14), efc_mm(9.5, 14), efc_mm(9.5, 6), efc_mm(0, 6) };
+		ExPolygons out = compensated(region);
+		REQUIRE(out.size() == 1);
+		CHECK(efc_mean_width(out.front(), 8., 12.) == Approx(double(flow.width() + flow.spacing())).margin(0.002));
+		CHECK(efc_mean_width(out.front(), 1., 5.) == Approx(19.6).margin(0.002));
+		CHECK(unscale<double>(unscale<double>(out.front().area())) == Approx(116.746).margin(0.01));
 	}
 }

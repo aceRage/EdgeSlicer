@@ -287,11 +287,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         perimeter_config.outer_wall_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(region_config.outer_wall_filament.value)));
     perimeter_config.sparse_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.sparse_infill_filament.value))));
     perimeter_config.solid_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.solid_infill_filament.value))));
-    // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
+    // In sync with PrintObject::_slice() slicing_mode_normal_below_layer: both ask
+    // PrintObject::spiral_vase_bottom_layers().
+    // The count is of the object's own layers, and Layer::id() starts at the raft's layer count: compare the
+    // object layer index, as the slicing step and detect_surfaces_type() do.
     bool spiral_mode = print_config.spiral_mode &&
-        //FIXME account for raft layers.
-        (this->layer()->id() >= size_t(region_config.bottom_shell_layers.value) &&
-         this->layer()->print_z >= region_config.bottom_shell_thickness - EPSILON);
+        this->layer()->id() - std::min(this->layer()->id(), this->layer()->object()->slicing_parameters().raft_layers()) >=
+            this->layer()->object()->spiral_vase_bottom_layers(region_config);
 
     double model_rotation_rad = 0.0;
     if (region_config.align_infill_direction_to_model) {
@@ -321,6 +323,12 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         this->layer()->object()->layer_count()
     );
     
+    // EdgeSlicer, thin feature notice: this call's record; kept only if it found something.
+    ThinFeatureLayer thin_found;
+    thin_found.layer_id = int(this->layer()->id());
+    thin_found.print_z  = this->layer()->print_z;
+    g.thin_features     = &thin_found;
+
     // Paint Depth (F3 fix-wave): give the top-surface/one-wall-top detection the same
     // interface_shells treatment PrintObject::has_bounded_paint_depth() already gets at
     // its own two read sites, so a bounded painted object's color-region boundary counts
@@ -367,6 +375,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    if (!thin_found.empty())
+        this->thin_feature_layers.push_back(std::move(thin_found));
 }
 
 #if 1

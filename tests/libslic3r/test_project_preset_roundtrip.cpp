@@ -11,6 +11,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ProjectConfigFill.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
@@ -236,7 +237,7 @@ bool fits_every_printer(const Preset *preset) { return preset != nullptr && Pres
 
 } // namespace
 
-TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string first = make_project("roundtrip.3mf");
 
@@ -404,7 +405,7 @@ TEST_CASE("A printer saved to the project comes back and keeps its project on it
 // in the Save Preset dialog. The project preset then has no printer list and no condition of its
 // own, so it is listed for every printer and a printer switch keeps it selected. Not ticked, nothing
 // changes.
-TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string path = make_project("every_printer.3mf", ProjectPresetPrinters::EveryPrinter);
 
@@ -499,6 +500,126 @@ TEST_CASE("Unticking Use-for-every-printer gives a project preset its parent's p
     user.is_project_embedded = false;
     bundle->prints.set_project_preset_printers(user, ProjectPresetPrinters::EveryPrinter);
     CHECK_FALSE(Preset::fits_every_printer(user.config));
+}
+
+namespace {
+
+std::vector<std::string> project_different_keys(const std::string &path, size_t slot)
+{
+    const nlohmann::json cfg = nlohmann::json::parse(zip_entry(path, "Metadata/project_settings.config"));
+    std::vector<std::string> keys;
+    if (cfg.contains("different_settings_to_system") && cfg["different_settings_to_system"].size() > slot)
+        unescape_strings_cstyle(cfg["different_settings_to_system"][slot].get<std::string>(), keys);
+    return keys;
+}
+
+bool has_key(const std::vector<std::string> &keys, const std::string &key)
+{
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+} // namespace
+
+// Hand test 2026-11-15 (curved tops spike, PR #1021): a changed SYSTEM process (edited, not saved as
+// a preset) was stored with no "different_settings_to_system" entry for the process. Per-nozzle
+// process P8 asked get_preset_parent(), which has no parent for a system preset, so every open put
+// the changed values back to the system preset's. Filaments and printers use the selected preset's
+// parent and were not affected; they are checked here too.
+TEST_CASE("Edited system process, filament and printer keep their changes through save and re-open", "[Preset][Bundle][ProjectPreset][slow]")
+{
+    auto check_values = [](PresetBundle &bundle, const std::string &where) {
+        INFO(where);
+        CHECK(bundle.prints.get_selected_preset_name() == X1C_PROC);
+        CHECK(bundle.prints.get_edited_preset().config.opt_int("top_shell_layers") == 9);
+        CHECK(bundle.prints.get_edited_preset().config.opt_int("wall_loops") == 5);
+        CHECK(bundle.prints.get_edited_preset().is_dirty);
+        REQUIRE(!bundle.filament_presets.empty());
+        const Preset *pla = bundle.filaments.find_preset(bundle.filament_presets[0], true);
+        REQUIRE(pla != nullptr);
+        CHECK(pla->config.opt_int("nozzle_temperature", 0) == 231);
+        CHECK(bundle.printers.get_selected_preset_name() == X1C);
+        CHECK(bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] == Approx(1.5));
+    };
+
+    std::string path;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        REQUIRE(bundle->prints.get_selected_preset().is_system);
+        REQUIRE(bundle->filaments.get_selected_preset().is_system);
+        REQUIRE(bundle->printers.get_selected_preset().is_system);
+        REQUIRE(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") != 9);
+        REQUIRE(bundle->filaments.get_edited_preset().config.opt_int("nozzle_temperature", 0) != 231);
+        REQUIRE(bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] != Approx(1.5));
+        bundle->prints.get_edited_preset().config.set_key_value("top_shell_layers", new ConfigOptionInt(9));
+        bundle->prints.get_edited_preset().config.set_key_value("wall_loops", new ConfigOptionInt(5));
+        bundle->prints.update_dirty();
+        bundle->filaments.get_edited_preset().config.option<ConfigOptionInts>("nozzle_temperature")->values[0] = 231;
+        bundle->filaments.update_dirty();
+        bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] = 1.5;
+        bundle->printers.update_dirty();
+        REQUIRE(bundle->prints.get_edited_preset().is_dirty);
+        REQUIRE(bundle->filaments.get_edited_preset().is_dirty);
+        REQUIRE(bundle->printers.get_edited_preset().is_dirty);
+        path = project_path("edited_system_presets.3mf");
+        store_project(*bundle, path);
+    }
+    // [process, filament 1, filament 2, printer]
+    CHECK(has_key(project_different_keys(path, 0), "top_shell_layers"));
+    CHECK(has_key(project_different_keys(path, 0), "wall_loops"));
+    CHECK(has_key(project_different_keys(path, 1), "nozzle_temperature"));
+    CHECK(has_key(project_different_keys(path, 3), "retraction_length"));
+
+    // Opened in a new session: the changes are there, shown as changes to the system presets.
+    auto second = bbl_bundle();
+    select_machine(*second, X1C, X1C_PROC, X1C_PLA);
+    open_project(*second, path);
+    check_values(*second, "first re-open");
+
+    // Saved again (as after a slice) and opened once more.
+    const std::string again = project_path("edited_system_presets_again.3mf");
+    store_project(*second, again);
+    CHECK(has_key(project_different_keys(again, 0), "top_shell_layers"));
+    auto third = bbl_bundle();
+    select_machine(*third, X1C, X1C_PROC, X1C_PLA);
+    open_project(*third, again);
+    check_values(*third, "second re-open");
+}
+
+// The CLI's side: a setting given on the command line over a named system process. Without a
+// record the GUI loader resets it; with the record_cli_overrides_as_different() entry it stays.
+TEST_CASE("A CLI project's command-line setting survives opening it in the GUI", "[Preset][Bundle][ProjectPreset]")
+{
+    DynamicPrintConfig project;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        project = bundle->full_config_secure();
+    }
+    REQUIRE(project.opt_int("top_shell_layers") != 9);
+    // What the CLI holds: one empty slot per preset (process, 2 filaments, printer), then the override.
+    project.option<ConfigOptionStrings>("different_settings_to_system", true)->values = { "", "", "", "" };
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("top_shell_layers", new ConfigOptionInt(9));
+    project.apply(overrides);
+
+    SECTION("not recorded: the loader puts the system value back")
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") != 9);
+    }
+    SECTION("recorded: kept")
+    {
+        CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                                Preset::printer_options()) == 1);
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK(bundle->prints.get_selected_preset_name() == X1C_PROC);
+        CHECK(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") == 9);
+    }
 }
 
 // Snapmaker #996: a 3MF pads filament_settings_id to the machine's slot count with empty names

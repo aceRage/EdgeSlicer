@@ -18,6 +18,17 @@
 	--pt-pop-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
 	--pt-input-bg: #FFFFFF;
 	--pt-row-h: 36px;
+	/* the preset managers (data_table.js opt-ins: star, locked rows, the focused row) */
+	--pt-star-on: #F2A900;
+	--pt-star-off: #B9B9BE;
+	--pt-locked-fg: #9A9AA0;
+	--pt-focus-ring: #009688;
+	--pt-focus-bg: #E6F4F2;
+	/* the preset managers' rename field: a name that cannot be used */
+	--pt-error: #D93025;
+	/* the preset managers' row selection (Ctrl / Shift+click), apart from the Enabled tick and the focus */
+	--pt-sel-bg: #C4E4F7;
+	--pt-sel-bar: #1A73C8;
 }
 
 body.pt-page {
@@ -562,4 +573,61 @@ body.pt-resizing * {
 
 .pt-printer-lbl {
 	color: var(--pt-muted);
+}
+
+/* ---- opt-ins of data_table.js used by the preset managers (guide/preset_manager) ---- */
+.pt-body .pt-row.focus {
+	background-color: var(--pt-focus-bg);
+	box-shadow: inset 2px 0 0 var(--pt-focus-ring);
+}
+
+.pt-body .pt-row:focus {
+	outline: none;
+}
+
+.pt-body .pt-row.focus:focus {
+	box-shadow: inset 2px 0 0 var(--pt-focus-ring), inset 0 0 0 1px var(--pt-focus-ring);
+}
+
+.pt-body .pt-row.locked .pt-td.check input[type="checkbox"] {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.pt-body .pt-row.locked .pt-td.check {
+	color: var(--pt-locked-fg);
+}
+
+.pt-star {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.pt-star svg {
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: var(--pt-star-off);
+	stroke-width: 1.4;
+}
+
+.pt-star.on svg {
+	fill: var(--pt-star-on);
+	stroke: var(--pt-star-on);
+}
+
+.pt-star:hover {
+	background-color: var(--pt-hover);
+}
+
+.pt-star:focus-visible {
+	outline: 1px solid var(--pt-focus-ring);
 }

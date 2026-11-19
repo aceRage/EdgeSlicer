@@ -20,6 +20,7 @@
 #include "Polyline.hpp"
 #include "MutablePolygon.hpp"
 #include "SupportCommon.hpp"
+#include "SupportMergePlan.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TreeSupport.hpp"
 #include "I18N.hpp"
@@ -3783,7 +3784,18 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
 
         // Produce the support G-code.
         SupportGeneratorLayersPtr raft_layers = generate_raft_base(print_object, support_params, print_object.slicing_parameters(), top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
+
+        // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 TreeSupport3D.cpp:5051-5066):
+        // the organic tree is grown on a fixed layer grid, so this post-pass is the only place its Z ladder can still
+        // be coarsened. The tips were placed with the tree's own top gap. A no-op on every single-diameter plate and
+        // on an object with support groups.
+        SupportMergeResult support_merge;
+        merge_support_layers_multi_diameter(print_object, support_params, print_object.slicing_parameters(), raft_layers,
+            bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers, support_merge,
+            double(config.z_distance_top_layers) * unscaled<double>(config.layer_height), ! group_claims.empty());
+
         SupportGeneratorLayersPtr layers_sorted = generate_support_layers(print_object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+        apply_support_merge_result(print_object, support_merge);
 
         // BBS: This is a hack to avoid the support being generated outside the bed area. See #4769.
         tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&](SupportGeneratorLayer *layer) {
@@ -4163,8 +4175,10 @@ void organic_draw_branches(
                              // Only propagate until the rest area is smaller than this threshold.
                             //double                          support_area_min = 0.1 * support_area_min_radius;
                             for (LayerIndex layer_idx = layer_begin - 1; layer_idx >= layer_bottommost; -- layer_idx) {
-                                LayerIndex collision_layer = (layer_idx == layer_begin - 1) ? layer_begin : layer_idx;
-                                Polygons collision = volumes.getCollision(0, collision_layer, false);
+                                // Every carried layer is printed (the bottom contact seed is put below them, see
+                                // below), so each is cut by its own collision, which holds the part within the
+                                // bottom Z gap under it.
+                                Polygons collision = volumes.getCollision(0, layer_idx, false);
                                 rest_support = diff_clipped(rest_support.empty() ? slice_front_contact : rest_support, collision, ApplySafetyOffset::Yes);
                                 remove_small(rest_support, tiny_area);
                                 double rest_support_area = area(rest_support);
@@ -4225,6 +4239,15 @@ void organic_draw_branches(
                             auto it_dst = slices.begin();
                             for (auto it_src = bottom_extra_slices.rbegin(); it_src != bottom_extra_slices.rend(); ++ it_src)
                                 *it_dst ++ = std::move(it_src->polygons);
+                            // Organic bottom contacts are not printed: they seed the bottom interface layers above
+                            // them (generate_interface_layers(), generate_support_toolpaths()) and are taken out of
+                            // the base of their own layer. Put the seed in the gap, one layer below the foot, so the
+                            // foot is printed at the bottom Z gap, as the lowest bottom interface layer. On the bed
+                            // there is no layer below, the contact stays on the foot's layer.
+                            if (! bottom_contacts.empty() && layer_begin > 0) {
+                                -- layer_begin;
+                                slices.insert(slices.begin(), Polygons{});
+                            }
                         }
 
                         // ORCA: retain bottom contacts even when no placeable areas intersect.
