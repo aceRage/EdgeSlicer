@@ -684,7 +684,7 @@ namespace Slic3r {
             // libcurl keeps the connection to the printer open between the chunks. A chunk that fails is
             // sent again after 200 ms, up to 3 more times (the web client's retry); the error is shown
             // only when they all fail.
-            std::string last_error;
+            wxString     last_error;
             bool        cancelled = false;
             res                   = false;
             for (int attempt = 0; attempt <= ElegooCc2::UPLOAD_CHUNK_RETRIES && !res && !cancelled; ++attempt) {
