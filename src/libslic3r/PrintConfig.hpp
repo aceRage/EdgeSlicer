@@ -2043,6 +2043,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool, alternate_extra_wall))
     ((ConfigOptionFloat, minimum_sparse_infill_area))
     ((ConfigOptionInt, solid_infill_filament))
+    // EdgeSlicer: 0 = same as the outer wall (see top_surface_filament_1based() in Print.hpp)
+    ((ConfigOptionInt, top_surface_filament))
+    ((ConfigOptionInt, bottom_surface_filament))
     ((ConfigOptionFloatOrPercent, internal_solid_infill_line_width))
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.

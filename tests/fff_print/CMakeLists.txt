@@ -77,6 +77,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
 	test_curved_tops.cpp
+	test_surface_filaments.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
 	test_counterbore_bridging.cpp

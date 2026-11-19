@@ -83,10 +83,14 @@ unsigned int effective_infill_filament_id(const Layer &layer, const PrintRegionC
 
 } // namespace
 
-unsigned int LayerRegion::extruder(FlowRole role) const
+unsigned int LayerRegion::extruder(FlowRole role, ExtrusionRole fill_role) const
 {
     const PrintRegionConfig &config = this->region().config();
     unsigned int             filament_id = 0;
+    // EdgeSlicer surface filaments: a bottom skin (0 = the outer wall's filament), resolved per layer
+    // as a wall filament is. The top skin needs no hint: PrintRegion::extruder(frTopSolidInfill) is it.
+    if (fill_role != erNone && is_bottom_surface_filament_role(fill_role))
+        return effective_layer_filament_id(*m_layer, unsigned(std::max(0, bottom_surface_filament_1based(config))));
     if (role == frInfill)
         filament_id = config.sparse_infill_filament.value;
     else if (role == frSolidInfill && std::abs(config.sparse_infill_density.value - 100.) < EPSILON)
@@ -109,7 +113,7 @@ Flow LayerRegion::flow(FlowRole role, double layer_height) const
     return this->flow(role, layer_height, m_layer->id() == 0);
 }
 
-Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_layer_width) const
+Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_layer_width, ExtrusionRole fill_role) const
 {
     const PrintConfig          &print_config = m_layer->object()->print()->config();
     ConfigOptionFloatOrPercent config_width;
@@ -118,7 +122,7 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
     const ConfigOptionFloatOrPercent *initial_width = &print_config.initial_layer_line_width;
     ConfigOptionFloatOrPercent        nozzle_initial_width;
     if (use_initial_layer_width && !print_config.nozzle_initial_layer_line_width.values.empty()) {
-        const unsigned int filament = this->extruder(role);
+        const unsigned int filament = this->extruder(role, fill_role);
         if (filament >= 1 && filament <= print_config.nozzle_initial_layer_line_width.values.size()) {
             const FloatOrPercent &w = print_config.nozzle_initial_layer_line_width.values[filament - 1];
             nozzle_initial_width    = ConfigOptionFloatOrPercent(w.value, w.percent);
@@ -135,6 +139,8 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
         config_width = m_region->config().sparse_infill_line_width;
     } else if (role == frSolidInfill) {
         config_width = m_region->config().internal_solid_infill_line_width;
+        if (fill_role != erNone && is_bottom_surface_filament_role(fill_role))
+            config_width = bottom_surface_role_width(m_region->config(), config_width, m_region->config().nozzle_internal_solid_infill_line_width);
     } else if (role == frTopSolidInfill) {
         config_width = m_region->config().top_surface_line_width;
     } else {
@@ -146,20 +152,23 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
     if (config_width.value == 0)
         config_width = m_layer->object()->config().line_width;
 
-    const auto nozzle_diameter = float(nozzle_diameter_for_filament(print_config, this->extruder(role)));
+    const auto nozzle_diameter = float(nozzle_diameter_for_filament(print_config, this->extruder(role, fill_role)));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
-Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge) const
+Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge, ExtrusionRole fill_role) const
 {
     const PrintRegion       &region         = this->region();
     const PrintRegionConfig &region_config  = region.config();
     const PrintObject       &print_object   = *this->layer()->object();
     Flow bridge_flow;
     // Here this->extruder(role) - 1 may underflow to MAX_INT, but then the get_at() will fall back to zero'th element, so everything is all right.
-    auto nozzle_diameter = float(nozzle_diameter_for_filament(print_object.print()->config(), this->extruder(role)));
+    auto nozzle_diameter = float(nozzle_diameter_for_filament(print_object.print()->config(), this->extruder(role, fill_role)));
     // ORCA: Bridge line width. 0 (Edge's default) keeps the widths below exactly as they were.
-    const ConfigOptionFloatOrPercent& bridge_width_opt = region_config.bridge_line_width;
+    // EdgeSlicer surface filaments: a bottom bridge printed by the bottom surface filament takes its nozzle's width.
+    const ConfigOptionFloatOrPercent  bridge_width_opt = (fill_role != erNone && is_bottom_surface_filament_role(fill_role)) ?
+        bottom_surface_role_width(region_config, region_config.bridge_line_width, region_config.nozzle_bridge_line_width) :
+        region_config.bridge_line_width;
     const double                      bridge_width      = bridge_width_opt.get_abs_value(nozzle_diameter);
     const bool                        has_bridge_width  = bridge_width > 0.;
     const double                      bridge_flow_ratio = region_config.bridge_flow;
@@ -175,7 +184,7 @@ Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge) const
         bridge_flow = Flow::bridging_flow(thread_diameter, nozzle_diameter);
     } else {
         // The same way as other slicers: Use normal extrusions. Apply bridge_flow while maintaining the original spacing.
-        Flow base_flow = this->flow(role);
+        Flow base_flow = this->flow(role, m_layer->height, m_layer->id() == 0, fill_role);
         if (has_bridge_width)
             base_flow = Flow(float(bridge_width), base_flow.height(), nozzle_diameter);
         bridge_flow = base_flow.with_flow_ratio(bridge_flow_ratio);

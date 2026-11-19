@@ -5968,8 +5968,10 @@ void GCode::compute_farthest_point(const std::vector<LayerToPrint> &layers, cons
                         for_each_path(entity, [&](const ExtrusionPath &path) {
                             if (!is_fallback_role(path.role()))
                                 return;
-                            const unsigned int filament = path.role() == erInternalInfill ? layer_tools.sparse_infill_filament(print_region)
-                                                                                          : layer_tools.solid_infill_filament(print_region);
+                            // EdgeSlicer surface filaments: the top skin prints with its own filament.
+                            const unsigned int filament = path.role() == erInternalInfill ? layer_tools.sparse_infill_filament(print_region) :
+                                                          path.role() == erTopSolidInfill ? layer_tools.top_surface_filament(print_region) :
+                                                                                            layer_tools.solid_infill_filament(print_region);
                             collect_from_path(max_dist_sq_fallback, farthest_point_fallback, farthest_extruder_fallback, path, shift,
                                               extruder_of(filament));
                         }, for_each_path);
@@ -8475,12 +8477,8 @@ LayerResult GCode::process_layer(const Print& print,
             if (entities.image_row_extruder_1based != 0)
                 return entities.image_row_extruder_1based;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
-            switch (fill_filament_source(region.config(), role)) {
-            case FillFilamentSource::Wall:        return unsigned(region.config().wall_filament.value);
-            case FillFilamentSource::SolidInfill: return unsigned(region.config().solid_infill_filament.value);
-            case FillFilamentSource::SparseInfill:
-            default:                              return unsigned(region.config().sparse_infill_filament.value);
-            }
+            // EdgeSlicer surface filaments: fill_filament_source_1based() covers the top / bottom skins too.
+            return unsigned(fill_filament_source_1based(region.config(), fill_filament_source(region.config(), role)));
         }
         return layer_tools.extruder_override == 0 ? unsigned(region.config().wall_filament.value) : layer_tools.extruder_override;
     };
@@ -8501,12 +8499,8 @@ LayerResult GCode::process_layer(const Print& print,
             if (entities.image_row_extruder_1based != 0 && layer_tools.extruder_override == 0)
                 return int(entities.image_row_extruder_1based) - 1;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
-            switch (fill_filament_source(region.config(), role)) {
-            case FillFilamentSource::Wall:        return int(layer_tools.wall_filament(region));
-            case FillFilamentSource::SolidInfill: return int(layer_tools.solid_infill_filament(region));
-            case FillFilamentSource::SparseInfill:
-            default:                              return int(layer_tools.sparse_infill_filament(region));
-            }
+            // EdgeSlicer surface filaments: LayerTools::fill_filament() covers the top / bottom skins too.
+            return int(layer_tools.fill_filament(region, role));
         }
         return int(layer_tools.wall_filament(region));
     };
