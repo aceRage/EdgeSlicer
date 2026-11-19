@@ -8,6 +8,7 @@
 #include "MeshBoolean.hpp"
 
 #include <algorithm>
+#include <numeric>
 #include <cmath>
 #include <deque>
 #include <queue>
@@ -2447,11 +2448,54 @@ Polygons project_mesh(
     return union_(top.front(), bottom.back());
 }
 
-void cut_mesh(const indexed_triangle_set& mesh, float z, indexed_triangle_set* upper, indexed_triangle_set* lower, bool triangulate_caps)
+void cut_mesh(const indexed_triangle_set& mesh_in, float z, indexed_triangle_set* upper, indexed_triangle_set* lower, bool triangulate_caps)
 {
     assert(upper || lower);
     if (upper == nullptr && lower == nullptr)
         return;
+
+    // A vertex within is_equal() of the plane is "on the plane" to some of the tests below and
+    // above or below it to the others (min_z > z, c->z() < slice_z ...), so a facet next to it can
+    // land in the wrong half or in neither, and the cap is then matched to a vertex the halves do
+    // not use: the halves come out open. Put such vertices exactly on the plane first (they move
+    // by at most epson), so that every test agrees about them.
+    indexed_triangle_set mesh_snapped;
+    for (size_t i = 0; i < mesh_in.vertices.size(); ++ i)
+        if (const float vz = mesh_in.vertices[i].z(); vz != z && is_equal(vz, z)) {
+            if (mesh_snapped.vertices.empty())
+                mesh_snapped = mesh_in;
+            mesh_snapped.vertices[i].z() = z;
+        }
+    if (! mesh_snapped.vertices.empty()) {
+        // Both ends of a short edge across the plane can land on the same point. Merge such
+        // duplicates, so the cap meets one vertex there, and drop the facets that collapse.
+        std::vector<int> on_plane;
+        for (int i = 0; i < int(mesh_snapped.vertices.size()); ++ i)
+            if (mesh_snapped.vertices[i].z() == z)
+                on_plane.emplace_back(i);
+        std::sort(on_plane.begin(), on_plane.end(), [&mesh_snapped](int l, int r) {
+            const Vec3f &vl = mesh_snapped.vertices[l], &vr = mesh_snapped.vertices[r];
+            return vl.x() < vr.x() || (vl.x() == vr.x() && (vl.y() < vr.y() || (vl.y() == vr.y() && l < r)));
+        });
+        std::vector<int> map_duplicate;
+        for (size_t i = 1; i < on_plane.size(); ++ i)
+            if (mesh_snapped.vertices[on_plane[i]] == mesh_snapped.vertices[on_plane[i - 1]]) {
+                if (map_duplicate.empty()) {
+                    map_duplicate.resize(mesh_snapped.vertices.size());
+                    std::iota(map_duplicate.begin(), map_duplicate.end(), 0);
+                }
+                map_duplicate[on_plane[i]] = map_duplicate[on_plane[i - 1]];
+            }
+        if (! map_duplicate.empty()) {
+            for (stl_triangle_vertex_indices &f : mesh_snapped.indices)
+                for (int k = 0; k < 3; ++ k)
+                    f(k) = map_duplicate[f(k)];
+            mesh_snapped.indices.erase(std::remove_if(mesh_snapped.indices.begin(), mesh_snapped.indices.end(),
+                [](const stl_triangle_vertex_indices &f) { return f(0) == f(1) || f(0) == f(2) || f(1) == f(2); }),
+                mesh_snapped.indices.end());
+        }
+    }
+    const indexed_triangle_set &mesh = mesh_snapped.vertices.empty() ? mesh_in : mesh_snapped;
 
     BOOST_LOG_TRIVIAL(trace) << "cut_mesh - slicing object";
 

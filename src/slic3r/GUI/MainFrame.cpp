@@ -1405,11 +1405,12 @@ void MainFrame::activate_plater(Plater *plater)
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(now - first_show).count() << " ms (3D canvas GL "
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(now - gl_started).count() << " ms)";
     }
-    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
-    // this project's selection now.
+    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they let go
+    // of it and follow this project's selection now. Only the tabs change: reset_model_config() would erase the settings of
+    // what was selected in the previous project.
     for (Tab *tab : wxGetApp().model_tabs_list)
         if (auto *model_tab = dynamic_cast<TabPrintModel *>(tab))
-            model_tab->reset_model_config();
+            model_tab->set_model_config({});
     plater->sidebar().obj_list()->part_selection_changed();
     if (m_platers_need_rescale.erase(plater) > 0)
         plater->msw_rescale();
