@@ -2360,8 +2360,11 @@ void check_confine_corpus(const fs::path &root, const std::vector<ConfineCase> &
         const bool before = legacy_is_path_within_root(root, c.candidate);
         const bool now    = is_path_within_root(root, c.candidate);
         INFO(c.label << " | candidate " << c.candidate.string() << " | before " << before << " now " << now);
-        if (!before)
-            CHECK_FALSE(now); // nothing refused before is accepted now
+        // Nothing refused before is accepted now, except a case listed as Inside: a spelling of a
+        // path that really is inside the root (the \\?\ form of a child, which main refused only
+        // because its canonical prefix differed from the root's).
+        if (!before && c.expect != Confine::Inside)
+            CHECK_FALSE(now);
         if (c.expect == Confine::Outside)
             CHECK_FALSE(now);
         else if (c.expect == Confine::Inside)
