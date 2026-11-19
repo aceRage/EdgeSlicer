@@ -191,7 +191,7 @@ std::string encode_file_name_header(const std::string& name)
     std::string       out;
     for (unsigned char c : name) {
         const bool plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                           c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == ''' || c == '(' || c == ')';
+                           c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')';
         if (plain) {
             out.push_back(static_cast<char>(c));
         } else {
