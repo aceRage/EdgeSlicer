@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_model_rotate_center.cpp
 	test_orient.cpp
+	test_plugin_preset_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
@@ -86,6 +87,8 @@ add_executable(${_TEST_NAME}_tests
 	test_height_colour_pattern.cpp
 	test_height_pattern_input.cpp
 	test_cut_paint.cpp
+	test_paint_transfer_cut.cpp
+	test_paint_transfer_boolean.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
 	test_cut_mesh_caps.cpp
@@ -148,6 +151,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament_cli_gates.cpp
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
+	test_cli_amf_inch.cpp
 	test_cli_output.cpp
 	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp

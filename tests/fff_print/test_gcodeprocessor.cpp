@@ -931,3 +931,53 @@ TEST_CASE("The estimated first layer time comment reports the first layer", "[GC
     REQUIRE(get_time_dhms(first_layer_time) != get_time_dhms(start_gcode_time));
     CHECK(gcode.find(std::string("; estimated first layer printing time (normal mode) = ") + get_time_dhms(first_layer_time)) != std::string::npos);
 }
+
+// Snapmaker #1083 / #1191: get_last_z_from_gcode used to treat every G0/G1/G2/G3 Z word as
+// absolute, so the U1 change-filament lift "G91 / G1 Z1.5 / G90" was stored as Z=1.5. Later
+// travel then lost clearance once the layer Z exceeded 1.5 mm (plus Z-hop).
+TEST_CASE("get_last_z_from_gcode tracks G90/G91 so a relative lift is not absolute Z", "[GCodeProcessor][get_last_z]")
+{
+    auto last_z = [](const std::string &gcode, double start_z, double &z) {
+        return GCodeProcessor::get_last_z_from_gcode(gcode, z, start_z);
+    };
+
+    SECTION("relative lift sequence adds to the starting Z")
+    {
+        const std::string gcode = "G91\nG1 Z1.5 F1800\nG90\n";
+        double            z     = 0.;
+        REQUIRE(last_z(gcode, 10.0, z));
+        REQUIRE_THAT(z, Catch::Matchers::WithinAbs(11.5, 1e-9));
+    }
+
+    SECTION("mixed G90/G91: absolute set, relative add, then another relative add")
+    {
+        const std::string gcode = "G90\nG1 Z5.0 F600\nG91\nG1 Z1.5 F1800\nG1 Z0.5 F1800\nG90\n";
+        double            z     = 0.;
+        REQUIRE(last_z(gcode, 2.0, z));
+        REQUIRE_THAT(z, Catch::Matchers::WithinAbs(7.0, 1e-9));
+    }
+
+    SECTION("G91 then G90 restoring absolute")
+    {
+        const std::string gcode = "G91\nG1 Z1.5 F1800\nG90\nG1 Z8.0 F600\n";
+        double            z     = 0.;
+        REQUIRE(last_z(gcode, 10.0, z));
+        REQUIRE_THAT(z, Catch::Matchers::WithinAbs(8.0, 1e-9));
+    }
+
+    SECTION("absolute G1 Z without G90/G91 still overwrites")
+    {
+        const std::string gcode = "G1 X10 Y10 Z12.5 F3000\n";
+        double            z     = 0.;
+        REQUIRE(last_z(gcode, 3.0, z));
+        REQUIRE_THAT(z, Catch::Matchers::WithinAbs(12.5, 1e-9));
+    }
+
+    SECTION("G-code with no Z move leaves z unchanged")
+    {
+        const std::string gcode = "G91\nG1 X1 Y1 F3000\nG90\n";
+        double            z     = 42.;
+        REQUIRE_FALSE(last_z(gcode, 10.0, z));
+        REQUIRE_THAT(z, Catch::Matchers::WithinAbs(42., 1e-9));
+    }
+}

@@ -180,6 +180,49 @@ TEST_CASE("CC2 /system/info and /upload answers", "[ElegooCc2]")
     CHECK_FALSE(ElegooCc2::parse_upload_reply(R"({"code":"000000"})", error)); // the CC1's answer is not the CC2's
     CHECK_FALSE(ElegooCc2::parse_upload_reply("", error));
 
+    const std::string d = ElegooCc2::describe_upload_failure(R"({"error_code":9004,"md5":"ABCDEF","offset":1143531})", "abcdef", 1143531);
+    CHECK(d.find("error 9004") != std::string::npos);
+    CHECK(d.find("offset 1143531 of 1143531") != std::string::npos);
+    CHECK(d.find("same as ours") != std::string::npos);
+    CHECK(ElegooCc2::describe_upload_failure(R"({"error_code":9004,"md5":"0000"})", "abcdef", 5).find("ours is abcdef") != std::string::npos);
+    CHECK(ElegooCc2::describe_upload_failure(R"({"error_code":0})", "x", 1).empty());
+    CHECK(ElegooCc2::describe_upload_failure("<html>", "x", 1).empty());
+
+    // X-File-Name is encodeURIComponent of the UTF-8 name, as ElegooSlicer's web client sends it.
+    CHECK(ElegooCc2::encode_file_name_header("ECC2_0.4_Pikachu+Charizard+v1 _0.12_23m2s.gcode") ==
+          "ECC2_0.4_Pikachu%2BCharizard%2Bv1%20_0.12_23m2s.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("cube.gcode") == "cube.gcode");
+    CHECK(ElegooCc2::encode_file_name_header(std::string("caf") + char(0xC3) + char(0xA9) + " (1)!~*'.gcode") == "caf%C3%A9%20(1)!~*'.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("a%b&c=d.gcode") == "a%25b%26c%3Dd.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("").empty());
+
+    CHECK(ElegooCc2::error_text(9004).find("checksum") != std::string::npos);
+    CHECK(ElegooCc2::error_text(9000).find("offset mismatch") != std::string::npos);
+    CHECK(ElegooCc2::error_text(9010).find("same name") != std::string::npos);
+    CHECK(ElegooCc2::upload_error_retryable(200, R"({"error_code":9004,"md5":"x","offset":1})"));
+    CHECK(ElegooCc2::upload_error_retryable(0, ""));
+    CHECK_FALSE(ElegooCc2::upload_error_retryable(401, ""));
+    CHECK_FALSE(ElegooCc2::upload_error_retryable(200, R"({"error_code":1000})"));
+    CHECK(ElegooCc2::UPLOAD_CHUNK_RETRIES == 3);
+    // HTTP 429: more tries, a growing wait, Retry-After honoured and capped, a readable message.
+    CHECK(ElegooCc2::upload_retries_for(429) == 5);
+    CHECK(ElegooCc2::upload_retries_for(200) == 3);
+    CHECK(ElegooCc2::upload_retry_delay_ms(0, 429, 0) == 1000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(1, 429, 0) == 2000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(3, 429, 0) == 8000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(4, 429, 0) == 8000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(0, 429, 3) == 3000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(0, 429, 600) == 30000);
+    CHECK(ElegooCc2::upload_retry_delay_ms(2, 200, 9) == ElegooCc2::UPLOAD_CHUNK_RETRY_MS);
+    CHECK(ElegooCc2::upload_error_retryable(429, "<html>429 Too Many Requests</html>"));
+    CHECK(ElegooCc2::too_many_requests_text().find("too many") != std::string::npos);
+    CHECK(ElegooCc2::too_many_requests_text().find("<html>") == std::string::npos);
+    const std::string crlf = "\r\n";
+    CHECK(ElegooCc2::retry_after_seconds("HTTP/1.1 429 Too Many Requests" + crlf + "Server: nginx" + crlf + "retry-after: 7" + crlf + crlf) == 7);
+    CHECK(ElegooCc2::retry_after_seconds("HTTP/1.1 429 X" + crlf + "Retry-After: 9" + crlf + crlf + "HTTP/1.1 200 OK" + crlf + "Server: nginx" + crlf + crlf) == 0); // the last response wins
+    CHECK(ElegooCc2::retry_after_seconds("HTTP/1.1 429 X" + crlf + "Retry-After: Wed, 21 Oct 2026 07:28:00 GMT" + crlf + crlf) == 0);
+    CHECK(ElegooCc2::retry_after_seconds("") == 0);
+
     CHECK(ElegooCc2::content_range(0, 1048576, 2500000) == "bytes 0-1048575/2500000");
     CHECK(ElegooCc2::content_range(2097152, 402848, 2500000) == "bytes 2097152-2499999/2500000");
 }

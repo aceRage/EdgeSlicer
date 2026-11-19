@@ -3343,6 +3343,18 @@ bool load_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionCo
     bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
     importer.log_errors();
     handle_legacy_project_loaded(importer.version(), config);
+    // EdgeSlicer surface filaments: PrusaSlicer prints the top and bottom skins with the solid infill extruder, so
+    // its projects keep that look (keep_legacy_surface_filaments(), PrintConfig.hpp).
+    if (res) {
+        keep_legacy_surface_filaments(config, true);
+        for (ModelObject *mo : model->objects) {
+            keep_legacy_surface_filaments(mo->config);
+            for (ModelVolume *mv : mo->volumes)
+                keep_legacy_surface_filaments(mv->config);
+            for (auto &range : mo->layer_config_ranges)
+                keep_legacy_surface_filaments(range.second);
+        }
+    }
     return res;
 }
 

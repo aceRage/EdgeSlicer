@@ -155,6 +155,95 @@ bool parse_upload_reply(const std::string& body, std::string& error)
     return true;
 }
 
+std::string describe_upload_failure(const std::string& body, const std::string& our_md5, size_t total)
+{
+    const json j = parse_object(body);
+    if (j.is_null())
+        return std::string();
+    const int code = int_at(j, "error_code", -1);
+    if (code == 0)
+        return std::string();
+    std::string out = error_text(code);
+    std::string md5 = str_at(j, "md5");
+    std::transform(md5.begin(), md5.end(), md5.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto it = j.find("offset");
+    const bool has_offset = it != j.end() && (it->is_number_integer() || it->is_number_unsigned());
+    if (has_offset || !md5.empty()) {
+        out += " (the printer reported";
+        if (has_offset)
+            out += " offset " + std::to_string(it->get<long long>()) + " of " + std::to_string(total) + " bytes sent";
+        if (!md5.empty()) {
+            out += std::string(has_offset ? ", " : " ") + "checksum " + md5;
+            if (!our_md5.empty())
+                out += md5 == our_md5 ? " (same as ours)" : " (ours is " + our_md5 + ")";
+        }
+        out += ")";
+    }
+    const std::string message = str_at(j, "message");
+    if (!message.empty())
+        out += ": " + message;
+    return out;
+}
+
+std::string encode_file_name_header(const std::string& name)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    std::string       out;
+    for (unsigned char c : name) {
+        const bool plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')';
+        if (plain) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 15]);
+        }
+    }
+    return out;
+}
+
+int upload_retries_for(int http_status) { return http_status == 429 ? UPLOAD_429_RETRIES : UPLOAD_CHUNK_RETRIES; }
+
+int upload_retry_delay_ms(int attempt, int http_status, int retry_after_s)
+{
+    if (http_status != 429)
+        return UPLOAD_CHUNK_RETRY_MS;
+    if (retry_after_s > 0)
+        return std::min(retry_after_s, 30) * 1000;
+    return 1000 << std::min(std::max(attempt, 0), 3);
+}
+
+int retry_after_seconds(const std::string& headers)
+{
+    const size_t status_line = headers.rfind("HTTP/");
+    std::string  block       = status_line == std::string::npos ? headers : headers.substr(status_line);
+    std::vector<std::string> lines;
+    boost::split(lines, block, boost::is_any_of("\r\n"), boost::token_compress_on);
+    for (const std::string& line : lines) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos || !boost::iequals(boost::trim_copy(line.substr(0, colon)), "Retry-After"))
+            continue;
+        try {
+            return std::max(0, std::stoi(boost::trim_copy(line.substr(colon + 1))));
+        } catch (...) {
+            return 0; // an HTTP date or junk: use the default back-off
+        }
+    }
+    return 0;
+}
+
+std::string too_many_requests_text()
+{
+    return "the printer is refusing requests because it is receiving too many (HTTP 429). Close other programs or web pages "
+           "connected to it (the Device tab, other slicers), wait a minute and send again";
+}
+
+bool upload_error_retryable(int http_status, const std::string& body)
+{
+    return http_status != 401 && http_status != 403 && int_at(parse_object(body), "error_code", -1) != ERR_ACCESS_DENIED;
+}
+
 std::string content_range(size_t offset, size_t length, size_t total)
 {
     const size_t last = length == 0 ? offset : offset + length - 1;
@@ -348,6 +437,15 @@ std::string error_text(int error_code)
     case ERR_INVALID_PARAMETER:
     case ERR_INVALID_PARAMETER2: return "the printer refused the request as invalid";
     case ERR_BUSY: return "the printer is busy";
+    case ERR_UPLOAD_OFFSET_MISMATCH: return "the printer lost track of the upload (offset mismatch, error 9000)";
+    case 9001:
+    case 9002:
+    case 9003: return "the printer could not write the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_MD5_FAILED: return "the printer's checksum of the uploaded file did not match (error 9004)";
+    case ERR_UPLOAD_PATH_MISSING: return "the printer's upload folder does not exist (error 9007)";
+    case 9008:
+    case 9009: return "the printer could not check the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_SAME_NAME: return "the printer could not replace an existing file of the same name (error 9010)";
     case ERR_FILE_NOT_FOUND: return "the printer cannot find the uploaded file";
     case ERR_MISSING_BED_LEVELING: return "the printer has no bed leveling data";
     case -1: return "the printer did not say whether it worked";

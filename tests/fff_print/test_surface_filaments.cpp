@@ -1,12 +1,16 @@
 // EdgeSlicer surface filaments: top_surface_filament / bottom_surface_filament (Process > Multimaterial >
 // Filament for Features). 0 (the default) follows the outer wall; the internal solid infill keeps
-// solid_infill_filament; ironing follows the top surface; bottom covers bottom surfaces, bottoms over support
-// and bottoms bridged over air.
+// solid_infill_filament; ironing follows the surface it irons unless ironing_filament names one; bottom covers
+// bottom surfaces, bottoms over support and bottoms bridged over air. Projects from before the keys keep their look.
 
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedFilamentConfigRemap.hpp"
@@ -16,6 +20,8 @@
 #include "test_data.hpp"
 
 #include <algorithm>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 #include <cmath>
 #include <map>
 #include <regex>
@@ -178,6 +184,21 @@ TEST_CASE("Fill roles map to the surface filament sources", "[SurfaceFilaments]"
     CHECK(fill_filament_source(c, erInternalInfill) == FillFilamentSource::SparseInfill);
     c.sparse_infill_density.value = 100.;
     CHECK(fill_filament_source(c, erSolidInfill) == FillFilamentSource::SparseInfill);
+    CHECK(fill_filament_source(c, erTopSolidInfill) == FillFilamentSource::TopSurface);
+    c.sparse_infill_density.value = 15.;
+    // Ironing: the surface it irons, or the ironing filament.
+    CHECK(fill_filament_source(c, erIroning, IronedSurface::Top) == FillFilamentSource::TopSurface);
+    CHECK(fill_filament_source(c, erIroning, IronedSurface::Bottom) == FillFilamentSource::BottomSurface);
+    CHECK(fill_filament_source(c, erIroning, IronedSurface::Solid) == FillFilamentSource::SolidInfill);
+    c.wall_filament.value          = 1;
+    c.solid_infill_filament.value  = 2;
+    c.sparse_infill_filament.value = 2;
+    CHECK(ironing_filament_1based(c, IronedSurface::Top) == 1);
+    CHECK(ironing_filament_1based(c, IronedSurface::Solid) == 2);
+    c.ironing_filament.value = 3;
+    CHECK(fill_filament_source(c, erIroning, IronedSurface::Solid) == FillFilamentSource::Ironing);
+    CHECK(ironing_filament_1based(c, IronedSurface::Top) == 3);
+    CHECK(ironing_filament_1based(c, IronedSurface::Bottom) == 3);
     CHECK(fill_filament_source(c, erTopSolidInfill) == FillFilamentSource::TopSurface);
 }
 
@@ -398,4 +419,209 @@ TEST_CASE("A surface filament on another nozzle takes that nozzle's flow", "[Sur
     CHECK(bottom_layer.flow(frSolidInfill, 0.2, true).nozzle_diameter() == Approx(0.4));
     CHECK(bottom_layer.extruder(frSolidInfill, erBottomSurface) == 2u);
     CHECK(bottom_layer.extruder(frSolidInfill) == 1u);
+}
+
+TEST_CASE("Ironing all solid layers irons each surface with its own filament", "[SurfaceFilaments][GCode][Ironing]")
+{
+    // Walls 1, solid infill 2, skins at their default (the walls'): the skins are ironed with 1, the internal
+    // solid infill with 2.
+    DynamicPrintConfig config = two_filaments(false);
+    config.set_deserialize_strict({ { "wall_filament", "1" },
+                                    { "sparse_infill_filament", "1" },
+                                    { "solid_infill_filament", "2" },
+                                    { "ironing_type", "solid" } });
+    Print      print;
+    Model      model;
+    const auto moves = moves_of(slice_cube(config, print, model));
+    CHECK(tools_of(moves, TOP) == std::set<int>{ 0 });
+    CHECK(tools_of(moves, SOLID) == std::set<int>{ 1 });
+    CHECK(tools_of(moves, "Ironing") == std::set<int>{ 0, 1 });
+
+    // One filament for everything: a single ironing pass as before, on that filament.
+    DynamicPrintConfig one = config;
+    one.set_deserialize_strict({ { "solid_infill_filament", "1" } });
+    Print      print1;
+    Model      model1;
+    const auto moves1 = moves_of(slice_cube(one, print1, model1));
+    CHECK(tools_of(moves1, "Ironing") == std::set<int>{ 0 });
+}
+
+TEST_CASE("An ironing filament of its own irons everything", "[SurfaceFilaments][GCode][Ironing]")
+{
+    DynamicPrintConfig config = two_filaments(true);
+    config.set_deserialize_strict({ { "wall_filament", "1" },
+                                    { "sparse_infill_filament", "1" },
+                                    { "solid_infill_filament", "1" },
+                                    { "ironing_filament", "2" } });
+    SECTION("top surfaces") {
+        config.set_deserialize_strict({ { "ironing_type", "top" } });
+    }
+    SECTION("all solid layers") {
+        config.set_deserialize_strict({ { "ironing_type", "solid" } });
+    }
+    Print      print;
+    Model      model;
+    const auto moves = moves_of(slice_cube(config, print, model));
+    REQUIRE(print.extruders() == std::vector<unsigned int>{ 0, 1 });
+    CHECK(tools_of(moves, "Ironing") == std::set<int>{ 1 });
+    CHECK(tools_of(moves, TOP) == std::set<int>{ 0 });
+    CHECK(tools_of(moves, BOTTOM) == std::set<int>{ 0 });
+    for (const std::string &type : types_on(moves, 1))
+        CHECK((type == "Ironing" || type == "Prime tower" || type == "Custom"));
+
+    // Without ironing it is not used at all.
+    DynamicPrintConfig off = config;
+    off.set_deserialize_strict({ { "ironing_type", "no ironing" } });
+    Print print_off;
+    Model model_off;
+    init_print({ TestMesh::cube_20x20x20 }, print_off, model_off, off);
+    CHECK(print_off.extruders() == std::vector<unsigned int>{ 0 });
+}
+
+namespace {
+
+// A project saved and loaded again through the 3MF code, as "Save project" / "Open project" do.
+struct LoadedProject
+{
+    Model              model;
+    DynamicPrintConfig config;
+};
+
+LoadedProject save_and_load(Model &model, DynamicPrintConfig config, const std::string &name)
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() /
+        ("snorca_tests_surffil_" + std::to_string(get_current_pid()));
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string path = (tmp_root / (name + ".3mf")).string();
+
+    PlateData *plate   = new PlateData();
+    plate->plate_index = 0;
+    for (int i = 0; i < int(model.objects.size()); ++i)
+        plate->objects_and_instances.emplace_back(i, 0);
+    StoreParams sp;
+    sp.path            = path.c_str();
+    sp.model           = &model;
+    sp.config          = &config;
+    sp.plate_data_list = { plate };
+    sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored  = store_bbs_3mf(sp);
+    delete plate;
+    REQUIRE(stored);
+
+    LoadedProject             out;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    version;
+    const bool loaded = load_bbs_3mf(path.c_str(), &out.config, &ctxt, &out.model, &plates, &presets, &is_bbl_3mf, &version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+    for (PlateData *p : plates)
+        delete p;
+    for (Preset *p : presets)
+        delete p;
+    REQUIRE(loaded);
+    return out;
+}
+
+DynamicPrintConfig wall1_solid2_project()
+{
+    DynamicPrintConfig config = two_filaments(false);
+    config.set_deserialize_strict({ { "wall_filament", "1" }, { "sparse_infill_filament", "1" }, { "solid_infill_filament", "2" } });
+    config.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "solid_infill_filament", "", "" }));
+    return config;
+}
+
+void add_cube(Model &model, double x)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(x, 50., 0.));
+    object->ensure_on_bed();
+}
+
+} // namespace
+
+TEST_CASE("A project from before the surface filaments keeps its look", "[SurfaceFilaments][3mf]")
+{
+    // A project written without the keys (an older EdgeSlicer, Bambu Studio, OrcaSlicer...): its skins printed
+    // with the solid infill filament.
+    DynamicPrintConfig old_project = wall1_solid2_project();
+    old_project.erase("top_surface_filament");
+    old_project.erase("bottom_surface_filament");
+    old_project.erase("ironing_filament");
+    REQUIRE_FALSE(old_project.has("top_surface_filament"));
+    Model model;
+    add_cube(model, 50.);
+    add_cube(model, 100.);
+    model.objects[1]->config.set("solid_infill_filament", 1); // its own solid infill filament
+    model.objects[0]->volumes.front()->config.set("wall_filament", 2);
+
+    LoadedProject loaded = save_and_load(model, old_project, "old_project");
+    CHECK(loaded.config.opt_int("top_surface_filament") == 2);
+    CHECK(loaded.config.opt_int("bottom_surface_filament") == 2);
+    CHECK_FALSE(loaded.config.has("ironing_filament")); // ironing follows the skins, as it did
+    // Named as set on the project, so the GUI's loader does not put the system value back.
+    const auto *different = loaded.config.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+    CHECK(different->values.front().find("top_surface_filament") != std::string::npos);
+    CHECK(different->values.front().find("bottom_surface_filament") != std::string::npos);
+    // An object with its own solid infill filament keeps it for its skins; one without inherits the project's.
+    REQUIRE(loaded.model.objects.size() == 2);
+    CHECK(loaded.model.objects[1]->config.opt_int("top_surface_filament") == 1);
+    CHECK(loaded.model.objects[1]->config.opt_int("bottom_surface_filament") == 1);
+    CHECK_FALSE(loaded.model.objects[0]->config.has("top_surface_filament"));
+    CHECK_FALSE(loaded.model.objects[0]->volumes.front()->config.has("top_surface_filament"));
+
+    // And slices as before: skins on the solid infill filament.
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(loaded.config, true);
+    Model one;
+    one.add_object(*loaded.model.objects[0]);
+    Print print;
+    print.apply(one, full);
+    print.validate();
+    const auto moves = moves_of(Test::gcode(print));
+    CHECK(tools_of(moves, TOP) == std::set<int>{ 1 });
+    CHECK(tools_of(moves, BOTTOM) == std::set<int>{ 1 });
+}
+
+TEST_CASE("A project saved with the surface filaments keeps what it holds", "[SurfaceFilaments][3mf]")
+{
+    DynamicPrintConfig project = wall1_solid2_project();
+    REQUIRE(project.opt_int("top_surface_filament") == 0);
+    Model model;
+    add_cube(model, 50.);
+    model.objects[0]->config.set("solid_infill_filament", 1);
+    LoadedProject loaded = save_and_load(model, project, "new_project");
+    CHECK(loaded.config.opt_int("top_surface_filament") == 0);
+    CHECK(loaded.config.opt_int("bottom_surface_filament") == 0);
+    CHECK(loaded.config.opt_int("ironing_filament") == 0);
+    CHECK_FALSE(loaded.model.objects[0]->config.has("top_surface_filament"));
+    const auto *different = loaded.config.option<ConfigOptionStrings>("different_settings_to_system");
+    REQUIRE(different != nullptr);
+    CHECK(different->values.front().find("top_surface_filament") == std::string::npos);
+}
+
+TEST_CASE("keep_legacy_surface_filaments on a config", "[SurfaceFilaments]")
+{
+    // A new project on the system profiles has walls = solid infill = 1: nothing changes for it either way.
+    DynamicPrintConfig config;
+    config.set_key_value("solid_infill_filament", new ConfigOptionInt(3));
+    CHECK(keep_legacy_surface_filaments(config));
+    CHECK(config.opt_int("top_surface_filament") == 3);
+    CHECK(config.opt_int("bottom_surface_filament") == 3);
+    config.set_key_value("top_surface_filament", new ConfigOptionInt(0));
+    CHECK_FALSE(keep_legacy_surface_filaments(config)); // present: kept
+    CHECK(config.opt_int("top_surface_filament") == 0);
+    CHECK(keep_legacy_surface_filaments(config, true));
+    CHECK(config.opt_int("top_surface_filament") == 3);
+
+    ModelConfig object;
+    CHECK_FALSE(keep_legacy_surface_filaments(object)); // no solid infill filament of its own: inherits
+    object.set("solid_infill_filament", 2);
+    CHECK(keep_legacy_surface_filaments(object));
+    CHECK(object.opt_int("top_surface_filament") == 2);
 }

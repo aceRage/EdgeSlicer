@@ -164,6 +164,8 @@ void append_gated_feature_filament_ids(const PrintRegionConfig &region, bool has
         ids.push_back(region.top_surface_filament.value);
     if (region.bottom_shell_layers.value > 0 && region.bottom_surface_filament.value > 0)
         ids.push_back(region.bottom_surface_filament.value);
+    if (region.ironing_type.value != IroningType::NoIroning && region.ironing_filament.value > 0)
+        ids.push_back(region.ironing_filament.value);
 }
 
 PrintRegionConfig effective_region(const ConfigBase &global, const ConfigBase *object_cfg, const ConfigBase *overlay)
@@ -334,6 +336,8 @@ void append_feature_filament_overrides(const ConfigBase &cfg, std::vector<int> &
         ids.push_back(region.top_surface_filament.value);
     if (cfg.option("bottom_surface_filament") && region.bottom_shell_layers.value > 0 && region.bottom_surface_filament.value > 0)
         ids.push_back(region.bottom_surface_filament.value);
+    if (cfg.option("ironing_filament") && region.ironing_type.value != IroningType::NoIroning && region.ironing_filament.value > 0)
+        ids.push_back(region.ironing_filament.value);
 }
 
 void append_config_filament_ids(const DynamicPrintConfig &cfg, std::vector<int> &ids)

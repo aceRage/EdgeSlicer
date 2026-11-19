@@ -300,3 +300,30 @@ TEST_CASE("has_facets does not report an early match from a tree deeper than 256
     REQUIRE_NOTHROW(restored.deserialize(data));
     REQUIRE(restored.num_facets(EnforcerBlockerType::Extruder2) == 0);
 }
+
+TEST_CASE("TriangleSelector resample paints a strip finer than the facets", "[TriangleSelector][PaintTransfer]")
+{
+    const TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleSelector   sel(mesh);
+    sel.resample([](const Vec3f &p) {
+        TriangleSelector::SampledState s;
+        if (p.z() > 9.999f && p.x() < 2.5f)
+            s.state = EnforcerBlockerType::Extruder2;
+        return s;
+    }, 0.05f);
+
+    REQUIRE(sel.has_facets(EnforcerBlockerType::Extruder2));
+}
+
+TEST_CASE("TriangleSelector resample skip leaves those facets unpainted", "[TriangleSelector][PaintTransfer]")
+{
+    const TriangleMesh mesh = make_cube(10., 10., 10.);
+    std::vector<bool>  skip(mesh.its.indices.size(), true);
+    TriangleSelector   sel(mesh);
+    sel.resample([](const Vec3f &) {
+        TriangleSelector::SampledState s;
+        s.state = EnforcerBlockerType::Extruder2;
+        return s;
+    }, 0.2f, &skip);
+    REQUIRE_FALSE(sel.has_facets(EnforcerBlockerType::Extruder2));
+}

@@ -1574,7 +1574,7 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
     const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
         for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
                         config.sparse_infill_filament.value, config.solid_infill_filament.value,
-                        config.top_surface_filament.value, config.bottom_surface_filament.value }) {
+                        config.top_surface_filament.value, config.bottom_surface_filament.value, config.ironing_filament.value }) {
             if (id <= 0)
                 continue; // outer_wall_filament / top_surface_filament / bottom_surface_filament 0 follow the walls
             const unsigned int i = (unsigned int)std::max(0, id - 1);
@@ -1792,6 +1792,24 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         }
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", has_scarf_joint_seam:" << has_scarf_joint_seam;
+    }
+
+    // Orca #17476: a value outside [1, nozzle count] means nozzle 1. Normalize it here so the
+    // slicing engine only sees in-range values. This works on this print's copy of the config;
+    // readers of the plate/project config are not changed. Run before keep_sliced_filament_map
+    // so the input snapshot is the clamped map.
+    if (auto *filament_map_opt = new_full_config.option<ConfigOptionInts>("filament_map")) {
+        const auto *nozzle_diameter_opt = new_full_config.option<ConfigOptionFloats>("nozzle_diameter");
+        const int   nozzle_count        = nozzle_diameter_opt ? std::max(1, static_cast<int>(nozzle_diameter_opt->values.size())) : 1;
+        bool        out_of_range        = false;
+        for (int &nozzle : filament_map_opt->values)
+            if (nozzle < 1 || nozzle > nozzle_count) {
+                nozzle       = 1;
+                out_of_range = true;
+            }
+        if (out_of_range)
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": filament_map names a nozzle outside 1.." << nozzle_count
+                                     << ", using nozzle 1 for those filaments";
     }
 
     // Ultra (dual-nozzle): filament_map is the grouping's input, but the slice overwrites the Print's copy

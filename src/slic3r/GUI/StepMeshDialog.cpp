@@ -348,6 +348,8 @@ void StepMeshDialog::update_mesh_number_text()
     wxString newText = wxString::Format(_L("Calculating, please wait..."));
     mesh_face_number_text->SetLabel(newText);
     stop_task();
+    // The worker does not post when the cancel flag is set, so make sure the run starts with it clear.
+    m_file.m_stop_mesh.store(false);
     if (!m_task) {
         m_task = new boost::thread(Slic3r::create_thread([this]() -> void {
             m_mesh_number = m_file.get_triangle_num(get_linear_defletion(), get_angle_defletion());

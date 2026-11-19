@@ -1793,6 +1793,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "solid_infill_filament"
             || opt_key == "top_surface_filament"
             || opt_key == "bottom_surface_filament"
+            || opt_key == "ironing_filament"
             || opt_key == "sparse_infill_line_width"
             || opt_key == "skin_infill_line_width"
             || opt_key == "skeleton_infill_line_width"
@@ -4795,6 +4796,7 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
             // so an object assigned to a filament prints all of its visible faces with it.
             out.top_surface_filament.value    = 0;
             out.bottom_surface_filament.value = 0;
+            out.ironing_filament.value        = 0;
         }
     // 2) Copy the rest of the values.
     for (auto it = in.cbegin(); it != in.cend(); ++ it)
@@ -4942,6 +4944,8 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.top_surface_filament.value = 0;
     if (config.bottom_surface_filament.value > (int) num_extruders || config.bottom_surface_filament.value < 0)
         config.bottom_surface_filament.value = 0;
+    if (config.ironing_filament.value > (int) num_extruders || config.ironing_filament.value < 0)
+        config.ironing_filament.value = 0;
     // Per-nozzle process P8: every other region setting from the process of the tool that prints the role (no-op without
     // per-tool processes). A setting made on the object, part, modifier or layer range still wins over the tool's process.
     if (!config.nozzle_region_values.values.empty()) {
@@ -5011,7 +5015,7 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
 bool model_volume_sets_filament(const ModelVolume &volume)
 {
     for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament",
-                             "top_surface_filament", "bottom_surface_filament" })
+                             "top_surface_filament", "bottom_surface_filament", "ironing_filament" })
         if (const ConfigOption *opt = volume.config.option(key); opt != nullptr && opt->getInt() > 0)
             return true;
     return false;
@@ -5113,7 +5117,8 @@ SlicingParameters PrintObject::slicing_parameters(const DynamicPrintConfig &full
 					range_and_config.second.has("sparse_infill_filament") ||
 					range_and_config.second.has("solid_infill_filament") ||
 					range_and_config.second.has("top_surface_filament") ||
-					range_and_config.second.has("bottom_surface_filament"))
+					range_and_config.second.has("bottom_surface_filament") ||
+					range_and_config.second.has("ironing_filament"))
 					PrintRegion::collect_object_printing_extruders(
 						print_config,
 						region_config_from_model_volume(default_region_config, &range_and_config.second.get(), *model_volume, filament_extruders),
@@ -5182,20 +5187,21 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
     };
     // The filaments a region prints with, the same ones Bambu inspects; a mixed filament's virtual slot
     // stands for its components.
-    // EdgeSlicer surface filaments: the top / bottom skins are part of the fills (0 = the outer wall's
-    // filament); they count on the layers whose fills really hold such a skin.
-    struct RegionFilaments { int wall; int outer_wall; int solid; int sparse; int top; int bottom; };
+    // EdgeSlicer surface filaments: the top / bottom skins and ironing are part of the fills (each with its own
+    // filament, fill_filament_source()); they count on the layers whose fills really hold them.
+    struct RegionFilaments { int wall; int outer_wall; int solid; int sparse; std::vector<int> surfaces; };
     auto region_filaments = [](const LayerRegion *layerm) {
         const PrintRegionConfig &c = layerm->region().config();
-        bool has_top = false, has_bottom = false;
+        RegionFilaments out{ c.wall_filament.value, c.outer_wall_filament.value, c.solid_infill_filament.value, c.sparse_infill_filament.value, {} };
         for (const ExtrusionEntity *ee : layerm->fills.entities) {
             const auto *coll = dynamic_cast<const ExtrusionEntityCollection *>(ee);
-            const ExtrusionRole role = coll == nullptr ? ee->role() : (coll->entities.empty() ? erNone : coll->entities.front()->role());
-            has_top    = has_top || is_top_surface_filament_role(role);
-            has_bottom = has_bottom || is_bottom_surface_filament_role(role);
+            if (coll == nullptr || coll->entities.empty())
+                continue;
+            const ExtrusionRole role = coll->entities.front()->role();
+            if (is_top_surface_filament_role(role) || is_bottom_surface_filament_role(role) || role == erIroning)
+                out.surfaces.push_back(fill_filament_source_1based(c, fill_filament_source(c, *coll)));
         }
-        return RegionFilaments{ c.wall_filament.value, c.outer_wall_filament.value, c.solid_infill_filament.value, c.sparse_infill_filament.value,
-                                has_top ? top_surface_filament_1based(c) : 0, has_bottom ? bottom_surface_filament_1based(c) : 0 };
+        return out;
     };
     auto add_walls = [&](std::set<int> &into, const RegionFilaments &f) {
         add(into, f.wall);
@@ -5205,8 +5211,8 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
     auto add_infill = [&](std::set<int> &into, const RegionFilaments &f) {
         add(into, f.solid);
         add(into, f.sparse);
-        add(into, f.top);
-        add(into, f.bottom);
+        for (int id : f.surfaces)
+            add(into, id);
     };
 
     // Taller than an extruder can print: every filament printing in the layers above its limit.

@@ -1199,6 +1199,32 @@ const std::vector<std::string> &network_endpoint_keys()
     return keys;
 }
 
+const std::vector<std::string> &plugin_selection_keys()
+{
+    static const std::vector<std::string> keys = {"slicing_pipeline_plugin", "print_plugin_config_overrides",
+                                                  "printer_plugin_config_overrides", "filament_plugin_config_overrides"};
+    return keys;
+}
+
+std::string plugin_selection_value(const DynamicPrintConfig &cfg, const std::string &key)
+{
+    std::string out;
+    auto add = [&out](const std::string &v) {
+        const std::string t = trim(v);
+        if (t.empty())
+            return;
+        if (!out.empty())
+            out.push_back('\n');
+        out += t;
+    };
+    if (const auto *s = cfg.option<ConfigOptionString>(key))
+        add(s->value);
+    else if (const auto *v = cfg.option<ConfigOptionStrings>(key))
+        for (const std::string &e : v->values)
+            add(e);
+    return out;
+}
+
 // A bed texture or model path that reaches over the network (UNC share, URL, device path):
 // Windows would contact the host - and send the user's credentials to an SMB server - just to
 // draw the bed.
@@ -1219,6 +1245,14 @@ std::vector<UntrustedSetting> find_untrusted_settings(const DynamicPrintConfig &
     if (const auto *ff = cfg.option<ConfigOptionString>("filename_format"))
         if (filename_format_leaves_folder(ff->value) && trusted.filename_format.count(ff->value) == 0)
             found.push_back({"filename_format", source, ff->value, SettingRisk::WritesOutsideOutputFolder});
+
+    // A file may name a slicing pipeline plugin (Python code that runs while slicing and edits the
+    // G-code) and hand it settings. Never take that over silently from a file we did not write.
+    for (const std::string &key : plugin_selection_keys()) {
+        const std::string v = plugin_selection_value(cfg, key);
+        if (!v.empty() && trusted.plugin_values.count(key + "=" + v) == 0)
+            found.push_back({key, source, v, SettingRisk::RunsPlugins});
+    }
 
     for (const std::string &key : network_endpoint_keys())
         if (const auto *opt = cfg.option<ConfigOptionString>(key))
