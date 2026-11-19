@@ -612,7 +612,7 @@ void SkeletalTrapezoidation::filterCentral(coord_t max_length)
 {
     for (edge_t& edge : graph.edges)
     {
-        if (isEndOfCentral(edge) && edge.to->isLocalMaximum() && !edge.from->isLocalMaximum())
+        if (isEndOfCentral(edge) && edge.to->isLocalMaximum() && !edge.to->isLocalMaximum())
         {
             filterCentral(edge.twin, 0, max_length);
         }
