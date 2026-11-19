@@ -531,6 +531,20 @@ bool spawn_host(SpawnedHost& out, const SandboxSpec& spec, std::string& error)
         error = "SetInformationJobObject failed";
         return false;
     }
+    // M4: no UI side channels. The helper has no windows of its own; it may not read or write
+    // the clipboard, use global atoms, use other processes' USER handles, switch desktops,
+    // change system parameters or display settings, or log the user off.
+    JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
+    ui.UIRestrictionsClass = JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS | JOB_OBJECT_UILIMIT_EXITWINDOWS |
+                             JOB_OBJECT_UILIMIT_GLOBALATOMS | JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_READCLIPBOARD |
+                             JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+    if (!::SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui))) {
+        ::CloseHandle(job);
+        ::CloseHandle(pipe);
+        close_parent_sandbox();
+        error = "SetInformationJobObject (UI restrictions) failed";
+        return false;
+    }
 
     std::wstring cmd = quote_arg(helper.wstring()) + L" --ipc-pipe " + quote_arg(pipe_name);
     if (!out.host_log_path.empty())
