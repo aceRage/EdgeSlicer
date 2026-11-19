@@ -254,6 +254,17 @@ struct PluginHostClient::Impl
         if (host.valid())
             return true;
 
+        // H4: fail closed. A missing or unsigned helper stops the run here with a clear message
+        // (before any "Run anyway" prompt: that override is for a missing OS sandbox only).
+        {
+            std::string why;
+            if (!helper_runnable(why)) {
+                error = why;
+                BOOST_LOG_TRIVIAL(error) << error;
+                return false;
+            }
+        }
+
 #ifndef __APPLE__
         // macOS: the parent is never in the helper's App Sandbox, so probe_os_sandbox() is
         // always false there and would prompt every user before spawn. Handshake is the
@@ -264,8 +275,10 @@ struct PluginHostClient::Impl
         }
 #endif
 
-        if (!spawn_host(host, spec, error))
+        if (!spawn_host(host, spec, error)) {
+            error = "The plugin helper (edge-plugin-host) could not start, so the plugin did not run: " + error;
             return false;
+        }
         g_spawn_count.fetch_add(1, std::memory_order_relaxed);
         live_pid.store(host.pid, std::memory_order_release);
 #ifdef _WIN32
@@ -761,37 +774,38 @@ std::uint64_t PluginHostClient::spawn_count() { return g_spawn_count.load(std::m
 
 bool PluginHostClient::should_use_host()
 {
+    // The helper itself runs the plugin code it was sent.
     if (in_child_process())
         return false;
+    // Tests only: set_force_in_process_for_testing, or EDGE_PLUGIN_HOST_IN_PROCESS once a test
+    // enabled helper env overrides. Release code never sets either.
     if (g_force_in_process.load(std::memory_order_acquire))
         return false;
     if (helper_env_overrides_allowed()) {
         if (const char* env = boost::nowide::getenv("EDGE_PLUGIN_HOST_IN_PROCESS")) {
             if (env[0] != '\0' && env[0] != '0') {
-                log_host_fallback_once("EDGE_PLUGIN_HOST_IN_PROCESS is set");
+                log_host_fallback_once("EDGE_PLUGIN_HOST_IN_PROCESS is set (test override)");
                 return false;
             }
         }
     }
-    if (!helper_exists()) {
-        log_host_fallback_once("edge-plugin-host is missing");
-        return false;
-    }
+    // H4: always the helper. A missing, unsigned or unstartable helper fails the run (fail
+    // closed, see host_unavailable_reason()); plugin code never falls back to running inside
+    // EdgeSlicer.
     return true;
 }
 
-bool PluginHostClient::host_fallback_active()
+std::string PluginHostClient::host_unavailable_reason()
 {
-    if (in_child_process() || g_force_in_process.load(std::memory_order_acquire))
-        return false;
-    if (helper_env_overrides_allowed()) {
-        if (const char* env = boost::nowide::getenv("EDGE_PLUGIN_HOST_IN_PROCESS")) {
-            if (env[0] != '\0' && env[0] != '0')
-                return true;
-        }
-    }
-    return !helper_exists();
+    if (in_child_process())
+        return {};
+    std::string reason;
+    if (!helper_runnable(reason))
+        return reason;
+    return {};
 }
+
+bool PluginHostClient::host_fallback_active() { return !host_unavailable_reason().empty(); }
 
 bool PluginHostClient::start_script(const std::string&                           plugin_key,
                                     const std::string&                           capability_name,

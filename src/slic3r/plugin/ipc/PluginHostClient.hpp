@@ -29,10 +29,13 @@ public:
     PluginHostClient(const PluginHostClient&)            = delete;
     PluginHostClient& operator=(const PluginHostClient&) = delete;
 
-    // True when script / post-process should run in edge-plugin-host.
+    // True when script / post-process should run in edge-plugin-host: always, outside tests (H4).
     static bool should_use_host();
-    // True when the helper is missing (or a test env override forced in-process) so Edge
-    // falls back to in-process execute. The Home card surfaces this.
+    // Why plugins cannot run now (the helper is missing, or not signed although the app is),
+    // empty when they can. Plugin code then does not run at all; there is no in-process
+    // fallback (H4).
+    static std::string   host_unavailable_reason();
+    // !host_unavailable_reason().empty(). The Home card shows the reason.
     static bool          host_fallback_active();
     static void          set_force_in_process_for_testing(bool force);
     static void          set_execute_timeout_for_testing(int timeout_ms);

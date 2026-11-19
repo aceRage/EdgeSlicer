@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,8 +30,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 #include <cwchar>
 #include <cwctype>
+#pragma comment(lib, "wintrust.lib")
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -398,6 +403,63 @@ bool helper_exists()
     boost::system::error_code ec;
     const auto                path = helper_path();
     return boost::filesystem::exists(path, ec) && boost::filesystem::is_regular_file(path, ec);
+}
+
+bool helper_signature_policy_allows(bool app_signed, bool helper_signed) { return !app_signed || helper_signed; }
+
+#ifdef _WIN32
+namespace {
+// Authenticode check of one file (no UI, no network revocation fetch).
+bool win_file_has_valid_signature(const std::wstring& path)
+{
+    WINTRUST_FILE_INFO file_info{};
+    file_info.cbStruct      = sizeof(file_info);
+    file_info.pcwszFilePath = path.c_str();
+    GUID         action     = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA data{};
+    data.cbStruct            = sizeof(data);
+    data.dwUIChoice          = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice       = WTD_CHOICE_FILE;
+    data.pFile               = &file_info;
+    data.dwStateAction       = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags         = WTD_CACHE_ONLY_URL_RETRIEVAL;
+    const LONG status        = ::WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    data.dwStateAction       = WTD_STATEACTION_CLOSE;
+    (void) ::WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    return status == ERROR_SUCCESS;
+}
+} // namespace
+#endif
+
+bool helper_runnable(std::string& reason)
+{
+    const boost::filesystem::path path = helper_path();
+    if (!helper_exists()) {
+        reason = "The plugin helper (edge-plugin-host) is missing from this installation (antivirus quarantine or an "
+                 "incomplete install?), so plugins do not run. Reinstall EdgeSlicer to run plugins again.";
+        return false;
+    }
+#ifdef _WIN32
+    static std::mutex              s_mutex;
+    static boost::filesystem::path s_checked;
+    static bool                    s_ok = true;
+    std::lock_guard<std::mutex>    lock(s_mutex);
+    if (s_checked != path) {
+        const bool app_signed    = win_file_has_valid_signature(boost::dll::program_location().wstring());
+        const bool helper_signed = app_signed && win_file_has_valid_signature(path.wstring());
+        s_ok                     = helper_signature_policy_allows(app_signed, helper_signed);
+        s_checked                = path;
+        if (!s_ok)
+            BOOST_LOG_TRIVIAL(error) << "edge-plugin-host is not signed although EdgeSlicer is: " << path.string();
+    }
+    if (!s_ok) {
+        reason = "The plugin helper (edge-plugin-host) is not signed like EdgeSlicer, so plugins do not run. "
+                 "Reinstall EdgeSlicer to run plugins again.";
+        return false;
+    }
+#endif
+    return true;
 }
 
 #ifdef _WIN32

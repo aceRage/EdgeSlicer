@@ -37,6 +37,14 @@ struct SpawnedHost
 boost::filesystem::path helper_path();
 bool                    helper_exists();
 
+// H4: may EdgeSlicer start the helper at all? False, with a message for the user, when it is
+// missing, or (Windows) when EdgeSlicer itself carries a valid Authenticode signature and the
+// helper does not: a release install whose helper was swapped or stripped. Unsigned developer
+// builds (neither signed) are allowed. The signature check runs once per helper path.
+bool helper_runnable(std::string& reason);
+// The signature rule on its own, for tests: app signed => helper must be signed.
+bool helper_signature_policy_allows(bool app_signed, bool helper_signed);
+
 // EDGE_PLUGIN_HOST / EDGE_PLUGIN_HOST_IN_PROCESS are ignored unless this is true.
 // Production never enables it; slic3rutils tests may. Hidden so a release DSO does not
 // export a switch for the env gate (Russ accepted the runtime-only gate).
