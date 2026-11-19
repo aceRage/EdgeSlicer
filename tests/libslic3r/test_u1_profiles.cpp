@@ -679,13 +679,15 @@ TEST_CASE("U1 toolchange lift is absolute and capped by object, relative by laye
         parser.set("z_offset", 0.0);
         parser.set("initial_tool", 0);
         parser.set("initial_extruder", 0);
-        parser.set("position", new ConfigOptionFloats({0., 0., 14.}));
         parser.set("temperature", new ConfigOptionInts({200, 200, 200, 200}));
         parser.set("first_layer_temperature", new ConfigOptionInts({210, 210, 210, 210}));
         parser.set("filament_type", std::vector<std::string>{"PLA", "PLA", "PLA", "PLA"});
         if (!parser.option("travel_speed"))
             parser.set("travel_speed", 200.0);
+        // The template writes position[2]; GCode passes "position" as a writable output
+        // (GCode::output_config), so it goes here rather than into the read-only parser config.
         DynamicConfig outputs;
+        outputs.set_key_value("position", new ConfigOptionFloats({0., 0., 14.}));
         const auto *tmpl = preset.config.option<ConfigOptionString>("change_filament_gcode");
         REQUIRE(tmpl != nullptr);
         return parser.process(tmpl->value, 0, nullptr, &outputs, nullptr);
@@ -699,6 +701,7 @@ TEST_CASE("U1 toolchange lift is absolute and capped by object, relative by laye
         parser.set("max_layer_z", max_layer_z);
         parser.set("max_print_height", 270);
         parser.set("z_offset", 0.0);
+        parser.set("filament_volume_type_list", new ConfigOptionString("Standard,Standard")); // set by GCode at export
         const auto *tmpl = preset.config.option<ConfigOptionString>("machine_end_gcode");
         REQUIRE(tmpl != nullptr);
         return parser.process(tmpl->value);
