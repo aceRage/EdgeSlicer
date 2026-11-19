@@ -674,6 +674,64 @@ SCENARIO("A project 3MF added to the current project is handled by the mode the 
     }
 }
 
+SCENARIO("File > Import asks how to bring in a project 3MF only when it carries object settings", "[CustomModels][3mf]") {
+    GIVEN("which behaviour is chosen in Preferences") {
+        const auto &d = cm::decide_import_project_choice;
+        THEN("nothing is asked without a 3MF that has object settings") {
+            for (const char *pref : {"load_all", "ask_when_relevant", "always_ask", "load_geometry_only", "load_geometry_with_settings", ""}) {
+                const cm::ImportChoice c = d(pref, "4", false);
+                CHECK_FALSE(c.ask);
+                CHECK(c.mode == cm::ProjectImportMode::GeometryOnly);
+            }
+        }
+        THEN("a preference that fixes the behaviour is not asked about") {
+            CHECK_FALSE(d("load_geometry_only", "", true).ask);
+            CHECK(d("load_geometry_only", "4", true).mode == cm::ProjectImportMode::GeometryOnly);
+            CHECK_FALSE(d("load_geometry_with_settings", "", true).ask);
+            CHECK(d("load_geometry_with_settings", "", true).mode == cm::ProjectImportMode::GeometryWithObjectSettings);
+            CHECK_FALSE(d("load_all", "", true).ask);
+            CHECK(d("load_all", "", true).mode == cm::ProjectImportMode::GeometryOnly);
+        }
+        THEN("otherwise it is asked, pre-selecting the last choice (geometry only unless it was with settings)") {
+            for (const char *pref : {"ask_when_relevant", "always_ask", ""}) {
+                CHECK(d(pref, "", true).ask);
+                CHECK(d(pref, "1", true).default_mode == cm::ProjectImportMode::GeometryOnly);
+                CHECK(d(pref, "2", true).default_mode == cm::ProjectImportMode::GeometryOnly);
+                CHECK(d(pref, "4", true).default_mode == cm::ProjectImportMode::GeometryWithObjectSettings);
+            }
+        }
+    }
+    GIVEN("saved 3MFs") {
+        ScratchDir scratch;
+        use_scratch_as_temporary_dir(scratch);
+        Model        source;
+        ModelObject *plain = make_bracket(source, "plain");
+        ModelObject *tuned = make_bracket(source, "tuned");
+        tuned->volumes.back()->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(35));
+        ModelObject *ranged = make_bracket(source, "ranged");
+        ranged->layer_config_ranges[{1., 2.}].set("wall_loops", 3);
+        ModelObject *only_extruder = make_bracket(source, "extruder");
+        only_extruder->config.set("extruder", 2);
+
+        const fs::path plain_file  = scratch.path / "plain.3mf";
+        const fs::path tuned_file  = scratch.path / "tuned.3mf";
+        const fs::path ranged_file = scratch.path / "ranged.3mf";
+        const fs::path ext_file    = scratch.path / "extruder.3mf";
+        REQUIRE(cm::save_objects({{plain, 0}}, plain_file).ok);
+        REQUIRE(cm::save_objects({{tuned, 0}}, tuned_file).ok);
+        REQUIRE(cm::save_objects({{ranged, 0}}, ranged_file).ok);
+        REQUIRE(cm::save_objects({{only_extruder, 0}}, ext_file).ok);
+        THEN("only files with per-part or height-range settings count") {
+            CHECK_FALSE(cm::project_3mf_has_object_settings(plain_file));
+            CHECK(cm::project_3mf_has_object_settings(tuned_file));
+            CHECK(cm::project_3mf_has_object_settings(ranged_file));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(ext_file));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(scratch.path / "missing.3mf"));
+            CHECK_FALSE(cm::project_3mf_has_object_settings(scratch.path / "model.stl"));
+        }
+    }
+}
+
 SCENARIO("A project 3MF dropped into the library carries settings that the loader reports but Add Custom Models never applies", "[CustomModels][3mf]") {
     GIVEN("a project saved with a full print configuration") {
         ScratchDir scratch;

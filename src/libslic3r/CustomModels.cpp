@@ -1,6 +1,8 @@
 #include "CustomModels.hpp"
 
+#include "AppConfig.hpp"
 #include "Format/bbs_3mf.hpp"
+#include "miniz_extension.hpp"
 #include "Model.hpp"
 #include "PrintConfig.hpp"
 #include "TriangleSelector.hpp"
@@ -428,6 +430,81 @@ ImportReport apply_project_import_mode(const std::vector<ModelObject *> &objects
     case ProjectImportMode::OpenAsProject: break;
     }
     return ImportReport();
+}
+
+namespace {
+// True when `xml` has a <metadata key="K" ...> tag whose K is a print-configuration key other than "extruder".
+bool xml_has_config_metadata(const std::string &xml)
+{
+    std::size_t pos = 0;
+    while ((pos = xml.find("<metadata", pos)) != std::string::npos) {
+        const std::size_t end = xml.find('>', pos);
+        if (end == std::string::npos)
+            break;
+        const std::size_t k = xml.find("key=\"", pos);
+        if (k != std::string::npos && k < end) {
+            const std::size_t b = k + 5, e = xml.find('"', b);
+            if (e != std::string::npos && e < end) {
+                const std::string key = xml.substr(b, e - b);
+                if (key != "extruder" && print_config_def.get(key) != nullptr)
+                    return true;
+            }
+        }
+        pos = end;
+    }
+    return false;
+}
+
+bool read_zip_entry(mz_zip_archive &zip, const char *name, std::string &out)
+{
+    const int idx = mz_zip_reader_locate_file(&zip, name, nullptr, 0);
+    if (idx < 0)
+        return false;
+    mz_zip_archive_file_stat stat;
+    if (!mz_zip_reader_file_stat(&zip, mz_uint(idx), &stat) || stat.m_uncomp_size > (64u << 20))
+        return false;
+    out.assign(size_t(stat.m_uncomp_size), ' ');
+    return mz_zip_reader_extract_to_mem(&zip, mz_uint(idx), out.data(), out.size(), 0) != 0;
+}
+} // namespace
+
+bool project_3mf_has_object_settings(const fs::path &path)
+{
+    if (file_type(path) != FileType::Project3mf)
+        return false;
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    try {
+        if (!open_zip_reader(&zip, path.string()))
+            return false;
+    } catch (...) {
+        return false;
+    }
+    bool        found = false;
+    std::string text;
+    if (read_zip_entry(zip, "Metadata/model_settings.config", text))
+        found = xml_has_config_metadata(text);
+    if (!found && read_zip_entry(zip, "Metadata/layer_config_ranges.xml", text))
+        found = text.find("<range") != std::string::npos;
+    close_zip_reader(&zip);
+    return found;
+}
+
+ImportChoice decide_import_project_choice(const std::string &load_behaviour, const std::string &last_action, bool any_3mf_has_object_settings)
+{
+    ImportChoice choice;
+    if (!any_3mf_has_object_settings)
+        return choice;
+    if (load_behaviour == OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY || load_behaviour == OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL)
+        return choice;
+    if (load_behaviour == OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY_WITH_SETTINGS) {
+        choice.mode = ProjectImportMode::GeometryWithObjectSettings;
+        return choice;
+    }
+    choice.ask = true;
+    if (project_import_mode_from_action(last_action) == ProjectImportMode::GeometryWithObjectSettings)
+        choice.default_mode = ProjectImportMode::GeometryWithObjectSettings;
+    return choice;
 }
 
 } // namespace custom_models
