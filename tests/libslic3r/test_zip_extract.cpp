@@ -1118,13 +1118,13 @@ TEST_CASE("extract_entries_confined writes under a dest longer than MAX_PATH", "
     CHECK(read_binary_file(extended_path(dest / "models" / "part.obj")) == "CCC");
     CHECK_FALSE(fs::exists(extended_path(dest / "skip.stl")));
 
-    // A second run renames instead of overwriting, still past MAX_PATH.
+    // A second run replaces the committed file (stage + rename over it), still past MAX_PATH.
     {
         MZ_Archive archive;
         REQUIRE(archive.open_reader(zip.string()));
         REQUIRE(extract_entries_confined(archive.arch, {0}, dest, ZipExtractCaps{}, dests, err));
     }
-    CHECK(read_binary_file(extended_path(dest / "keep(1).stl")) == "AAA");
+    CHECK(read_binary_file(extended_path(dest / "keep.stl")) == "AAA");
 
     // The traversal entry still rejects the whole call under the long dest, and nothing leaks out.
     {

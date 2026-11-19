@@ -922,19 +922,12 @@ bool is_safe_archive_relative_path(const std::string &path)
         const std::string seg = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (seg.empty() || seg == "." || seg == "..")
             return false;
-        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb. Refused on
-        // every platform, so an archive that is refused on one OS is refused on all of them.
+        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb.
+        // (Reserved device names and a trailing dot/space on an ordinary name are not refused
+        // here: ZIP extraction renames them in sanitize_zip_extract_segment, and 3MF entries such
+        // as Auxiliaries/aux.png must keep loading.)
         if (seg.find_first_not_of(". ") == std::string::npos)
             return false;
-#ifdef _WIN32
-        // "foo." / "foo " would collide with "foo": refuse a name that only ends in a dot or
-        // space. DOS device names (CON, AUX, nul.txt, COM¹, …) open the device; on POSIX they
-        // are ordinary names (Auxiliaries/aux.png, con.jpg in a 3MF).
-        if (seg.back() == '.' || seg.back() == ' ')
-            return false;
-        if (is_windows_reserved_device_name(seg))
-            return false;
-#endif
         if (slash == std::string::npos)
             break;
         start = slash + 1;
@@ -1026,6 +1019,23 @@ boost::filesystem::path weakly_canonical_for_confine(const boost::filesystem::pa
 
 bool skip_dot_or_empty(const boost::filesystem::path &comp) { return comp.empty() || comp == "."; }
 
+// A canonical path is compared without its "\\?\" / "\\?\UNC\" prefix: following a junction from a
+// prefixed path yields the target's plain spelling ("C:\..."), while a path with no link on it
+// keeps the prefix, so the same folder would otherwise compare unequal. Both sides are already
+// absolute and normalised here, so the prefix carries no location of its own.
+boost::filesystem::path without_extended_prefix(const boost::filesystem::path &p)
+{
+#ifdef _WIN32
+    boost::filesystem::path pref = p;
+    const std::wstring      s    = pref.make_preferred().wstring();
+    if (s.rfind(L"\\\\?\\UNC\\", 0) == 0)
+        return boost::filesystem::path(L"\\\\" + s.substr(8));
+    if (s.rfind(L"\\\\?\\", 0) == 0)
+        return boost::filesystem::path(s.substr(4));
+#endif
+    return p;
+}
+
 // Win32 (unprefixed) path parsing drops trailing dots and spaces from a name, so "root\.. "
 // or "root\..." can open root or its parent, while the extended-length form used by the confine
 // check below takes the name literally. Refuse an element made only of dots and spaces (other
@@ -1062,8 +1072,9 @@ bool is_path_within_root(const boost::filesystem::path &root, const boost::files
             return false;
         // Prefixed I/O follows a junction past MAX_PATH; canonicalise the same way so the
         // confine check sees the real target instead of the unresolved long path.
-        const boost::filesystem::path root_c = boost::filesystem::weakly_canonical(extended_path(strip_trailing_separators_path(root)));
-        const boost::filesystem::path cand_c = weakly_canonical_for_confine(extended_path(candidate));
+        const boost::filesystem::path root_c =
+            without_extended_prefix(boost::filesystem::weakly_canonical(extended_path(strip_trailing_separators_path(root))));
+        const boost::filesystem::path cand_c = without_extended_prefix(weakly_canonical_for_confine(extended_path(candidate)));
         if (has_embedded_nul(root_c) || has_embedded_nul(cand_c))
             return false;
         auto r = root_c.begin();

@@ -803,34 +803,15 @@ TEST_CASE("archive entry names may not leave the extraction folder", "[Untrusted
         CHECK_FALSE(is_safe_archive_relative_path(p));
 }
 
-TEST_CASE("archive entry names refuse a trailing dot or space and DOS device names", "[Untrusted][ZipSlip]")
+TEST_CASE("archive entry names keep device names and trailing dots for the extractor to rename", "[Untrusted][ZipSlip]")
 {
-#ifdef _WIN32
-    // Windows strips a trailing dot or space, so "foo." / "foo " would collide with "foo".
-    for (const char *p : {"foo.", "foo ", "a/foo.", "a/foo ", "foo.bar.", "dir /x", "x/dir."})
-        CHECK_FALSE(is_safe_archive_relative_path(p));
-    // Device names, including with an extension: "nul.txt" opens the null device.
-    // Superscript ¹ ² ³ are COM1–3 / LPT1–3.
-    for (const char *p : {"CON", "con", "PRN", "AUX", "NUL", "nul.txt", "NUL.3mf", "COM1", "com1.stl", "LPT9",
-                          "lpt1.gcode", "a/NUL", "a/nul.txt", "COM9.x", "aux.foo.bar", "COM\xC2\xB9", "COM\xC2\xB2.txt",
-                          "LPT\xC2\xB3", "lpt\xC2\xB9.gcode"})
-        CHECK_FALSE(is_safe_archive_relative_path(p));
-    // Ordinary names that only look similar stay allowed.
-    for (const char *p : {"console.stl", "Auxiliaries/cover.png", "connection.json", "prntr.3mf", "COM10", "LPT0",
-                          "COM0.txt", "nulish.txt", "a..b", "..a"})
+    // Not a confinement question: "nul.txt" / "foo." stay inside the folder. ZIP extraction renames
+    // them (sanitize_zip_extract_segment) and 3MF entries such as Auxiliaries/aux.png must load, so
+    // the validator accepts them on every platform, as before the long-path port.
+    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl", "..a/b..",
+                          "COM\xC2\xB9.txt", "console.stl", "a..b", "..a"})
         CHECK(is_safe_archive_relative_path(p));
-
-    std::string out;
-    for (const char *p : {"foo.", "foo ", "nul.txt", "CON", "a\\nul.txt", "./COM1.stl", "..a/b..", "COM\xC2\xB9.txt"}) {
-        INFO(p);
-        CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
-    }
-#else
-    // On POSIX these are ordinary names; 3MF entries like Auxiliaries/aux.png must still load.
-    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl",
-                          "..a/b..", "COM\xC2\xB9.txt"})
-        CHECK(is_safe_archive_relative_path(p));
-    // All-dot / all-space segments stay refused on every platform (as before this change).
+    // All-dot / all-space segments stay refused on every platform.
     for (const char *p : {"a/.../b", "a/.. /b", "a/. /b", "...", ". ."})
         CHECK_FALSE(is_safe_archive_relative_path(p));
     std::string out;
@@ -838,7 +819,6 @@ TEST_CASE("archive entry names refuse a trailing dot or space and DOS device nam
     CHECK(out == "Auxiliaries/aux.png");
     CHECK(normalize_archive_entry_path("con.jpg", out) == ArchiveEntryName::Ok);
     CHECK(out == "con.jpg");
-#endif
 }
 
 // The Windows ANSI code page maps these look-alikes to '.', '/', '\\' and ':' when a UTF-8 name is
@@ -881,9 +861,7 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     CHECK(normalized("dir\\") == "dir");
     CHECK(normalized(".//a/") == "a");
     CHECK(normalized("..a/b") == "..a/b");
-#ifndef _WIN32
     CHECK(normalized("..a/b..") == "..a/b..");
-#endif
     CHECK(normalized("caf\xC3\xA9\\\xE6\xB5\x8B.json") == "caf\xC3\xA9/\xE6\xB5\x8B.json");
 
     // Nothing to extract.
@@ -900,13 +878,6 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
         INFO(p);
         CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
     }
-#ifdef _WIN32
-    for (const char *p : {"a/.../b", "a/.. /b", "a/. /b", "foo.", "foo ", "..a/b..", "nul.txt", "CON", "a\\NUL.3mf",
-                          "COM\xC2\xB9.txt"}) {
-        INFO(p);
-        CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
-    }
-#endif
     // Over-long names, before and after normalisation.
     CHECK(normalize_archive_entry_path(std::string(1025, 'a'), out) == ArchiveEntryName::Reject);
     CHECK(normalize_archive_entry_path("./" + std::string(1025, 'a'), out) == ArchiveEntryName::Reject);
@@ -2460,7 +2431,7 @@ TEST_CASE("is_path_within_root refuses every path the pre-long-path check refuse
         {fs::path(L"//edgeslicer-nohost.invalid/share/x"), Confine::Outside, "UNC, forward slashes"},
         {fs::path(L"\\\\?\\UNC\\edgeslicer-nohost.invalid\\share\\x"), Confine::Outside, "extended UNC"},
         // \\?\ and \\.\ spellings
-        {fs::path(L"\\\\?\\" + rw + L"\\a"), Confine::Either, "extended child"},
+        {fs::path(L"\\\\?\\" + rw + L"\\a"), Confine::Inside, "extended child (same file; main refused it only for the prefix)"},
         {fs::path(L"\\\\?\\" + rw + L"\\..\\x"), Confine::Outside, "extended dot-dot"},
         {fs::path(L"\\\\?\\" + dw + L"\\x"), Confine::Outside, "extended parent"},
         {fs::path(L"\\\\.\\" + rw + L"\\a"), Confine::Either, "device-path child"},
