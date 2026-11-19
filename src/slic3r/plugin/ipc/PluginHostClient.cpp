@@ -320,7 +320,9 @@ struct PluginHostClient::Impl
         sandbox_report = sandbox_report_from_json(reply.contains("sandbox") ? reply["sandbox"] : nlohmann::json::object());
         if (sandbox_report.degraded)
             BOOST_LOG_TRIVIAL(warning) << "plugin host OS sandbox is degraded: " << sandbox_report.detail;
-        const bool shipping = sandbox_report.applied && sandbox_kind_is_shipping(sandbox_report.kind);
+        // M2: Landlock below ABI 3 leaves truncate() unhandled: not a shipping sandbox.
+        const bool weak_landlock = sandbox_report.kind == k_sandbox_kind_landlock_seccomp && sandbox_report.landlock_abi < 3;
+        const bool shipping = sandbox_report.applied && sandbox_kind_is_shipping(sandbox_report.kind) && !weak_landlock;
         if (!shipping && !sandbox_env_disable_requested()) {
             const std::string reason = sandbox_report.detail.empty() ? std::string("plugin host reported no shipping OS sandbox") :
                                                                        sandbox_report.detail;

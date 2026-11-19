@@ -404,6 +404,50 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
     emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
 #endif
 
+    // M2: signals only to this helper (its pid, its own process group, which it leads, or
+    // "my group" = 0). Without Landlock ABI 6 signal scoping a child could otherwise SIGKILL or
+    // SIGSTOP EdgeSlicer or any process of the user. Applied on every ABI.
+    {
+        const uint32_t self     = static_cast<uint32_t>(::getpid());
+        const uint32_t neg_self = static_cast<uint32_t>(-static_cast<int32_t>(::getpid()));
+#ifdef __NR_kill
+        // kill(pid, sig): pid == self, 0 or -self.
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 6, static_cast<uint32_t>(__NR_kill));
+        emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 3, 0, self);
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 0u);
+        emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, neg_self);
+        emit(BPF_RET | BPF_K, 0, 0, deny);
+        emit(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW);
+#endif
+        // tgkill / rt_sigqueueinfo / rt_tgsigqueueinfo(tgid, ...): tgid == self.
+        for (const int nr : {
+#ifdef __NR_tgkill
+                 int(__NR_tgkill),
+#endif
+#ifdef __NR_rt_sigqueueinfo
+                 int(__NR_rt_sigqueueinfo),
+#endif
+#ifdef __NR_rt_tgsigqueueinfo
+                 int(__NR_rt_tgsigqueueinfo),
+#endif
+                 -1}) {
+            if (nr < 0)
+                continue;
+            emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, static_cast<uint32_t>(nr));
+            emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[0]));
+            emit(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, self);
+            emit(BPF_RET | BPF_K, 0, 0, deny);
+            emit(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW);
+        }
+#ifdef __NR_tkill
+        deny_nr(__NR_tkill); // any thread id; glibc uses tgkill
+#endif
+#ifdef __NR_pidfd_send_signal
+        deny_nr(__NR_pidfd_send_signal);
+#endif
+    }
+
 #ifdef __NR_socketpair
     // socketpair(AF_UNIX, SOCK_STREAM) stays: asyncio and the inherited IPC fd. SOCK_DGRAM
     // pairs can sendto() journald; restrict the type. AF_UNIX socket() is still denied.
