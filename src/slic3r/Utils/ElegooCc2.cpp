@@ -203,6 +203,42 @@ std::string encode_file_name_header(const std::string& name)
     return out;
 }
 
+int upload_retries_for(int http_status) { return http_status == 429 ? UPLOAD_429_RETRIES : UPLOAD_CHUNK_RETRIES; }
+
+int upload_retry_delay_ms(int attempt, int http_status, int retry_after_s)
+{
+    if (http_status != 429)
+        return UPLOAD_CHUNK_RETRY_MS;
+    if (retry_after_s > 0)
+        return std::min(retry_after_s, 30) * 1000;
+    return 1000 << std::min(std::max(attempt, 0), 3);
+}
+
+int retry_after_seconds(const std::string& headers)
+{
+    const size_t status_line = headers.rfind("HTTP/");
+    std::string  block       = status_line == std::string::npos ? headers : headers.substr(status_line);
+    std::vector<std::string> lines;
+    boost::split(lines, block, boost::is_any_of("\r\n"), boost::token_compress_on);
+    for (const std::string& line : lines) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos || !boost::iequals(boost::trim_copy(line.substr(0, colon)), "Retry-After"))
+            continue;
+        try {
+            return std::max(0, std::stoi(boost::trim_copy(line.substr(colon + 1))));
+        } catch (...) {
+            return 0; // an HTTP date or junk: use the default back-off
+        }
+    }
+    return 0;
+}
+
+std::string too_many_requests_text()
+{
+    return "the printer is refusing requests because it is receiving too many (HTTP 429). Close other programs or web pages "
+           "connected to it (the Device tab, other slicers), wait a minute and send again";
+}
+
 bool upload_error_retryable(int http_status, const std::string& body)
 {
     return http_status != 401 && http_status != 403 && int_at(parse_object(body), "error_code", -1) != ERR_ACCESS_DENIED;

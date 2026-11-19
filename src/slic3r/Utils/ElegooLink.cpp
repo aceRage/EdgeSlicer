@@ -685,15 +685,21 @@ namespace Slic3r {
             // sent again after 200 ms, up to 3 more times (the web client's retry); the error is shown
             // only when they all fail.
             wxString     last_error;
-            bool        cancelled = false;
-            res                   = false;
-            for (int attempt = 0; attempt <= ElegooCc2::UPLOAD_CHUNK_RETRIES && !res && !cancelled; ++attempt) {
+            bool        cancelled   = false;
+            int         last_status = 0, retry_after = 0;
+            std::string response_headers;
+            res = false;
+            // A 429 (the printer's web server limiting requests) gets a longer back-off and more tries.
+            for (int attempt = 0; attempt <= ElegooCc2::upload_retries_for(last_status) && !res && !cancelled; ++attempt) {
                 if (attempt > 0) {
-                    BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: CC2 chunk %2%/%3% failed, sending it again (%4%/%5%)") % name % (i + 1) % packageCount % attempt %
-                                                      ElegooCc2::UPLOAD_CHUNK_RETRIES;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(ElegooCc2::UPLOAD_CHUNK_RETRY_MS));
+                    const int wait_ms = ElegooCc2::upload_retry_delay_ms(attempt - 1, last_status, retry_after);
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: CC2 chunk %2%/%3% failed (HTTP %4%), sending it again in %5% ms (%6%/%7%)") % name % (i + 1) % packageCount %
+                                                      last_status % wait_ms % attempt % ElegooCc2::upload_retries_for(last_status);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
                 }
                 bool retryable = true;
+                last_status    = 0;
+                retry_after    = 0;
                 http.clear_headers();
                 http.header("Accept", "application/json")
                     .header("Content-Type", "application/octet-stream")
@@ -711,16 +717,22 @@ namespace Slic3r {
                             res = true;
                         } else {
                             const std::string detail = ElegooCc2::describe_upload_failure(body, md5, total);
+                            last_status              = static_cast<int>(status);
                             last_error               = format_error(body, detail.empty() ? why : detail, status);
                             retryable                = ElegooCc2::upload_error_retryable(static_cast<int>(status), body);
                         }
                     })
                     .on_error([&](std::string body, std::string error, unsigned status) {
                         BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading CC2 chunk: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
-                        retryable = ElegooCc2::upload_error_retryable(static_cast<int>(status), body);
-                        last_error = (status == 401 || status == 403) ? format_error(body, "the printer refused the access code", status) :
+                        retryable   = ElegooCc2::upload_error_retryable(static_cast<int>(status), body);
+                        last_status = static_cast<int>(status);
+                        retry_after = ElegooCc2::retry_after_seconds(response_headers);
+                        // The 429 body is the web server's HTML page: say what it means instead.
+                        last_error  = (status == 401 || status == 403) ? format_error(body, "the printer refused the access code", status) :
+                                      status == 429                    ? wxString::FromUTF8(ElegooCc2::too_many_requests_text()) :
                                                                          format_error(body, error, status);
                     })
+                    .on_header_callback([&](std::string headers) { response_headers = std::move(headers); })
                     .on_progress([&](Http::Progress progress, bool& cancel) {
                         if (progress.ultotal == progress.ulnow)
                             return;

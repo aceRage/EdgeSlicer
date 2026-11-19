@@ -101,6 +101,16 @@ std::string encode_file_name_header(const std::string& name);
 // Extra tries of one chunk after a failed answer, and the wait between them (the web client: 3 and 200 ms).
 constexpr int    UPLOAD_CHUNK_RETRIES  = 3;
 constexpr int    UPLOAD_CHUNK_RETRY_MS = 200;
+// HTTP 429 (the printer's web server limiting requests; its answer is an HTML page): how many times a
+// chunk is sent again, how long to wait before the next try (Retry-After when the printer sends one,
+// else 1, 2, 4, 8, 8 s; capped at 30 s), and the sentence for the user. No reference client handles
+// 429, so this is ours; the other failures keep the web client's 3 tries 200 ms apart.
+constexpr int UPLOAD_429_RETRIES = 5;
+int         upload_retries_for(int http_status);
+int         upload_retry_delay_ms(int attempt, int http_status, int retry_after_s);
+// Retry-After (seconds) from the headers of the LAST response in the accumulated header text; 0 if none.
+int         retry_after_seconds(const std::string& headers);
+std::string too_many_requests_text();
 // Whether a failed chunk is worth sending again: not when the printer refused the access code.
 bool upload_error_retryable(int http_status, const std::string& body);
 // "bytes <first>-<last>/<total>" for one chunk.
