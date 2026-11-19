@@ -1574,7 +1574,7 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
     const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
         for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
                         config.sparse_infill_filament.value, config.solid_infill_filament.value,
-                        config.top_surface_filament.value, config.bottom_surface_filament.value }) {
+                        config.top_surface_filament.value, config.bottom_surface_filament.value, config.ironing_filament.value }) {
             if (id <= 0)
                 continue; // outer_wall_filament / top_surface_filament / bottom_surface_filament 0 follow the walls
             const unsigned int i = (unsigned int)std::max(0, id - 1);
