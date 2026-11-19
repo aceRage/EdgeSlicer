@@ -148,6 +148,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament_cli_gates.cpp
 	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
+	test_cli_amf_inch.cpp
 	test_cli_output.cpp
 	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp

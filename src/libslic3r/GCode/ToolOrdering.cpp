@@ -2066,6 +2066,17 @@ ToolOrdering::LayerData ToolOrdering::collect_layer_and_unprintable_data()
     return data;
 }
 
+FlushOrderCacheKey make_flush_order_cache_key(const std::vector<unsigned int> &extruders,
+                                              std::optional<unsigned int>      initial_extruder_id)
+{
+    FlushOrderCacheKey key;
+    key.filaments = extruders;
+    std::sort(key.filaments.begin(), key.filaments.end());
+    key.filaments.erase(std::unique(key.filaments.begin(), key.filaments.end()), key.filaments.end());
+    key.initial_extruder = initial_extruder_id.value_or(~0u);
+    return key;
+}
+
 // Declared in ToolOrdering.hpp (exposed for unit testing).
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders)
 {
@@ -2268,17 +2279,6 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             wipe_volumes.push_back(std::vector<float>(number_of_extruders, print_config->prime_volume));
     }
 
-    auto extruders_to_hash_key = [](const std::vector<unsigned int>& extruders,
-                                    std::optional<unsigned int>      initial_extruder_id) -> uint32_t {
-        uint32_t hash_key = 0;
-        // high 16 bit define initial extruder ,low 16 bit define extruder set
-        if (initial_extruder_id)
-            hash_key |= (1 << (16 + *initial_extruder_id));
-        for (auto item : extruders)
-            hash_key |= (1 << item);
-        return hash_key;
-    };
-
     std::vector<LayerPrintSequence> other_layers_seqs;
     const ConfigOptionInts *other_layers_print_sequence_op = print_config->option<ConfigOptionInts>("other_layers_print_sequence");
     const ConfigOptionInt *other_layers_print_sequence_nums_op = print_config->option<ConfigOptionInt>("other_layers_print_sequence_nums");
@@ -2356,7 +2356,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 
         // The algorithm complexity is O(n2*2^n)
         if (i != 0) {
-            auto hash_key = extruders_to_hash_key(lt.extruders, current_extruder_id);
+            auto hash_key = make_flush_order_cache_key(lt.extruders, current_extruder_id);
             auto iter = m_tool_order_cache.find(hash_key);
             if (iter == m_tool_order_cache.end()) {
                 lt.extruders = get_extruders_order(wipe_volumes, lt.extruders, current_extruder_id);
@@ -2480,7 +2480,7 @@ void ToolOrdering::assign_custom_gcodes(const Print &print)
                 // BBS
 				(color_change ? 
 					mode == CustomGCode::SingleExtruder || 
-						(custom_gcode.extruder <= int(num_filaments) && extruder_printing_above[unsigned(custom_gcode.extruder - 1)]) :
+						(custom_gcode.extruder > 0 && custom_gcode.extruder <= int(num_filaments) && extruder_printing_above[unsigned(custom_gcode.extruder - 1)]) :
 				 	tool_change && tool_changes_as_color_changes);
 			if (pause_or_custom_gcode || apply_color_change)
         		lt.custom_gcode = &custom_gcode;

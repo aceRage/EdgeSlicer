@@ -231,6 +231,8 @@ public:
     // Forget the cached motion limits after custom G-code changed them behind the writer's back.
     void invalidate_acceleration() { m_last_acceleration = 0; m_last_travel_acceleration = 0; }
     void invalidate_jerk() { m_last_jerk = 0; }
+    // Last print acceleration the writer emitted (0 if none, or after invalidate_acceleration()).
+    unsigned int last_print_acceleration() const { return m_last_acceleration; }
 
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
