@@ -177,6 +177,10 @@ bool PluginManager::initialize(bool install_hooks)
     return true;
 }
 
+namespace {
+constexpr std::chrono::milliseconds k_shutdown_wait{15000};
+}
+
 void PluginManager::set_shutting_down() { m_shutting_down.store(true, std::memory_order_release); }
 
 void PluginManager::shutdown()
@@ -204,13 +208,20 @@ void PluginManager::shutdown()
     // Reject new plugin loads before we drain.
     set_shutting_down();
 
+    // M13: bounded waits. A plugin import that blocks (it runs in-process) must not hang quit.
     std::string wait_error;
-    if (!wait_for_discovery(std::chrono::milliseconds::max(), wait_error) && !wait_error.empty())
+    if (!wait_for_discovery(k_shutdown_wait, wait_error) && !wait_error.empty())
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": Plugin discovery did not finish cleanly during shutdown: " << wait_error;
 
     // Wait for any in-progress plugin loads. Cancelled loads keep their slot until their worker
-    // has actually unwound, so this cannot return while one is still executing Python.
-    wait_for_all_plugin_loads();
+    // has actually unwound. If one is still executing Python after the bound, leave everything
+    // loaded: the interpreter is then not finalized (PythonInterpreter::shutdown waits only
+    // briefly for running calls) and the process exit ends it.
+    if (!wait_for_all_plugin_loads(k_shutdown_wait)) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": a plugin load did not finish within "
+                                 << k_shutdown_wait.count() << " ms; leaving plugins loaded for the process exit";
+        return;
+    }
 
     unload_all_plugins();
     PythonPluginBridge::instance().clear_pending_captures();
