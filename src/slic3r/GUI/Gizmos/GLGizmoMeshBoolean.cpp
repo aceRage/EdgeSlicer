@@ -3,6 +3,7 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -11,6 +12,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include <imgui/imgui_internal.h>
+#include <memory>
+#include <wx/utils.h>
 namespace Slic3r {
 namespace GUI {
 
@@ -483,6 +486,15 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         suffix = "intersection";
         break;
     }
+    // Keep paint v2: the inputs the result is painted from, in object coordinates (the boolean ran on
+    // each volume's mesh transformed by its own matrix). A Difference's tool only leaves the wall
+    // of its cut, which stays plain.
+    const std::vector<PaintTransfer::Source> paint_sources =
+        PaintTransfer::part_boolean_sources(*m_src.mv, *m_tool.mv, m_operation_mode == MeshBooleanOperation::Difference);
+    std::unique_ptr<wxBusyCursor> busy;
+    if (PaintTransfer::worth_transferring(paint_sources))
+        busy = std::make_unique<wxBusyCursor>();
+
     ModelVolume* new_volume = nullptr;
     {
         // One undo step for the boolean and the tool part's deletion: TakeSnapshot holds
@@ -490,8 +502,10 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         // made the first undo bring the tool part back over the result.
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Mesh Boolean");
 
-        // The new volume replaces the source volume in its slot (libslic3r, unit-tested).
-        new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix);
+        // The new volume replaces the source volume in its slot (libslic3r, unit-tested), painted
+        // from both inputs while they still exist.
+        new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix,
+                                                                        &paint_sources);
 
         if (delete_input) {
             std::vector<ItemForDelete> items;
