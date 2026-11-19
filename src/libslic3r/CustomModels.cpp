@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <exception>
 #include <set>
 
@@ -374,6 +375,59 @@ ImportReport prepare_imported_objects(const std::vector<ModelObject *> &objects,
         BOOST_LOG_TRIVIAL(warning) << "Custom model: removed " << report.untrusted_settings_removed
                                    << " untrusted setting(s) from the object settings of a library file";
     return report;
+}
+
+ProjectImportMode project_import_mode_from_action(const std::string &stored)
+{
+    if (stored.empty())
+        return ProjectImportMode::OpenAsProject;
+    char *end   = nullptr;
+    const long v = std::strtol(stored.c_str(), &end, 10);
+    if (end == stored.c_str())
+        return ProjectImportMode::OpenAsProject;
+    if (v == 4)
+        return ProjectImportMode::GeometryWithObjectSettings;
+    return v < 2 ? ProjectImportMode::OpenAsProject : ProjectImportMode::GeometryOnly;
+}
+
+std::string project_import_action_value(ProjectImportMode mode)
+{
+    switch (mode) {
+    case ProjectImportMode::GeometryOnly: return "2";
+    case ProjectImportMode::GeometryWithObjectSettings: return "4";
+    case ProjectImportMode::OpenAsProject:
+    default: return "1";
+    }
+}
+
+ImportReport apply_project_import_mode(const std::vector<ModelObject *> &objects, ProjectImportMode mode, std::size_t filament_count)
+{
+    switch (mode) {
+    case ProjectImportMode::GeometryWithObjectSettings: return prepare_imported_objects(objects, filament_count);
+    case ProjectImportMode::GeometryOnly:
+        for (ModelObject *object : objects) {
+            if (object == nullptr)
+                continue;
+            // The extruder is the one setting that survives the reset.
+            const bool has_extruder = object->config.has("extruder");
+            const int  extruder_id  = has_extruder ? object->config.extruder() : -1;
+            object->config.reset();
+            if (has_extruder)
+                object->config.set("extruder", extruder_id);
+            for (ModelVolume *volume : object->volumes) {
+                if (volume == nullptr)
+                    continue;
+                const bool volume_has_extruder = volume->config.has("extruder");
+                const int  volume_extruder_id  = volume_has_extruder ? volume->config.extruder() : -1;
+                volume->config.reset();
+                if (volume_has_extruder)
+                    volume->config.set("extruder", volume_extruder_id);
+            }
+        }
+        break;
+    case ProjectImportMode::OpenAsProject: break;
+    }
+    return ImportReport();
 }
 
 } // namespace custom_models

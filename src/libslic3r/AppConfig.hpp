@@ -37,6 +37,8 @@ using namespace nlohmann;
 // Orca #14080
 #define SETTING_OPENGL_PHONG_SMOOTH_NORMALS "opengl_phong_smooth_normals"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY "load_geometry_only"
+// Added later; an older build reads an unknown value as "load all".
+#define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY_WITH_SETTINGS "load_geometry_with_settings"
 
 #define SUPPORT_DARK_MODE
 //#define _MSW_DARK_MODE
