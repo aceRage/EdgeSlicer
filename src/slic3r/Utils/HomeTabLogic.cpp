@@ -10,7 +10,8 @@ using json = nlohmann::json;
 
 bool valid_section(const std::string& section)
 {
-    return section == "recent" || section == "library" || section == "history" || section == "vendors";
+    return section == "recent" || section == "library" || section == "history" || section == "vendors" ||
+           section == "vaults";
 }
 
 std::string section_or_default(const std::string& section)
@@ -37,6 +38,19 @@ ArchiveOpen archive_open_kind(const std::string& file_name)
     if (ends_with(name, ".gcode") || ends_with(name, ".gco") || ends_with(name, ".g"))
         return ArchiveOpen::Gcode;
     return ArchiveOpen::None;
+}
+
+DownloadOpen download_open_kind(const std::string& file_name)
+{
+    const std::string name = lower(file_name);
+    if (ends_with(name, ".3mf")) // includes ".gcode.3mf"
+        return DownloadOpen::Project;
+    if (ends_with(name, ".gcode") || ends_with(name, ".gco") || ends_with(name, ".g"))
+        return DownloadOpen::Gcode;
+    for (const char* e : {".stl", ".step", ".stp", ".obj", ".amf"})
+        if (ends_with(name, e))
+            return DownloadOpen::AddToPlate;
+    return DownloadOpen::None;
 }
 
 std::string clean_colour(const std::string& colour)

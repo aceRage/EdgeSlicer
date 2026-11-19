@@ -138,7 +138,7 @@
         "225"
     ],
     "temperature_vitrification": [
-        "138"
+        "30"
     ],
     "full_fan_speed_layer": [
         "0"
@@ -162,7 +162,7 @@
         "0.01"
     ],
     "cool_plate_temp": [
-        "0"
+        "30"
     ],
     "eng_plate_temp": [
         "0"
@@ -171,7 +171,7 @@
         "0"
     ],
     "cool_plate_temp_initial_layer": [
-        "0"
+        "30"
     ],
     "eng_plate_temp_initial_layer": [
         "0"

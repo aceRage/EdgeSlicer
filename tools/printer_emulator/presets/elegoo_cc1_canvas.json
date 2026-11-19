@@ -1,0 +1,19 @@
+{
+  "id": "cc1",
+  "personality": "elegoo_cc1",
+  "name": "EMU Elegoo CC1 (CANVAS)",
+  "edgeslicer_preset": "Elegoo Centauri Carbon 0.4 nozzle",
+  "bind": "127.0.0.21",
+  "port": 80,
+  "lan": false,
+  "state": "standby",
+  "canvas": {"attached": true, "active_tray": 0, "tray_id_base": 0, "auto_refill": 0},
+  "slots": [
+    {"type": "PLA", "name": "ELEGOO PLA", "brand": "ELEGOO", "color": "#D02A2A", "loaded": true},
+    {"type": "PLA", "name": "PLA PRO", "color": "#F5F5F5", "loaded": true, "untagged": true},
+    {"type": "ASA", "name": "ELEGOO ASA", "brand": "ELEGOO", "color": "#202020", "loaded": true},
+    {"loaded": false}
+  ],
+  "camera": {"enabled": true, "viewer_limit": 4},
+  "faults": {}
+}

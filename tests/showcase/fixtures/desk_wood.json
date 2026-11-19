@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: desk wood", "plate_index": 0, "source": "model", "preset_base": "desk_wood",
+      "background": { "type": "environment", "blur": 0.7, "color1": "#E8DCCB", "color2": "#8E7A63" },
+      "floor": { "type": "texture", "texture": "oak", "shadow_strength": 0.5, "contact_shadow": 0.7, "reflection": 0.3 },
+      "lighting": { "azimuth": 200, "elevation": 40, "key_temperature": 4000, "key_intensity": 1.1, "fill_intensity": 0.25,
+                    "rim_intensity": 0.3, "environment": "workshop", "env_intensity": 0.8, "shadow_softness": 1.5 },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

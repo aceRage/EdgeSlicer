@@ -12,15 +12,12 @@
 #include <windows.h>
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
-#elif defined(__APPLE__)
-#include <boost/process/spawn.hpp>
-#include <boost/process/args.hpp>
-#include <boost/process/search_path.hpp>
 #else
-#include <cstdlib>
-#include <boost/process/spawn.hpp>
 #include <boost/process/args.hpp>
+#include <boost/process/child.hpp>
+#include <boost/process/io.hpp>
 #include <boost/process/search_path.hpp>
+#include <boost/process/spawn.hpp>
 #endif
 
 #include <wx/wx.h>
@@ -221,6 +218,55 @@ std::vector<std::string> linux_flatpak_args(const std::string &file_path, const 
 }
 
 // -------------------------------------------------------------------------------------------
+// Launch decisions (macOS, Linux)
+// -------------------------------------------------------------------------------------------
+
+LaunchResult launch_macos(const std::string &file_path, const std::string &custom_exe_path, const LaunchOps &ops)
+{
+    LaunchResult result;
+    if (!custom_exe_path.empty()) {
+        // A custom override is a path to the .app bundle or the executable inside it; `open -a`
+        // takes either.
+        result.exe_path = custom_exe_path;
+        result.outcome  = ops.run_and_wait({ "open", "-a", custom_exe_path, file_path }) == 0 ? LaunchOutcome::Launched :
+                                                                                               LaunchOutcome::LaunchFailed;
+        return result;
+    }
+    // Try the bundle name first, then the bundle id.
+    if (ops.run_and_wait(macos_open_by_name_args(file_path)) == 0 || ops.run_and_wait(macos_open_by_bundle_id_args(file_path)) == 0) {
+        result.outcome = LaunchOutcome::Launched;
+        return result;
+    }
+    result.outcome = LaunchOutcome::NotFound;
+    return result;
+}
+
+LaunchResult launch_linux(const std::string &file_path, const std::string &custom_exe_path, const LaunchOps &ops)
+{
+    LaunchResult result;
+    if (!custom_exe_path.empty()) {
+        result.exe_path = custom_exe_path;
+        result.outcome  = ops.start({ custom_exe_path, file_path }) ? LaunchOutcome::Launched : LaunchOutcome::LaunchFailed;
+        return result;
+    }
+    if (ops.in_path("bambu-studio")) {
+        result.exe_path = "bambu-studio";
+        result.outcome  = ops.start(linux_path_exec_args(file_path)) ? LaunchOutcome::Launched : LaunchOutcome::LaunchFailed;
+        return result;
+    }
+    // `flatpak run` is the application itself, so it is not waited for; `flatpak info` tells first
+    // whether the app is installed.
+    if (ops.in_path("flatpak") && ops.run_and_wait({ "flatpak", "info", "com.bambulab.BambuStudio" }) == 0) {
+        result.exe_path = "flatpak run com.bambulab.BambuStudio";
+        result.outcome  = ops.start(linux_flatpak_args(file_path)) ? LaunchOutcome::Launched : LaunchOutcome::LaunchFailed;
+        return result;
+    }
+    // AppImage is not discoverable (no install location, no PATH entry, no package registry).
+    result.outcome = LaunchOutcome::NotFound;
+    return result;
+}
+
+// -------------------------------------------------------------------------------------------
 // Platform entry point
 // -------------------------------------------------------------------------------------------
 
@@ -361,105 +407,52 @@ LaunchResult open_in_bambu_studio(const std::string &file_path, const std::strin
     return result;
 }
 
-#elif defined(__APPLE__)
+#else // macOS, Linux
 
 namespace {
-bool run_argv(const std::vector<std::string> &argv)
+int run_and_wait(const std::vector<std::string> &argv)
 {
     try {
-        boost::process::spawn(boost::process::search_path(argv.front()), boost::process::args(std::vector<std::string>(argv.begin() + 1, argv.end())));
-        return true;
-    } catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "BambuStudioLauncher: failed to spawn \"" << argv.front() << "\": " << ex.what();
-        return false;
-    }
-}
-} // namespace
-
-LaunchResult open_in_bambu_studio(const std::string &file_path, const std::string &custom_exe_path)
-{
-    LaunchResult result;
-    if (!custom_exe_path.empty() && boost::filesystem::exists(custom_exe_path)) {
-        // A custom override is a path to the .app bundle or the executable inside it; `open -a`
-        // takes either.
-        if (run_argv({ "open", "-a", custom_exe_path, file_path })) {
-            result.outcome  = LaunchOutcome::Launched;
-            result.exe_path = custom_exe_path;
-        } else {
-            result.outcome  = LaunchOutcome::LaunchFailed;
-            result.exe_path = custom_exe_path;
+        const boost::filesystem::path exe = boost::process::search_path(argv.front());
+        if (exe.empty()) {
+            BOOST_LOG_TRIVIAL(error) << "BambuStudioLauncher: \"" << argv.front() << "\" is not on PATH";
+            return -1;
         }
-        return result;
+        boost::process::child child(exe, boost::process::args(std::vector<std::string>(argv.begin() + 1, argv.end())),
+                                    boost::process::std_out > boost::process::null, boost::process::std_err > boost::process::null);
+        child.wait();
+        BOOST_LOG_TRIVIAL(info) << "BambuStudioLauncher: \"" << argv.front() << "\" exited with " << child.exit_code();
+        return child.exit_code();
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "BambuStudioLauncher: failed to run \"" << argv.front() << "\": " << ex.what();
+        return -1;
     }
-
-    // Try the bundle name first, then the bundle id. `open -a` fails (non-zero exit) when the
-    // name isn't registered with Launch Services, but boost::process::spawn on "open" itself
-    // rarely fails to start - the app-not-found case is a "look for by name" miss we cannot
-    // distinguish from here without waiting on the child, so we optimistically report Launched
-    // once `open` itself starts, same as the existing start_new_slicer() pattern in Process.cpp.
-    if (run_argv(macos_open_by_name_args(file_path))) {
-        result.outcome = LaunchOutcome::Launched;
-        return result;
-    }
-    if (run_argv(macos_open_by_bundle_id_args(file_path))) {
-        result.outcome = LaunchOutcome::Launched;
-        return result;
-    }
-    result.outcome = LaunchOutcome::NotFound;
-    return result;
 }
 
-#else // Linux
-
-namespace {
-bool has_in_path(const std::string &exe_name)
-{
-    return !boost::process::search_path(exe_name).empty();
-}
-bool run_argv(const std::vector<std::string> &argv)
+bool start(const std::vector<std::string> &argv)
 {
     try {
         boost::process::spawn(argv.front().find('/') != std::string::npos ? argv.front() : boost::process::search_path(argv.front()).string(),
-                               boost::process::args(std::vector<std::string>(argv.begin() + 1, argv.end())));
+                              boost::process::args(std::vector<std::string>(argv.begin() + 1, argv.end())));
         return true;
     } catch (const std::exception &ex) {
         BOOST_LOG_TRIVIAL(error) << "BambuStudioLauncher: failed to spawn \"" << argv.front() << "\": " << ex.what();
         return false;
     }
 }
+
+bool in_path(const std::string &exe_name) { return !boost::process::search_path(exe_name).empty(); }
 } // namespace
 
 LaunchResult open_in_bambu_studio(const std::string &file_path, const std::string &custom_exe_path)
 {
-    LaunchResult result;
-    if (!custom_exe_path.empty() && boost::filesystem::exists(custom_exe_path)) {
-        if (run_argv({ custom_exe_path, file_path })) {
-            result.outcome  = LaunchOutcome::Launched;
-            result.exe_path = custom_exe_path;
-        } else {
-            result.outcome  = LaunchOutcome::LaunchFailed;
-            result.exe_path = custom_exe_path;
-        }
-        return result;
-    }
-
-    if (has_in_path("bambu-studio")) {
-        result.exe_path = "bambu-studio";
-        result.outcome  = run_argv(linux_path_exec_args(file_path)) ? LaunchOutcome::Launched : LaunchOutcome::LaunchFailed;
-        return result;
-    }
-    if (has_in_path("flatpak")) {
-        // We cannot cheaply tell whether the Flatpak app itself is installed without invoking
-        // `flatpak run`, which is also the launch step - so a missing app surfaces as
-        // LaunchFailed (flatpak exits non-zero) rather than NotFound. The caller's message
-        // covers both the same way.
-        result.exe_path = "flatpak run com.bambulab.BambuStudio";
-        result.outcome  = run_argv(linux_flatpak_args(file_path)) ? LaunchOutcome::Launched : LaunchOutcome::LaunchFailed;
-        return result;
-    }
-    // AppImage is not discoverable (no install location, no PATH entry, no package registry).
-    result.outcome = LaunchOutcome::NotFound;
-    return result;
+    const LaunchOps   ops{ run_and_wait, start, in_path };
+    const std::string custom = !custom_exe_path.empty() && boost::filesystem::exists(custom_exe_path) ? custom_exe_path : std::string();
+#ifdef __APPLE__
+    return launch_macos(file_path, custom, ops);
+#else
+    return launch_linux(file_path, custom, ops);
+#endif
 }
 
 #endif

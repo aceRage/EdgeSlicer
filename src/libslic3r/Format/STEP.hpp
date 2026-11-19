@@ -7,6 +7,8 @@
 #include <boost/filesystem.hpp>
 #include <Message_ProgressIndicator.hxx>
 #include <atomic>
+#include <iomanip>
+#include <iostream>
 
 namespace fs = boost::filesystem;
 
@@ -90,7 +92,8 @@ public:
     Standard_Boolean UserBreak() override { return should_stop.load(); }
 
     void Show(const Message_ProgressScope&, const Standard_Boolean) override {
-        std::cout << "Progress: " << GetPosition() << "%" << std::endl;
+        // Orca #14994: GetPosition() is a 0..1 fraction.
+        std::cout << "Progress: " << std::fixed << std::setprecision(2) << 100.0 * GetPosition() << "%" << std::endl;
     }
 private:
     std::atomic<bool>& should_stop;

@@ -28,11 +28,39 @@ int physical_to_logical(const std::vector<int> &physical_extruder_map, int physi
 bool is_ams_ht_id(int ams_id);
 bool is_external_spool_ams_id(int ams_id);
 
+// The external spool holders of a two-extruder printer, one per extruder (print.vir_slot[] in the
+// report): 255 feeds the main extruder (physical 0, the RIGHT one), 254 the deputy (physical 1, the
+// LEFT one) - BambuStudio VIRTUAL_TRAY_MAIN_ID / VIRTUAL_TRAY_DEPUTY_ID. A job maps a filament to
+// one as ams_id 254/255, slot_id 0, tray id 254/255.
+// Physical extruder an external spool holder feeds; -1 for any other ams id.
+int external_spool_physical_extruder(int ams_id);
+// The external spool holder of a physical extruder (0 -> 255, 1 -> 254); -1 for any other id.
+int external_spool_ams_id(int physical_extruder);
+// "Ext-L" / "Ext-R" for the external spools (BambuStudio's names), tray_name() for everything else.
+// For what a person reads; tray_name() stays the grouping's "Ext".
+std::string tray_display_name(int ams_id, int slot_id);
+
 // The tray name the grouping's machine-filament builder expects, as BambuStudio's
 // Sidebar::build_filament_ams_list writes it: "A1".."D4" for four-slot units, "HT-A".. for
 // AMS HT units and "Ext" for the external spool. Only "Ext" marks an external spool, which
 // the grouping treats differently; an AMS HT is an ordinary AMS slot.
 std::string tray_name(int ams_id, int slot_id);
+// A rack AMS slot's name: "1".."9".
+std::string rack_tray_name(int slot_id);
+
+// One AMS tray of the printer report as PresetBundle::filament_ams_list holds it
+// (Sidebar::build_filament_ams_list): key = ams_id * 4 + slot_id, as BambuStudio keys it and as
+// CalibrationPresetPage::sync_ams_info looks trays up, so an AMS HT (ams id 128+) sorts after the
+// four-slot units and never shares a key with one. ams_id and slot_id are the report's map keys
+// ("0", "1", "128"; "0".."3"). key is -1 when either is not a number.
+struct AmsListEntry
+{
+    int         key{ -1 };
+    std::string tray_name;
+};
+// rack_ams: a slot of a rack AMS (the H3C's AMS 3H): same key, named by its number, "1".."9",
+// as Bambu Studio labels it (DevFilaSystem get_slot_name).
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id, bool rack_ams = false);
 
 struct MappedTray
 {

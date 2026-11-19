@@ -1,0 +1,21 @@
+{
+  "format": "edgeslicer-vault-template",
+  "version": 1,
+  "title": "Synology NAS",
+  "description": "A shared folder on your Synology DiskStation, through DSM's WebDAV Server.",
+  "url_hint": "https://diskstation.local:5006/models/",
+  "spec": {
+    "kind": "webdav",
+    "name": "Synology NAS",
+    "url": "",
+    "auth": "basic",
+    "recursive": true,
+    "max_depth": 6
+  },
+  "hints": [
+    "In DSM, open Package Center and install WebDAV Server, then turn on HTTPS (port 5006). Port 5005 is plain http: EdgeSlicer allows it on your local network only, and warns you first.",
+    "The address is your NAS's name or IP address, the port, and the shared folder: https://diskstation.local:5006/models/ or https://192.168.1.20:5006/models/.",
+    "Sign in with a DSM user that can only read your models folder, not your admin account.",
+    "QuickConnect relay addresses do not work for WebDAV. From outside your home, use your own domain with HTTPS or a VPN such as Tailscale."
+  ]
+}

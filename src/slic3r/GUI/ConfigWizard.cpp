@@ -50,6 +50,7 @@
 #include "MsgDialog.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MainFrame.hpp"
+#include "Plater.hpp"
 #include "WizardNetworking.hpp"
 
 #if defined(__linux__) && defined(__WXGTK3__)
@@ -1278,9 +1279,19 @@ PageFirmware::PageFirmware(ConfigWizard *parent)
 void PageFirmware::apply_custom_config(DynamicPrintConfig &config)
 {
     auto sel = gcode_picker->GetSelection();
-    if (sel >= 0 && (size_t)sel < gcode_opt.enum_labels.size()) {
-        auto *opt = new ConfigOptionEnum<GCodeFlavor>(static_cast<GCodeFlavor>(sel));
-        config.set_key_value("gcode_flavor", opt);
+
+    // Safety check: ensure selection index is within bounds
+    if (sel >= 0 && (size_t) sel < gcode_opt.enum_values.size()) {
+        std::string selected_flavor_str = gcode_opt.enum_values[sel];
+        // Ensure the default value exists to prevent null pointer crashes
+        if (gcode_opt.default_value) {
+            // Clone the fully initialized option (preserves the dictionary map)
+            ConfigOption* opt = gcode_opt.default_value->clone();
+            // Deserialize the string safely
+            opt->deserialize(selected_flavor_str);
+            // Save it to the printer configuration
+            config.set_key_value("gcode_flavor", opt);
+        }
     }
 }
 
@@ -2670,8 +2681,9 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
             BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] a Bambu Lab printer was installed and installed_networking was unset; enabling it";
             app_config->set_bool("installed_networking", true);
 
-            // Nothing on disk to load: offer the download once, after the wizard has closed - the
-            // dialog is modal and cannot run while this one still is.
+            // Nothing on disk to load: say the plug-in is missing, once, after the wizard has closed
+            // - the dialog is modal and cannot run while this one still is. (No download is offered:
+            // EdgeSlicer never fetches Bambu's plug-in.)
             bool have_plugin = false;
             try {
                 namespace fs = boost::filesystem;
@@ -2681,8 +2693,8 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
                               fs::exists(pf / "libbambu_networking.dylib");
             } catch (...) {}
             if (! have_plugin) {
-                BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] no network plug-in in data_dir/plugins; scheduling the download dialog";
-                wxGetApp().CallAfter([] { wxGetApp().ShowDownNetPluginDlg(); });
+                BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] no network plug-in in data_dir/plugins; scheduling the plug-in-missing message";
+                wxGetApp().CallAfter([] { wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ false); });
             }
         }
     }
@@ -2873,6 +2885,9 @@ bool ConfigWizard::run(RunReason reason, StartPage start_page)
 
         app.app_config->set_legacy_datadir(false);
         app.update_mode();
+        // Orca #16365: the printers chosen in the wizard may not take the plates' bed types.
+        if (Plater *plater = app.plater())
+            plater->normalize_bed_types(false);
         // BBS
         //app.obj_manipul()->update_ui_from_settings();
         BOOST_LOG_TRIVIAL(info) << "ConfigWizard applied";

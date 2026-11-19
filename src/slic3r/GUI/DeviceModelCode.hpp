@@ -29,6 +29,39 @@ std::string resolve_model_subseries(const std::string &code, const std::map<std:
 // the subseries table we ship; it must not touch codes where '-' is part of the name ("BL-P001").
 std::string strip_model_revision(const std::string &code);
 
+// The "printer_type" of <printers_dir>/<code>.json, or "" when there is no such definition (or the
+// code could name a path outside the folder).
+std::string read_definition_printer_type(const std::string &printers_dir, const std::string &code);
+
+// A reported model code -> the printer_type of its definition: the code's own file, then a parent
+// that lists it as a sub-series, then the code without its "-V<n>" revision. "" when none applies.
+// This is what DeviceManager::parse_printer_type does against resources/printers.
+std::string resolve_model_code(const std::string &code, const std::string &printers_dir,
+                               const std::map<std::string, std::vector<std::string>> &subseries);
+
+// The serial-number table: the first three characters of a Bambu serial ("20P" for an X2D, "094"
+// for an H2D) -> the model_id of the definition that carries that "sn_prefix". Bambu Studio uses it
+// to identify a printer that reported no usable model code (DevPrinterConfigUtil::
+// get_printer_type_by_dev_id). When two definitions share a prefix the first file by name wins.
+std::map<std::string, std::string> load_model_sn_prefixes(const std::string &printers_dir);
+
+// The model_id whose sn_prefix matches the start of `dev_id`, or "" when none does.
+std::string resolve_model_by_serial(const std::string &dev_id, const std::map<std::string, std::string> &sn_prefixes);
+
+// What a device is: its reported code resolved as above, else its serial number's prefix. "" when
+// neither identifies a definition in this build. Callers keep the raw code in that case so the
+// send dialog can name it (DeviceManager::identify_printer_type).
+std::string identify_device_model(const std::string &code, const std::string &dev_id, const std::string &printers_dir,
+                                  const std::map<std::string, std::vector<std::string>> &subseries,
+                                  const std::map<std::string, std::string>                &sn_prefixes);
+
+// The send dialog's model check: the slicer profile's model id (`profile_model`) against the
+// device's resolved printer_type (`device_model`). Equal ids pass, as does a profile model that the
+// device's definition lists under "compatible_machine". An unidentified device (empty model)
+// never matches a profile that has a model id.
+bool device_matches_profile_model(const std::string &profile_model, const std::string &device_model,
+                                  const std::vector<std::string> &device_compatible_machines);
+
 } } // namespace Slic3r::GUI
 
 #endif // slic3r_GUI_DeviceModelCode_hpp_

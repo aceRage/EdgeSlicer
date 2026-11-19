@@ -1,0 +1,29 @@
+{
+    "type": "filament",
+    "name": "Bambu PC @base H3C",
+    "inherits": "fdm_filament_pc_h3c",
+    "from": "system",
+    "filament_id": "GFC00",
+    "instantiation": "false",
+    "filament_cost": [
+        "36.99"
+    ],
+    "filament_density": [
+        "1.185"
+    ],
+    "filament_flow_ratio": [
+        "0.94"
+    ],
+    "filament_vendor": [
+        "Bambu Lab"
+    ],
+    "fins_extrude_safe_temp": [
+        "117"
+    ],
+    "impact_strength_z": [
+        "9.0"
+    ],
+    "temperature_vitrification": [
+        "90"
+    ]
+}

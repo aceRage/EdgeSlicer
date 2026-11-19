@@ -44,6 +44,7 @@
             "nozzle_max_temperature": 320
         },
         "model_id": "C13",
+        "sn_prefix": "03W",
         "compatible_machine":["BL-P001", "BL-P002", "C11", "C12"],
         "printer_type": "C13",
         "printer_thumbnail_image": "printer_thumbnail",

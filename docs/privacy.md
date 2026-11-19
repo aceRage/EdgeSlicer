@@ -226,4 +226,12 @@ the release refs listed above.
 `EDGESLICER_TEST_CRASH=startup` crashes at the very start instead, before any window opens and
 without the log breadcrumbs. It is useful from a script, for example:
 `EdgeSlicer.exe --datadir <dir> --hub-token 1234abcd` with the variable set. Only testers set
-either value. Without the variable, neither path does anything.
+these values. Without the variable, none of these paths does anything.
+
+`EDGESLICER_TEST_CRASH=workers` also crashes at the start, but in several worker threads at once,
+the way a crash during slicing does.
+
+Test copies (anything run from `C:\Dev\EdgeSlicerTest`, or any build started with
+`EDGESLICER_LOCAL_MINIDUMP=1`) also write their own local dump to `crash\EdgeSlicer_<pid>_<time>.dmp`
+next to `EdgeSlicer.exe`. Nothing uploads these. The folder keeps the newest 10 files. If a dump
+cannot be written, a `.dmp.failed.txt` file with the error code is left in its place.

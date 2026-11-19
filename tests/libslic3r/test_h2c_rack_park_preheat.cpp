@@ -362,6 +362,31 @@ SCENARIO("Header nozzle and volume maps follow the plate's grouping", "[H2CRackP
         CHECK(count_preheat_lines(gcode) == 0);
     }
 
+    GIVEN("the owner's mixed rack (L 0.4, R1-R4 0.4, R5 0.8, R6 0.6), filaments 2 and 3 on the 0.8 and the 0.6")
+    {
+        // Owner report 2026-11-05: the H2C checks a filament's nozzle id against its rack slot, so the 0.8 must be 5 and the
+        // 0.6 6 (Bambu Studio 2.9.x's physical slot ids), not the size-sorted 6 and 5 that made the printer refuse the job.
+        const DynamicPrintConfig cfg = machine_config(H2C, {
+            { "filament_map_mode", "Manual" },
+            { "filament_map", "1,2,2" },
+            { "extruder_rack_nozzle_override", ";0.4,0.4,0.4,0.4,0.8,0.6" },
+            { "filament_rack_nozzle_diameter", "0,0.8,0.6" },
+        });
+        Print print;
+        Model model;
+        const std::string gcode      = slice(print, model, cfg, H2C);
+        const auto        nozzle_map = check_header(print, gcode);
+        CHECK(nozzle_map[0] == 0);
+        CHECK(nozzle_map[1] == 5);
+        CHECK(nozzle_map[2] == 6);
+        auto group = print.get_layered_nozzle_group_result();
+        REQUIRE(group);
+        REQUIRE(group->get_nozzle_from_id(5));
+        CHECK(group->get_nozzle_from_id(5)->diameter == "0.8");
+        REQUIRE(group->get_nozzle_from_id(6));
+        CHECK(group->get_nozzle_from_id(6)->diameter == "0.6");
+    }
+
     GIVEN("an H2D plate")
     {
         const DynamicPrintConfig cfg = machine_config(H2D, { { "filament_nozzle_map", "5,5,5" } });

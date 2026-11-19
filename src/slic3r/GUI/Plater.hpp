@@ -71,6 +71,7 @@ namespace UndoRedo {
 namespace GUI {
 
 class MainFrame;
+struct FilamentData;
 class ConfigOptionsGroup;
 class ObjectSettings;
 class ObjectLayers;
@@ -137,6 +138,9 @@ public:
     Sidebar &operator=(Sidebar &&) = delete;
     Sidebar &operator=(const Sidebar &) = delete;
     ~Sidebar();
+    // Project strip P4: the window's ParamsPanel moves to the sidebar of the project shown.
+    void detach_params_panel();
+    void attach_params_panel();
 
     void create_printer_preset();
     void init_filament_combo(PlaterPresetComboBox **combo, const int filament_idx);
@@ -155,6 +159,70 @@ public:
     void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
     // BBS. Add on_filaments_change() method.
     void on_filaments_change(size_t num_filaments);
+    // Per-nozzle process P2: put 0-based filament `filament` on 1-based tool `tool` (0 = its own nozzle), and the
+    // summary under the filament list.
+    void set_filament_nozzle(size_t filament, int tool);
+    void update_filament_nozzle_summary();
+    // Per-nozzle process P5: pin 0-based filament `filament` to rack nozzle size `diameter` (0 = its extruder's nozzle).
+    void set_filament_rack_pin(size_t filament, double diameter);
+    // Per-nozzle process P9: pin 0-based filament `filament` to rack slot `slot` (1-based, 0 = any slot of its size).
+    void set_filament_rack_slot(size_t filament, int slot);
+    // Per-nozzle process P9: the sidebar's "Edit / Add rack slots" for 0-based extruder `extruder` (the project's rack sizes).
+    void edit_rack_nozzles(size_t extruder);
+    // Per-nozzle process P9: the toolhead button beside each filament (toolchangers): its label and visibility, and a click.
+    void update_filament_tool_buttons();
+    wxWindow *make_filament_tool_button(int filament_idx);
+    // Per-nozzle process P9: Left / Right per filament on Bambu's two-extruder machines (the plate's manual filament map), the
+    // "Print on" menu (Auto / Left / Right and the rack's nozzles by size) and pinning a rack size.
+    bool filament_sides_supported() const;
+    // A single-extruder machine with a nozzle rack (Bambu H3C: nine slots): the filament badge shows Auto or the pinned slot, and
+    // its list offers Auto, the rack's sizes and each slot (the same pins as the filament menu's "Rack nozzle size" / "Rack slot").
+    bool filament_single_rack_supported() const;
+    void append_filament_rack_menu(wxMenu *menu, size_t filament);
+    int  filament_side(size_t filament) const; // 0 = auto, 1 = left, 2 = right
+    void set_filament_side(size_t filament, int side);
+    void set_filament_rack_size(size_t filament, size_t extruder, double diameter);
+    void append_filament_side_menu(wxMenu *menu, size_t filament);
+    // One choice of the side badge / "Print on" list: a side (0 auto, 1 left, 2 right) and, on a side whose rack holds several
+    // sizes, a size (0 = any), with the list label, the badge text and the size's rack slots.
+    struct SideChoice
+    {
+        int              side{ 0 };
+        double           size{ 0. };
+        wxString         label;
+        wxString         badge;
+        std::vector<int> slots;
+    };
+    std::vector<SideChoice> filament_side_choices() const;
+    int                     filament_side_choice(size_t filament) const; // index into filament_side_choices()
+    void                    apply_filament_side_choice(size_t filament, const SideChoice &choice);
+    void cycle_filament_tool(size_t filament);
+    // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
+    // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).
+    void set_tool_nozzle_size(int tool, double diameter);
+    // After the project's nozzle sizes changed: remembered for the printer model, the sidebar, the filament lists, the
+    // Tabs and the slice follow.
+    void on_nozzle_sizes_changed();
+    // After the nozzles were edited (strip picker, Extruder settings, sync from the printer): when every extruder now carries
+    // one size and the selected system printer is another nozzle variant of the same model, select the variant of that size,
+    // so the Plate's process list (and the filament lists) follow the nozzles. The project's rack is kept. Not for a printer
+    // preset with unsaved changes or a user printer preset. Returns whether the printer changed.
+    bool follow_nozzle_sizes_with_printer_variant();
+    // "Sync nozzle sizes from printer" for a Bambu printer: the sizes the selected printer reports become the project's.
+    void sync_nozzle_sizes_from_bambu_printer();
+    // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md section 4): its tiles (sizes, used state, filament dots), a
+    // tile's menu and edit (the same project keys as P7 / P9), the Extruder Settings dialog, and the strip's sync.
+    void refresh_nozzle_strip();
+    // Refresh once after the current event (several changes in a row cost one refresh).
+    void request_nozzle_strip_refresh();
+    void on_nozzle_tile_clicked(int index);
+    void edit_nozzle_tile(int index, double diameter, int volume_type);
+    void show_extruder_settings_dialog();
+    void sync_nozzles_from_strip();
+    void relayout_printer_section();
+    // The Process section (ParamsPanel) and the scrolled sidebar after a part of the Process tab's header was shown, hidden or
+    // changed height (the per-nozzle process chips), so the preset combo and page tabs move at once.
+    void relayout_params_section();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);
@@ -172,6 +240,11 @@ public:
     void add_custom_filament(wxColour new_col);
     void scroll_filament_area_to_bottom();
     void edit_filament();
+    // The filament slot the Filament tab edits (0-based), -1 when none was chosen yet.
+    int  editing_filament_index() const;
+    // RemoteAccess (phone filament settings): which slot the Filament tab edits, as edit_filament
+    // sets it from the slot menu; -1 while the tab switches presets, so no slot follows it.
+    void set_editing_filament(int index);
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
@@ -181,9 +254,20 @@ public:
     // BBS
     void on_bed_type_change(BedType bed_type);
     void load_ams_list(std::string const & device, MachineObject* obj);
-    std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
+    // Static: reads only the printer, so the unit tests can build it with no window.
+    static std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
+    // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
+    // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
+    // the "<printer> as of <time>" text), 0 = the user declined, -1 = there is none.
+    int load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of);
     void show_sync_filament_dialog();
+    // Elegoo Centauri Carbon 1: the CANVAS trays into the same sync dialog (ElegooCanvasUI.hpp).
+    void show_canvas_sync_dialog();
+    // Creality K-series CFS: boxsInfo slots into the same sync dialog (MixedFilamentManager).
+    void show_cfs_sync_dialog();
+    // The colour-matching dialog and the project update both syncs share.
+    void apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic = false);
     // Point the "Filaments" row's sync button at the sync that fits the current
     // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.
     void update_filament_sync_button();
@@ -192,6 +276,7 @@ public:
     void update_dynamic_filament_list();
 
     void update_nozzle_settings(bool switch_machine = false);
+    bool m_nozzle_strip_refresh_pending{ false };
     // Sets the per-nozzle Flow combos from the project nozzle_volume_type (after a device auto-match).
     void sync_nozzle_flow_combos();
 
@@ -319,6 +404,8 @@ public:
     bool is_presets_dirty() const;
     void set_plater_dirty(bool is_dirty);
     void update_project_dirty_from_presets();
+    // Orca #15916: reset per-plate bed type overrides the selected printer cannot use.
+    void normalize_bed_types(bool multi_bed_changed);
     int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
@@ -334,10 +421,61 @@ public:
     const SLAPrint& sla_print() const;
     SLAPrint& sla_print();
 
-    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString());
+    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString(), bool reload_presets = true);
     // BBS: save & backup
     void load_project(wxString const & filename = "", wxString const & originfile = "-");
+
+    // ---- Project strip (tests/design_multi_project_sidebar.md). P4: one live Plater per open project; MainFrame shows one,
+    // wxGetApp().plater() is the one shown. ProjectStrip drives these. ----
+    // True when this is the project on screen (wxGetApp().plater()).
+    bool is_active_project() const;
+    // MainFrame::activate_plater(): this project goes out of sight / comes back. Hidden, it keeps its model, undo history,
+    // slice and preview; a slice running on it goes on, and what would touch the window or the app-global presets (the
+    // slice / export completion handling, a scheduled re-apply of the presets) waits until it is shown again.
+    void on_project_hidden();
+    // Curved tops P3: Developer mode changed. Every plate's slice result is invalid (a curved block planned with
+    // or without the developer overrides must be planned again before it can be exported or sent); a hidden
+    // project re-applies when it is shown, the shown one now.
+    void invalidate_slices_for_developer_mode();
+    void on_project_shown();
+    // Why the active project cannot be switched away from right now (a job holds the plate, a print or send is being
+    // prepared, a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool
+    // first.
+    wxString project_swap_blocker();
+    // Stops a running slice before the project is closed. True when one was running.
+    bool     cancel_slicing_for_project_close();
+    // Session restore: writes the project as File > Save writes it (project_park_save_strategy), quietly, without changing
+    // its file name. False with the reason in `error`.
+    bool save_project_snapshot(const std::string& snapshot_3mf, std::string& error);
+    // Session restore: loads a snapshot into this (fresh, shown) Plater without asking anything and gives it back its file
+    // name or Untitled name and its unsaved flag. False when nothing could be loaded.
+    bool load_project_snapshot(const std::string& snapshot_3mf, const wxString& origin_path, const wxString& name, bool dirty, int plate);
+    // Opens a project file (or a model file as a new project) in this fresh Plater without the save prompt. False when
+    // nothing was loaded.
+    bool load_project_unprompted(const wxString& filename);
+    // True while load_project_snapshot() loads: load_files() stays quiet (no warnings, no untrusted-settings strip of the
+    // project's own presets, no "keep my printer" switch).
+    bool is_project_swap_loading() const { return m_project_swap_loading; }
+    // Set by the strip for a whole switch or strip open. Opens arriving meanwhile (hub, Layerling or Vault "send to plate",
+    // another instance) wait until it is over, then go to the project shown.
+    static void set_project_switch_busy(bool busy) { s_project_switch_busy = busy; }
+    static bool is_project_switch_busy() { return s_project_switch_busy; }
+    // P2 strip badges: plates holding objects, and those of them with valid G-code.
+    void count_sliced_plates(int& plates_with_objects, int& plates_sliced);
+    // P2 live strip thumbnail: the current plate rendered as the 3MF thumbnail is (false when there is no canvas).
+    bool render_current_plate_thumbnail(ThumbnailData& out, unsigned int size);
+    // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo, a new or loaded project).
+    size_t project_change_marker() const;
+    // The current plate holds an object (an empty plate's thumbnail renders nothing).
+    bool current_plate_has_objects() const;
+    // The slice thread is working (not finished and waiting for its result to be picked up): the strip's spinner for a
+    // hidden project.
+    bool is_slicing_in_background() const;
+    // A hidden project's slice finished and its result waits for the project to be shown (the strip's tick for it).
+    bool has_hidden_slice_result() const;
     int save_project(bool saveAs = false);
+    void set_opened_from_zip(bool opened);
+    bool opened_from_zip() const;
     //BBS download project by project id
     void import_model_id(wxString download_info);
     void download_project(const wxString& project_id);
@@ -367,16 +505,21 @@ public:
     void calib_temp(const Calib_Params& params);
     void calib_max_vol_speed(const Calib_Params& params);
     void calib_retraction(const Calib_Params& params);
+    void calib_temp_retraction(const Calib_Params& params);
     void calib_VFA(const Calib_Params& params);
     void calib_input_shaping_freq(const Calib_Params& params);
     void calib_input_shaping_damp(const Calib_Params& params);
-    void calib_junction_deviation(const Calib_Params& params);
+    void Calib_Cornering(const Calib_Params& params);
+    void calib_ironing_flow(const Calib_Params& params);
 
     BuildVolume_Type get_build_volume_type() const;
 
     //BBS: add only gcode mode
     bool only_gcode_mode() { return m_only_gcode; }
     void set_only_gcode(bool only_gcode) { m_only_gcode = only_gcode; }
+    // The previewed G-code's own settings were loaded into the presets, as a .gcode.3mf's are: the bed already is the
+    // one it was sliced for, and the sidebar shows them.
+    bool gcode_settings_loaded() const { return m_only_gcode && m_gcode_settings_loaded; }
 
     //BBS: add only gcode mode
     bool using_exported_file() { return m_exported_file; }
@@ -403,6 +546,12 @@ public:
     // snapmaker-orca:// URL, in which case from_url is true: the user has already
     // said which project to open, so do not ask them again.
     bool load_files(const wxArrayString& filenames, bool from_url = false);
+    // The answer to "load these objects as one object with multiple parts?" for the model loads that
+    // follow, instead of asking: 1 = always one object with parts (whenever a file holds several
+    // objects), 0 = always separate objects, -1 = ask as usual (the default). Send to Plate of the
+    // Layerling tab sets it around its own load and puts it back to -1; nothing else uses it.
+    void set_multipart_answer(int answer);
+    int  multipart_answer() const;
 
     const wxString& get_last_loaded_gcode() const { return m_last_loaded_gcode; }
 
@@ -452,6 +601,8 @@ public:
     bool is_preview_shown() const;
     bool is_preview_loaded() const;
     bool is_view3D_shown() const;
+    // The Showcase tab's view is the current panel.
+    bool is_showcase_shown() const;
 
     bool are_view3D_labels_shown() const;
     void show_view3D_labels(bool show);
@@ -479,7 +630,7 @@ public:
     void deselect_all();
     void exit_gizmo();
     void remove(size_t obj_idx);
-    void reset(bool apply_presets_change = false);
+    void reset(bool apply_presets_change = false, bool reload_presets = true);
     void reset_with_confirm();
     //BBS: return int for various result
     int close_with_confirm(std::function<bool(bool yes_or_no)> second_check = nullptr); // BBS close project
@@ -515,10 +666,16 @@ public:
     // File > Export > Export & Open in Bambu Studio: same export as export_bambu_3mf(), then
     // launch the installed Bambu Studio with the exported file (Utils/BambuStudioLauncher.hpp).
     void export_and_open_in_bambu_studio();
+    // Send to Bambu Connect (Bambu printers): export the current plate, or all plates, as .gcode.3mf
+    // into <temp>/EdgeSlicer/bambu-connect and open it in the user's own Bambu Connect app through
+    // its bambu-connect:// URL scheme (Utils/BambuConnect.hpp). Connect does the printing.
+    void send_to_bambu_connect(bool all_plates);
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
     void export_stl_part();
+    // Outline of the selected SVG / text part (the 2D shape it is embossed from) as DXF, in mm
+    void export_outline_dxf();
     // Export as a STEP file of B-rep solids (Format/STEPExport): the selected objects, or with no
     // object selected every object on the current plate (placed relative to that plate).
     void export_step(bool selection_only = false);
@@ -543,7 +700,6 @@ public:
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
     bool reslice();
-    void record_slice_preset(std::string action);
     void reslice_SLA_supports(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_hollowing(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &object, bool postpone_error_messages = false);
@@ -557,6 +713,12 @@ public:
     void schedule_background_process(bool schedule = true);
     bool is_background_process_update_scheduled() const;
     void suppress_background_process(const bool stop_background_process) ;
+    // Called by MainFrame::shutdown (app close, and the old frame of a language / theme rebuild):
+    // from then on the background-process updates and the slice-button sync below are no-ops, so
+    // a timer that still fires while the window tree is torn down cannot touch a dead MainFrame
+    // (EDGESLICER-A).
+    void begin_shutdown();
+    bool is_shutting_down() const;
     /* -1: send current gcode if not specified
      * -2: send all gcode to target machine */
     int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
@@ -603,6 +765,10 @@ public:
     void on_bed_type_change(BedType bed_type);
     bool update_filament_colors_in_full_config();
     void on_config_change(const DynamicPrintConfig &config);
+    // The prime tower was turned with the Rotate tool, or an undo/redo restored its angle: write
+    // wipe_tower_rotation_angle (degrees, any turn - stored in (-180, 180]) into the edited print
+    // preset, refresh the Process tab field and propagate the change like a field edit.
+    void set_wipe_tower_rotation_angle(double angle_deg);
     /// @brief Check whether high-temperature and low-temperature filaments are mixed on the current plate.
     /// @return True if compatible; false if high/low temperature materials are mixed.
     bool check_filament_temp_mixing();
@@ -698,6 +864,9 @@ public:
     /// @brief Show confirmation dialog for allowed high/low temperature mixing before slice.
     /// @return True if slicing can proceed; false if blocked or user cancelled.
     bool confirm_filament_temp_mixing_before_slice();
+    // EdgeSlicer, curved tops on any printer (design 3.4): once per printer preset and head values, the user accepts
+    // head values no curved print has checked. False = the user cancelled the slice.
+    bool confirm_curved_tops_head_before_slice();
     /// @brief Confirm warning-level high/low temperature material mixing before slicing all plates.
     /// @return True if slice-all can continue; otherwise false.
     bool confirm_filament_temp_mixing_before_slice_all();
@@ -718,6 +887,8 @@ public:
     std::vector<int> get_global_filament_map() const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
+    // Orca #11419: no objects on any plate.
+    bool is_empty_project() const;
     wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) const;
     void set_project_filename(const wxString& filename);
     void update_print_error_info(int code, std::string msg, std::string extra);
@@ -734,6 +905,8 @@ public:
     GLCanvas3D* get_current_canvas3D(bool exclude_preview = false);
     GLCanvas3D* get_view3D_canvas3D();
     GLCanvas3D* get_preview_canvas3D();
+    // Showcase S5: the Showcase view (the --showcase-render job drives it); null before it exists.
+    class ShowcaseView* get_showcase_view();
     // Ultra: make OpenGL usable on both canvases without any window ever being shown
     // (hub-managed instances). False = OpenGL unusable; callers must fail, not draw.
     bool        ensure_gl_ready();
@@ -748,6 +921,7 @@ public:
     void show_uv_editor(bool show);
 
     void arrange();
+    void arrange_loose(); // EdgeSlicer: place only loose instances (remote hub)
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions
@@ -798,6 +972,8 @@ public:
     bool can_add_model() const;
     bool can_add_plate() const;
     bool can_delete_plate() const;
+    // Undoable rename; use for user edits instead of PartPlate::set_plate_name().
+    void rename_plate(int plate_index, const std::string& name);
     bool can_increase_instances() const;
     bool can_decrease_instances() const;
     bool can_set_instance_to_object() const;
@@ -862,6 +1038,9 @@ public:
     void set_bed_position(Vec2d& pos);
     //BBS: is the background process slicing currently
     bool is_background_process_slicing() const;
+    // What the slicing notification's Cancel does: stop the background process (a slice-all run
+    // ends with it). False when the background process was idle (nothing to stop at this moment).
+    bool cancel_slicing();
     //BBS: update slicing context
     void update_slicing_context_to_current_partplate();
     //BBS: show object info
@@ -1024,6 +1203,9 @@ public:
     void enable_wireframe(bool status);
     bool is_wireframe_enabled() const;
 
+    void toggle_show_xray();
+    bool is_show_xray() const;
+
 	// Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.
 	bool PopupMenu(wxMenu *menu, const wxPoint& pos = wxDefaultPosition);
     bool PopupMenu(wxMenu *menu, int x, int y) { return this->PopupMenu(menu, wxPoint(x, y)); }
@@ -1075,9 +1257,17 @@ private:
     wxString m_last_loaded_gcode;
     //BBS: add only gcode mode
     bool m_only_gcode { false };
+    // Set by load_gcode() for the file it previews, so it means nothing once m_only_gcode is cleared.
+    bool m_gcode_settings_loaded { false };
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
+    bool m_project_swap_loading { false };
+    static inline bool s_project_switch_busy { false };
+    // Project strip: the next load_project() skips close_with_confirm (it loads into a fresh Plater); the strip's own loads
+    // run while s_project_switch_busy is set and must not wait for themselves.
+    bool m_skip_close_confirm { false };
+    int  m_project_strip_loads { 0 };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };
 

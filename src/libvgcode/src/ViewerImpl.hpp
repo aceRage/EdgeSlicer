@@ -95,6 +95,20 @@ public:
     // caller decides which of the two it varies with the realistic view setting.
     //
     void set_tone(float exposure, float saturation);
+    // EDGE (Showcase S5): see Viewer::set_smooth_look().
+    void set_smooth_look(bool enabled, const std::array<float, 128>& looks) { m_smooth_look = enabled; m_looks = looks; }
+    bool is_smooth_look() const { return m_smooth_look; }
+    // EDGE (Showcase realism 1b): see Viewer::set_fragment_prelude().
+    bool set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                              std::string* error);
+    unsigned int get_fragment_prelude_program() const { return m_prelude_shader_id; }
+    void set_use_fragment_prelude(bool use) { m_use_prelude = use; }
+    // EDGE (multi-colour filaments, P3): see Viewer::set_base_color_prelude().
+    bool set_base_color_prelude(const std::string& prelude, std::string* error);
+    unsigned int get_base_color_program() const { return m_base_color_prelude.empty() ? 0 : m_segments_shader_id; }
+    void set_extruded_volume_enabled(bool enabled);
+    void set_multicolour_preview(bool enabled) { m_multicolour_preview = enabled; }
+    bool is_multicolour_preview_active() const { return m_multicolour_preview && !m_base_color_prelude.empty() && m_roles_tex_id != 0 && !m_smooth_look; }
     // ORCA: section view, see Viewer::set_clipping_plane()
     void set_clipping_plane(const std::array<float, 4>& plane) { m_clipping_plane = plane; }
     void set_light_top_dir(const Vec3& direction) { m_light_top_dir = direction; }
@@ -388,13 +402,6 @@ private:
     };
     SegmentsUniforms m_uni_segments;
     SegmentsUniforms m_uni_segments_caster;
-    int m_uni_segments_shadow_map_id{ -1 };
-    int m_uni_segments_shadow_light_vp_id{ -1 };
-    int m_uni_segments_shadow_intensity_id{ -1 };
-    int m_uni_segments_shadow_map_texel_id{ -1 };
-    int m_uni_segments_exposure_id{ -1 };
-    int m_uni_segments_saturation_id{ -1 };
-    int m_uni_segments_light_top_dir_id{ -1 };
     // ORCA: the layers greyed or dimmed around the one the sliders show, in the segments and options shaders.
     struct LayerColorsUniforms
     {
@@ -405,7 +412,53 @@ private:
 
         void init(unsigned int shader_id);
     };
-    LayerColorsUniforms m_uni_segments_layer_colors;
+    // The shaded program's own uniforms (not the shadow caster's). EDGE (Showcase realism 1b): one
+    // set for the built-in segments program, one for the host's prelude program.
+    struct ShadedSegmentsUniforms
+    {
+        // ORCA: realistic view
+        int shadow_map{ -1 };
+        int shadow_light_vp{ -1 };
+        int shadow_intensity{ -1 };
+        int shadow_map_texel{ -1 };
+        int exposure{ -1 };
+        int saturation{ -1 };
+        int light_top_dir{ -1 };
+        // EDGE (Showcase S5): the smooth bead look
+        int smooth_mode{ -1 };
+        int pm_mode{ -1 };   // EDGE (multi-colour P5)
+        int role_tex{ -1 };
+        int look_a{ -1 };
+        int look_b{ -1 };
+        // EDGE (multi-colour P3): the per-vertex extruded volume
+        int volume_tex{ -1 };
+        int use_volume{ -1 };
+        LayerColorsUniforms layer_colors;
+
+        void init(unsigned int shader_id);
+    };
+    ShadedSegmentsUniforms m_uni_segments_shaded;
+    // EDGE (Showcase realism 1b): see Viewer::set_fragment_prelude().
+    unsigned int m_prelude_shader_id{ 0 };
+    SegmentsUniforms m_uni_prelude;
+    ShadedSegmentsUniforms m_uni_prelude_shaded;
+    bool m_use_prelude{ false };
+    // EDGE (multi-colour P3): what the fragment prelude's program was last asked for, so that
+    // set_base_color_prelude() can rebuild it with the base-colour prelude in it as well.
+    std::string m_fragment_prelude;
+    std::vector<std::pair<std::string, int>> m_fragment_prelude_units;
+    // EDGE (multi-colour P3): the base-colour prelude both programs are built with ("" = none), and
+    // whether the extruded volumes are wanted.
+    std::string m_base_color_prelude;
+    bool m_use_volume{ false };
+    // EDGE (multi-colour P5): Preview draws coextruded colours (needs the base colour prelude).
+    bool m_multicolour_preview{ false };
+    // EDGE (multi-colour P3): the built-in segments program's uniforms and sampler units, after it
+    // is (re)built.
+    void init_segments_uniforms();
+    // EDGE (multi-colour P3): the segments fragment shader with the base-colour prelude (if any) and,
+    // for the fragment prelude's program, EXTERNAL_LIGHTING and its prelude.
+    std::string segments_fragment_text(const std::string* lighting_prelude) const;
     //
     // Caches for OpenGL uniforms id for options shader
     //
@@ -536,6 +589,16 @@ private:
     //
     unsigned int m_enabled_options_buf_id{ 0 };
     unsigned int m_enabled_options_tex_id{ 0 };
+    // EDGE (Showcase S5): per vertex, its extrusion role | min(extruder, 15) << 8 (R16UI), for the
+    // smooth bead look; drawn from a texture unit of its own.
+    unsigned int m_roles_buf_id{ 0 };
+    unsigned int m_roles_tex_id{ 0 };
+    // EDGE (multi-colour P3): per vertex, the volume its extruder has laid so far (R32F, mm3), built
+    // only on request (set_extruded_volume_enabled); the one-float stand-in otherwise.
+    unsigned int m_volumes_buf_id{ 0 };
+    unsigned int m_volumes_tex_id{ 0 };
+    unsigned int m_volume_fallback_buf_id{ 0 };
+    unsigned int m_volume_fallback_tex_id{ 0 };
     size_t m_enabled_options_count{ 0 };
     //
     // Caches for size of data sent to gpu, in bytes
@@ -571,6 +634,9 @@ private:
     //
     float m_exposure{ 1.0f };
     float m_saturation{ 1.0f };
+    // EDGE (Showcase S5)
+    bool m_smooth_look{ false };
+    std::array<float, 128> m_looks{};
     // ORCA: the light the segments shader shades with, in eye space.
     Vec3 m_light_top_dir{ -0.4574957f, 0.4574957f, 0.7624929f };
 

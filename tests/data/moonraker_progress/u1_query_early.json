@@ -1,0 +1,26 @@
+{
+  "result": {
+    "eventtime": 81234.567,
+    "status": {
+      "print_stats": {
+        "filename": "plate_1.gcode",
+        "total_duration": 1402.3,
+        "print_duration": 1335.7,
+        "filament_used": 812.4,
+        "state": "printing",
+        "message": "",
+        "info": { "total_layer": 322, "current_layer": 11 }
+      },
+      "display_status": { "progress": 0.08, "message": null },
+      "virtual_sdcard": {
+        "file_path": "/home/pi/printer_data/gcodes/plate_1.gcode",
+        "progress": 0.08,
+        "is_active": true,
+        "file_position": 510500,
+        "file_size": 6380500
+      },
+      "heater_bed": { "temperature": 60.1, "target": 60.0 },
+      "extruder": { "temperature": 219.8, "target": 220.0 }
+    }
+  }
+}

@@ -485,9 +485,9 @@ Five things. Every one follows a shape the hub already has, which is the point.
 #### N1. `GET /r/<token>/pair` - what the app is talking to
 
 ```json
-{ "name": "ACE-PC", "version": "2.3.1", "hub": "ultra1/1",
+{ "name": "WORKSHOP-PC", "version": "2.3.1", "hub": "ultra1/1",
   "urls": { "lan": "http://10.0.0.12:13640/r/<token>/",
-            "remote": "https://ace-pc.tail1234.ts.net/r/<token>/" },
+            "remote": "https://workshop-pc.tail1234.ts.net/r/<token>/" },
   "push": { "webpush": true, "apns": true, "fcm": false, "unified": true,
             "vapid": "<base64url 65-byte point>" },
   "features": ["events", "control", "send", "archive"] }
@@ -995,12 +995,12 @@ suggests; against the existing `deps/build` tree, where OpenSSL is already stamp
     "apns": { "enabled": true,
               "bundle": "dev.acerage.ultra1",
               "key_id": "ABC123DEFG", "team_id": "DEF123GHIJ",
-              "key_path": "C:/Users/ace/keys/AuthKey_ABC123DEFG.p8",
+              "key_path": "C:/Users/<you>/keys/AuthKey_ABC123DEFG.p8",
               "key_pem": "",
               "env": "production" },
     "fcm":  { "enabled": true,
               "project_id": "ultra1-1a2b3",
-              "service_account_path": "C:/Users/ace/keys/ultra1-fcm.json",
+              "service_account_path": "C:/Users/<you>/keys/ultra1-fcm.json",
               "service_account_json": "" },
     "devices": [
       { "id": "d_7f3a...", "platform": "apns", "env": "production",

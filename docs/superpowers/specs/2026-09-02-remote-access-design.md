@@ -116,7 +116,7 @@ WebRTC video was built and gated on 2026-09-02 (branch `feat/webrtc-video`) and 
 - Keep the LAN path (`http://<lan-ip>:13640/`) working unchanged as the default; remote is opt-in.
 - Prefer inheriting identity from a transport that provides it (Tailscale) over building more of our own; but ship the hub's own password + TOTP anyway, because every no-app path needs it.
 - Hidden-mode instances (the parallel plan) and remote access compose: a phone-initiated open still spawns a hidden instance; nothing here changes that.
-- Test files, batch files and projects for these experiments live at `C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\` (MAX_PATH).
+- Test files, batch files and projects for these experiments live at `%TEMP%\snorca_hubtest\` (MAX_PATH).
 
 ---
 

@@ -89,41 +89,41 @@ void wxMediaCtrl2::Load(wxURI url)
             key2.QueryRawValue("Source Filter", clsid);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": clsid %1% path %2%") % clsid % path;
 
-        std::string             data_dir_str = Slic3r::data_dir();
-        boost::filesystem::path data_dir_path(data_dir_str);
-        auto                    dll_path = data_dir_path / "plugins" / "BambuSource.dll";
-        if (path.empty() || !wxFile::Exists(path) || clsid != CLSID_BAMBU_SOURCE) {
-            // Ultra (live view): what sits at <plugins>\BambuSource.dll may be the ~9.7 KB
-            // placeholder EdgeSlicer ships so the agent's LoadLibrary probe succeeds. It exports no
-            // DllRegisterServer, so offering to regsvr32 it - the stock behaviour - can only end in
-            // "the entry-point DllRegisterServer was not found" plus two pointless UAC prompts.
-            // Offer Bambu's real camera component instead.
-            if (Slic3r::GUI::is_ultranet_bambusource_stub(dll_path)) {
-                BOOST_LOG_TRIVIAL(info) << "[camera component] plug-ins BambuSource is our stub; offering the real component";
-                CallAfter([this] {
-                    if (Slic3r::GUI::wxGetApp().offer_bambu_camera_component(this)) {
-                        // Installed and registered: let the user hit Play again on a working filter.
-                        wxMediaEvent event(wxEVT_MEDIA_STATECHANGED);
-                        event.SetId(GetId());
-                        event.SetEventObject(this);
-                        wxPostEvent(this, event);
-                    }
-                });
-            } else if (boost::filesystem::exists(dll_path)) {
-                CallAfter([] {
-                    int res = wxMessageBox(_L("BambuSource has not correctly been registered for media playing! Press Yes to re-register it. You will be promoted twice"), _L("Error"), wxYES_NO);
-                    if (res == wxYES)
-                        Slic3r::GUI::wxGetApp().register_bambu_source_filter();
-                    return true;
-                });
-            } else {
-                CallAfter([this] {
-                    // No BambuSource at all. On a fresh EdgeSlicer install this is the same story as
-                    // the stub - the component simply is not part of our network plug-in - so make
-                    // the same offer rather than telling the user to reinstall BambuStudio.
-                    Slic3r::GUI::wxGetApp().offer_bambu_camera_component(this);
-                });
+        // Ultra (live view): the camera module lives in <data_dir>\cameratools - shipped with the app
+        // (CAMERA_BIN_DIR) and seeded there at start-up, or fetched as the camera component.
+        // <data_dir>\plugins\BambuSource.dll is UltraNet's storage module, never the filter.
+        const auto ours = Slic3r::GUI::camera_module_dir(boost::filesystem::path(Slic3r::data_dir())) / "BambuSource.dll";
+        const bool registered_real = !path.empty() && wxFile::Exists(path) &&
+                                     Slic3r::GUI::exports_dll_register_server(boost::filesystem::path(path.ToStdWstring()));
+        const auto decision = Slic3r::GUI::filter_registration_decision(clsid == CLSID_BAMBU_SOURCE, registered_real,
+                                                                        Slic3r::GUI::exports_dll_register_server(ours));
+        bool usable = decision == Slic3r::GUI::FilterRegistration::UseRegistered;
+        if (decision == Slic3r::GUI::FilterRegistration::RegisterOurs) {
+            // Nothing usable registered (none at all, a dangling path, or a path that now holds
+            // UltraNet's storage module): register ours for this user, silently - no UAC.
+            BOOST_LOG_TRIVIAL(info) << "[camera component] registered filter unusable (clsid " << clsid << ", path " << path
+                                    << "); registering " << ours.string();
+            usable = Slic3r::GUI::wxGetApp().register_bambu_source_filter();
+            if (usable) {
+                path  = wxString(ours.wstring());
+                clsid = CLSID_BAMBU_SOURCE;
             }
+        }
+        if (!usable) {
+            // This build carries no camera files and nothing usable is registered: offer Bambu's
+            // camera component rather than the stock "re-register it" prompt, which could only ever
+            // run regsvr32 on a DLL with no DllRegisterServer.
+            BOOST_LOG_TRIVIAL(info) << "[camera component] no usable BambuSource filter (clsid " << clsid << ", path " << path
+                                    << "); offering the component";
+            if (decision == Slic3r::GUI::FilterRegistration::OfferComponent) CallAfter([this] {
+                if (Slic3r::GUI::wxGetApp().offer_bambu_camera_component(this)) {
+                    // Installed and registered: let the user hit Play again on a working filter.
+                    wxMediaEvent event(wxEVT_MEDIA_STATECHANGED);
+                    event.SetId(GetId());
+                    event.SetEventObject(this);
+                    wxPostEvent(this, event);
+                }
+            });
             m_error = clsid != CLSID_BAMBU_SOURCE ? 101 : path.empty() ? 102 : 103;
             wxMediaEvent event(wxEVT_MEDIA_STATECHANGED);
             event.SetId(GetId());
@@ -131,12 +131,8 @@ void wxMediaCtrl2::Load(wxURI url)
             wxPostEvent(this, event);
             return;
         }
-        if (path != dll_path) {
-            // Ultra: the registered BambuSource DirectShow filter comes from another install
-            // (e.g. OrcaSlicer/BambuStudio) rather than our bundled stub, but video plays fine
-            // through it. Suppress the confusing "different install" warning nag; do NOT
-            // regsvr32 our stub (it has no DllRegisterServer, so it can only fail).
-        }
+        // A working filter registered by another install (OrcaSlicer, Bambu Studio) is used as it is
+        // and left registered, so the apps do not fight over HKCU; no "different install" nag.
         wxRegKey keyWmp(wxRegKey::HKCU, "SOFTWARE\\Microsoft\\MediaPlayer\\Player\\Extensions\\.");
         keyWmp.Create();
         long permissions = 0;

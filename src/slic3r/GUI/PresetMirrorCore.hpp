@@ -210,6 +210,77 @@ struct UidCandidate {
 // Returns the index into `cands`, or -1 when there is nothing usable.
 int choose_uid(const std::vector<UidCandidate>& cands, const std::string& logged_in_uid);
 
+// ---- change detection (printer-switch fast path) -----------------------------------------------
+//
+// Every printer switch used to run the whole mirror: read every source preset, .info and base/
+// file, and every copy of them, on the UI thread (~0.4 s on a ~660-file Bambu Studio folder),
+// although it nearly always found nothing to do. The plan is a function of the source files,
+// the manifest and the dest files, and a dest-only change (the user deleting or editing a copy
+// here) never leads to a copy, so when neither the source tree nor the manifest changed since a
+// clean run, a new run would copy nothing. The fingerprint below detects that from a directory
+// listing alone (name, size and mtime; no file is opened).
+
+// One line per regular file under <dir>/{filament,process,machine}/ and their base/ subfolders:
+// "<rel>|<size>|<mtime>", sorted. Empty when `src_uid_dir` is empty, missing or could not be
+// listed completely; callers treat an empty fingerprint as "changed" (run the mirror).
+std::string source_tree_fingerprint(const std::string& src_uid_dir);
+
+// "<size>|<mtime>" of one file, or "-" when it does not exist.
+std::string file_stamp(const std::string& path);
+
+// The part of a change fingerprint (see mirror_change_fingerprint) that describes the source:
+// everything before its "manifest=" line. What follows (the manifest stamp and the listing of the
+// mirror's own output folder) is rewritten by every run, so a run is judged by whether the source
+// moved while it ran, and remembered by the whole fingerprint it left behind.
+std::string fingerprint_source_part(const std::string& fingerprint);
+
+// ---- the gate across restarts (startup fast path) ----------------------------------------------
+//
+// Startup ran the whole mirror on every start (9.1 s in the owner's profiled start of 2026-10-24,
+// with a cold file cache), because the skip gate below lived only in memory. The fingerprint of
+// the last clean run is now also kept on disk, as a record of the app version, a format number and
+// a digest of the fingerprint, and startup skips the run when the fingerprint it takes now has the
+// same digest under the same app version. The fingerprint covers the uid, the source folder, the
+// manifest and the mirror's output folder (user/default), so a Bambu Studio edit, a Re-pull all,
+// a deleted or edited copy here and a different login all make the next start run the mirror.
+// Bump kMirrorGateFormat whenever what a run copies changes for the same inputs (new sanitising
+// rules, a new folder), so a record written by the old rules is not trusted.
+constexpr int kMirrorGateFormat = 1;
+
+// The record to keep for a fingerprint left by a clean run. Empty for an empty fingerprint.
+std::string mirror_gate_record(const std::string& app_version, const std::string& fingerprint);
+
+// Whether a record kept on disk says a run on `fingerprint` would do nothing. False for an empty
+// fingerprint, an empty or unreadable record, another app version or format, or another digest.
+bool mirror_gate_record_allows_skip(const std::string& record, const std::string& app_version, const std::string& fingerprint);
+
+// Remembers the fingerprint left by the last clean run, and says whether a switch-time run can be
+// skipped because nothing changed since. Records nothing (and forgets the old one) when the run
+// was not clean, a fingerprint could not be taken, or the source changed while the run read it,
+// so the next switch runs again.
+class MirrorSkipGate
+{
+public:
+    bool can_skip(const std::string& fingerprint) const { return !fingerprint.empty() && fingerprint == m_last; }
+    // `before`: taken just before the run; `after`: just after it.
+    void record_run(bool clean, const std::string& before, const std::string& after)
+    {
+        if (clean && !before.empty() && !after.empty() && fingerprint_source_part(before) == fingerprint_source_part(after))
+            m_last = after;
+        else
+            m_last.clear();
+    }
+    void invalidate() { m_last.clear(); }
+    // Startup skipped its run because the record on disk matched: `fingerprint` is what that
+    // clean run left behind, so switches can skip on it too.
+    void seed(const std::string& fingerprint) { m_last = fingerprint; }
+    // The fingerprint of the last clean run, or empty when there is none to trust.
+    const std::string& last() const { return m_last; }
+
+private:
+    std::string m_last;
+};
+
 }}} // namespace Slic3r::GUI::mirror
 
 #endif // slic3r_GUI_PresetMirrorCore_hpp_

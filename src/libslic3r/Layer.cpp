@@ -1,5 +1,6 @@
 #include "Layer.hpp"
 #include "ClipperUtils.hpp"
+#include "FineDetail.hpp"
 #include "Print.hpp"
 #include "Fill/Fill.hpp"
 #include "ShortestPath.hpp"
@@ -112,22 +113,61 @@ static inline bool layer_needs_raw_backup(const Layer *layer)
     return true;
 }
 
+// Bambu Studio 2.9.1 (Layer.cpp:39).
+void Layer::apply_auto_circle_compensation()
+{
+    const PrintObject *obj = this->object();
+    for (LayerRegion *layerm : m_regions)
+        layerm->auto_circle_compensation(layerm->slices, obj->print()->config(), float(scale_(obj->config().circle_compensation_manual_offset.value)));
+}
+
+// Bambu Studio 2.9.1 (Layer.cpp:84-127): the circle compensation flags go with the raw slices.
+// Bambu never advances its surface index on restore, so every surface got the first one's flags;
+// here each surface gets its own.
+static void backup_circle_compensation(LayerRegion *layerm)
+{
+    layerm->raw_counter_circle_compensation.clear();
+    layerm->raw_holes_circle_compensation.clear();
+    for (const Surface &surface : layerm->slices.surfaces) {
+        layerm->raw_counter_circle_compensation.push_back(surface.counter_circle_compensation);
+        layerm->raw_holes_circle_compensation.push_back(surface.holes_circle_compensation);
+    }
+}
+
+static void restore_circle_compensation(LayerRegion *layerm)
+{
+    size_t surface_idx = 0;
+    for (Surface &surface : layerm->slices.surfaces) {
+        if (surface_idx < layerm->raw_counter_circle_compensation.size() && surface_idx < layerm->raw_holes_circle_compensation.size()) {
+            surface.counter_circle_compensation = layerm->raw_counter_circle_compensation[surface_idx];
+            surface.holes_circle_compensation   = layerm->raw_holes_circle_compensation[surface_idx];
+        }
+        ++surface_idx;
+    }
+}
+
 void Layer::backup_untyped_slices()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             layerm->raw_slices = to_expolygons(layerm->slices.surfaces);
+            backup_circle_compensation(layerm);
+        }
     } else {
         assert(m_regions.size() == 1);
         m_regions.front()->raw_slices.clear();
+        m_regions.front()->raw_counter_circle_compensation.clear();
+        m_regions.front()->raw_holes_circle_compensation.clear();
     }
 }
 
 void Layer::restore_untyped_slices()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             layerm->slices.set(layerm->raw_slices, stInternal);
+            restore_circle_compensation(layerm);
+        }
     } else {
         assert(m_regions.size() == 1);
         m_regions.front()->slices.set(this->lslices, stInternal);
@@ -141,10 +181,12 @@ void Layer::restore_untyped_slices()
 void Layer::restore_untyped_slices_no_extra_perimeters()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             //BBS: remove extra_perimeters. Always false
         	//if (! layerm->region().config().extra_perimeters.value)
             	layerm->slices.set(layerm->raw_slices, stInternal);
+            restore_circle_compensation(layerm);
+        }
     } else {
     	assert(m_regions.size() == 1);
     	LayerRegion *layerm = m_regions.front();
@@ -210,6 +252,9 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.opt_serialize("inner_wall_line_width") == other_config.opt_serialize("inner_wall_line_width")
 		&& config.opt_serialize("outer_wall_line_width") == other_config.opt_serialize("outer_wall_line_width")
 		&& config.detect_thin_wall                  == other_config.detect_thin_wall
+        // EdgeSlicer, Fine detail: a modifier with its own level must get its own perimeter run, and its thin lines
+        // their own speed cap.
+        && FineDetail::same_walls(config, other_config)
 		&& config.infill_wall_overlap              == other_config.infill_wall_overlap
         && config.top_bottom_infill_wall_overlap              == other_config.top_bottom_infill_wall_overlap
         // Orca: these flags directly change the effective wall count produced by the perimeter
@@ -246,9 +291,60 @@ void Layer::make_perimeters()
 
     // keep track of regions whose perimeters we have already generated
     std::vector<unsigned char> done(m_regions.size(), false);
-    
+
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 Layer.cpp:256-344): a region inside a merge band is extruded
+    // on the group top only, at the height of the whole band, on the contour the band retained. The steps below it
+    // are dropped, not merged into it. A region carrying patches never shares a perimeter pass: a shared pass can
+    // honour the merge plan of its front region only.
+    const auto make_merged_perimeters = [this](LayerRegion *lm) {
+        lm->fill_surfaces.surfaces.clear();
+        lm->fill_no_overlap_expolygons.clear();
+        bool generated = false;
+        for (const AdaptiveMergePatch &patch : lm->adaptive_merge_patches) {
+            if (! patch.group_top || patch.area().empty())
+                continue;
+            SurfaceCollection core_slices;
+            for (const Surface &surface : lm->slices.surfaces)
+                for (ExPolygon &piece : intersection_ex(ExPolygons{ surface.expolygon }, patch.area()))
+                    core_slices.surfaces.emplace_back(surface, std::move(piece));
+            if (core_slices.surfaces.empty())
+                continue;
+            // The band rests on the layer below its lowest step. A suppressed orphan there is sliced but not
+            // extruded, so the walls over it overhang.
+            ExPolygons        lower_storage;
+            const ExPolygons *lower_slices = nullptr;
+            if (patch.bottom_idx > 0 && patch.bottom_idx <= this->object()->layer_count()) {
+                const Layer     *lower   = this->object()->get_layer(int(patch.bottom_idx - 1));
+                const ExPolygons dropped = adaptive_suppressed_orphan_area(*lower);
+                if (dropped.empty())
+                    lower_slices = &lower->lslices;
+                else {
+                    lower_storage = diff_ex(lower->lslices, dropped);
+                    lower_slices  = &lower_storage;
+                }
+            }
+            lm->make_perimeters(core_slices, { lm }, &lm->fill_surfaces, &lm->fill_no_overlap_expolygons,
+                                patch.merged_height, ! generated, lower_slices);
+            generated = true;
+        }
+        if (! generated) {
+            // Swallowed by a group top above, so nothing is extruded here. The fill surfaces still go through
+            // shell discovery (a solid step inside the band must reach combine_adaptive_infill()), so the pass
+            // runs and its extrusions are thrown away.
+            lm->make_perimeters(lm->slices, { lm }, &lm->fill_surfaces, &lm->fill_no_overlap_expolygons);
+            lm->perimeters.clear();
+            lm->thin_fills.clear();
+            lm->thin_feature_layers.clear(); // nothing is extruded here, so nothing was skipped or widened
+        }
+        lm->fills.clear();
+        lm->fill_expolygons = to_expolygons(lm->fill_surfaces.surfaces);
+    };
+
     for (LayerRegionPtrs::iterator layerm = m_regions.begin(); layerm != m_regions.end(); ++ layerm) 
-    	if ((*layerm)->slices.empty()) {
+    	if (! (*layerm)->adaptive_merge_patches.empty()) {
+            done[layerm - m_regions.begin()] = true;
+            make_merged_perimeters(*layerm);
+        } else if ((*layerm)->slices.empty()) {
  			(*layerm)->perimeters.clear();
  			(*layerm)->fills.clear();
  			(*layerm)->thin_fills.clear();
@@ -264,7 +360,7 @@ void Layer::make_perimeters()
 	        LayerRegionPtrs layerms;
 	        layerms.push_back(*layerm);
 	        for (LayerRegionPtrs::const_iterator it = layerm + 1; it != m_regions.end(); ++it)
-	            if (! (*it)->slices.empty()) {
+	            if (! (*it)->slices.empty() && (*it)->adaptive_merge_patches.empty()) {
 		            LayerRegion* other_layerm = *it;
 		            const PrintRegion &other_region = other_layerm->region();
                     if (is_perimeter_compatible(this_region, other_region))
@@ -316,6 +412,23 @@ void Layer::make_perimeters()
 	                    (*l)->fill_surfaces = std::move(split_fill_surfaces);
                         //BBS: Separate fill_no_overlap
                         (*l)->fill_no_overlap_expolygons = intersection_ex((*l)->slices.surfaces, fill_no_overlap, ApplySafetyOffset::Yes);
+	                }
+
+	                // When counterbore hole bridging (chbFilled) is active, process_no_bridge may
+	                // create fill surfaces that extend beyond all region slices (e.g. by clearing
+	                // holes in the bridge expolygon). These "extra" fills are lost during the
+	                // intersection-based splitting above. Recover them and assign to the first
+	                // merged region so the sacrificial bridge layer is not broken.
+	                if (layerm_config->region().config().counterbore_hole_bridging.value != chbNone) {
+	                    Polygons all_region_slices_p;
+	                    for (LayerRegion *l : layerms)
+	                        polygons_append(all_region_slices_p, to_polygons(l->slices.surfaces));
+	                    ExPolygons extra_fill = diff_ex(fill_surfaces.surfaces, all_region_slices_p, ApplySafetyOffset::Yes);
+	                    if (!extra_fill.empty()) {
+	                        append(layerms.front()->fill_expolygons, extra_fill);
+	                        layerms.front()->fill_expolygons = union_ex(layerms.front()->fill_expolygons);
+	                        layerms.front()->fill_surfaces.append(std::move(extra_fill), fill_surfaces.surfaces.front());
+	                    }
 	                }
 	            }
 	        }
@@ -446,15 +559,20 @@ coordf_t Layer::get_sparse_infill_max_void_area()
     double max_void_area = 0.;
     for (auto layerm : m_regions) {
         Flow flow = layerm->flow(frInfill);
-        float density = layerm->region().config().sparse_infill_density;
-        InfillPattern pattern = layerm->region().config().sparse_infill_pattern;
+        const PrintRegionConfig &config = layerm->region().config();
+        float density = config.sparse_infill_density;
+        InfillPattern pattern = config.sparse_infill_pattern;
         if (density == 0.)
             return -1;
+        // Orca: the adaptive TPMS infill is as sparse as its interior density.
+        if (density < 100.f && config.adaptive_infill_mode != AdaptiveInfillMode::Disabled && is_adaptive_infill_pattern(pattern))
+            density = std::min(density, std::max(1.f, float(config.adaptive_infill_interior_density)));
 
         //BBS: rough estimation and need to be optimized
         double spacing = flow.scaled_spacing() * (100 - density) / density;
         switch (pattern) {
             case ipConcentric:
+            case ipSpiralInset:
             case ipRectilinear:
             case ipLine:
             case ipGyroid:

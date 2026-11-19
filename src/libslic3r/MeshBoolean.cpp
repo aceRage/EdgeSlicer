@@ -7,6 +7,8 @@
 
 #include <boost/next_prior.hpp>
 #include "boost/log/trivial.hpp"
+#include <algorithm>
+#include <iterator>
 // Include igl first. It defines "L" macro which then clashes with our localization
 #include <igl/copyleft/cgal/mesh_boolean.h>
 #include <manifold/manifold.h>
@@ -244,6 +246,12 @@ triangle_mesh_to_cgal(const std::vector<stl_vertex> &V,
 {
     std::unique_ptr<CGALMesh, CGALMeshDeleter> out(new CGALMesh{});
     triangle_mesh_to_cgal(V, F, out->m);
+    // Orca #17080: CGAL's volume predicate (does_bound_a_volume) dereferences an incident halfedge for
+    // every vertex, so a vertex no face uses crashes it. Remove the isolated vertices and compact the
+    // indices so cgal_to_indexed_triangle_set() maps the result back to a valid ITS. Only this CGALMesh
+    // builder does it: parameterize_lscm() calls the template directly and relies on the vertex order.
+    if (CGALProc::remove_isolated_vertices(out->m) != 0)
+        out->m.collect_garbage();
     return out;
 }
 
@@ -930,7 +938,27 @@ void do_boolean(McutMesh& srcMesh, const McutMesh& cutMesh, const std::string& b
     // But we can force it to work by spliting the src mesh into disconnected components,
     // and do booleans seperately, then merge all the results.
     indexed_triangle_set all_its;
-    if (boolean_opts == "UNION" || boolean_opts == "A_NOT_B") {
+    if (boolean_opts == "A_NOT_B") {
+        // Orca #16275: re-split the source after each tool part. When one cut disconnects
+        // the source, mcut rejects the next dispatch and the remaining cuts were skipped.
+        std::vector<indexed_triangle_set> parts = std::move(src_parts);
+        for (size_t j = 0; j < cut_parts.size(); j++) {
+            auto                                  cut_part = triangle_mesh_to_mcut(cut_parts[j]);
+            std::vector<indexed_triangle_set>     next_parts;
+            for (indexed_triangle_set &part : parts) {
+                auto src_part = triangle_mesh_to_mcut(part);
+                if (do_boolean_single(*src_part, *cut_part, boolean_opts)) {
+                    TriangleMesh                      tri_part = mcut_to_triangle_mesh(*src_part);
+                    std::vector<indexed_triangle_set> pieces   = its_split(tri_part.its);
+                    std::move(pieces.begin(), pieces.end(), std::back_inserter(next_parts));
+                } else
+                    next_parts.emplace_back(std::move(part));
+            }
+            parts = std::move(next_parts);
+        }
+        for (const indexed_triangle_set &part : parts)
+            its_merge(all_its, part);
+    } else if (boolean_opts == "UNION") {
         for (size_t i = 0; i < src_parts.size(); i++) {
             auto src_part = triangle_mesh_to_mcut(src_parts[i]);
             for (size_t j = 0; j < cut_parts.size(); j++) {
@@ -1066,7 +1094,15 @@ bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
                                     << int(a.Status()) << " tool=" << int(b.Status()) << ")";
             return false;
         }
-        manifold::MeshGL out = a.Boolean(b, op).GetMeshGL();
+        manifold::Manifold result = a.Boolean(b, op);
+        // A boolean that fails part way (ResultTooLarge, Cancelled) comes back EMPTY with an error
+        // status, which must not pass for an empty result: the caller would give up instead of
+        // trying mcut.
+        if (result.Status() != manifold::Manifold::Error::NoError) {
+            BOOST_LOG_TRIVIAL(warning) << "MeshBoolean::mfd: boolean failed (" << int(result.Status()) << "), falling back";
+            return false;
+        }
+        manifold::MeshGL out = result.GetMeshGL();
         if (out.triVerts.empty())
             return true; // legitimately empty result (e.g. void intersection)
 
@@ -1131,6 +1167,47 @@ bool union_all(const std::vector<indexed_triangle_set> &meshes, indexed_triangle
 }
 
 } // namespace mfd
+
+BooleanOutcome make_boolean_with_fallback(const TriangleMesh &a, const TriangleMesh &b, const std::string &op,
+                                          std::vector<TriangleMesh> &dst, const char *log_tag)
+{
+    std::vector<TriangleMesh> res;
+    if (mfd::make_boolean(a, b, res, op)) {
+        const bool empty = std::all_of(res.begin(), res.end(), [](const TriangleMesh &m) { return m.empty(); });
+        if (empty)
+            return BooleanOutcome::Empty;
+        dst = std::move(res);
+        return BooleanOutcome::Done;
+    }
+    BOOST_LOG_TRIVIAL(warning) << log_tag << ": Manifold boolean " << op << " failed, falling back to mcut";
+    res.clear();
+    try {
+        mcut::make_boolean(a, b, res, op);
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << log_tag << ": mcut boolean " << op << " failed: " << ex.what();
+        return BooleanOutcome::Failed;
+    }
+    // mcut does not say whether it did the boolean, so an empty mcut result stays a failure.
+    if (std::all_of(res.begin(), res.end(), [](const TriangleMesh &m) { return m.empty(); }))
+        return BooleanOutcome::Failed;
+    dst = std::move(res);
+    return BooleanOutcome::Done;
+}
+
+bool make_boolean_chain(const TriangleMesh &a, const TriangleMesh &b, const std::string &op, TriangleMesh &out,
+                        const char *log_tag)
+{
+    std::vector<TriangleMesh> dst;
+    if (make_boolean_with_fallback(a, b, op, dst, log_tag) != BooleanOutcome::Done)
+        return false;
+    TriangleMesh merged = dst.front();
+    for (size_t i = 1; i < dst.size(); ++ i)
+        merged.merge(dst[i]);
+    if (merged.empty())
+        return false;
+    out = std::move(merged);
+    return true;
+}
 
 } // namespace MeshBoolean
 } // namespace Slic3r

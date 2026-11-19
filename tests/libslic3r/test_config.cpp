@@ -220,6 +220,52 @@ SCENARIO("Config ini load/save interface", "[Config]") {
     }
 }
 
+TEST_CASE("A string list item holding a semicolon reads back as one item", "[Config][Escape]")
+{
+    // ';' separates the items, so an item holding one must be quoted. Before the fix an item
+    // was quoted only for a space, tab, quote, backslash or line break, so "a;b" came back as
+    // "a" and "b".
+    const std::vector<std::string> cases[] = {
+        {"PLA;HS", "PETG"},              // a filament or preset name with no space
+        {"M106 S255", "M107;fan off"},   // a one-line G-code snippet with no space before ';'
+        {"a;b;c"},                       // a single item
+        {"", "x;y", ""},                 // empty items around it
+    };
+    for (const std::vector<std::string> &in : cases) {
+        const std::string        stored = escape_strings_cstyle(in);
+        std::vector<std::string> out;
+        REQUIRE(unescape_strings_cstyle(stored, out));
+        CHECK(out == in);
+    }
+    CHECK(escape_strings_cstyle({"PLA;HS", "PETG"}) == "\"PLA;HS\";PETG");
+}
+
+TEST_CASE("different_settings_to_system keeps one entry per preset through a G-code header", "[Config][Escape]")
+{
+    // Each entry is itself a ';'-joined key list (print, filaments..., printer). The G-code header
+    // and the .ini export write the list with serialize(); importing the config reads it back.
+    DynamicPrintConfig cfg;
+    auto *opt   = cfg.option<ConfigOptionStrings>("different_settings_to_system", true);
+    opt->values = {"brim_type;enable_support;initial_layer_print_height", "", "machine_start_gcode;z_hop"};
+
+    DynamicPrintConfig loaded;
+    loaded.load_from_ini_string_commented("; different_settings_to_system = " + opt->serialize() + "\n",
+                                          ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(loaded.option<ConfigOptionStrings>("different_settings_to_system")->values == opt->values);
+}
+
+TEST_CASE("String lists written before the semicolon fix read the same as before", "[Config][Escape]")
+{
+    // Older versions left such items unquoted, so their files hold the items split apart; the
+    // reader is unchanged and reads them exactly as it always did.
+    std::vector<std::string> out;
+    REQUIRE(unescape_strings_cstyle("brim_type;enable_support;;\"Generic PLA @System\";z_hop", out));
+    CHECK(out == std::vector<std::string>{"brim_type", "enable_support", "", "Generic PLA @System", "z_hop"});
+    out.clear();
+    REQUIRE(unescape_strings_cstyle("\"M107\\nG92 E0\";\"say \\\"hi\\\"\"", out));
+    CHECK(out == std::vector<std::string>{"M107\nG92 E0", "say \"hi\""});
+}
+
 SCENARIO("DynamicPrintConfig serialization", "[Config]") {
     WHEN("DynamicPrintConfig is serialized and deserialized") {
         FullPrintConfig full_print_config;
@@ -419,9 +465,63 @@ TEST_CASE("prime_tower_brim_width accepts the -1 auto sentinel shipped by BBL/Qi
     CHECK(config.validate(true).count("prime_tower_brim_width") == 1);
 }
 
-// Orca #13812: the printer tab keeps Wipe on with firmware retraction when the whole retraction is done before
-// the wipe, so the config check that the CLI and the 3MF loader run has to accept that state too.
-TEST_CASE("Firmware retraction allows wipe only with the whole retraction before the wipe", "[Config]")
+// Bambu Studio writes subnormals such as 1.04632e-311 into flush_volumes_matrix. libc++'s stream fails them (strtod's
+// ERANGE) while MSVC's reads them, so a stream check dropped those projects' settings on macOS only.
+TEST_CASE("Float options read a subnormal on every platform and still reject garbage", "[Config][FloatParse]")
+{
+    const double subnormal = 1.04632e-311;
+    REQUIRE(std::fpclassify(subnormal) == FP_SUBNORMAL);
+
+    SECTION("vectors keep the subnormal's value") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize("0, 1.04632e-311, 0.5"));
+        CHECK(floats.values == std::vector<double>{ 0., subnormal, 0.5 });
+
+        ConfigOptionFloatsNullable nullable;
+        REQUIRE(nullable.deserialize("nil,1.04632e-311"));
+        REQUIRE(nullable.values.size() == 2);
+        CHECK(std::isnan(nullable.values[0]));
+        CHECK(nullable.values[1] == subnormal);
+
+        DynamicPrintConfig config;
+        CHECK_NOTHROW(config.set_deserialize_strict("flush_volumes_matrix", "0,1.04632e-311,280,0"));
+        CHECK(config.opt<ConfigOptionFloats>("flush_volumes_matrix")->values == std::vector<double>{ 0., subnormal, 280., 0. });
+    }
+    SECTION("scalars and percents keep it too") {
+        ConfigOptionFloat f;
+        REQUIRE(f.deserialize("1.04632e-311"));
+        CHECK(f.value == subnormal);
+        ConfigOptionPercent p;
+        REQUIRE(p.deserialize("1.04632e-311%"));
+        CHECK(p.value == subnormal);
+        ConfigOptionFloatOrPercent fp;
+        REQUIRE(fp.deserialize("1.04632e-311%"));
+        CHECK(fp.value == subnormal);
+        CHECK(fp.percent);
+    }
+    SECTION("the stream's leading-number reading is kept") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize(" +1.5 ,-2e1,250%"));
+        CHECK(floats.values == std::vector<double>{ 1.5, -20., 250. });
+    }
+    SECTION("garbage, infinities and overflow are still rejected") {
+        for (const char *bad : { "zzzz", "1e999", "-1e999", "inf", "nan", "+-1", "+", "%" }) {
+            INFO(bad);
+            ConfigOptionFloats floats;
+            CHECK(! floats.deserialize(bad));
+            ConfigOptionFloat f;
+            CHECK(! f.deserialize(bad));
+        }
+        ConfigOptionFloats floats;
+        CHECK(! floats.deserialize("1,zzzz"));
+        DynamicPrintConfig config;
+        CHECK_THROWS_AS(config.set_deserialize_strict("flush_volumes_matrix", "0,abc"), BadOptionValueException);
+    }
+}
+
+// Orca #17302: firmware retraction plus wipe is always valid. The whole retraction is a G10
+// before the wipe, so G11 restores it; the old 100%-before-wipe exception is no longer needed.
+TEST_CASE("Firmware retraction allows wipe at any retract-before-wipe split", "[Config]")
 {
     Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -433,7 +533,7 @@ TEST_CASE("Firmware retraction allows wipe only with the whole retraction before
     CHECK(config.validate(true).count("use_firmware_retraction") == 0);
 
     config.set_deserialize_strict("retract_before_wipe", "70%");
-    CHECK(config.validate(true).count("use_firmware_retraction") == 1);
+    CHECK(config.validate(true).count("use_firmware_retraction") == 0);
 
     config.set_deserialize_strict("wipe", "0");
     CHECK(config.validate(true).count("use_firmware_retraction") == 0);
@@ -543,6 +643,43 @@ TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option 
     for (const std::string &d : duplicates)
         UNSCOPED_INFO(d);
     CHECK(duplicates.empty());
+}
+
+// The same key registered twice in ONE ConfigDef: ConfigDef::add asserts on it, so a Debug build
+// stopped at startup ("preset_names", then "outer_wall_acceleration", "retract_lift_above" and
+// "retract_lift_below" were each added twice in PrintConfigDef). A Release build skips the assert;
+// there each add() takes a new serialization ordinal for the same map entry, so
+// by_serialization_key_ordinal holds one more entry than options per duplicate. The second
+// registration's values were the ones in force, and stay so.
+TEST_CASE("No ConfigDef registers the same option key twice in itself", "[Config][ConfigDefs]")
+{
+    struct Source { const char *name; const ConfigDef *def; };
+    const Source sources[] = {
+        { "print_config_def",         &print_config_def },
+        { "cli_actions_config_def",   &cli_actions_config_def },
+        { "cli_transform_config_def", &cli_transform_config_def },
+        { "cli_misc_config_def",      &cli_misc_config_def },
+    };
+    for (const Source &src : sources) {
+        INFO(src.name);
+        CHECK(src.def->by_serialization_key_ordinal.size() == src.def->options.size());
+    }
+    const ConfigOptionDef *def = print_config_def.get("preset_names");
+    REQUIRE(def != nullptr);
+    CHECK(def->mode == comAdvanced);
+    CHECK(def->tooltip == "Names of presets related to the physical printer.");
+
+    def = print_config_def.get("outer_wall_acceleration");
+    REQUIRE(def != nullptr);
+    CHECK(def->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{500.});
+    CHECK(def->min == 0.);
+    for (const char *key : {"retract_lift_above", "retract_lift_below"}) {
+        INFO(key);
+        def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->label.rfind("Only lift Z", 0) == 0);
+        CHECK(def->min == 0.);
+    }
 }
 
 // CLI --uptodate_settings / --downward_check (Snapmaker_Orca.cpp) call
@@ -782,6 +919,40 @@ TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit
     }
 }
 
+// Orca #15033: --allow-rotations is opt-in, as its name implies. The CLI reads the option's default when the flag is
+// absent, so the def's default decides whether a headless arrange may rotate objects.
+TEST_CASE("CLI --allow-rotations defaults off and is opt-in", "[Config][CLI][AllowRotations]")
+{
+    const ConfigOptionDef *def = cli_misc_config_def.get("allow_rotations");
+    REQUIRE(def != nullptr);
+    const ConfigOptionBool *dflt = def->get_default_value<ConfigOptionBool>();
+    REQUIRE(dflt != nullptr);
+    CHECK_FALSE(dflt->value);
+
+    auto parse = [](std::initializer_list<const char *> args) {
+        DynamicPrintAndCLIConfig config;
+        t_config_option_keys extra;
+        t_config_option_keys keys;
+        std::vector<const char *> argv(args);
+        REQUIRE(config.read_cli(int(argv.size()), argv.data(), &extra, &keys));
+        return std::make_pair(std::move(config), std::move(keys));
+    };
+    {
+        auto [config, keys] = parse({"prog"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") == keys.end());
+        // The CLI's own read: the option filled from its default is false.
+        const ConfigOptionBool *opt = config.option<ConfigOptionBool>("allow_rotations", true);
+        REQUIRE(opt != nullptr);
+        CHECK_FALSE(opt->value);
+    }
+    {
+        auto [config, keys] = parse({"prog", "--allow-rotations"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") != keys.end());
+        REQUIRE(config.has("allow_rotations"));
+        CHECK(config.opt_bool("allow_rotations"));
+    }
+}
+
 // The settings combo box of a plain enum option shows the option's NUMERIC value as the list index and saves the
 // picked index back as the value (Choice::set_value / Choice::get_value in src/slic3r/GUI/Field.cpp). So
 // enum_values[i] must be the key of enum value i: a key inserted in the middle of the list (seam_position
@@ -832,6 +1003,42 @@ TEST_CASE("Enum options list their keys in the order of their values", "[Config]
     }
 }
 
+TEST_CASE("support_style lists its keys and labels in the order of their values", "[Config][ConfigDefs][Support]")
+{
+    // Orca #12164: SupportMaterialStyle had organic last while support_style lists it fourth, so any
+    // code that reads enum_labels[value] (the unsaved-changes dialog upstream) or picks
+    // enum_values[value] (the Style filters in Tab.cpp and SupportSetEditDialog.cpp) shifted every
+    // tree style by one. The enum now follows the list. The option stays key-mapped in
+    // enum_choice_maps_by_key() because those filters show a subset of the list.
+    const ConfigOptionDef *def = print_config_def.get("support_style");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_keys_map != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    REQUIRE(def->enum_values.size() == def->enum_keys_map->size());
+    for (size_t i = 0; i < def->enum_values.size(); ++i) {
+        INFO("index " << i << ", key " << def->enum_values[i]);
+        CHECK(def->enum_keys_map->at(def->enum_values[i]) == int(i));
+    }
+    CHECK(def->enum_labels[smsTreeOrganic] == "Organic");
+    CHECK(def->enum_labels[smsTreeSlim] == "Tree Slim");
+    CHECK(def->enum_labels[smsTreeStrong] == "Tree Strong");
+    CHECK(def->enum_labels[smsTreeHybrid] == "Tree Hybrid");
+    CHECK(def->enum_labels[smsSnug] == "Snug");
+
+    // The tree subset the Style filters build by value picks exactly the tree keys.
+    std::set<std::string> tree_keys;
+    for (int v : { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic })
+        tree_keys.insert(def->enum_values[size_t(v)]);
+    CHECK(tree_keys == std::set<std::string>{ "default", "tree_slim", "tree_strong", "tree_hybrid", "organic" });
+
+    // Values are stored by key, so a saved style reads back as the same style.
+    for (const char *key : { "default", "grid", "snug", "organic", "tree_slim", "tree_strong", "tree_hybrid" }) {
+        ConfigOptionEnum<SupportMaterialStyle> opt;
+        REQUIRE(opt.deserialize(key));
+        CHECK(opt.serialize() == key);
+    }
+}
+
 TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row", "[Config][ConfigDefs]")
 {
     // Every option Field.cpp maps by key: each listed key is a known value, the row a pick stores
@@ -863,8 +1070,8 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
         CHECK(enum_choice_value_at_index(def, -1) == -1);
         CHECK(enum_choice_value_at_index(def, int(def.enum_values.size())) == -1);
     }
-    // The helper names 17 options; a typo there would silently drop one from the mapping.
-    CHECK(mapped == 17);
+    // The helper names 18 options (17 plus gcode_flavor); a typo there would silently drop one from the mapping.
+    CHECK(mapped == 18);
 
     SECTION("locked_*_infill_pattern: the first row is \"default\" (ipCount), not ipMonotonic")
     {
@@ -885,18 +1092,20 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
         }
     }
 
-    SECTION("nozzle_volume_type & co: \"E3D High Flow\" is row 4 and value 5; no value 4")
+    SECTION("nozzle_volume_type & co: \"TPU285\" is row 4 and value 4, \"E3D High Flow\" row 5 and value 5")
     {
         for (const char *key : { "nozzle_volume_type", "default_nozzle_volume_type", "extruder_nozzle_volume_type" }) {
             INFO("option " << key);
             const ConfigOptionDef *def = print_config_def.get(key);
             REQUIRE(def != nullptr);
-            REQUIRE(def->enum_values.size() == 5);
-            CHECK(def->enum_values[4] == "E3D High Flow");
-            CHECK(enum_choice_value_at_index(*def, 4) == int(nvtE3DHighFlow));
-            CHECK(enum_choice_index_of_value(*def, nvtE3DHighFlow) == 4);
-            CHECK(enum_choice_index_of_value(*def, 4) == -1);
-            for (NozzleVolumeType t : { nvtStandard, nvtHighFlow, nvtHybrid, nvtTPUHighFlow })
+            REQUIRE(def->enum_values.size() == 6);
+            CHECK(def->enum_values[4] == "TPU285");
+            CHECK(def->enum_values[5] == "E3D High Flow");
+            CHECK(enum_choice_value_at_index(*def, 4) == int(nvtTPU285));
+            CHECK(enum_choice_value_at_index(*def, 5) == int(nvtE3DHighFlow));
+            CHECK(enum_choice_index_of_value(*def, nvtE3DHighFlow) == 5);
+            CHECK(enum_choice_index_of_value(*def, nvtTPU285) == 4);
+            for (NozzleVolumeType t : { nvtStandard, nvtHighFlow, nvtHybrid, nvtTPUHighFlow, nvtTPU285, nvtE3DHighFlow })
                 CHECK(enum_choice_value_at_index(*def, enum_choice_index_of_value(*def, t)) == int(t));
         }
     }
@@ -958,10 +1167,10 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     options.insert(options.end(),
                    {"mixed_filament_definitions", "filament_volume_type", "nozzle_volume_type", "filament_map",
                     "filament_map_mode", "printer_extruder_id", "enable_filament_mapping", "device_tool_count",
-                    "device_changer", "dithering_local_z_mode", "wipe_tower_rotation_angle",
+                    "device_changer", "dithering_local_z_mode",
                     "mixed_filament_pointillism_pixel_size", "inherits"});
 
-    REQUIRE(fill_missing_project_keys(project, system, options) == 1);
+    REQUIRE(fill_missing_project_keys(project, system, options) == 2); // sparse_infill_density + wipe_tower_rotation_angle (an ordinary print key since Orca #15227; already in print_options())
     REQUIRE(project.has("sparse_infill_density"));
     REQUIRE_FALSE(project.has("mixed_filament_definitions"));
     REQUIRE_FALSE(project.has("filament_volume_type"));
@@ -973,7 +1182,7 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     REQUIRE_FALSE(project.has("device_tool_count"));
     REQUIRE_FALSE(project.has("device_changer"));
     REQUIRE_FALSE(project.has("dithering_local_z_mode"));
-    REQUIRE_FALSE(project.has("wipe_tower_rotation_angle"));
+    REQUIRE(project.has("wipe_tower_rotation_angle"));
     REQUIRE_FALSE(project.has("mixed_filament_pointillism_pixel_size"));
     REQUIRE_FALSE(project.has("inherits"));
     REQUIRE(project_config_fill_skip_keys().count("mixed_filament_definitions") == 1);
@@ -1011,6 +1220,38 @@ TEST_CASE("fill_missing_project_keys skips keys handle_legacy drops on load", "[
     REQUIRE_FALSE(project.has("silent_mode"));
     REQUIRE(fill_missing_project_keys(project, system, Preset::print_options()) == 1);
     REQUIRE_THAT(project.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.2, 1e-9));
+}
+
+TEST_CASE("Per-filament text lists a project leaves out read as their fallback", "[Config][CLI]")
+{
+    // A Bambu A1 mini project without filament_ids crashed --slice --export-3mf: the plate data
+    // read filament_ids->get_at(id) on the empty list.
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_colour", true)->values = {"#FFFFFF", "#202020"};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "");
+    CHECK(cfg.filament_string_at("filament_colour", 1, "#FFFFFF") == "#202020");
+    // Past the end reads the first entry, as get_at() does.
+    CHECK(cfg.filament_string_at("filament_colour", 5, "#FFFFFF") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("filament_colour", 0, "#000000") == "#FFFFFF");
+    CHECK(cfg.filament_string_at("not_an_option", 0, "fallback") == "fallback");
+
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values = {"GFA00", "GFS00"};
+    CHECK(cfg.filament_string_at("filament_ids", 1, "") == "GFS00");
+}
+
+TEST_CASE("A support filament's type reads without filament_ids", "[Config][CLI]")
+{
+    DynamicPrintConfig cfg;
+    cfg.option<ConfigOptionStrings>("filament_type", true)->values  = {"PLA", "PA"};
+    cfg.option<ConfigOptionBools>("filament_is_support", true)->values = {false, true};
+    cfg.option<ConfigOptionStrings>("filament_ids", true)->values.clear();
+
+    std::string shown;
+    CHECK(cfg.get_filament_type(shown, 0) == "PLA");
+    CHECK(cfg.get_filament_type(shown, 1) == "PA-S");
+    CHECK(shown == "Sup.PA");
 }
 
 TEST_CASE("missing_project_keys is empty when the project already has every listed key", "[Config][CLI]")
@@ -1320,8 +1561,8 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
     // and GCodeConfig through PRINT_CONFIG_CLASS_DERIVED_DEFINE. Both generate hash(), operator==,
     // operator< and the option registration from the same option list. The hash inequalities use fixed
     // inputs, so they are deterministic; they check that hash() covers the changed option.
-    // Edge's PrintObjectConfig lists Ultra's print_extruder_id / print_extruder_variant first;
-    // brim_object_gap is third (Orca's first). Ordering checks use Edge's first member.
+    // Edge's PrintObjectConfig lists brim_object_gap first, as Orca does (print_extruder_id /
+    // print_extruder_variant moved to GCodeConfig with per-nozzle process P1). Ordering checks use it.
     SECTION("default-constructed configs are equal and find their options by key")
     {
         PrintObjectConfig a, b;
@@ -1330,7 +1571,6 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
         REQUIRE_FALSE(a < b);
         REQUIRE_FALSE(b < a);
         REQUIRE(a.optptr("layer_height") == &a.layer_height);
-        REQUIRE(a.optptr("print_extruder_id") == &a.print_extruder_id);
         REQUIRE(a.optptr("brim_object_gap") == &a.brim_object_gap);
     }
 
@@ -1347,9 +1587,8 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
     SECTION("ordering is decided by the first option in declaration order that differs")
     {
         PrintObjectConfig a, b;
-        // print_extruder_id is declared first on Edge (ConfigOptionInts).
-        a.print_extruder_id.values = {2};
-        b.print_extruder_id.values = {1};
+        // brim_object_gap is declared first (ConfigOptionFloat).
+        a.brim_object_gap.value    = b.brim_object_gap.value + 0.1;
         a.layer_height.value       = b.layer_height.value - 0.05; // declared later, points the other way
         REQUIRE(b < a);
         REQUIRE_FALSE(a < b);
@@ -1421,8 +1660,7 @@ TEST_CASE("A static config applies itself onto a config of its type as a lookup 
         object.wall_generator.value        = PerimeterGeneratorType::Arachne;
         object.support_speed.values        = {33.};
         object.enable_support.value        = true;
-        object.print_extruder_id.values    = {1, 2};
-        object.print_extruder_variant.values = {"Direct Drive Standard", "Direct Drive High Flow"};
+        object.brim_object_gap.value       = 0.3;
         FullPrintConfig full;
         REQUIRE(object.apply_to(full));
         check_member_apply_matches_key_apply(object);
@@ -1511,4 +1749,356 @@ TEST_CASE("apply ignore_nonexistent is honoured when typed apply cannot run", "[
     REQUIRE_FALSE(object.apply_to(region));
     REQUIRE_NOTHROW(region.apply(object, true));
     REQUIRE_THROWS_AS(region.apply(object, false), UnknownOptionException);
+}
+
+TEST_CASE("G-code flavor menu lists Repetier and keeps the C++ enum values", "[Config][ConfigDefs]")
+{
+    // Orca #13126 puts Repetier in the printer's firmware menu. The enum itself must not be renumbered:
+    // values are stored by key in files, but the numbers are pinned here so a reorder is a conscious act.
+    CHECK(int(gcfMarlinLegacy) == 0);
+    CHECK(int(gcfKlipper) == 1);
+    CHECK(int(gcfRepRapFirmware) == 2);
+    CHECK(int(gcfMarlinFirmware) == 3);
+    CHECK(int(gcfRepRapSprinter) == 4);
+    CHECK(int(gcfRepetier) == 5);
+
+    const ConfigOptionDef *def = print_config_def.get("gcode_flavor");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    CHECK(enum_choice_maps_by_key("gcode_flavor"));
+
+    const std::vector<std::string> expected{"marlin", "klipper", "reprapfirmware", "repetier", "marlin2"};
+    CHECK(def->enum_values == expected);
+    for (const std::string &key : expected) {
+        ConfigOptionEnum<GCodeFlavor> opt;
+        INFO("key " << key);
+        REQUIRE(opt.deserialize(key));
+        CHECK(opt.serialize() == key);
+    }
+    // The row a pick stores shows the same row again, and Repetier is stored as gcfRepetier.
+    const int repetier_row = enum_choice_index_of_value(*def, int(gcfRepetier));
+    REQUIRE(repetier_row >= 0);
+    CHECK(def->enum_values[size_t(repetier_row)] == "repetier");
+    CHECK(enum_choice_value_at_index(*def, repetier_row) == int(gcfRepetier));
+    // Marlin 2 moved down one row but keeps its value.
+    CHECK(enum_choice_value_at_index(*def, enum_choice_index_of_value(*def, int(gcfMarlinFirmware))) == int(gcfMarlinFirmware));
+}
+
+// ---- Snapmaker #975: enum options read through the base option and getInt() ----------------------
+//
+// A DynamicConfig can hold an enum as ConfigOptionEnumGeneric (e.g. one cloned from another config
+// or created from its definition without a typed constructor). option<ConfigOptionEnum<T>>() only
+// checks type() == coEnum and then static_casts, so reading ->value from a generic option is UB.
+// min_object_distance, normalize_fdm and normalize_fdm_2 now read enums through getInt(), and the
+// two normalize functions no longer dereference a missing print_sequence.
+
+namespace {
+
+// The generic form of an enum option, with the key map from its definition.
+template<typename T> ConfigOptionEnumGeneric *generic_enum(const char *key, T value)
+{
+    const ConfigOptionDef *def = print_config_def.get(key);
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_keys_map != nullptr);
+    return new ConfigOptionEnumGeneric(def->enum_keys_map, int(value));
+}
+
+} // namespace
+
+TEST_CASE("min_object_distance reads generic enum options", "[Config][Regression][EnumGeneric]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(40.));
+    cfg.set_key_value("printer_technology", generic_enum("printer_technology", ptFFF));
+
+    cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+    CHECK(min_object_distance(cfg) == Approx(40.));
+
+    cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByLayer));
+    CHECK(min_object_distance(cfg) == Approx(6.));
+
+    cfg.set_key_value("printer_technology", generic_enum("printer_technology", ptSLA));
+    CHECK(min_object_distance(cfg) == Approx(6.));
+
+    // An option of the wrong type under the key is not read as an enum.
+    DynamicPrintConfig wrong;
+    wrong.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(40.));
+    wrong.set_key_value("print_sequence", new ConfigOptionString("by object"));
+    CHECK(min_object_distance(wrong) == Approx(0.));
+}
+
+TEST_CASE("normalize_fdm_2 reads generic enum options and tolerates a missing print_sequence", "[Config][Regression][EnumGeneric]")
+{
+    SECTION("by object with two objects turns the prime tower off")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.set_key_value("timelapse_type", generic_enum("timelapse_type", TimelapseType::tlTraditional));
+        const t_config_option_keys changed = cfg.normalize_fdm_2(2, 2);
+        CHECK_FALSE(cfg.opt_bool("enable_prime_tower"));
+        CHECK(std::find(changed.begin(), changed.end(), "enable_prime_tower") != changed.end());
+    }
+    SECTION("a smooth timelapse keeps the prime tower")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.set_key_value("timelapse_type", generic_enum("timelapse_type", TimelapseType::tlSmooth));
+        cfg.normalize_fdm_2(2, 2);
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+    SECTION("no print_sequence at all")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        REQUIRE_NOTHROW(cfg.normalize_fdm_2(2, 2));
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+}
+
+TEST_CASE("normalize_fdm reads generic enum options and tolerates a missing print_sequence", "[Config][Regression][EnumGeneric]")
+{
+    SECTION("by object turns the prime tower off")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.normalize_fdm(2);
+        CHECK_FALSE(cfg.opt_bool("enable_prime_tower"));
+    }
+    SECTION("no print_sequence at all")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        REQUIRE_NOTHROW(cfg.normalize_fdm(2));
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+}
+
+TEST_CASE("Orca's initial_layer_travel_jerk is not a process option; initial_layer_travel_acceleration is Bambu's", "[Config][ConfigDefs][Orca11674][Snap937]")
+{
+    // Orca #11674 adds first-layer travel acceleration / jerk as initial_layer_travel_acceleration and
+    // initial_layer_travel_jerk. EdgeSlicer has the same feature as first_layer_travel_acceleration /
+    // first_layer_travel_jerk (Snapmaker #937 + #980, PR #497). The acceleration name is also Bambu Studio's
+    // per-extruder-variant key, carried with 6000 by the BBL H2D/H2C/H3C processes and a QIDI preset. Owner
+    // decision 2026-11-04 (#854): it is ported as Bambu's per-variant key (default 0 = unset), so those presets
+    // print first-layer travels at 6000 as in Bambu Studio; Orca's jerk name stays undeclared.
+    const ConfigOptionDef *ilta = print_config_def.get("initial_layer_travel_acceleration");
+    REQUIRE(ilta != nullptr);
+    CHECK(ilta->type == coFloats);
+    CHECK(ilta->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{ 0. });
+    CHECK(print_config_def.get("initial_layer_travel_jerk") == nullptr);
+    {
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), "initial_layer_travel_jerk") == opts.end());
+        CHECK(std::find(opts.begin(), opts.end(), "initial_layer_travel_acceleration") != opts.end());
+    }
+    // Orca #11674 / #13320 are reconciled onto these keys: the same feature (float or percent of the travel
+    // acceleration / jerk, in the print options), with EdgeSlicer's default 0 = "keep the initial layer value".
+    const std::pair<const char *, const char *> ours[] = {{"first_layer_travel_acceleration", "travel_acceleration"},
+                                                         {"first_layer_travel_jerk", "travel_jerk"}};
+    for (const auto &[key, ratio_over] : ours) {
+        INFO(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->type == coFloatOrPercent);
+        CHECK(def->ratio_over == ratio_over);
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), key) != opts.end());
+        const auto *opt = dynamic_cast<const ConfigOptionFloatOrPercent *>(def->default_value.get());
+        REQUIRE(opt != nullptr);
+        CHECK(opt->value == 0.);
+        CHECK_FALSE(opt->percent);
+    }
+}
+
+TEST_CASE("A scalar option keeps its value when deserializing fails", "[Config]") {
+    using Catch::Matchers::WithinAbs;
+
+    SECTION("float") {
+        ConfigOptionFloat opt(7.5);
+        REQUIRE_FALSE(opt.deserialize("abc"));
+        CHECK_THAT(opt.value, (WithinAbs(7.5, 1e-9)));
+    }
+    SECTION("int") {
+        ConfigOptionInt opt(3);
+        REQUIRE_FALSE(opt.deserialize("abc"));
+        CHECK(opt.value == 3);
+    }
+    SECTION("percent") {
+        ConfigOptionPercent opt(40.);
+        REQUIRE_FALSE(opt.deserialize("abc%"));
+        CHECK_THAT(opt.value, (WithinAbs(40., 1e-9)));
+    }
+    SECTION("float or percent") {
+        ConfigOptionFloatOrPercent opt(0.4, false);
+        REQUIRE_FALSE(opt.deserialize("abc%"));
+        CHECK_THAT(opt.value, (WithinAbs(0.4, 1e-9)));
+        CHECK_FALSE(opt.percent);
+    }
+    SECTION("point") {
+        ConfigOptionPoint opt(Vec2d(1., 2.));
+        REQUIRE_FALSE(opt.deserialize("5,abc"));
+        CHECK((opt.value == Vec2d(1., 2.)));
+    }
+    SECTION("point3") {
+        ConfigOptionPoint3 opt(Vec3d(1., 2., 3.));
+        REQUIRE_FALSE(opt.deserialize("5,6,abc"));
+        CHECK((opt.value == Vec3d(1., 2., 3.)));
+    }
+}
+
+TEST_CASE("A scalar option still takes a valid value", "[Config]") {
+    using Catch::Matchers::WithinAbs;
+
+    ConfigOptionFloatOrPercent opt(0.4, false);
+    REQUIRE(opt.deserialize("50%"));
+    CHECK_THAT(opt.value, (WithinAbs(50., 1e-9)));
+    CHECK(opt.percent);
+
+    ConfigOptionPoint point;
+    REQUIRE(point.deserialize("3x4"));
+    CHECK((point.value == Vec2d(3., 4.)));
+}
+
+TEST_CASE("support interface pattern registry includes spiral inset", "[Config][SpiralInset]")
+{
+    const auto &values = ConfigOptionEnum<SupportMaterialInterfacePattern>::get_enum_values();
+    REQUIRE(values.at("spiralinset") == SupportMaterialInterfacePattern::smipSpiralInset);
+}
+
+TEST_CASE("spiral inset is offered for the solid surface patterns and round-trips", "[Config][SpiralInset]")
+{
+    REQUIRE(ConfigOptionEnum<InfillPattern>::get_enum_values().at("spiralinset") == ipSpiralInset);
+    for (const char *key : {"top_surface_pattern", "bottom_surface_pattern", "internal_solid_infill_pattern", "support_interface_pattern"}) {
+        CAPTURE(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->has_enum_value("spiralinset"));
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("top_surface_pattern", "spiralinset");
+    CHECK(config.opt_enum<InfillPattern>("top_surface_pattern") == ipSpiralInset);
+    CHECK(config.opt_serialize("top_surface_pattern") == "spiralinset");
+    // Opt-in: no default changed.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<InfillPattern>("top_surface_pattern") == ipMonotonicLine);
+}
+
+TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config][TpmsAdaptive]") {
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Enable);
+    DynamicPrintConfig config;
+    config.set_deserialize("tpms_adaptive", "stepped_shells", ctxt);
+    config.set_deserialize("tpms_interior_density", "12%", ctxt);
+    config.set_deserialize("tpms_adaptive_gradient", "quadratic", ctxt);
+
+    CHECK(config.opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::SteppedShells);
+    CHECK(config.option<ConfigOptionPercent>("adaptive_infill_interior_density")->value == Approx(12.));
+    CHECK(config.opt_enum<AdaptiveInfillGradient>("adaptive_infill_gradient") == AdaptiveInfillGradient::Quadratic);
+    CHECK(ctxt.substitutions.empty());
+    // Opt-in: off by default.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::Disabled);
+}
+
+// Orca #16680: the editor and the placeholder check look the per-template placeholders up by the option key
+// (time_lapse_gcode, not timelapse_gcode), so every key must be one, and every custom G-code option needs a list.
+TEST_CASE("Custom G-code placeholder lists are keyed by option keys", "[Config][Orca16680]")
+{
+    const auto &placeholders = custom_gcode_specific_placeholders();
+    REQUIRE_FALSE(placeholders.empty());
+    for (const auto &[gcode_key, keys] : placeholders) {
+        INFO(gcode_key);
+        CHECK(print_config_def.has(gcode_key));
+        for (const std::string &key : keys) {
+            INFO(key);
+            CHECK(custom_gcode_specific_config_def.has(key));
+        }
+    }
+
+    // Multiline text options that aren't custom G-code; add any new one that isn't G-code here.
+    const std::set<std::string> not_gcode = { "notes", "filament_notes", "printer_notes", "post_process",
+                                              "adaptive_pressure_advance_model", "small_area_infill_flow_compensation_model" };
+    size_t gcode_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!def.multiline || not_gcode.count(key) > 0)
+            continue;
+        INFO(key);
+        CHECK(placeholders.count(key) == 1);
+        ++gcode_options;
+    }
+    CHECK(gcode_options == placeholders.size());
+}
+
+// Orca #16963: transferring a list option by index must not read an entry from an empty source list.
+TEST_CASE("Entries of a list applied by index onto an empty list are copied", "[Config][Regression]")
+{
+    for (const std::vector<std::string> &ids : { std::vector<std::string>{"GFA00"}, std::vector<std::string>{"GFA00", "GFA01"} }) {
+        DynamicPrintConfig edited;
+        edited.set_key_value("filament_ids", new ConfigOptionStrings(ids));
+        std::vector<std::string> keys;
+        for (size_t i = 0; i < ids.size(); ++i)
+            keys.push_back("filament_ids#" + std::to_string(i));
+
+        DynamicPrintConfig saved;
+        saved.set_key_value("filament_ids", new ConfigOptionStrings());
+        saved.apply_only(edited, keys);
+        CHECK(saved.option<ConfigOptionStrings>("filament_ids")->values == ids);
+    }
+}
+
+TEST_CASE("An empty list applied by index replaces the target list", "[Config][Regression]")
+{
+    DynamicPrintConfig saved;
+    saved.set_key_value("filament_ids", new ConfigOptionStrings());
+    DynamicPrintConfig edited;
+    SECTION("target has entries") { edited.set_key_value("filament_ids", new ConfigOptionStrings({"GFA00"})); }
+    SECTION("target lacks the option") {}
+
+    edited.apply_only(saved, {"filament_ids#0"});
+    CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
+}
+
+TEST_CASE("The chamber temperature key the settings page checks exists", "[Config][Regression]")
+{
+    // ConfigManipulation::check_chamber_temperature and TabFilament asked for "chamber_temperatures" (Bambu
+    // Studio's name), which this config does not have, so the safe-temperature warning never ran.
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.has("chamber_temperature"));
+    CHECK_FALSE(config.has("chamber_temperatures"));
+    REQUIRE(config.option<ConfigOptionInts>("chamber_temperature") != nullptr);
+}
+
+TEST_CASE("CLI command-line settings are recorded in the slot of their preset type", "[Config][ProjectPreset]")
+{
+    DynamicPrintConfig project;
+    // [process, filament 1, filament 2, printer]; the process already lists one change.
+    project.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "wall_loops", "", "", "" }));
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("top_shell_layers", new ConfigOptionInt(9));            // process
+    overrides.set_key_value("wall_loops", new ConfigOptionInt(4));                 // process, already listed
+    overrides.set_key_value("nozzle_temperature", new ConfigOptionInts({ 215 }));   // filament
+    overrides.set_key_value("retraction_length", new ConfigOptionFloats({ 0.5 }));  // printer
+    overrides.set_key_value("different_settings_to_system", new ConfigOptionStrings({ "x" }));
+
+    CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 4);
+    const std::vector<std::string> &slots = project.option<ConfigOptionStrings>("different_settings_to_system")->values;
+    REQUIRE(slots.size() == 4);
+    auto keys = [](const std::string &slot) {
+        std::vector<std::string> out;
+        unescape_strings_cstyle(slot, out);
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    CHECK(keys(slots[0]) == std::vector<std::string>{ "top_shell_layers", "wall_loops" });
+    CHECK(keys(slots[1]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[2]) == std::vector<std::string>{ "nozzle_temperature" });
+    CHECK(keys(slots[3]) == std::vector<std::string>{ "retraction_length" });
+
+    // Nothing to record into: left alone.
+    DynamicPrintConfig bare;
+    CHECK(record_cli_overrides_as_different(bare, overrides, Preset::print_options(), Preset::filament_options(),
+                                            Preset::printer_options()) == 0);
+    CHECK_FALSE(bare.has("different_settings_to_system"));
 }

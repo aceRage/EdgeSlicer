@@ -1,14 +1,20 @@
+#include "AdaptiveLayerMerge.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
 #include "DeterminismDump.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
+#include "FineDetail.hpp"
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
+#include "MixedFilament.hpp"
+#include "MixedSublayer.hpp"
 #include "MutablePolygon.hpp"
+#include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
+#include "NozzleProcess.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
@@ -18,6 +24,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
 #include "ContourZ.hpp"
+#include "CurvedTops.hpp"
 #include "SLA/IndexedMesh.hpp"
 #include "Support/Stabilizers.hpp"
 #include "ExtruderAreas.hpp"
@@ -25,8 +32,10 @@
 #include "Fill/Fill.hpp"
 #include "Fill/FillLightning.hpp"
 #include "Format/STL.hpp"
+#include "Fill/AdaptiveInfillField.hpp"
 #include "format.hpp"
 
+#include <algorithm>
 #include <float.h>
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/concurrent_vector.h>
@@ -36,6 +45,7 @@
 #include <utility>
 
 #include <boost/log/trivial.hpp>
+#include <Eigen/Core>
 
 #include <tbb/parallel_for.h>
 #include <tbb/spin_mutex.h>
@@ -155,10 +165,13 @@ std::vector<std::reference_wrapper<const PrintRegion>> PrintObject::all_regions(
     return out;
 }
 
-Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple)
+Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple, int max_edges)
 {
     // n = max(round(2 * d), 3); // for 0.4mm nozzle
-    size_t nb_edges = (int)std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter)));
+    // Three edges at the least whatever max_edges says: the setting's minimum of 3 is held by the settings page alone,
+    // and a project or a config file can carry less (2 gives a polygon of two points, 0 none, a negative number
+    // is taken for a very large one).
+    size_t nb_edges = (size_t)std::max(3, std::min(max_edges, std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter)))));
     // cylinder(h = h, r = d / cos (180 / n), $fn = n);
     //create x polyholes by rotation if multiple
     int nb_polyhole = 1;
@@ -175,7 +188,11 @@ Polygons create_polyholes(const Point center, const coord_t radius, const coord_
         const float new_radius = radius / float(std::cos(PI / nb_edges));
         for (size_t i_edge = 0; i_edge < nb_edges; ++i_edge) {
             float angle = rotation * i_poly + (float(PI) * 2 * (float)i_edge) / nb_edges;
-            pts.points.emplace_back(center.x() + new_radius * cos(angle), center.y() + new_radius * sin(angle));
+            // The corner is worked out in float as it was; the center is added to it as a whole number. Added in
+            // float (which is what coord_t + float is), the center lost its low bits: a float holds every eighth
+            // unit at 100 mm from the object's origin.
+            pts.points.emplace_back(center.x() + coord_t(std::round(new_radius * std::cos(angle))),
+                                    center.y() + coord_t(std::round(new_radius * std::sin(angle))));
         }
         pts.make_clockwise();
     }
@@ -183,13 +200,32 @@ Polygons create_polyholes(const Point center, const coord_t radius, const coord_
     return list;
 }
 
+// Whether a hole, given clockwise as a layer holds it, is convex: gone round clockwise it never turns left.
+// A point that rounding has left a unit or two to the wrong side of the line through its neighbours is no dent
+// (the compensations put points along the flats of a large hole): a left turn counts once the point stands
+// SCALED_EPSILON off that line.
+bool polyhole_is_convex(const Polygon &hole)
+{
+    const Points &pts = hole.points;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const Point &before = pts[(i + pts.size() - 1) % pts.size()];
+        const Point &at     = pts[i];
+        const Point &after  = pts[(i + 1) % pts.size()];
+        // The cross product is the length of the chord from `before` to `after` times how far `at` stands off it.
+        const double cross = cross2(Vec2d((at - before).cast<double>()), Vec2d((after - at).cast<double>()));
+        if (cross > 0. && cross > SCALED_EPSILON * (after - before).cast<double>().norm())
+            return false;
+    }
+    return true;
+}
+
 // Detect and convert holes to polyholes, implementation is ported from SuperSlicer
 void PrintObject::_transform_hole_to_polyholes()
 {
     // get all circular holes for each layer
     // the id is center-diameter-extruderid
-    //the tuple is Point center; float diameter_max; int extruder_id; coord_t max_variation; bool twist;
-    std::vector<std::vector<std::pair<std::tuple<Point, float, int, coord_t, bool>, Polygon*>>> layerid2center;
+    //the tuple is Point center; float diameter_max; int extruder_id; coord_t max_variation; bool twist; int max_edges;
+    std::vector<std::vector<std::pair<std::tuple<Point, float, int, coord_t, bool, int>, Polygon*>>> layerid2center;
     for (size_t i = 0; i < this->m_layers.size(); i++) layerid2center.emplace_back();
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -203,7 +239,9 @@ void PrintObject::_transform_hole_to_polyholes()
                     for (Surface& surf : layer->m_regions[region_idx]->slices.surfaces) {
                         for (Polygon& hole : surf.expolygon.holes) {
                             //test if convex (as it's clockwise bc it's a hole, we have to do the opposite)
-                            if (hole.convex_points(PI).empty() && hole.points.size() > 8) {
+                            // convex_points(PI) was asked for here and is always empty: it lists the points that turn
+                            // left by more than the angle given, and no turn is by more than a half circle.
+                            if (hole.points.size() > 8 && polyhole_is_convex(hole)) {
                                 // Computing circle center
                                 Point center = hole.centroid();
                                 double diameter_min = std::numeric_limits<float>::max(), diameter_max = 0;
@@ -228,9 +266,10 @@ void PrintObject::_transform_hole_to_polyholes()
                                 // SCALED_EPSILON was a bit too harsh. Now using a config, as some may want some harsh setting and some don't.
                                 coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.get_abs_value(unscaled(diameter_sum / hole.points.size()))));
                                 bool twist = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_twisted.value;
+                                int max_edges = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_max_edges.value;
                                 if (diameter_max - diameter_min < max_variation * 2 && diameter_line_max - diameter_line_min < max_variation * 2) {
                                     layerid2center[layer_idx].emplace_back(
-                                        std::tuple<Point, float, int, coord_t, bool>{center, diameter_max, layer->m_regions[region_idx]->region().config().wall_filament.value, max_variation, twist}, & hole);
+                                        std::tuple<Point, float, int, coord_t, bool, int>{center, diameter_max, layer->m_regions[region_idx]->region().config().wall_filament.value, max_variation, twist, max_edges}, & hole);
                                 }
                             }
                         }
@@ -241,14 +280,16 @@ void PrintObject::_transform_hole_to_polyholes()
         }
     });
     //sort holes per center-diameter
-    std::map<std::tuple<Point, float, int, coord_t, bool>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
+    // A multimap: a hole that stops being round for some layers and is round again further up makes two runs
+    // with one and the same id, and both are to be converted. A map kept the first and dropped the rest.
+    std::multimap<std::tuple<Point, float, int, coord_t, bool, int>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
 
     //search & find hole that span at least X layers
     const size_t min_nb_layers = 2;
     for (size_t layer_idx = 0; layer_idx < this->m_layers.size(); ++layer_idx) {
         for (size_t hole_idx = 0; hole_idx < layerid2center[layer_idx].size(); ++hole_idx) {
             //get all other same polygons
-            std::tuple<Point, float, int, coord_t, bool>& id = layerid2center[layer_idx][hole_idx].first;
+            std::tuple<Point, float, int, coord_t, bool, int>& id = layerid2center[layer_idx][hole_idx].first;
             float max_z = layers()[layer_idx]->print_z;
             std::vector<std::pair<Polygon*, int>> holes;
             holes.emplace_back(layerid2center[layer_idx][hole_idx].second, layer_idx);
@@ -256,7 +297,7 @@ void PrintObject::_transform_hole_to_polyholes()
                 if (layers()[search_layer_idx]->print_z - layers()[search_layer_idx]->height - max_z > EPSILON) break;
                 //search an other polygon with same id
                 for (size_t search_hole_idx = 0; search_hole_idx < layerid2center[search_layer_idx].size(); ++search_hole_idx) {
-                    std::tuple<Point, float, int, coord_t, bool>& search_id = layerid2center[search_layer_idx][search_hole_idx].first;
+                    std::tuple<Point, float, int, coord_t, bool, int>& search_id = layerid2center[search_layer_idx][search_hole_idx].first;
                     if (std::get<2>(id) == std::get<2>(search_id)
                         && std::get<0>(id).distance_to(std::get<0>(search_id)) < std::get<3>(id)
                         && std::abs(std::get<1>(id) - std::get<1>(search_id)) < std::get<3>(id)
@@ -277,7 +318,7 @@ void PrintObject::_transform_hole_to_polyholes()
     }
     //create a polyhole per id and replace holes points by it.
     for (auto entry : id2layerz2hole) {
-        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(std::get<2>(entry.first) - 1)), std::get<4>(entry.first));
+        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(nozzle_diameter_for_filament(print()->config(), unsigned(std::get<2>(entry.first)))), std::get<4>(entry.first), std::get<5>(entry.first));
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
@@ -297,6 +338,19 @@ void PrintObject::_transform_hole_to_polyholes()
 // 1) Merges typed region slices into stInternal type.
 // 2) Increases an "extra perimeters" counter at region slices where needed.
 // 3) Generates perimeters, gap fills and fill regions (fill regions of type stInternal).
+// EdgeSlicer, curved tops: written on the slicing thread, read by Print::apply() under the state mutex.
+void PrintObject::set_curved_tops_clipped(bool clipped)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_clipped = clipped;
+}
+
+void PrintObject::set_curved_tops_guard_inputs_used(std::string inputs)
+{
+    std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+    m_curved_tops_guard_inputs = std::move(inputs);
+}
+
 void PrintObject::make_perimeters()
 {
     // prerequisites
@@ -304,6 +358,9 @@ void PrintObject::make_perimeters()
 
     if (! this->set_started(posPerimeters))
         return;
+    // Curved tops: the walls are regenerated whole here (the fills follow in posInfill, which this
+    // step invalidates), so nothing an earlier curved-tops run cut is left.
+    this->set_curved_tops_clipped(false);
 
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
@@ -388,12 +445,35 @@ void PrintObject::make_perimeters()
         BOOST_LOG_TRIVIAL(debug) << "Generating extra perimeters for region " << region_id << " in parallel - end";
     }
 
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 PrintObject.cpp:578-580): decide the layer-merge groups
+    // before the walls are generated, since walls and infill share the grouping. A plate whose used filaments
+    // print through a single nozzle diameter returns at the gate and leaves every region without patches.
+    this->compute_adaptive_merge_groups();
+    m_print->throw_if_canceled();
+    // Mixed color sublayer P3 (D9): Ratio rows split the band heights the merge just chose.
+    const MixedRatioMergeStats merge_stats = this->adapt_local_z_ratio_plan_to_merge_bands();
+    if (merge_stats.whole_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: %2% merged layer bands of a mixed color sublayer print in one colour each: no sub-layer "
+                             "of the mix is tall enough to start above the layers the band merges."),
+                           this->model_object()->name, merge_stats.whole_bands));
+    if (merge_stats.reordered_top_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: on %2% merged layer bands of a mixed color sublayer the Bambu Studio colour order could not be "
+                             "kept, so the top colour there may differ: the first sub-layer must reach above the layers the band merges."),
+                           this->model_object()->name, merge_stats.reordered_top_bands));
+
     // Ultra (over-support walls): the per-layer "there is support under here" region the wall
     // classifier needs, built once here and dropped again below. When the feature is off this
     // leaves m_over_support_below empty, LayerRegion::make_perimeters hands the generator a null
     // pointer, and the generator takes its original code path verbatim - which is what makes the
     // off-mode G-code byte-identical.
     this->build_over_support_below();
+
+    // EdgeSlicer, thin feature notice: each layer's own thread records into its regions; start from nothing.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->thin_feature_layers.clear();
 
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
@@ -408,6 +488,20 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     this->clear_over_support_below();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // EdgeSlicer, thin feature notice (design P3, D6 (a)): one notice per object, merged after the parallel loop.
+    // Observation only; the notice names the object, so the slicing warning offers "Jump to [object]".
+    {
+        std::vector<const ThinFeatureLayer *> found;
+        for (const Layer *layer : m_layers)
+            for (const LayerRegion *layerm : layer->regions())
+                for (const ThinFeatureLayer &thin : layerm->thin_feature_layers)
+                    found.push_back(&thin);
+        m_thin_feature_summary = summarize_thin_features(found);
+        const std::string notice = thin_feature_notice(m_thin_feature_summary, this->model_object()->name);
+        if (!notice.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, notice, PrintStateBase::SlicingThinFeatures);
+    }
 
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
     det_dump_extrusions(*this, "2_make_perimeters_extrusions");
@@ -527,9 +621,90 @@ void PrintObject::prepare_infill()
     } // for each region
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
+    // Orca: precompute the object's 3D connected bodies for separated infills / per-model
+    // centering. Two islands belong to the same body when their slices overlap on adjacent
+    // layers; islands that only overlap in top-down projection but never touch (e.g. interleaved
+    // chain links) stay separate, matching "split to objects". Each layer island then records
+    // the full bounding box of its body, so its infill is centered on that body as if it were
+    // sliced alone. Compute this before bridges so anchors and extrusion share the same origin.
+    // EdgeSlicer: #14674 ran this at the start of infill(); upstream moved it here in #15206, whose
+    // bridge-anchor part we already carry, so the anchors use the same body origin.
+    bool needs_separated_components = false;
+    for (size_t i = 0; i < this->num_printing_regions(); ++ i) {
+        const PrintRegionConfig &rc = this->printing_region(i).config();
+        if (rc.separated_infills || rc.center_of_surface_pattern == CenterOfSurfacePattern::Each_Model ||
+            (rc.sparse_infill_density.value > 0 && is_octree_infill_pattern(rc.sparse_infill_pattern.value))) {
+            needs_separated_components = true;
+            break;
+        }
+    }
+    // Orca: Fast path: the feature only changes anything when the object is made of more than one
+    // connected body. Detect that cheaply the same way as "Split to objects" - more than one
+    // model part, or a single part whose mesh is splittable (is_splittable() is cached). A single
+    // body already shares the object center, i.e. the default, so skip the connectivity pass.
+    if (needs_separated_components) {
+        int                parts      = 0;
+        const ModelVolume *first_part = nullptr;
+        for (const ModelVolume *v : this->model_object()->volumes)
+            if (v->is_model_part()) { ++ parts; first_part = v; }
+        if (parts <= 1 && ! (first_part != nullptr && first_part->is_splittable()))
+            needs_separated_components = false;
+    }
+    m_separated_body_bboxes.clear();
+    for (Layer *layer : m_layers)
+        layer->lslices_separated_component_ids.clear();
+    if (needs_separated_components) {
+        const size_t        nl = m_layers.size();
+        std::vector<size_t> offset(nl + 1, 0); // Orca: flat index of the first island of each layer
+        for (size_t i = 0; i < nl; ++ i)
+            offset[i + 1] = offset[i] + m_layers[i]->lslices.size();
+        const size_t nreg = offset[nl];
+        // Orca: Union-find over every (layer, island).
+        std::vector<size_t> parent(nreg);
+        for (size_t i = 0; i < nreg; ++ i) parent[i] = i;
+        auto find = [&parent](size_t x) {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        auto unite = [&](size_t a, size_t b) { a = find(a); b = find(b); if (a != b) parent[a] = b; };
+        // Orca: Join islands that overlap between two consecutive layers. Already-connected islands
+        // cannot change the partition and need no polygon intersection.
+        for (size_t i = 0; i + 1 < nl; ++ i) {
+            m_print->throw_if_canceled();
+            const Layer *la = m_layers[i], *lb = m_layers[i + 1];
+            for (size_t a = 0; a < la->lslices.size(); ++ a)
+                for (size_t b = 0; b < lb->lslices.size(); ++ b)
+                    if (la->lslices_bboxes[a].overlap(lb->lslices_bboxes[b]) &&
+                        find(offset[i] + a) != find(offset[i + 1] + b) &&
+                        ! intersection_ex(la->lslices[a], lb->lslices[b]).empty())
+                        unite(offset[i] + a, offset[i + 1] + b);
+        }
+        // Orca: Number the bodies by their first island and merge the bounding boxes of their islands.
+        std::vector<size_t> body_of_root(nreg, size_t(-1));
+        for (size_t i = 0; i < nl; ++ i) {
+            Layer *layer = m_layers[i];
+            layer->lslices_separated_component_ids.resize(layer->lslices.size());
+            for (size_t a = 0; a < layer->lslices.size(); ++ a) {
+                size_t &body = body_of_root[find(offset[i] + a)];
+                if (body == size_t(-1)) {
+                    body = m_separated_body_bboxes.size();
+                    m_separated_body_bboxes.emplace_back();
+                }
+                m_separated_body_bboxes[body].merge(layer->lslices_bboxes[a]);
+                layer->lslices_separated_component_ids[a] = body;
+            }
+        }
+    }
+
     // the following step needs to be done before combination because it may need
     // to remove only half of the combined infill
     this->bridge_over_infill();
+    m_print->throw_if_canceled();
+
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 PrintObject.cpp:1042-1044): move the fill of every merge
+    // span onto its group-top layer before the regular "infill every N layers" combination, which then leaves
+    // the merged regions alone.
+    this->combine_adaptive_infill();
     m_print->throw_if_canceled();
 
     // combine fill surfaces to honor the "infill every N layers" option
@@ -561,16 +736,13 @@ void PrintObject::infill()
 
     if (this->set_started(posInfill)) {
         m_print->set_status(35, L("Generating infill toolpath"));
-        const auto& adaptive_fill_octree = this->m_adaptive_fill_octrees.first;
-        const auto& support_fill_octree = this->m_adaptive_fill_octrees.second;
-
         BOOST_LOG_TRIVIAL(debug) << "Filling layers in parallel - start";
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, m_layers.size()),
-            [this, &adaptive_fill_octree = adaptive_fill_octree, &support_fill_octree = support_fill_octree](const tbb::blocked_range<size_t>& range) {
+            [this](const tbb::blocked_range<size_t>& range) {
                 for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
                     m_print->throw_if_canceled();
-                    m_layers[layer_idx]->make_fills(adaptive_fill_octree.get(), support_fill_octree.get(), this->m_lightning_generator.get());
+                    m_layers[layer_idx]->make_fills(&m_adaptive_fill_octrees.first, &m_adaptive_fill_octrees.second, this->m_lightning_generator.get());
                 }
             }
         );
@@ -580,8 +752,71 @@ void PrintObject::infill()
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */
         det_dump_extrusions(*this, "4_infill_extrusions");
+        this->warn_if_first_layer_prints_nothing(*this);
         this->set_done(posInfill);
     }
+}
+
+// An object whose bed contact is narrower than the first-layer wall gets no first-layer extrusion
+// at all: it starts in mid-air, and because getObjectExtruderMap (Print.cpp) finds no first-layer
+// extruder for it, it gets no brim of any kind either (brim types and painted ears alike). Nothing
+// here changes the slice; it only says so, with the width needed and the settings that fix it.
+void PrintObject::warn_if_first_layer_prints_nothing(const PrintObject &layers_src)
+{
+    if (layers_src.layers().empty() || this->has_raft())
+        return;
+    const Layer *first = layers_src.layers().front();
+    if (first->lslices.empty() || first->has_extrusions())
+        return;
+
+    // Contact width: the narrowest inward offset that erases the whole first-layer footprint.
+    BoundingBox bbox = get_extents(first->lslices);
+    double lo = 0., hi = unscaled(std::max(bbox.size().x(), bbox.size().y()));
+    for (int i = 0; i < 24 && hi - lo > 0.002; ++ i) {
+        const double mid = 0.5 * (lo + hi);
+        if (offset_ex(first->lslices, -float(scale_(mid / 2.))).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    const double contact = hi;
+
+    // Wall settings of the first region that has first-layer slices.
+    const LayerRegion *layerm = nullptr;
+    for (const LayerRegion *r : first->regions())
+        if (!r->slices.empty()) { layerm = r; break; }
+    if (layerm == nullptr && !first->regions().empty())
+        layerm = first->regions().front();
+    if (layerm == nullptr)
+        return;
+    const Flow   ext_flow   = layerm->flow(frExternalPerimeter);
+    const double line_width = ext_flow.width();
+    const double nozzle     = ext_flow.nozzle_diameter();
+    const bool   classic    = this->config().wall_generator.value == PerimeterGeneratorType::Classic;
+    const bool   thin_walls = FineDetail::classic_thin_walls(layerm->region().config());
+
+    auto mm = [](double v) { return Slic3r::format("%.2f", v); };
+    std::string message;
+    if (classic && !thin_walls) {
+        // Classic walls without thin-wall detection need room for one whole external wall.
+        // The wall vanishes a little before the contact is as narrow as the wall (the inward offset
+        // of a curved band that thin collapses), hence "comfortably wider" and the 0.03 mm margin.
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow for the first-layer "
+                                      "wall line width (%3% mm), so it gets no brim and starts in mid-air. With the current settings the bed "
+                                      "contact must be comfortably wider than %3% mm."),
+                                 this->model_object()->name, mm(contact), mm(line_width));
+        const double suggest = std::floor((contact - 0.03) * 100.) / 100.;
+        if (suggest >= 0.6 * nozzle)
+            message += " " + Slic3r::format(_u8L("To fix it, set Wall generator to Arachne, turn on Detect thin wall, or set the first-layer line width to %1% mm or less."),
+                                            mm(suggest));
+        else
+            message += " " + _u8L("To fix it, set Wall generator to Arachne or turn on Detect thin wall, or give the part a wider base.");
+    } else {
+        message = Slic3r::format(_u8L("%1% prints nothing on the first layer: its bed contact (about %2% mm wide) is too narrow to print, "
+                                      "so it gets no brim and starts in mid-air. Give the part a wider base or reorient it."),
+                                 this->model_object()->name, mm(contact));
+    }
+    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message, PrintStateBase::SlicingEmptyFirstLayer);
 }
 
 void PrintObject::ironing()
@@ -644,9 +879,12 @@ bool PrintObject::need_z_contouring() const
         return false;
     }
 
-    // Contouring needs a single instance to raycast against; see contour_z().
-    if (m_model_object == nullptr || m_model_object->instances.size() != 1) {
-        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, unexpected number of instances";
+    // A PrintObject groups the instances that share their whole transformation but the XY
+    // shift: an instance rotated, scaled or mirrored differently is a PrintObject of its own.
+    // The first instance therefore stands for all of them (Orca #16461). Skip only when there
+    // is no instance to raycast against.
+    if (m_instances.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, no instances";
         return false;
     }
 
@@ -658,17 +896,22 @@ void PrintObject::contour_z()
     if (!this->set_started(posContouring))
         return;
 
-    if (!this->need_z_contouring()) {
+    // EdgeSlicer: curved tops share this step and its mesh (CurvedTops.cpp). With
+    // curved_tops_enabled off (the default) this is exactly the ZAA-only step it was.
+    const bool zaa         = this->need_z_contouring();
+    const bool curved_tops = m_config.curved_tops_enabled.value && !m_instances.empty();
+    if (!zaa && !curved_tops) {
         this->set_done(posContouring);
         return;
     }
 
-    m_print->set_status(40, L("Z contouring"));
+    m_print->set_status(40, zaa ? L("Z contouring") : L("Curved tops"));
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
 
     TriangleMesh mesh = this->m_model_object->raw_mesh();
 
-    ModelInstance           *inst          = m_model_object->instances.front();
+    // The first instance stands for all copies that share this PrintObject's transformation.
+    const ModelInstance     *inst          = m_instances.front().model_instance;
     Point                    center_offset = this->center_offset();
     Geometry::Transformation trans         = inst->get_transformation();
 
@@ -679,16 +922,61 @@ void PrintObject::contour_z()
     sla::IndexedMesh imesh(mesh);
     imesh.ground_level_offset(-z);
 
-    tbb::parallel_for(
-        // Contouring starts with the second layer to avoid a build plate collision.
-        tbb::blocked_range<size_t>(1, m_layers.size()),
-        [this, &imesh](const tbb::blocked_range<size_t>& range) {
-            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
-                m_print->throw_if_canceled();
-                m_layers[layer_idx]->make_contour_z(imesh);
+    if (zaa)
+        tbb::parallel_for(
+            // Contouring starts with the second layer to avoid a build plate collision.
+            tbb::blocked_range<size_t>(1, m_layers.size()),
+            [this, &imesh](const tbb::blocked_range<size_t>& range) {
+                for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+                    m_print->throw_if_canceled();
+                    m_layers[layer_idx]->make_contour_z(imesh);
+                }
             }
+        );
+    m_print->throw_if_canceled();
+
+    if (curved_tops) {
+        // A refusal leaves the object planar; every refusal and every block is reported to the user.
+        // What the guards read is recorded, so Print::apply() regenerates the walls when it changes.
+        this->set_curved_tops_guard_inputs_used(curved_tops_guard_inputs(*this));
+        const bool             clipped_before = m_curved_tops_clipped;
+        const CurvedTopsResult ct             = apply_curved_tops(*this, mesh, imesh);
+        // Safety net (review finding g): this step running again over layers an earlier, unfinished run
+        // already cut (a cancel), with a guard now refusing, would print a cut-down top with nothing on
+        // it. Print::apply() regenerates the walls before that can happen; should it ever be reached
+        // anyway, stop rather than slice it.
+        if (!ct.applied && clipped_before)
+            throw Slic3r::SlicingError(Slic3r::format(_u8L("Curved tops: the top layers of %1% were cut for a curved top that is now "
+                                                           "refused. Slice again."),
+                                                      this->model_object()->name),
+                                       this->id().id);
+        // P3: developer overrides. In force: their own warning, every slice. Carried by the project but
+        // Developer mode off: ignored, and the curved-tops message says so.
+        const CurvedTopsDevOverrides dev     = curved_tops_dev_overrides(m_config);
+        std::string                  ignored = dev.ignored_note();
+        // Out-of-range override values: clamped by curved_tops_dev_overrides(), said here.
+        if (dev.active)
+            for (const std::string &note : dev.clamp_notes)
+                ignored += (ignored.empty() ? "" : "\n") + note;
+        if (!ct.applied)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("Curved tops (experimental): %1% is printed with flat top layers because %2%"),
+                                                         this->model_object()->name, ct.refusal) +
+                                              (ignored.empty() ? std::string() : "\n" + ignored),
+                                          PrintStateBase::SlicingCurvedTopsUnavailable);
+        else {
+            std::string msg = ct.summary;
+            for (const std::string &note : ct.notes)
+                msg += "\n" + note;
+            if (!ignored.empty())
+                msg += "\n" + ignored;
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg, PrintStateBase::SlicingCurvedTopsSummary);
         }
-    );
+        if (dev.active)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          Slic3r::format(_u8L("%1% (object %2%)"), dev.active_message(), this->model_object()->name),
+                                          PrintStateBase::SlicingCurvedTopsDevOverrides);
+    }
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
 
@@ -780,27 +1068,34 @@ void PrintObject::generate_support_material()
 
             this->_generate_support_material();
             m_print->throw_if_canceled();
+        }
+        // Orca: the tree support collision/avoidance caches and support nodes are only used while this step runs
+        // (detect_overhangs() rebuilds them from scratch), so don't keep them resident until the next slice.
+        // Side stabilizers below do not read this cache.
+        this->clear_tree_support_preview_cache();
 
-            // Side stabilizers ride on the support layers the generator above just made.
-            if (m_config.stabilizer_supports.value != smOff && !m_shared_object) {
-                m_print->set_status(50, L("Generating side stabilizers"));
-                const stabilizers::PlanReport stab = generate_stabilizer_supports(*this, [this]() { this->throw_if_canceled(); });
-                // Painted stabilizer points are an explicit ask: say so when one cannot be honoured.
-                if (! stab.unreachable.empty()) {
-                    const Vec3d &p = stab.unreachable.front();
-                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                        Slic3r::format(_u8L("Object %1%: %2% painted stabilizer point(s) cannot be reached by a printable strut (the first at a height of %3% mm). "
-                                            "Move the paint higher, away from the bed or out of recesses, or give the struts more room."),
-                                       this->model_object()->name, stab.unreachable.size(), std::round(p.z() * 10.) / 10.),
-                        PrintStateBase::SlicingStabilizerPaintUnreachable);
-                }
-                if (stab.manual_without_paint)
-                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                        Slic3r::format(_u8L("Object %1%: side stabilizers are set to Manual but no stabilizer points are painted, so none were generated. "
-                                            "Paint them with the support painting tool, or set the stabilizers to Auto."),
-                                       this->model_object()->name),
-                        PrintStateBase::SlicingStabilizerManualUnpainted);
+        // Side stabilizers (Support/Stabilizers.hpp) ride on whatever support layers exist - the
+        // generator's above, or none: they do not depend on Enable supports. With supports off the
+        // block above is skipped, so no support, interface or raft is made; the stabilizers insert
+        // their own support layers at the object's layer heights, as they do between supports.
+        if (this->has_stabilizers() && !m_shared_object) {
+            m_print->set_status(50, L("Generating side stabilizers"));
+            const stabilizers::PlanReport stab = generate_stabilizer_supports(*this, [this]() { this->throw_if_canceled(); });
+            // Painted stabilizer points are an explicit ask: say so when one cannot be honoured.
+            if (! stab.unreachable.empty()) {
+                const Vec3d &p = stab.unreachable.front();
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: %2% painted stabilizer point(s) cannot be reached by a printable strut (the first at a height of %3% mm). "
+                                        "Move the paint higher, away from the bed or out of recesses, or give the struts more room."),
+                                   this->model_object()->name, stab.unreachable.size(), std::round(p.z() * 10.) / 10.),
+                    PrintStateBase::SlicingStabilizerPaintUnreachable);
             }
+            if (stab.manual_without_paint)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: side stabilizers are set to Manual but no stabilizer points are painted, so none were generated. "
+                                        "Paint them with the support painting tool, or set the stabilizers to Auto."),
+                                   this->model_object()->name),
+                    PrintStateBase::SlicingStabilizerManualUnpainted);
         }
         // Ultra (support groups, plan 2026-09-02 3.7): both this feature and support filament
         // matching (Chameleon) write SupportLayer::interface_by_extruder, so running both would
@@ -832,7 +1127,7 @@ void PrintObject::generate_support_material()
         // Ultra (support groups, Stage 5): the three notices the plan's Stage 5 list asks for.
         // All NON_CRITICAL, all raised here for the same reason as the two above.
         // 1. The soluble rule of 3.6. A zero top Z distance is not a per-part quantity - it sets
-        //    SlicingParameters::soluble_interface, the bottom surface classification and the
+        //    SlicingParameters::zero_gap_interface_* (Slicing.cpp), the bottom surface classification and the
         //    organic-tree static - so the strictest group wins and the WHOLE object follows it.
         //    Groups asking for a larger gap do not get their own; say so.
         if (const std::string soluble_group = this->support_group_soluble_name(); ! soluble_group.empty())
@@ -960,14 +1255,69 @@ void PrintObject::simplify_extrusion_path()
     }
 }
 
-std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> PrintObject::prepare_adaptive_infill_data(
-    const std::vector<std::pair<const Surface *, float>> &surfaces_w_bottom_z) const
+// Orca: Separated body of the island containing a point of a layer, else of the island outline nearest within 1 mm, or -1.
+static int separated_body_at(const Layer &layer, const Point &point)
+{
+    int    body = -1;
+    double best = scaled<double>(1.);
+    for (size_t i = 0; i < layer.lslices.size() && i < layer.lslices_separated_component_ids.size() && best > 0.; ++ i) {
+        BoundingBox bbox = layer.lslices_bboxes[i];
+        bbox.offset(coord_t(best));
+        if (! bbox.contains(point))
+            continue;
+        const double dist = layer.lslices[i].contains(point) ? 0. : (layer.lslices[i].point_projection(point) - point).cast<double>().norm();
+        if (dist < best) {
+            best = dist;
+            body = int(layer.lslices_separated_component_ids[i]);
+        }
+    }
+    return body;
+}
+
+// Orca: The object mesh in the octree frame split by separated body. Each connected component goes to the body
+// most of its sampled triangles lie on, sampled a layer height inside the solid at the layer nearest to them.
+static std::vector<indexed_triangle_set> split_mesh_by_body(const PrintObject &object, const indexed_triangle_set &mesh, size_t num_bodies)
+{
+    const Eigen::Matrix3d             to_object = FillAdaptive::transform_to_world().toRotationMatrix();
+    const double                      inset     = object.config().layer_height.value;
+    std::vector<indexed_triangle_set> bodies(num_bodies);
+    for (const indexed_triangle_set &component : its_split(mesh)) {
+        std::vector<size_t> votes(num_bodies, 0);
+        const size_t        step = std::max<size_t>(1, component.indices.size() / 8);
+        for (size_t i = 0; i < component.indices.size(); i += step) {
+            const stl_triangle_vertex_indices &tri = component.indices[i];
+            const Vec3d a = component.vertices[tri[0]].cast<double>(), b = component.vertices[tri[1]].cast<double>(),
+                        d = component.vertices[tri[2]].cast<double>();
+            const Vec3d  normal = (b - a).cross(d - a);
+            const double area2  = normal.norm();
+            const Vec3d  c = to_object * ((a + b + d) / 3. - (area2 > 0. ? Vec3d(normal * (inset / area2)) : Vec3d::Zero()));
+            size_t lo = 0, hi = object.layer_count();
+            while (lo < hi) {
+                const size_t mid = (lo + hi) / 2;
+                if (object.get_layer(int(mid))->slice_z < c.z())
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            if (lo == object.layer_count() || (lo > 0 && c.z() - object.get_layer(int(lo) - 1)->slice_z < object.get_layer(int(lo))->slice_z - c.z()))
+                -- lo;
+            if (const int body = separated_body_at(*object.get_layer(int(lo)), Point(scaled<coord_t>(c.x()), scaled<coord_t>(c.y()))); body >= 0)
+                ++ votes[body];
+        }
+        if (const auto best = std::max_element(votes.begin(), votes.end()); *best > 0)
+            its_merge(bodies[best - votes.begin()], component);
+    }
+    return bodies;
+}
+
+std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> PrintObject::prepare_adaptive_infill_data(
+    const std::vector<std::pair<const Surface *, const Layer *>> &surfaces_w_layer) const
 {
     using namespace FillAdaptive;
 
     auto [adaptive_line_spacing, support_line_spacing] = adaptive_fill_line_spacing(*this);
     if ((adaptive_line_spacing == 0. && support_line_spacing == 0.) || this->layers().empty())
-        return std::make_pair(OctreePtr(), OctreePtr());
+        return {};
 
     indexed_triangle_set mesh = this->model_object()->raw_indexed_triangle_set();
     // Rotate mesh and build octree on it with axis-aligned (standart base) cubes.
@@ -975,27 +1325,60 @@ std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> PrintObject::prepare
     its_transform(mesh, to_octree * this->trafo_centered(), true);
 
     // Triangulate internal bridging surfaces.
-    std::vector<std::vector<Vec3d>> overhangs(std::max(surfaces_w_bottom_z.size(), size_t(1)));
+    std::vector<std::vector<Vec3d>> overhangs(std::max(surfaces_w_layer.size(), size_t(1)));
     // ^ make sure vector is not empty, even with no briding surfaces we still want to build the adaptive trees later, some continue normally
-    tbb::parallel_for(tbb::blocked_range<int>(0, surfaces_w_bottom_z.size()),
-        [this, &to_octree, &overhangs, &surfaces_w_bottom_z](const tbb::blocked_range<int> &range) {
+    tbb::parallel_for(tbb::blocked_range<int>(0, surfaces_w_layer.size()),
+        [this, &to_octree, &overhangs, &surfaces_w_layer](const tbb::blocked_range<int> &range) {
             PRINT_OBJECT_TIME_LIMIT_MILLIS(PRINT_OBJECT_TIME_LIMIT_DEFAULT);
             for (int surface_idx = range.begin(); surface_idx < range.end(); ++surface_idx) {
                 std::vector<Vec3d> &out = overhangs[surface_idx];
                 m_print->throw_if_canceled();
-                append(out, triangulate_expolygon_3d(surfaces_w_bottom_z[surface_idx].first->expolygon,
-                                                   surfaces_w_bottom_z[surface_idx].second));
+                append(out, triangulate_expolygon_3d(surfaces_w_layer[surface_idx].first->expolygon,
+                                                   float(surfaces_w_layer[surface_idx].second->bottom_z())));
                 for (Vec3d &p : out)
                     p = (to_octree * p).eval();
             }
         });
+
+    // Orca: Each body gets the octree it has when sliced on its own, from its own triangles.
+    std::pair<Octrees, Octrees> octrees;
+    const size_t                num_bodies  = m_separated_body_bboxes.size();
+    bool                        need_object = num_bodies <= 1;
+    if (num_bodies > 1) {
+        const std::vector<indexed_triangle_set> body_meshes = split_mesh_by_body(*this, mesh, num_bodies);
+        need_object = std::any_of(body_meshes.begin(), body_meshes.end(), [](const indexed_triangle_set &its) { return its.indices.empty(); });
+        std::vector<std::vector<Vec3d>>         body_overhangs(num_bodies);
+        for (size_t i = 0; i < surfaces_w_layer.size(); ++ i)
+            if (const int body = separated_body_at(*surfaces_w_layer[i].second, surfaces_w_layer[i].first->expolygon.contour.points.front()); body >= 0)
+                append(body_overhangs[body], overhangs[i]);
+        if (adaptive_line_spacing)
+            octrees.first.bodies.resize(num_bodies);
+        if (support_line_spacing)
+            octrees.second.bodies.resize(num_bodies);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, num_bodies), [&, adaptive_spacing = adaptive_line_spacing, support_spacing = support_line_spacing](
+                                                                        const tbb::blocked_range<size_t> &range) {
+            for (size_t body = range.begin(); body < range.end(); ++ body) {
+                m_print->throw_if_canceled();
+                if (body_meshes[body].indices.empty())
+                    continue;
+                if (adaptive_spacing)
+                    octrees.first.bodies[body] = build_octree(body_meshes[body], body_overhangs[body], adaptive_spacing, false);
+                if (support_spacing)
+                    octrees.second.bodies[body] = build_octree(body_meshes[body], body_overhangs[body], support_spacing, true);
+            }
+        });
+    }
+
     // and gather them.
     for (size_t i = 1; i < overhangs.size(); ++ i)
         append(overhangs.front(), std::move(overhangs[i]));
 
-    return std::make_pair(
-        adaptive_line_spacing ? build_octree(mesh, overhangs.front(), adaptive_line_spacing, false) : OctreePtr(),
-        support_line_spacing  ? build_octree(mesh, overhangs.front(), support_line_spacing, true) : OctreePtr());
+    // Orca: The object's octree only serves bodies that have none of their own.
+    if (need_object && adaptive_line_spacing)
+        octrees.first.object = build_octree(mesh, overhangs.front(), adaptive_line_spacing, false);
+    if (need_object && support_line_spacing)
+        octrees.second.object = build_octree(mesh, overhangs.front(), support_line_spacing, true);
+    return octrees;
 }
 
 FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
@@ -1008,6 +1391,38 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
         }
 
     return has_lightning_infill ? FillLightning::build_generator(std::as_const(*this), [this]() -> void { this->throw_if_canceled(); }) : FillLightning::GeneratorPtr();
+}
+
+AdaptiveInfillFields PrintObject::prepare_adaptive_infill_fields() const
+{
+    AdaptiveInfillFields fields;
+    std::array<bool, size_t(AdaptiveInfillMode::Count)> modes{};
+    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
+        if (const PrintRegionConfig &config = this->printing_region(region_id).config();
+            config.sparse_infill_density > 0 && config.sparse_infill_density < 100 && is_adaptive_infill_pattern(config.sparse_infill_pattern))
+            modes[size_t(config.adaptive_infill_mode.value)] = true;
+    modes[size_t(AdaptiveInfillMode::Disabled)] = false;
+    if (std::find(modes.begin(), modes.end(), true) == modes.end() || m_layers.empty())
+        return fields;
+
+    std::vector<AdaptiveInfillField::Slice> slices;
+    slices.reserve(m_layers.size());
+    BoundingBox bbox;
+    for (const Layer *layer : m_layers) {
+        slices.push_back({layer->bottom_z(), layer->print_z, &layer->lslices});
+        bbox.merge(get_extents(layer->lslices));
+    }
+    if (!bbox.defined)
+        return fields;
+    for (size_t mode = 0; mode < modes.size(); ++mode) {
+        if (!modes[mode])
+            continue;
+        // Without a field, the infill falls back to the regular pattern.
+        auto field = std::make_unique<AdaptiveInfillField>(slices, bbox, AdaptiveInfillMode(mode), [this]() { m_print->throw_if_canceled(); });
+        if (!field->empty())
+            fields[mode] = std::move(field);
+    }
+    return fields;
 }
 
 void PrintObject::clear_layers()
@@ -1048,6 +1463,7 @@ void PrintObject::clear_support_layers()
             l->sharp_tails.clear();
             l->sharp_tails_height.clear();
             l->cantilevers.clear();
+            l->support_overhangs.clear();
         }
     }
 }
@@ -1093,13 +1509,17 @@ bool PrintObject::invalidate_state_by_config_options(
     for (const t_config_option_key &opt_key : opt_keys) {
         if (   opt_key == "brim_width"
             || opt_key == "brim_object_gap"
+            || opt_key == "brim_use_efc_outline"
             || opt_key == "brim_type"
             || opt_key == "brim_ears_max_angle"
             || opt_key == "brim_ears_detection_length"
+            || opt_key == "brim_ears_outer_only"
             // BBS: brim generation depends on printing speed
             || opt_key == "outer_wall_speed"
             || opt_key == "small_perimeter_speed"
             || opt_key == "small_perimeter_threshold"
+            || opt_key == "small_support_perimeter_speed"
+            || opt_key == "small_support_perimeter_threshold"
             || opt_key == "sparse_infill_speed"
             || opt_key == "inner_wall_speed"
             || opt_key == "support_speed"
@@ -1107,12 +1527,13 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "top_surface_speed") {
             // Brim is printed below supports, support invalidates brim and skirt.
             steps.emplace_back(posSupportMaterial);
-            if (opt_key == "brim_type") {
-                const auto* old_brim_type = old_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                const auto* new_brim_type = new_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                //BBS: When switch to manual brim, the object must have brim, then re-generate perimeter
-                //to make the wall order of first layer to be outer-first
-                if (old_brim_type->value == btOuterOnly || new_brim_type->value == btOuterOnly)
+            if (opt_key == "brim_type" || opt_key == "brim_width") {
+                // Regenerate the walls when the brim starts or stops putting the first layer's outer walls first.
+                auto outer_walls_first = [](const ConfigOptionResolver &config) {
+                    return brim_puts_outer_walls_first(config.option<ConfigOptionEnum<BrimType>>("brim_type")->value,
+                                                       config.option<ConfigOptionFloat>("brim_width")->value);
+                };
+                if (outer_walls_first(old_config) != outer_walls_first(new_config))
                     steps.emplace_back(posPerimeters);
             }
         } else if (
@@ -1159,6 +1580,7 @@ bool PrintObject::invalidate_state_by_config_options(
                opt_key == "layer_height"
             || opt_key == "dithering_z_step_size"
             || opt_key == "dithering_local_z_mode"
+            || opt_key == "enable_mixed_color_sublayer"
             || opt_key == "dithering_local_z_whole_objects"
             || opt_key == "dithering_local_z_direct_multicolor"
             || opt_key == "dithering_step_painted_zones_only"
@@ -1215,9 +1637,12 @@ bool PrintObject::invalidate_state_by_config_options(
 		} else if (
                opt_key == "elefant_foot_compensation"
             || opt_key == "elefant_foot_compensation_layers"
+            || opt_key == "elefant_foot_layers_density"
             || opt_key == "support_top_z_distance"
             || opt_key == "support_bottom_z_distance"
             || opt_key == "xy_hole_compensation"
+            || opt_key == "enable_circle_compensation"
+            || opt_key == "circle_compensation_manual_offset"
             || opt_key == "xy_contour_compensation"
             //BBS: [Arthur] the following params affect bottomBridge surface type detection
             || opt_key == "support_type"
@@ -1231,6 +1656,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "hole_to_polyhole"
             || opt_key == "hole_to_polyhole_threshold"
             || opt_key == "hole_to_polyhole_twisted"
+            || opt_key == "hole_to_polyhole_max_edges"
             ) {
             steps.emplace_back(posSlice);
         } else if (opt_key == "image_fill_params" || opt_key == "image_fill_detail") {
@@ -1270,6 +1696,9 @@ bool PrintObject::invalidate_state_by_config_options(
             // re-run posSupportMaterial exactly like a support_interface_filament change.
             || opt_key == "support_filament_matching"
             || opt_key == "support_interface_not_for_body"
+            || opt_key == "support_interface_interlock"
+            || opt_key == "support_interface_interlock_layers"
+            || opt_key == "support_interface_interlock_beam_lines"
             || opt_key == "support_interface_spacing"
             || opt_key == "support_bottom_interface_spacing" //BBS
             || opt_key == "support_base_pattern"
@@ -1285,6 +1714,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_ironing_pattern"
             || opt_key == "support_ironing_flow"
             || opt_key == "support_ironing_spacing"
+            || opt_key == "support_ironing_inset"
+            || opt_key == "support_ironing_direction"
             || opt_key == "raft_expansion"
             || opt_key == "raft_first_layer_density"
             || opt_key == "raft_first_layer_expansion"
@@ -1365,11 +1796,20 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "skeleton_infill_line_width"
             || opt_key == "infill_direction"
             || opt_key == "solid_infill_direction"
+            // Orca: the connected bodies (and the bridge anchors) are worked out in prepare_infill().
+            || opt_key == "center_of_surface_pattern"
+            || opt_key == "separated_infills"
+            || opt_key == "top_layer_direction"
+            || opt_key == "top_surface_expansion_margin"
+            || opt_key == "top_surface_expansion_direction"
+            || opt_key == "bottom_layer_direction"
             || opt_key == "align_infill_direction_to_model" 
             || opt_key == "extra_solid_infills"
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "relative_bridge_angle" // ORCA: Relative bridge angle
+            || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
             || opt_key == "internal_bridge_density") {
@@ -1378,24 +1818,34 @@ bool PrintObject::invalidate_state_by_config_options(
                opt_key == "top_surface_pattern"
             || opt_key == "undertop_surface_pattern"
             || opt_key == "bottom_surface_pattern"
+            || opt_key == "top_surface_fill_order"
+            || opt_key == "bottom_surface_fill_order"
             || opt_key == "internal_solid_infill_pattern"
             || opt_key == "external_fill_link_max_length"
             || opt_key == "infill_anchor"
             || opt_key == "infill_anchor_max"
             || opt_key == "top_surface_line_width"
-            || opt_key == "top_surface_density"
             || opt_key == "bottom_surface_density"
             || opt_key == "initial_layer_line_width"
             || opt_key == "small_area_infill_flow_compensation"
             || opt_key == "lateral_lattice_angle_1"
             || opt_key == "lateral_lattice_angle_2"
-            || opt_key == "infill_overhang_angle") {
+            || opt_key == "infill_overhang_angle"
+            || opt_key == "gyroid_optimized"
+            || opt_key == "infill_complete_top") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
+                   || opt_key == "adaptive_infill_mode"
+                   || opt_key == "adaptive_infill_interior_density"
+                   || opt_key == "adaptive_infill_gradient"
+                   || opt_key == "sparse_infill_smooth_factor"
                    || opt_key == "symmetric_infill_y_axis"
                    || opt_key == "infill_shift_step"
                    || opt_key == "sparse_infill_rotate_template"
                    || opt_key == "solid_infill_rotate_template"
+                   || opt_key == "lightning_overhang_angle"
+                   || opt_key == "lightning_prune_angle"
+                   || opt_key == "lightning_straightening_angle"
                    || opt_key == "skeleton_infill_density"
                    || opt_key == "skin_infill_density"
                    || opt_key == "infill_lock_depth"
@@ -1415,6 +1865,26 @@ bool PrintObject::invalidate_state_by_config_options(
                 is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))
                 steps.emplace_back(posPerimeters);
             steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "top_surface_density") {
+            // ORCA: 0% means no top solid fill, which switches off both the top surface expansion and the wall
+            // removal over top surfaces. Only crossing zero matters; posPerimeters cascades to posPrepareInfill.
+            const auto *old_density = old_config.option<ConfigOptionPercent>(opt_key);
+            const auto *new_density = new_config.option<ConfigOptionPercent>(opt_key);
+            assert(old_density && new_density);
+            if (is_approx(old_density->value, 0.) || is_approx(new_density->value, 0.))
+                steps.emplace_back(posPerimeters);
+            // EdgeSlicer: posPrepareInfill, not upstream's posInfill - our bridge_over_infill() reads the top
+            // density (prints_dense()), so a change has to re-run it.
+            steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "top_surface_expansion") {
+            // ORCA: without the expansion the top fill never reaches the space freed by only_one_wall_top, so the
+            // walls over top surfaces are kept. Only crossing zero matters; posPerimeters cascades to posPrepareInfill.
+            const auto *old_expansion = old_config.option<ConfigOptionFloat>(opt_key);
+            const auto *new_expansion = new_config.option<ConfigOptionFloat>(opt_key);
+            assert(old_expansion && new_expansion);
+            if (old_expansion->value <= 0. || new_expansion->value <= 0.)
+                steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
         } else if (opt_key == "internal_solid_infill_line_width") {
             // This value is used for calculating perimeter - infill overlap, thus perimeters need to be recalculated.
             steps.emplace_back(posPerimeters);
@@ -1432,6 +1902,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_scale"
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
+            || opt_key == "fuzzy_skin_ripples_per_layer"
+            || opt_key == "fuzzy_skin_ripple_offset"
+            || opt_key == "fuzzy_skin_layers_between_ripple_offset"
             || opt_key == "detect_overhang_wall"
             || opt_key == "unsupported_wall_last"
             || opt_key == "overhang_reverse"
@@ -1439,12 +1912,27 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_reverse_threshold"
             || opt_key == "wall_direction"
             || opt_key == "enable_overhang_speed"
+            || opt_key == "overhang_shadow_inner_wall"
+            || opt_key == "overhang_shadow_speed_ratio"
+            || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
+            // EdgeSlicer, Fine detail: region keys read by the perimeter generator.
+            || opt_key == "fine_detail"
+            || opt_key == "thin_feature_line_width"
+            || opt_key == "thin_feature_min_size"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
         } else if (opt_key == "bridge_flow" || opt_key == "internal_bridge_flow") {
             steps.emplace_back(posPerimeters);
+            steps.emplace_back(posInfill);
+            steps.emplace_back(posSupportMaterial);
+        } else if (opt_key == "bridge_line_width") {
+            // Edge: upstream invalidates only posPrepareInfill, but bridging_flow() also sizes the
+            // overhang walls (posPerimeters), the internal bridges (posPrepareInfill), the bridge
+            // infill (posInfill) and the support's bridge perimeters, like bridge_flow does.
+            steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
             steps.emplace_back(posInfill);
             steps.emplace_back(posSupportMaterial);
         } else if (
@@ -1453,9 +1941,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_transition_filter_deviation"
             || opt_key == "wall_transition_angle"
             || opt_key == "wall_distribution_count"
+            || opt_key == "wall_maximum_resolution"
+            || opt_key == "wall_maximum_deviation"
             || opt_key == "min_feature_size"
             || opt_key == "min_length_factor"
-            || opt_key == "min_bead_width") {
+            || opt_key == "min_bead_width"
+            // EdgeSlicer, Fine detail: Cura's separate minimums.
+            || opt_key == "min_odd_wall_line_width"
+            || opt_key == "min_even_wall_line_width") {
             steps.emplace_back(posSlice);
         } else if (
                opt_key == "seam_position"
@@ -1468,6 +1961,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "scarf_joint_flow_ratio"
             || opt_key == "wipe_inward"
             || opt_key == "wipe_inward_distance"
+            || opt_key == "retract_after_outer_wall"
             || opt_key == "seam_slope_start_height"
             || opt_key == "seam_slope_entire_loop"
             || opt_key == "seam_slope_min_length"
@@ -1484,6 +1978,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "outer_wall_speed"
             || opt_key == "small_perimeter_speed"
             || opt_key == "small_perimeter_threshold"
+            || opt_key == "small_support_perimeter_speed"
+            || opt_key == "small_support_perimeter_threshold"
             || opt_key == "sparse_infill_speed"
             || opt_key == "inner_wall_speed"
             || opt_key == "internal_solid_infill_speed"
@@ -1492,10 +1988,35 @@ bool PrintObject::invalidate_state_by_config_options(
             // so nothing sliced has to be redone.
             || opt_key == "over_support_flow"
             || opt_key == "over_support_speed"
+            // EdgeSlicer, Fine detail: applied in GCode::_extrude only.
+            || opt_key == "fine_detail_speed"
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
-            || opt_key == "bed_mesh_probe_distance") {
+            || opt_key == "bed_mesh_probe_distance"
+            // Orca #11876: flow ratios are applied in GCode::_extrude only.
+            || opt_key == "print_flow_ratio"
+            || opt_key == "top_solid_infill_flow_ratio"
+            || opt_key == "bottom_solid_infill_flow_ratio"
+            || opt_key == "brim_flow_ratio"
+            || opt_key == "spiral_starting_flow_ratio"
+            || opt_key == "spiral_finishing_flow_ratio"
+            // Edge: read by GCode::process_layer only.
+            || opt_key == "min_layer_time_pause"
+            // Edge: nothing sliced depends on it. Print::apply invalidates psWipeTower when the resolved
+            // interface temperatures (Print::support_interface_temperatures) change.
+            || opt_key == "support_interface_nozzle_temperature"
+            // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
+            || opt_key == "apply_scarf_seam_on_circles"
+            || opt_key == "support_ironing_speed"
+            // EdgeSlicer, curved tops P3: the developer overrides. What they change is in the guard record
+            // (curved_tops_guard_inputs), which Print::apply() compares and which re-plans the block when it
+            // differs; with Developer mode off they are ignored and change nothing but the config block.
+            || opt_key.rfind("curved_tops_dev_", 0) == 0
+            // EdgeSlicer, curved tops P4: the same for the nozzle contact tolerance and the pattern (both in the
+            // guard record; the head check reads the tolerance at export).
+            || opt_key == "curved_tops_nozzle_tolerance"
+            || opt_key == "curved_tops_pattern") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
@@ -1539,6 +2060,13 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // EdgeSlicer, curved tops (P2): the block is checked against the support layers, so new supports
+        // re-plan it. Walls a block already cut are regenerated first (posPerimeters invalidates
+        // posContouring), so a block now refused leaves an uncut planar top. Objects without curved
+        // tops on invalidate exactly as before. Called from Print::apply(), under the state mutex the
+        // slicing thread writes m_curved_tops_clipped under.
+        if (m_config.curved_tops_enabled.value)
+            invalidated |= this->invalidate_step(m_curved_tops_clipped ? posPerimeters : posContouring);
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
@@ -1620,23 +2148,25 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
     // Auto support types put support under every overhang they detect, and a bottom bridge is
     // an overhang by construction. Manual (painted) types only support what the user enforced.
     s.is_auto = is_auto(m_config.support_type.value);
-    // How a generator refuses to support a bridge is not the same in all three of them, and the
+    // How a generator refuses to support a bridge is not the same in both of them, and the
     // classifier has to follow each one or it will call a face "over support" that nothing will be
-    // under. Read off the three call sites:
+    // under. Read off the two call sites:
     //   normal(auto)          SupportMaterial.cpp - `if (bridge_no_support) remove_bridges_from_
     //                         contacts(...)`, which takes NO length and drops every bridge it can
     //                         detect. The feature stands down for the whole object.
-    //   tree(auto), organic   TreeSupport3D.cpp - the same length-less removal, same gate.
-    //                         TreeSupport::generate() hands organic trees to TreeSupport3D before
-    //                         detect_overhangs() runs, so the length rule never applies here. The
-    //                         default tree style resolves to organic (SupportParameters.hpp).
-    //   tree(auto), classic   TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
-    //                         contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
+    //   tree(auto), every     TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
+    //   style                 contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
     //                         max_bridge_length in BOTH directions, and a straight perimeter segment
     //                         anchored at both ends and that short, get no support and stay real
     //                         bridges; a longer one is supported. Not gated on bridge_no_support,
     //                         and max_bridge_length defaults to 10 mm, so a gate that demanded 0
-    //                         here switched the feature off on every classic tree profile.
+    //                         here switched the feature off on every tree profile. ORGANIC trees
+    //                         take the same path: TreeSupport3D's generate_support_areas() calls
+    //                         TreeSupport::detect_overhangs() (its own length-less generate_
+    //                         overhangs() is compiled out), so bridge_no_support never reached an
+    //                         organic tree. Orca #11295 made the GUI say so (max_bridge_length shown
+    //                         and bridge_no_support hidden for every tree style); before it, this
+    //                         classifier keyed organic trees on bridge_no_support.
     // s.bridgeable is that length, scaled; 0 means nothing is bridgeable.
     if (s.is_auto) {
         if (m_config.support_type.value == stNormalAuto) {
@@ -1644,13 +2174,8 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
         } else if (m_config.support_type.value == stTreeAuto) {
             s.is_auto &= (m_config.support_interface_top_layers.value > 0 &&
                           m_config.support_critical_regions_only.value == false);
-            const auto style = m_config.support_style.value;
-            if (style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid) {
-                if (m_config.max_bridge_length.value > 0)
-                    s.bridgeable = scale_(m_config.max_bridge_length.value);
-            } else {
-                s.is_auto &= ! m_config.bridge_no_support.value;
-            }
+            if (m_config.max_bridge_length.value > 0)
+                s.bridgeable = scale_(m_config.max_bridge_length.value);
         }
     }
     this->slice_support_annotations(s.enforcers, s.blockers);
@@ -1717,6 +2242,23 @@ const Polygons* PrintObject::over_support_below(size_t layer_id) const
     return &m_over_support_below[layer_id];
 }
 
+// A layer is still bottom while its index is below bottom_shell_layers or its underside is less than
+// bottom_shell_thickness above the underside of the first layer. That is the test the bottom shell of any other
+// print follows (discover_vertical_shells() and discover_horizontal_shells() below: "m_layers[n]->bottom_z() -
+// bottom_z < bottom_shell_thickness - EPSILON"), and what makes the bottom at least as thick as asked. As there,
+// the thickness adds to a bottom and does not make one: with no bottom layers there is no bottom.
+size_t PrintObject::spiral_vase_bottom_layers(const PrintRegionConfig &region_config) const
+{
+    const int bottom_shell_layers = region_config.bottom_shell_layers.value;
+    if (bottom_shell_layers <= 0 || m_layers.empty())
+        return 0;
+    size_t         num_layers = std::min(size_t(bottom_shell_layers), m_layers.size());
+    const coordf_t bottom_z   = m_layers.front()->bottom_z();
+    while (num_layers < m_layers.size() && m_layers[num_layers]->bottom_z() - bottom_z < region_config.bottom_shell_thickness.value - EPSILON)
+        ++ num_layers;
+    return num_layers;
+}
+
 void PrintObject::detect_surfaces_type()
 {
     BOOST_LOG_TRIVIAL(info) << "Detecting solid surfaces..." << log_memory_info();
@@ -1736,7 +2278,7 @@ void PrintObject::detect_surfaces_type()
     // for less solid material/time when the forced solid shells cost more than they're worth.
     bool interface_shells = ! spiral_mode && (m_config.interface_shells.value ||
         (this->has_bounded_paint_depth() && m_config.paint_depth_solid_interfaces.value));
-    size_t num_layers     = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
+    size_t num_layers     = spiral_mode ? this->spiral_vase_bottom_layers(this->printing_region(0).config()) : m_layers.size();
 
     // Ultra (over-support surfaces): the slice-time reconstruction of "where will support land",
     // shared with the wall classifier - see PrintObject::over_support_settings().
@@ -1962,6 +2504,71 @@ void PrintObject::detect_surfaces_type()
                         }
                     }
 
+                    // ORCA: Grow the top surfaces by top_surface_expansion, so the top solid infill also covers the
+                    // material left by features rising from the middle of a top surface (filling the holes and
+                    // joining the tops, so the features rest on solid infill). Each connected island is grown and
+                    // clipped separately: growing one island's top across a gap into another - which may have no top
+                    // surface at all, leaving a partially filled layer - is never allowed. The original top is
+                    // unioned back in and bottom surfaces are never claimed, so this can only add area.
+                    const PrintRegionConfig &region_config  = layerm->region().config();
+                    const double             top_expansion  = region_config.top_surface_expansion.value;
+                    // Nothing to expand without a top fill: a 0% top surface density leaves the top layer with
+                    // walls only, and zero top shell layers retypes it as internal in prepare_fill_surfaces().
+                    if (top_expansion > 0. && region_config.top_shell_layers.value > 0 &&
+                        region_config.top_surface_density.value > 0. && ! top.empty()) {
+                        const double     d = scale_(top_expansion);
+                        const ExPolygons T = union_ex(to_expolygons(top));
+                        // Walls are laid out on spacing, not width; and only_one_wall_top leaves a single wall over
+                        // a top surface, which is exactly the situation handled here.
+                        const int    wall_loops = region_config.only_one_wall_top.value ? std::min(region_config.wall_loops.value, 1)
+                                                                                        : region_config.wall_loops.value;
+                        const double wall_band  = wall_loops <= 0 ? 0. :
+                            double(layerm->flow(frExternalPerimeter).scaled_width()) +
+                            double(layerm->flow(frPerimeter).scaled_spacing()) * double(wall_loops - 1);
+                        const double margin     = scale_(region_config.top_surface_expansion_margin.value);
+                        // minimum real top to act on: ignore anything thinner than ~2 top-infill lines
+                        const float  min_top    = float(layerm->flow(frTopSolidInfill).scaled_width());
+                        const auto   direction  = region_config.top_surface_expansion_direction.value;
+
+                        ExPolygons grown;
+                        for (const ExPolygon &island : union_ex(layerm_slices_surfaces)) {
+                            // The top infill only exists inside the perimeters, so seed and measure from the infill
+                            // region (the island minus the wall band), not the raw slice: a section whose exposed top
+                            // is just the walls themselves is then skipped instead of being flooded inward. Clip the
+                            // layer's tops to the island first, to keep the boolean ops proportional to the island.
+                            const ExPolygons infill_region = wall_band > 0. ? offset_ex(island, -float(wall_band)) : ExPolygons{ island };
+                            const ExPolygons island_top    = intersection_ex(
+                                ClipperUtils::clip_clipper_polygons_with_subject_bbox(T, get_extents(island).inflated(SCALED_EPSILON)),
+                                infill_region);
+                            if (opening_ex(island_top, min_top).empty())
+                                continue; // no real top infill in this section - never expand into it
+
+                            // Grow, then keep only what the configured direction allows, using the top's own filled
+                            // outline (same outer edge, holes closed) to tell the two apart.
+                            // EdgeSlicer: upstream grows with Clipper2 (offset_ex_2, miter joins); we have no
+                            // Clipper2Utils, so this is the Clipper1 offset with miter joins and Clipper2's default
+                            // miter limit of 2.
+                            ExPolygons expanded = offset_ex(island_top, float(d), ClipperLib::jtMiter, 2.);
+                            if (direction != TopSurfaceExpansionDirection::InwardAndOutward) {
+                                ExPolygons outline;
+                                outline.reserve(island_top.size());
+                                for (const ExPolygon &ex : island_top)
+                                    outline.emplace_back(ex.contour);
+                                outline = union_ex(outline);
+                                expanded = direction == TopSurfaceExpansionDirection::Inward ?
+                                    intersection_ex(expanded, outline) :              // only growth into the holes
+                                    diff_ex(expanded, diff_ex(outline, island_top));  // only growth past the outer edge
+                            }
+                            // hold the expansion clear of the walls by the configured margin
+                            const ExPolygons allowed = margin > 0. ? offset_ex(infill_region, -float(margin)) : infill_region;
+                            append(grown, intersection_ex(expanded, allowed));
+                        }
+
+                        ExPolygons new_top = diff_ex(union_ex(T, grown), to_expolygons(bottom));
+                        top.clear();
+                        surfaces_append(top, std::move(new_top), stTop);
+                    }
+
         #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
                     {
                         static int iRun = 0;
@@ -2068,7 +2675,50 @@ void PrintObject::detect_surfaces_type()
                     // This would also skip generation of very short dual bridge layers (that are shorter than N perimeters), but these are unecessary as the bridge distance is
                     // We could reduce this slightly to account for innacurcies in the clipping operation.
                     // TODO: Monitor GitHub issues to check whether second bridge layers are ommited where they should be generated. If yes, reduce the filtering distance
-                    
+
+                    // ORCA: Same-layer-top guard.
+                    //
+                    // Collect every stTop polygon present at layer i+1 (this region) and
+                    // expand it by the same `offset_distance` used by the bridge filter
+                    // above. Note that `offset_distance` here is the full wall-band
+                    // distance for the region (external wall width + all configured
+                    // internal wall widths, i.e. external + (wall_loops - 1) × internal),
+                    // not a single perimeter width. Any candidate second-bridge area that
+                    // falls under this expanded mask will be subtracted out below.
+                    //
+                    // Why this exists: detect_surfaces_type() classifies a layer's "top"
+                    // surfaces as the geometry that is not covered by the layer above. Those
+                    // stTop regions often have small stInternal islands embedded in them.
+                    // The pre-existing wall-band filter (shrink_ex/offset_ex by
+                    // offset_distance) is supposed to throw those tiny islands away, but
+                    // its result is sensitive to Clipper's floating-point order of
+                    // operations: on macOS ARM the filter eats them, on Windows/Intel it
+                    // doesn't. Visible bridges then show up scattered across the printed
+                    // top surface.
+                    //
+                    // Expanding stTop by offset_distance and subtracting it from the
+                    // overlap makes the decision platform-independent: an island fully
+                    // surrounded by stTop disappears regardless of which Clipper happens
+                    // to be doing the math, while large stInternal regions away from the
+                    // top survive intact (the expansion only nibbles the wall-band depth
+                    // inward).
+                    //
+                    // Keep ExPolygons throughout so that any holes inside an stTop surface
+                    // are offset with the correct sign (positive offset shrinks holes /
+                    // grows the solid region). Using Polygons + expand() would treat the
+                    // contour and each hole as independent polygons and could distort the
+                    // mask.
+                    ExPolygons same_layer_top_expanded;
+                    {
+                        ExPolygons same_layer_top;
+                        for (const Surface &s : top_surfs) {
+                            if (s.surface_type == stTop)
+                                same_layer_top.push_back(s.expolygon);
+                        }
+                        if (! same_layer_top.empty())
+                            same_layer_top_expanded = offset_ex(same_layer_top, offset_distance);
+                    }
+
                     // For each surface in the layer above
                     for (const Surface &s_up : top_surfs) {
                         // Only reclassify stInternal polygons (i.e. what will become later solid and sparse infill)
@@ -2083,10 +2733,16 @@ void PrintObject::detect_surfaces_type()
                         // Filter out the resulting candidate bridges based on size. First perform a shrink operation...
                         // ...followed by an expand operation to bring them back to the original size (positive offset)
                         overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
-                        
+
+                        // ORCA: subtract the expanded same-layer stTop mask (see comment above
+                        // the mask construction). Drops stInternal islands fully surrounded by
+                        // stTop at i+1 without affecting bridges that lie away from the top.
+                        if (! same_layer_top_expanded.empty() && ! overlap.empty())
+                            overlap = diff_ex(overlap, same_layer_top_expanded, ApplySafetyOffset::Yes);
+
                         // Now subtract the filtered new bridge layer from the remaining internal surfaces to create the new internal surface
                         ExPolygons remainder = diff_ex(p_up, overlap, ApplySafetyOffset::Yes);
-                        
+
                         // Remainder stays as stInternal
                         ExPolygons unified_remainder = union_safety_offset_ex(remainder);
                         for (auto &ex_remainder : unified_remainder) {
@@ -2248,7 +2904,7 @@ void PrintObject::discover_vertical_shells()
         Polygons    holes;
     };
     bool     spiral_mode      = this->print()->config().spiral_mode.value;
-    size_t   num_layers       = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
+    size_t   num_layers       = spiral_mode ? this->spiral_vase_bottom_layers(this->printing_region(0).config()) : m_layers.size();
     std::vector<DiscoverVerticalShellsCacheEntry> cache_top_botom_regions(num_layers, DiscoverVerticalShellsCacheEntry());
     // Paint Depth Stage 2 (Task 3 item 1): mirror detect_surfaces_type()'s effective
     // interface_shells value (see PrintObject::has_bounded_paint_depth()) so vertical shell
@@ -2699,6 +3355,113 @@ template<typename T> void debug_draw(std::string name, const T& a, const T& b, c
 }
 #endif
 
+// Whether a fill surface of the layer with the given id prints at full density, by the density Fill.cpp gives its type, once
+// bridge_over_infill() and combine_infill() have run.
+static bool prints_dense(const Surface &surface, const PrintRegionConfig &region_config, const PrintObjectConfig &object_config, size_t layer_id)
+{
+    switch (surface.surface_type) {
+    case stInternal: return region_config.sparse_infill_density.value == 100;
+    case stTop: return region_config.top_surface_density.value == 100;
+    case stBottom: return region_config.bottom_surface_density.value == 100;
+    case stBottomOverSupport: return region_config.bottom_surface_density.value == 100;
+    case stBottomBridge: return region_config.bridge_density.value == 100;
+    case stInternalSolid:
+        // Elephant foot compensation thins it on the layers just above the first (only with no raft, as Fill.cpp),
+        // and combining infill leaves voids below the top layer of each group.
+        if (region_config.infill_combination.value ||
+            (object_config.raft_layers.value == 0 && object_config.elefant_foot_layers_density.value < 100 && layer_id > 0 &&
+             layer_id <= size_t(std::max(object_config.elefant_foot_compensation_layers.value, 1))))
+            return false;
+        // Where it lies over sparse infill, bridge_over_infill() turns it into an internal bridge.
+        [[fallthrough]];
+    case stInternalBridge:
+    case stSecondInternalBridge:
+    case stInternalAfterExternalBridge:
+        return region_config.bridge_density.value == 100 && object_config.internal_bridge_density.value == 100;
+    default: return false;
+    }
+}
+
+// Orca: Derive the fallback bridge direction from the supplied anchor geometry.
+// Pattern-specific angle selection belongs at the call site, where the supporting
+// layer and region are known; this helper must not override it with a base config angle.
+double determine_bridging_angle(const Polygons &bridged_area, const Lines &anchors)
+{
+    AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
+
+    std::map<double, int> counted_directions;
+    for (const Polygon &p : bridged_area) {
+        double acc_distance = 0;
+        for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
+            Vec2d  start        = p.points[point_idx].cast<double>();
+            Vec2d  next         = p.points[point_idx + 1].cast<double>();
+            Vec2d  v            = next - start; // vector from next to current
+            double dist_to_next = v.norm();
+            acc_distance += dist_to_next;
+            if (acc_distance > scaled(2.0)) {
+                acc_distance = 0.0;
+                v.normalize();
+                int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
+                float step_size   = dist_to_next / lines_count;
+                for (int i = 0; i < lines_count; ++i) {
+                    Point a                   = (start + v * (i * step_size)).cast<coord_t>();
+                    auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
+                    double angle = lines_tree.get_line(index).orientation();
+                    if (angle > PI) {
+                        angle -= PI;
+                    }
+                    angle += PI * 0.5;
+                    counted_directions[angle]++;
+                }
+            }
+        }
+    }
+
+    std::pair<double, int> best_dir{0, 0};
+    // sliding window accumulation
+    for (const auto &dir : counted_directions) {
+        int    score_acc          = 0;
+        double dir_acc            = 0;
+        double window_start_angle = dir.first - PI * 0.1;
+        double window_end_angle   = dir.first + PI * 0.1;
+        for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
+             dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
+            dir_acc += dirs_window->first * dirs_window->second;
+            score_acc += dirs_window->second;
+        }
+        // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
+        //  opposite direction.
+        if (window_start_angle < 0.5 * PI) {
+            for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
+                 dirs_window != counted_directions.end(); dirs_window++) {
+                dir_acc += (dirs_window->first - PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+        // A window reaching above the top of the span takes in the directions at the bottom of it, as for the window
+        // reaching below the bottom just above. (Asked of window_start_angle, which never comes above 1.4 PI, and with
+        // a bound of window_start_angle - 1.5 PI, this was never run, and votes near 1.5 PI were never pooled with
+        // the votes near 0.5 PI they agree with.)
+        if (window_end_angle > 1.5 * PI) {
+            for (auto dirs_window = counted_directions.begin();
+                 dirs_window != counted_directions.upper_bound(window_end_angle - PI); dirs_window++) {
+                dir_acc += (dirs_window->first + PI) * dirs_window->second;
+                score_acc += dirs_window->second;
+            }
+        }
+
+        if (score_acc > best_dir.second) {
+            best_dir = {dir_acc / score_acc, score_acc};
+        }
+    }
+    double bridging_angle = best_dir.first;
+    if (bridging_angle == 0) {
+        bridging_angle = 0.001;
+    }
+
+    return bridging_angle;
+}
+
 // This method applies bridge flow to the first internal solid layer above sparse infill.
 void PrintObject::bridge_over_infill()
 {
@@ -2753,6 +3516,9 @@ void PrintObject::bridge_over_infill()
                 // unsupported area will serve as a filter for polygons worth bridging.
                 Polygons   unsupported_area;
                 Polygons   lower_layer_solids;
+                // Whether every fill surface of the lower layer prints at full density, which the early-out below needs. Kept
+                // apart from the unchanged rule for what counts as a solid to expand.
+                bool       dense_below = true;
                 for (const LayerRegion *region : layer->lower_layer->regions()) {
                     Polygons fill_polys = to_polygons(region->fill_expolygons);
                     // initially consider the whole layer unsupported, but also gather solid layers to later cut off supported parts
@@ -2762,6 +3528,7 @@ void PrintObject::bridge_over_infill()
                             Polygons p = to_polygons(surface.expolygon);
                             lower_layer_solids.insert(lower_layer_solids.end(), p.begin(), p.end());
                         }
+                        dense_below = dense_below && prints_dense(surface, region->region().config(), po->config(), layer->lower_layer->id());
                     }
                 }
                 unsupported_area = closing(unsupported_area, float(SCALED_EPSILON));
@@ -2775,10 +3542,15 @@ void PrintObject::bridge_over_infill()
                 // By expanding the lower layer solids, we avoid making bridges from the tiny internal overhangs that are (very likely) supported by previous layer solids
                 // NOTE that we cannot filter out polygons worth bridging by their area, because sometimes there is a very small internal island that will grow into large hole
                 lower_layer_solids = shrink(lower_layer_solids, 1 * spacing); // first remove thin regions that will not support anything
-                lower_layer_solids = expand(lower_layer_solids, (1 + expansion_multiplier) * spacing); // then expand back (opening), and further for parts supported by internal solids
                 // By shrinking the unsupported area, we avoid making bridges from narrow ensuring region along perimeters.
                 unsupported_area   = shrink(unsupported_area, expansion_multiplier * spacing);
-                unsupported_area   = diff(unsupported_area, lower_layer_solids);
+                // Then expand the solids back (opening), and further for parts supported by internal solids. Over a lower layer
+                // printed at full density the expansion nearly always covers everything, which diff_expanded() proves at a
+                // fraction of the cost. Where Clipper's own offset decimation folds a sliver of solid thinner than about 0.01
+                // of the reach, about 16 µm here, its result may differ from the full expansion's; that is accepted.
+                const float reach  = float((1 + expansion_multiplier) * spacing);
+                unsupported_area   = dense_below ? diff_expanded(unsupported_area, lower_layer_solids, reach) :
+                                                   diff(unsupported_area, expand(lower_layer_solids, reach));
                 
                 for (const LayerRegion *region : layer->regions()) {
                     SurfacesPtr region_internal_solids = region->fill_surfaces.filter_by_type(stInternalSolid);
@@ -2955,14 +3727,15 @@ void PrintObject::bridge_over_infill()
     std::map<size_t, Polylines> infill_lines;
     // SECTION to generate infill polylines
     {
-        std::vector<std::pair<const Surface *, float>> surfaces_w_bottom_z;
+        std::vector<std::pair<const Surface *, const Layer *>> surfaces_w_layer;
         for (const auto &pair : surfaces_by_layer) {
             for (const CandidateSurface &c : pair.second) {
-                surfaces_w_bottom_z.emplace_back(c.original_surface, c.region->m_layer->bottom_z());
+                surfaces_w_layer.emplace_back(c.original_surface, c.region->m_layer);
             }
         }
 
-        this->m_adaptive_fill_octrees = this->prepare_adaptive_infill_data(surfaces_w_bottom_z);
+        this->m_adaptive_fill_octrees = this->prepare_adaptive_infill_data(surfaces_w_layer);
+        this->m_adaptive_infill_fields    = this->prepare_adaptive_infill_fields();
 
         std::vector<size_t> layers_to_generate_infill;
         for (const auto &pair : surfaces_by_layer) {
@@ -2978,8 +3751,8 @@ void PrintObject::bridge_over_infill()
             for (size_t job_idx = r.begin(); job_idx < r.end(); job_idx++) {
                 size_t lidx = layers_to_generate_infill[job_idx];
                 infill_lines.at(
-                    lidx) = po->get_layer(lidx)->generate_sparse_infill_polylines_for_anchoring(po->m_adaptive_fill_octrees.first.get(),
-                                                                                                po->m_adaptive_fill_octrees.second.get(),
+                    lidx) = po->get_layer(lidx)->generate_sparse_infill_polylines_for_anchoring(&po->m_adaptive_fill_octrees.first,
+                                                                                                &po->m_adaptive_fill_octrees.second,
                                                                                                 po->m_lightning_generator.get());
             }
         });
@@ -3046,11 +3819,13 @@ void PrintObject::bridge_over_infill()
     }
 
     // LAMBDA to gather areas with sparse infill deep enough that we can fit thick bridges there.
-    auto gather_areas_w_depth = [target_flow_height_factor](const PrintObject *po, int lidx, float target_flow_height) {
+    // target_flow_height is the depth a thick bridge sinks to, target_flow_height_factor of its height already: the
+    // caller applies the factor. Applying it again here looked only 0.81 of a thread deep.
+    auto gather_areas_w_depth = [](const PrintObject *po, int lidx, float target_flow_height) {
         // Gather layers sparse infill areas, to depth defined by used bridge flow
         ExPolygons layers_sparse_infill{};
         ExPolygons not_sparse_infill{};
-        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height * target_flow_height_factor - EPSILON;
+        double   bottom_z = po->get_layer(lidx)->print_z - target_flow_height - EPSILON;
         for (int i = int(lidx) - 1; i >= 0; --i) {
             // Stop iterating if layer is lower than bottom_z and at least one iteration was made
             const Layer *layer = po->get_layer(i);
@@ -3073,81 +3848,6 @@ void PrintObject::bridge_over_infill()
         not_sparse_infill    = union_ex(not_sparse_infill);
         not_sparse_infill    = closing_ex(not_sparse_infill, float(SCALED_EPSILON));
         return diff(layers_sparse_infill, not_sparse_infill);
-    };
-
-    // Orca: Derive the fallback bridge direction from the supplied anchor geometry.
-    // Pattern-specific angle selection belongs at the call site, where the supporting
-    // layer and region are known; this helper must not override it with a base config angle.
-    auto determine_bridging_angle = [](const Polygons &bridged_area, const Lines &anchors) {
-        AABBTreeLines::LinesDistancer<Line> lines_tree(anchors);
-
-        std::map<double, int> counted_directions;
-        for (const Polygon &p : bridged_area) {
-            double acc_distance = 0;
-            for (int point_idx = 0; point_idx < int(p.points.size()) - 1; ++point_idx) {
-                Vec2d  start        = p.points[point_idx].cast<double>();
-                Vec2d  next         = p.points[point_idx + 1].cast<double>();
-                Vec2d  v            = next - start; // vector from next to current
-                double dist_to_next = v.norm();
-                acc_distance += dist_to_next;
-                if (acc_distance > scaled(2.0)) {
-                    acc_distance = 0.0;
-                    v.normalize();
-                    int   lines_count = int(std::ceil(dist_to_next / scaled(2.0)));
-                    float step_size   = dist_to_next / lines_count;
-                    for (int i = 0; i < lines_count; ++i) {
-                        Point a                   = (start + v * (i * step_size)).cast<coord_t>();
-                        auto [distance, index, p] = lines_tree.distance_from_lines_extra<false>(a);
-                        double angle = lines_tree.get_line(index).orientation();
-                        if (angle > PI) {
-                            angle -= PI;
-                        }
-                        angle += PI * 0.5;
-                        counted_directions[angle]++;
-                    }
-                }
-            }
-        }
-
-        std::pair<double, int> best_dir{0, 0};
-        // sliding window accumulation
-        for (const auto &dir : counted_directions) {
-            int    score_acc          = 0;
-            double dir_acc            = 0;
-            double window_start_angle = dir.first - PI * 0.1;
-            double window_end_angle   = dir.first + PI * 0.1;
-            for (auto dirs_window = counted_directions.lower_bound(window_start_angle);
-                 dirs_window != counted_directions.upper_bound(window_end_angle); dirs_window++) {
-                dir_acc += dirs_window->first * dirs_window->second;
-                score_acc += dirs_window->second;
-            }
-            // current span of directions is 0.5 PI to 1.5 PI (due to the aproach.). Edge values should also account for the
-            //  opposite direction.
-            if (window_start_angle < 0.5 * PI) {
-                for (auto dirs_window = counted_directions.lower_bound(1.5 * PI - (0.5 * PI - window_start_angle));
-                     dirs_window != counted_directions.end(); dirs_window++) {
-                    dir_acc += (dirs_window->first - PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-            if (window_start_angle > 1.5 * PI) {
-                for (auto dirs_window = counted_directions.begin();
-                     dirs_window != counted_directions.upper_bound(window_start_angle - 1.5 * PI); dirs_window++) {
-                    dir_acc += (dirs_window->first + PI) * dirs_window->second;
-                    score_acc += dirs_window->second;
-                }
-            }
-
-            if (score_acc > best_dir.second) {
-                best_dir = {dir_acc / score_acc, score_acc};
-            }
-        }
-        double bridging_angle = best_dir.first;
-        if (bridging_angle == 0) {
-            bridging_angle = 0.001;
-        }
-
-        return bridging_angle;
     };
 
     // Orca: Extend scan sections to the nearest anchors and reconstruct the bridge area.
@@ -3337,7 +4037,6 @@ void PrintObject::bridge_over_infill()
                                                                                            target_flow_height_factor, &surfaces_by_layer,
                                                                                            &clustered_layers_for_threads,
                                                                                            gather_areas_w_depth, &infill_lines,
-                                                                                           determine_bridging_angle,
                                                                                            construct_anchored_polygon](
                                                                                               tbb::blocked_range<size_t> r) {
         PRINT_OBJECT_TIME_LIMIT_MILLIS(PRINT_OBJECT_TIME_LIMIT_DEFAULT);
@@ -3505,13 +4204,18 @@ void PrintObject::bridge_over_infill()
                             bridging_angle = determine_bridging_angle(area_to_be_bridge, to_lines(anchors.empty() ? boundary_plines : anchors));
                     }
 
-                    // Orca: Preserve the user's internal bridge angle override after automatic
-                    // direction selection. Ultra has no relative_bridge_angle setting.
+                    // Orca: Preserve the user's absolute or relative internal bridge angle
+                    // override after automatic direction selection.
                     if (candidate.region->region().config().internal_bridge_angle.value > 0) {
-                        bridging_angle = Geometry::deg2rad(region_config.internal_bridge_angle.value);
-                        if (region_config.align_infill_direction_to_model) {
-                            const auto &m = po->trafo().matrix();
-                            bridging_angle += std::atan2(double(m(1, 0)), double(m(0, 0)));
+                        const double custom_angle_rad = Geometry::deg2rad(region_config.internal_bridge_angle.value);
+                        if (region_config.relative_bridge_angle.value)
+                            bridging_angle += custom_angle_rad;
+                        else {
+                            bridging_angle = custom_angle_rad;
+                            if (region_config.align_infill_direction_to_model) {
+                                const auto &m = po->trafo().matrix();
+                                bridging_angle += std::atan2(double(m(1, 0)), double(m(0, 0)));
+                            }
                         }
                     }
 
@@ -3603,6 +4307,11 @@ void PrintObject::bridge_over_infill()
                 ExPolygons additional_ensuring = intersection_ex(additional_ensuring_areas, near_perimeters);
 
                 SurfacesPtr internal_infills = region->fill_surfaces.filter_by_type(stInternal);
+                // Orca #16570: Sloping walls shift adjacent infill contours, so their boundary bands
+                // may intersect in a strip too narrow to print. Widen these contacts into
+                // sparse infill to retain support after the fill's half-spacing inset.
+                additional_ensuring = intersection_ex(internal_infills,
+                    expand_ex(to_polygons(additional_ensuring), region->flow(frSolidInfill).scaled_spacing()));
                 ExPolygons new_internal_infills = diff_ex(internal_infills, cut_from_infill);
                 new_internal_infills            = diff_ex(new_internal_infills, additional_ensuring);
                 for (const ExPolygon &ep : new_internal_infills) {
@@ -3658,8 +4367,11 @@ void PrintObject::bridge_over_infill()
         // stInternal / stInternalSolid surfaces and keeps every stInternalBridge surface, in order, so this is what a
         // serial run produces.
         std::vector<std::vector<Surfaces>> rewritten(this->layers().size());
+        // Guard against size_t underflow when the object has 0 or 1 layers — there is
+        // no "layer above" to receive an extra bridge, so the whole pass is a no-op.
+        const size_t last = (this->layers().size() < 2) ? 0 : this->layers().size() - 1;
         // Process layers in parallel up to second-to-last
-        tbb::parallel_for( tbb::blocked_range<size_t>(0, this->layers().size() - 1), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
+        tbb::parallel_for( tbb::blocked_range<size_t>(0, last), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
             for (size_t lidx = r.begin(); lidx < r.end(); ++lidx)
             {
                 Layer* layer = this->get_layer(lidx);
@@ -3742,11 +4454,14 @@ void PrintObject::bridge_over_infill()
                                     next_new_surfaces.emplace_back(tmp, ep);
                                 }
                                 
-                                // Calculate leftover polygons = s->expolygon - bridging_union
-                                ExPolygons leftover = diff_ex(s->expolygon, bridging_union, ApplySafetyOffset::Yes);
-                                // Shrink + expand to remove trivial polygons
-                                leftover = offset_ex(shrink_ex(leftover, offset_distance), offset_distance);
-                                
+                                // Calculate leftover polygons = s->expolygon - the second bridge made above.
+                                // Everything of the surface that is not second bridge stays what it was. The leftover
+                                // used to be s->expolygon - bridging_union put through the same shrink + expand as the
+                                // bridge: that sieve is for bridges too small to matter, and on the leftover it dropped
+                                // whatever was narrower than two lines from the layer, with nothing printed in its
+                                // place. So did taking bridging_union off, for the overlap the sieve had refused.
+                                ExPolygons leftover = diff_ex(s->expolygon, overlap, ApplySafetyOffset::Yes);
+
                                 // Leftover polygons exist. Add them to the new surface maintaining their original attributes
                                 if (!leftover.empty()) {
                                     ExPolygons unified_leftover = union_safety_offset_ex(leftover);
@@ -3827,7 +4542,7 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     clamp_exturder_to_default(config.support_filament,           num_extruders);
     clamp_exturder_to_default(config.support_interface_filament, num_extruders);
     // Ultra (support groups): support_top_z_distance is object-wide behaviour - it decides
-    // SlicingParameters::soluble_interface (Slicing.cpp), bottom surface classification in
+    // SlicingParameters::zero_gap_interface_top and _bottom (Slicing.cpp), bottom surface classification in
     // detect_surfaces_type, and the organic-tree soluble static (TreeSupport3D.cpp). A per-part
     // value cannot be honoured, so the strictest group wins: any group asking for a soluble
     // interface makes the whole object soluble. No group -> no change, so this is a no-op for
@@ -3839,6 +4554,12 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.6.
     if (PrintObject::support_groups_want_soluble(object))
         config.support_top_z_distance.value = 0.;
+    // Per-nozzle process P2: the support width of the support filament's nozzle process (no-op without one).
+    // A support width set on the object still wins.
+    // P6: nor does a line_width set on the object when the plate's support width is 0 (= line_width).
+    if (!config.nozzle_support_line_width.values.empty() && object.config.get().option("support_line_width") == nullptr &&
+        !(object.config.get().option("line_width") != nullptr && config.support_line_width.value == 0.))
+        stamp_nozzle_line_widths(config);
     return config;
 }
 
@@ -4114,6 +4835,58 @@ std::vector<std::string> PrintObject::modifiers_without_overrides() const
     return out;
 }
 
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint)
+{
+    // With Override paint on the paint does not shadow the modifier, so neither note applies. (On an
+    // unpainted part the flag is dropped and an otherwise inert modifier still gets the plain notice.)
+    if (! overlaps_painted || ! sets_filament || overrides_paint)
+        return ModifierPaintNote::None;
+    if (region_is_alias)
+        return ModifierPaintNote::SameFilamentPainted;
+    return filament_differs ? ModifierPaintNote::FilamentOverriddenByPaint : ModifierPaintNote::None;
+}
+
+PrintObject::ModifierPaintNotes PrintObject::modifier_paint_notes() const
+{
+    ModifierPaintNotes out;
+    // Painting only exists as a concept with several filaments.
+    if (m_shared_regions == nullptr || this->model_object() == nullptr || m_print->config().filament_diameter.size() < 2)
+        return out;
+    for (const ModelVolume *volume : this->model_object()->volumes) {
+        if (volume == nullptr || ! volume->is_modifier())
+            continue;
+        if (! model_volume_sets_filament(*volume))
+            continue;
+        bool seen = false, effective = false, differs = false, overlaps_painted = false;
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+                if (region.model_volume == volume && region.parent >= 0) {
+                    seen = true;
+                    const PrintObjectRegions::VolumeRegion &parent = layer_range.volume_regions[region.parent];
+                    if (parent.model_volume != nullptr && parent.model_volume->is_mm_painted())
+                        overlaps_painted = true;
+                    if (region.region != parent.region) {
+                        effective = true;
+                        if (region.region != nullptr && parent.region != nullptr) {
+                            const PrintRegionConfig &a = region.region->config(), &b = parent.region->config();
+                            if (a.wall_filament != b.wall_filament || a.sparse_infill_filament != b.sparse_infill_filament ||
+                                a.solid_infill_filament != b.solid_infill_filament)
+                                differs = true;
+                        }
+                    }
+                }
+        if (! seen)
+            continue;
+        switch (classify_modifier_paint_note(! effective, true, differs, overlaps_painted, model_volume_overrides_paint(*volume))) {
+        case ModifierPaintNote::SameFilamentPainted:       out.same_filament_painted.emplace_back(volume->name); break;
+        case ModifierPaintNote::FilamentOverriddenByPaint: out.filament_overridden.emplace_back(volume->name);   break;
+        default: break;
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> PrintObject::modifiers_without_parent() const
 {
     std::vector<std::string> out;
@@ -4158,15 +4931,84 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     if (config.outer_wall_filament.value > (int) num_extruders)
         config.outer_wall_filament.value = 0;
     clamp_exturder_to_default(config.solid_infill_filament, num_extruders);
+    // Per-nozzle process P8: every other region setting from the process of the tool that prints the role (no-op without
+    // per-tool processes). A setting made on the object, part, modifier or layer range still wins over the tool's process.
+    if (!config.nozzle_region_values.values.empty()) {
+        stamp_nozzle_region_values(config);
+        auto reapply_region = [&config](const DynamicPrintConfig &src) {
+            for (const std::string &key : src.keys())
+                if (is_nozzle_region_option(key))
+                    if (ConfigOption *dst = config.option(key); dst != nullptr)
+                        if (const ConfigOption *opt = src.option(key); opt != nullptr && opt->type() == dst->type())
+                            dst->set(opt);
+        };
+        if (volume.is_model_part())
+            reapply_region(volume.get_object()->config.get());
+        reapply_region(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_region(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_region(*layer_range_config);
+    }
     if (config.sparse_infill_density.value < 0.00011f)
         // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
         // See GH issue #5910.
         config.sparse_infill_density.value = 0;
     else
         config.sparse_infill_density.value = std::min(config.sparse_infill_density.value, 100.);
-    if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
-        config.fuzzy_skin.value = FuzzySkinType::None;
+    // A point distance of 0 divides every wall segment forever (infinite loop, then out of memory;
+    // Orca #11915 puts the minimum at 0.01). Switch fuzzy skin off for such a region, Disabled rather
+    // than None: painted fuzzy skin regions start from this config and turn None into All (#10312),
+    // which would bring the zero distance back.
+    if (config.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
+        config.fuzzy_skin.value = FuzzySkinType::Disabled_fuzzy;
+    // Per-nozzle process P2: each role's width from the process of the nozzle that prints it (no-op without one).
+    // A width set on the object, part, modifier or layer range still wins over the nozzle's process.
+    if (!config.nozzle_outer_wall_line_width.values.empty()) {
+        const PrintRegionConfig plate = config; // the widths before the stamp
+        stamp_nozzle_line_widths(config);
+        auto reapply_widths = [&config, &plate](const DynamicPrintConfig &src) {
+            // P6: a line_width set on the object or a layer range is what a role left at 0 on the plate means.
+            const bool own_line_width = src.option("line_width") != nullptr;
+            for (const auto &key : nozzle_line_width_keys()) {
+                ConfigOption *dst = config.option(key.second);
+                if (dst == nullptr)
+                    continue;
+                if (const ConfigOption *opt = src.option(key.second); opt != nullptr)
+                    dst->set(opt);
+                else if (own_line_width && key.second != "bridge_line_width")
+                    if (const auto *before = plate.option<ConfigOptionFloatOrPercent>(key.second); before != nullptr && before->value == 0.)
+                        dst->set(before);
+            }
+        };
+        reapply_widths(volume.get_object()->config.get());
+        reapply_widths(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_widths(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_widths(*layer_range_config);
+    }
+    // Override paint belongs to a modifier that sets a filament: a part (or its object, or a height range
+    // modifier) never carries it, and a modifier without a filament of its own keeps what it inherited.
+    if (volume.is_model_part())
+        config.override_paint.value = false;
+    else if (config.override_paint.value != default_or_parent_region_config.override_paint.value && ! model_volume_sets_filament(volume))
+        config.override_paint.value = default_or_parent_region_config.override_paint.value;
     return config;
+}
+
+bool model_volume_sets_filament(const ModelVolume &volume)
+{
+    for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+        if (const ConfigOption *opt = volume.config.option(key); opt != nullptr && opt->getInt() > 0)
+            return true;
+    return false;
+}
+
+bool model_volume_overrides_paint(const ModelVolume &volume)
+{
+    const ConfigOption *opt = volume.config.option("override_paint");
+    return volume.is_modifier() && opt != nullptr && opt->getBool() && model_volume_sets_filament(volume);
 }
 
 struct POProfiler
@@ -4187,6 +5029,41 @@ void PrintObject::generate_support_preview()
     this->generate_support_material();
     boost::posix_time::ptime ts3 = boost::posix_time::microsec_clock::local_time();
     profiler.duration2 = (ts3 - ts2).total_milliseconds();
+}
+
+// Edge (support highlight, phase 5): see Print.hpp.
+void PrintObject::detect_support_overhangs_only()
+{
+    // The steps a slice runs before the support step that the detection reads: the slices, and for
+    // bridge removal the perimeters and the bottom bridge surfaces of the infill preparation. Always
+    // both, so the layers are exactly as the slice has them when its support step starts.
+    this->make_perimeters();
+    this->prepare_infill();
+    this->throw_if_canceled();
+    this->clear_support_layers();
+    if (m_layers.size() < 2 || ! m_config.enable_support.value)
+        return;
+    if (is_tree(m_config.support_type.value)) {
+        // Every tree style, organic too, detects with TreeSupport::detect_overhangs().
+        TreeSupport tree_support(*this, m_slicing_params);
+        tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
+        tree_support.detect_overhangs();
+        this->clear_tree_support_preview_cache();
+    } else {
+        PrintObjectSupportMaterial support_material(this, m_slicing_params);
+        support_material.detect_overhangs_only(*this);
+    }
+    this->throw_if_canceled();
+}
+
+// Edge (support highlight, phase 6): see Print.hpp.
+void PrintObject::generate_support_for_preview()
+{
+    this->clear_support_layers();
+    if ((m_config.enable_support.value && m_layers.size() > 1) || (this->has_raft() && ! m_layers.empty()))
+        this->_generate_support_material();
+    this->clear_tree_support_preview_cache();
+    this->throw_if_canceled();
 }
 
 void PrintObject::update_slicing_parameters()
@@ -4275,12 +5152,22 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
         return result;
 
     const int filament_count = int(m_print->config().filament_diameter.size());
+    const MixedFilamentManager &mixed = m_print->mixed_filament_manager();
     auto add = [&](std::set<int> &into, int filament_1based) {
-        if (filament_1based > 0 && filament_1based <= filament_count)
+        if (filament_1based > 0 && filament_1based <= filament_count) {
             into.insert(filament_1based - 1);
+        } else if (filament_1based > filament_count) {
+            // A mixed filament prints with its physical components (upstream Orca #16947, for Edge's
+            // virtual mixed slots above the real count): those are what cannot leave the nozzle's reach.
+            std::vector<int> ids{ filament_1based };
+            mixed.expand_virtual_extruder_ids(ids, size_t(filament_count));
+            for (int id : ids)
+                if (id > 0 && id <= filament_count)
+                    into.insert(id - 1);
+        }
     };
-    // The filaments a region prints with, the same ones Bambu inspects (mixed-filament virtual slots above
-    // the real count are dropped by `add`).
+    // The filaments a region prints with, the same ones Bambu inspects; a mixed filament's virtual slot
+    // stands for its components.
     struct RegionFilaments { int wall; int outer_wall; int solid; int sparse; };
     auto region_filaments = [](const LayerRegion *layerm) {
         const PrintRegionConfig &c = layerm->region().config();
@@ -4940,7 +5827,12 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
             std::abs(layer_height_profile[layer_height_profile.size() - 2] - slicing_parameters.object_print_z_uncompensated_max + slicing_parameters.object_print_z_min) > 1e-3))
         layer_height_profile.clear();
 
-    if (layer_height_profile.empty() || layer_height_profile[1] != slicing_parameters.first_object_layer_height || has_dithering_ranges) {
+    // Snapmaker #757: a differing first layer height must NOT force regeneration: doing so discards a
+    // valid variable layer height profile (e.g. loaded from a 3MF) and replaces it with a fixed-height
+    // profile. generate_object_layers() applies the first layer height itself whenever it is fixed
+    // (no raft, or a bridging first object layer over a raft), so the profile's first segment does not
+    // need to match it here. Edge: the dithering / mixed-height ranges still regenerate the profile.
+    if (layer_height_profile.empty() || has_dithering_ranges) {
         //layer_height_profile = layer_height_profile_adaptive(slicing_parameters, model_object.layer_config_ranges, model_object.volumes);
         layer_height_profile = layer_height_profile_from_ranges(slicing_parameters, *ranges_to_use);
         // The layer height profile is already compressed.
@@ -5294,6 +6186,12 @@ void PrintObject::combine_infill()
         const bool enable_combine_infill = region.config().infill_combination.value;
         if (enable_combine_infill == false || region.config().sparse_infill_density == 0.)
             continue;
+        // A region merged into mixed-nozzle slabs already prints its fill once per slab
+        // (combine_adaptive_infill()); combining it again would stack two thickness plans.
+        if (std::any_of(m_layers.begin(), m_layers.end(), [region_id](const Layer *layer) {
+                return ! layer->get_region(int(region_id))->adaptive_merge_patches.empty();
+            }))
+            continue;
 
         // Support internal solid infill when sparse_infill_density is 100%
         const bool          use_solid_infill = fabs(region.config().sparse_infill_density.value - 100.) < EPSILON;
@@ -5303,9 +6201,9 @@ void PrintObject::combine_infill()
 
         // Limit the number of combined layers to the maximum height allowed by this regions' nozzle.
         //FIXME limit the layer height to max_layer_height
-        double nozzle_diameter = this->print()->config().nozzle_diameter.get_at(region.config().wall_filament.value - 1);
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().sparse_infill_filament.value - 1));
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().solid_infill_filament.value - 1));
+        double nozzle_diameter = nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().wall_filament.value));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().sparse_infill_filament.value)));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().solid_infill_filament.value)));
         
         //Orca: Limit combination of infill to up to infill_combination_max_layer_height
         const double infill_combination_max_layer_height = region.config().infill_combination_max_layer_height.get_abs_value(nozzle_diameter);
@@ -5406,6 +6304,999 @@ void PrintObject::combine_infill()
             }
         }
     }
+}
+
+// Mixed nozzle diameters, the fill half of a merge. After BambuStudio v02.09.01.70 PrintObject::combine_adaptive_infill()
+// (PrintObject.cpp:5004-5700), reduced to the wall-nozzle case: a region's fill follows its wall patches.
+//
+// Every group-top patch [bottom_idx, top_idx] of a region extrudes the fill of its whole Z span once, on the group top,
+// at the merged height. Surface types were detected on the fine grid, so each step's requirement is lifted:
+//   1. the group top's own top surfaces stay top;
+//   2. bridges anywhere in the span keep their type (and bridge angle) - the merged bead rests where the lowest
+//      step of the span rests;
+//   3. every other non-sparse surface in the span becomes solid on the group top (a top or bottom surface of a
+//      lower step turns internal solid, since the span continues past it);
+//   4. the rest keeps the group top's own surface (sparse infill).
+// All of it is clipped to the group top's own fill area inside the patch, since the walls of the group top were
+// generated on that contour. The group top's own bottom surfaces are not merged: they print at the physical layer
+// height where the face is, as in Bambu (they are not part of a first band, which Edge never plans). The layers below the group top extrude nothing of the region: a region whose layer
+// holds no extruding group top loses its whole fill (its walls were dropped in Layer::make_perimeters()).
+//
+// Edge deviations from Bambu, deliberate:
+//   * Fill printed by a different nozzle than the walls (sparse_infill_filament / solid_infill_filament on another
+//     diameter) is not planned on its own ladder; it follows the wall patches. Bambu plans it separately.
+//   * Swallowed fill is removed rather than turned into stInternalVoid: Fill.cpp turns the corners between printing
+//     surfaces and void surfaces into base-height solid "extensions", which would put thin coarse-nozzle solid
+//     back into the swallowed footprint.
+//   * Bambu's top re-detection against the next slab's footprint and its fill repair passes are not ported.
+void PrintObject::combine_adaptive_infill()
+{
+    if (! this->print()->uses_multiple_nozzle_diameters())
+        return;
+
+    const size_t region_count = this->num_printing_regions();
+    const size_t layer_count  = m_layers.size();
+
+    struct Replacement {
+        size_t     layer_idx;
+        size_t     region_id;
+        ExPolygons area;
+        Surfaces   surfaces;
+    };
+    std::vector<Replacement> replacements;
+
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx) {
+            m_print->throw_if_canceled();
+            const LayerRegion *layerm = m_layers[layer_idx]->get_region(int(region_id));
+            for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches) {
+                if (! patch.group_top || patch.area().empty() || patch.top_idx != layer_idx ||
+                    patch.bottom_idx > patch.top_idx)
+                    continue;
+                // The group top's own bottoms (an overhang face starting on this step) stay on the fine grid at the
+                // physical layer height, where the face really is: they are left out of the merged area and keep
+                // their surface (BambuStudio v02.09.01.70 PrintObject.cpp:5386-5392, the "blocked" bottoms).
+                Polygons own_fill;
+                Polygons own_bottom;
+                for (const Surface &surface : layerm->fill_surfaces.surfaces) {
+                    if (surface.surface_type == stInternalVoid)
+                        continue;
+                    polygons_append(surface.is_bottom() ? own_bottom : own_fill, to_polygons(surface.expolygon));
+                }
+                ExPolygons fill_area = intersection_ex(union_ex(own_fill), patch.area());
+                if (! own_bottom.empty())
+                    fill_area = diff_ex(fill_area, own_bottom);
+                if (fill_area.empty())
+                    continue;
+
+                Surfaces out;
+                Polygons claimed;
+                auto claim = [&out, &claimed, &fill_area](const Surface &templ, SurfaceType type, const ExPolygon &expolygon) {
+                    ExPolygons area = intersection_ex(ExPolygons{ expolygon }, fill_area);
+                    if (! claimed.empty())
+                        area = diff_ex(area, claimed);
+                    for (ExPolygon &piece : area) {
+                        polygons_append(claimed, to_polygons(piece));
+                        out.emplace_back(templ, std::move(piece));
+                        out.back().surface_type = type;
+                    }
+                };
+                // 1. The group top's own top surfaces.
+                for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                    if (surface.surface_type == stTop)
+                        claim(surface, stTop, surface.expolygon);
+                // 2. Bridges of the span, lowest step first (BambuStudio collect_span_bridges()).
+                for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
+                    for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
+                        if (surface.is_bridge())
+                            claim(surface, surface.surface_type, surface.expolygon);
+                // 3. Every other non-sparse requirement of the span. A lower step's top or (non-bridge) bottom turns
+                //    internal solid: the span continues past it, so it is no face of the slab.
+                for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
+                    for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
+                        if (surface.surface_type != stInternal && surface.surface_type != stInternalVoid)
+                            claim(surface, surface.surface_type == stTop || surface.is_bottom() ? stInternalSolid : surface.surface_type,
+                                  surface.expolygon);
+                // 4. The rest of the group top as it was typed.
+                for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                    if (surface.surface_type != stInternalVoid)
+                        claim(surface, surface.surface_type, surface.expolygon);
+
+                for (Surface &surface : out) {
+                    surface.thickness        = patch.merged_height;
+                    surface.thickness_layers = (unsigned short) (patch.top_idx - patch.bottom_idx + 1);
+                }
+                replacements.push_back({ layer_idx, region_id, std::move(fill_area), std::move(out) });
+            }
+        }
+    }
+
+    // Drop what the swallowed steps would have extruded. Everything above was read before anything was written.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions()) {
+            if (layerm->adaptive_merge_patches.empty())
+                continue;
+            Polygons extruded;
+            for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches)
+                if (patch.group_top && ! patch.area().empty())
+                    polygons_append(extruded, to_polygons(patch.area()));
+            if (extruded.empty()) {
+                layerm->fill_surfaces.clear();
+                continue;
+            }
+            const ExPolygons keep = union_ex(extruded);
+            Surfaces kept;
+            for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                for (ExPolygon &piece : intersection_ex(ExPolygons{ surface.expolygon }, keep))
+                    kept.emplace_back(surface, std::move(piece));
+            layerm->fill_surfaces.set(std::move(kept));
+        }
+
+    for (Replacement &replacement : replacements) {
+        LayerRegion *layerm = m_layers[replacement.layer_idx]->get_region(int(replacement.region_id));
+        Surfaces kept;
+        for (const Surface &surface : layerm->fill_surfaces.surfaces)
+            for (ExPolygon &piece : diff_ex(ExPolygons{ surface.expolygon }, replacement.area))
+                kept.emplace_back(surface, std::move(piece));
+        append(kept, std::move(replacement.surfaces));
+        layerm->fill_surfaces.set(std::move(kept));
+    }
+}
+
+// Decide which layers each wall region keeps. A larger nozzle keeps one contour out of every band and
+// drops the ones below it. Bands are a per-diameter ladder shared by every region of this object that
+// uses the same diameter, so two such regions never straddle each other's band boundaries. The stack
+// itself is sliced at the user's layer_height; the reference nozzle is only the ratio denominator for
+// those band sizes.
+//
+// Algorithm from BambuStudio v02.09.01.70 src/libslic3r/PrintObject.cpp:4312-4998. This is not a
+// behavioural match: Bambu with a 0.2 layer-grid nozzle will merge a plate where every nozzle is 0.4;
+// Edge never merges a single-diameter plate. Different reference nozzle, different band sizes, and
+// Edge expands mixed virtual filaments where Bambu has no equivalent.
+//
+// Edge differences, all deliberate:
+//   * The gate is Print::uses_multiple_nozzle_diameters(), which in Edge is pure mixed-diameter detection
+//     (no multi_nozzle_diameter_mode key, no UI toggle - Lance's decision).
+//   * The band reference is adaptive_band_reference_nozzle() over the plate's used WALL filaments
+//     (plate_wall_filament_ids(): every object's gated wall filaments), not object_extruders() (which also
+//     collects infill) and not used_printing_filaments() (which also collects supports). A finer infill-only
+//     or support-only nozzle, or a wall_filament on a region whose walls are off, must not size any walls.
+//     Step 3 widened this from the object's own walls to the plate's: Bambu measures every object against one
+//     plate-wide grid nozzle, and an object printed entirely by the 0.8 next to a 0.4 object has to stack its
+//     slabs against the 0.4's layers; with an object-local reference it would be its own reference and never
+//     merge. Edge has no separate grid nozzle, so the "some filament uses a nozzle larger than D" clause cannot
+//     trigger: D is the smallest nonzero diameter over the same wall list the bands are sized from.
+//   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
+//     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
+//     count (Bambu's get_at() pitfall).
+//   * Each region's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle(): the
+//     nozzle that prints the band, the tightest limits where used filaments share it, never values.front().
+//   * The first object layer is never merged. Every merged ladder starts on layer 1, and layer 0 prints as
+//     sliced. Bambu anchors the first band on the bed and then needs per-filament first-layer temperatures,
+//     bed temperature, brim, skirt and the empty-first-layer check to follow a bed contact printed one or more
+//     layers up; none of that exists here, so the bed contact stays a plain first layer.
+//
+// Id conventions, per the F3 precedent of PR #850: the filament ids in here are 1-based when handed to
+// nozzle_diameter_for_filament() (Edge-wide convention) and 0-based everywhere else.
+
+// 0-based wall filament ids this object actually prints walls with. Band sizing matches Bambu in using
+// wall nozzles only; infill-only nozzles deliberately do not enter the ratio. The enable gates match
+// PrintRegion.cpp:143 and MixedFilamentCliGates.cpp:150: wall_filament counts only when wall_loops > 0,
+// and outer_wall_filament counts only when wall_loops > 0 and the override is set. Brim is not threaded
+// through (default brim_type is AutoBrim, so PrintObject::has_brim() is true on every object and would
+// keep a walls-off wall_filament in the set). A region with walls off whose wall_filament still names a
+// finer nozzle must not coarsen the walls that do print. append_gated_feature_filament_ids is file-local
+// in MixedFilamentCliGates.cpp, so this is a local loop rather than a new header.
+static std::vector<unsigned int> object_wall_filament_ids(const PrintObject &object)
+{
+    std::vector<unsigned int> ids;
+    ids.reserve(object.num_printing_regions() * 2);
+    for (size_t region_id = 0; region_id < object.num_printing_regions(); ++ region_id) {
+        const PrintRegionConfig &config = object.printing_region(region_id).config();
+        if (config.wall_loops.value > 0) {
+            if (config.wall_filament.value > 0)
+                ids.emplace_back((unsigned int) config.wall_filament.value - 1);
+            if (config.outer_wall_filament.value > 0)
+                ids.emplace_back((unsigned int) config.outer_wall_filament.value - 1);
+        }
+    }
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
+// The gated wall filaments of every object on the plate (0-based), the band reference list.
+static std::vector<unsigned int> plate_wall_filament_ids(const Print &print)
+{
+    std::vector<unsigned int> ids;
+    for (const PrintObject *object : print.objects())
+        append(ids, object_wall_filament_ids(*object));
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
+double Print::adaptive_merge_reference_nozzle() const
+{
+    return adaptive_band_reference_nozzle(m_config, plate_wall_filament_ids(*this));
+}
+
+// Mixed color sublayer P3 (D9): a Ratio row's painted region keeps its virtual (mixed) filament id, whose nozzle
+// is no physical nozzle. Its components print through one nozzle diameter (D8, Print::validate), so the region is
+// banded on that nozzle, as Bambu Studio 2.9.1 syncs a mixed slot's nozzle from its components
+// (sync_mixed_filament_nozzle_diameters). Every other region, and every row outside the feature, keeps its own id.
+static unsigned int adaptive_merge_region_filament(const Print &print, unsigned int wall_filament)
+{
+    const PrintConfig          &cfg          = print.config();
+    const MixedFilamentManager &mgr          = print.mixed_filament_manager();
+    const size_t                num_physical = cfg.filament_colour.size();
+    if (wall_filament == 0 || !mgr.is_mixed(wall_filament, num_physical) ||
+        mixed_sublayer_legacy_mode(mgr.mixed_filaments(), cfg.enable_mixed_color_sublayer.value))
+        return wall_filament;
+    const MixedFilament *mf = mgr.mixed_filament_from_id(wall_filament, num_physical);
+    if (mf == nullptr)
+        return wall_filament;
+    const bool gradient = mf->gradient_enabled && mf->component_a != mf->component_b;
+    if (mixed_sublayer_effective_method(mf->sublayer_method, cfg.enable_mixed_color_sublayer.value, cfg.dithering_local_z_mode.value, gradient) !=
+        MixedSublayerMethod::Ratio)
+        return wall_filament;
+    const std::vector<MixedRatioComponent> components = mixed_ratio_components(*mf, num_physical);
+    if (components.size() < 2)
+        return wall_filament;
+    std::vector<unsigned int> ids;
+    std::vector<double>       nozzles(num_physical, 0.);
+    for (size_t i = 0; i < num_physical; ++i)
+        nozzles[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
+    for (const MixedRatioComponent &c : components)
+        ids.push_back(c.extruder);
+    if (mixed_ratio_diameter_mismatch(ids, nozzles).mismatch())
+        return wall_filament;
+    return components.front().extruder;
+}
+
+void PrintObject::compute_adaptive_merge_groups()
+{
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->adaptive_merge_patches.clear();
+
+    // Only meaningful when different nozzle diameters are present. Plate-wide is the right gate:
+    // a single-diameter plate never merges, even if one object could invent a finer reference.
+    if (! this->print()->uses_multiple_nozzle_diameters())
+        return;
+
+    // m_slicing_params.layer_height is the user's base step this object was sliced on, which is what a band
+    // size is measured in. A caller that has not sliced yet has no grid to merge on, and m_slicing_params is
+    // cleared by every invalidating step (PrintObject.cpp:1823, :1828, :1845), so refuse rather than read a
+    // stale layer_height. This makes the planner safe to call from anywhere, not merely loud in a debug build.
+    if (! m_slicing_params.valid)
+        return;
+    assert(m_slicing_params.valid);
+
+    const PrintConfig &print_config = this->print()->config();
+    const size_t       region_count = this->num_printing_regions();
+    const size_t       layer_count  = m_layers.size();
+    if (region_count == 0 || layer_count < 2)
+        return;
+
+    std::vector<double> layer_heights;
+    layer_heights.reserve(layer_count);
+    for (const Layer *layer : m_layers)
+        layer_heights.emplace_back(layer->height);
+
+    std::vector<double> region_nozzles(region_count, 0.);
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        const PrintRegionConfig &config = this->printing_region(region_id).config();
+        // wall_filament is already a 1-based config id; nozzle_diameter_for_filament() wants that
+        // convention, so it is passed through unchanged. (used_printing_filaments() / object_extruders()
+        // are 0-based and need +1, which adaptive_band_reference_nozzle() applies internally.)
+        const unsigned int filament = adaptive_merge_region_filament(*this->print(), (unsigned int) config.wall_filament.value);
+        region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
+    }
+    // Band reference is the plate's wall nozzles only. Infill-only nozzles deliberately do not size the
+    // walls: a 0.2 infill next to 0.4 walls must not coarsen those walls. wall_filament /
+    // outer_wall_filament are 1-based and converted to 0-based by object_wall_filament_ids() because
+    // adaptive_band_reference_nozzle() adds 1 to reach the config id.
+    const double min_nozzle = adaptive_band_reference_nozzle(print_config, plate_wall_filament_ids(*this->print()));
+    if (min_nozzle <= EPSILON)
+        return;
+    // A mixed region that is not a Ratio row (Subdivide, gradient, cadence kept on its virtual id) is never banded: its
+    // Local-Z passes split one layer, not a merged band. nozzle_diameter_for_filament() now resolves a mixed filament to
+    // its components' nozzle, so pin these regions to the band reference (a ladder of one), as they printed before.
+    {
+        const MixedFilamentManager &mgr          = this->print()->mixed_filament_manager();
+        const size_t                num_physical = print_config.filament_colour.size();
+        for (size_t region_id = 0; region_id < region_count; ++region_id) {
+            const unsigned int wall = (unsigned int) this->printing_region(region_id).config().wall_filament.value;
+            if (mgr.is_mixed(wall, num_physical) && adaptive_merge_region_filament(*this->print(), wall) == wall)
+                region_nozzles[region_id] = min_nozzle;
+        }
+    }
+
+    // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
+    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that
+    // leaves a single band height on this grid is widened (adaptive_ladder_height_range), or the ladder of an
+    // odd run comes back empty and the region loses every layer above the first.
+    std::vector<unsigned int> used_filaments;
+    this->print()->used_printing_filaments(used_filaments);
+    std::vector<AdaptiveLayerHeightRange> region_ranges(region_count);
+    for (size_t region_id = 0; region_id < region_count; ++ region_id)
+        region_ranges[region_id] = adaptive_ladder_height_range(
+            adaptive_layer_height_range_for_nozzle(
+                print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                used_filaments),
+            region_nozzles[region_id], min_nozzle, m_slicing_params.layer_height);
+
+    // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
+    // pass has already aligned painted ownership to each band's anchor contour.
+    const std::vector<uint8_t> band_tops;
+
+    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] layers=" << layer_count << " min_nozzle=" << min_nozzle
+                             << " band_tops=none (fixed nozzle ladders)";
+
+    // Plan every region on the fixed ladder shared by its nozzle diameter, then arbitrate the resulting
+    // slabs from bottom to top. Colours never create a new ladder phase.
+    struct MergeEvent {
+        size_t                   region_id;
+        double                   nozzle;
+        AdaptiveLayerHeightRange range;
+        AdaptiveLayerBand        band;
+        size_t                    source_bottom_idx;
+        bool                      merged;
+    };
+    std::vector<MergeEvent> events;
+    auto span_height = [&layer_heights](size_t bottom_idx, size_t top_idx) {
+        double height = 0.;
+        for (size_t layer_idx = bottom_idx; layer_idx <= top_idx; ++ layer_idx)
+            height += layer_heights[layer_idx];
+        return height;
+    };
+    // Keep the previous slab's floor and the tail's top fixed. Borrow only enough steps from the
+    // previous slab to make the tail printable, e.g. 0.5 + 0.1 becomes 0.4 + 0.2 for a 0.8 nozzle.
+    // Callers try this only once growing a neighbour inside the preferred window has failed.
+    // A slab resting on the bed belongs to the first band, whose height is fixed; it never donates steps.
+    auto split_before_tail = [&](size_t bottom_idx, size_t previous_top_idx, size_t tail_top_idx,
+                                 const AdaptiveLayerHeightRange &range, size_t &split_top_idx) {
+        if (bottom_idx == 0 || bottom_idx >= previous_top_idx || previous_top_idx >= tail_top_idx)
+            return false;
+        double tail_height = span_height(previous_top_idx + 1, tail_top_idx);
+        if (tail_height >= range.min_height - EPSILON)
+            return false;
+        size_t tail_bottom_idx = previous_top_idx + 1;
+        while (tail_bottom_idx > bottom_idx && tail_height < range.min_height - EPSILON)
+            tail_height += layer_heights[-- tail_bottom_idx];
+        if (tail_bottom_idx == bottom_idx || ! range.contains(tail_height) ||
+            ! range.contains(span_height(bottom_idx, tail_bottom_idx - 1)))
+            return false;
+        split_top_idx = tail_bottom_idx - 1;
+        return true;
+    };
+    // A run of steps a region owns that no band of its nozzle could take. It is carried to the end of
+    // planning as an explicit record instead of being suppressed right away, because absorbing it needs to
+    // know the space the other nozzles occupy. Recovering it afterwards by subtracting the planned
+    // extrusions from the raw slices would also report the hairline by which every step inside a band
+    // differs from that band's anchor contour, and those hairlines are not holes.
+    struct PendingOrphan {
+        size_t                   region_id;
+        AdaptiveLayerHeightRange range;
+        // The relaxed ceiling, 1.0D. Passing the preferred 0.7D is the last resort before giving the run away.
+        double                   max_height;
+        size_t                   bottom_idx;
+        size_t                   top_idx;
+        // "no-band" - no band of this nozzle covers the step. "too-thin" - a band covers it, but everything
+        // under the step is occupied and the clear span left is thinner than this nozzle can extrude.
+        const char              *source;
+        // What was lost. Recovery takes back only the column over it, so the rest of the slab that takes it
+        // keeps its own span.
+        ExPolygons               area;
+        // A too-thin bottom face resting on nothing. It is dropped rather than absorbed: the slab above keeps
+        // its own floor, and the step above the face is typed as the bridge over it instead.
+        bool                     floating { false };
+    };
+    std::vector<PendingOrphan> pending_orphans;
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        const double nozzle = region_nozzles[region_id];
+        if (nozzle <= EPSILON)
+            continue;
+        const AdaptiveLayerHeightRange range = region_ranges[region_id];
+        size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
+        // H3C fix (2026-11-06): a process chosen for this coarser nozzle sets its slab height (its own layer height in whole
+        // base layers, in the same window) instead of the size ratio. The finest nozzle keeps printing the plate's layer height.
+        if (nozzle > min_nozzle + EPSILON)
+            band_size = nozzle_process_band_size(
+                nozzle_layer_height_for_filament(print_config, adaptive_merge_region_filament(*this->print(), (unsigned int) this->printing_region(region_id).config().wall_filament.value)),
+                band_size, m_slicing_params.layer_height, range.min_height, range.max_height);
+
+        std::vector<unsigned char> has_material(layer_count, 0);
+        for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
+            has_material[layer_idx] = ! m_layers[layer_idx]->get_region(region_id)->raw_slices.empty();
+
+        if (band_size < 2) {
+            // This nozzle extrudes the slicing grid itself, so it prints every layer exactly as sliced.
+            for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
+                if (has_material[layer_idx])
+                    events.push_back({ region_id, nozzle, range,
+                                       { layer_idx, layer_idx, layer_heights[layer_idx] },
+                                       layer_idx, false });
+            BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id << " nozzle=" << nozzle
+                                     << " band_size=1 -> prints every layer";
+            continue;
+        }
+
+        // One diameter owns one ladder. Region/colour start layers do not create a new phase.
+        // Edge: the ladder starts on layer 1; layer 0 is the bed contact and prints as sliced (a fixed-grid
+        // event below), so no band is anchored at the object base and Bambu's first-band path never runs.
+        // The support merge plan (SupportMergePlan.cpp) builds its fixed ladders through the same helper, so a
+        // support slab only ever ends on a band top the walls of that nozzle use.
+        std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_ladder(layer_heights, band_size, range, band_tops);
+
+        std::vector<AdaptiveLayerBand> live_bands;
+        std::vector<unsigned char>     covered(layer_count, 0);
+        covered[0] = 1;
+        if (has_material[0])
+            events.push_back({ region_id, nozzle, range, { 0, 0, layer_heights[0] }, 0, false });
+        for (const AdaptiveLayerBand &band : bands) {
+            AdaptiveLayerBand live = band;
+            // The first band is a snapshot of the object base and keeps its grid top whatever it holds.
+            if (band.bottom_idx != 0 &&
+                ! pull_adaptive_band_top_to_material(live, layer_heights, range, has_material))
+                continue;
+            for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx; ++ layer_idx)
+                covered[layer_idx] = 1;
+            live_bands.emplace_back(live);
+        }
+
+        // Layers this region owns that no band covers: a colour tail ending inside a band, or a step the
+        // ladder had to bridge with a single-layer group. A run the nozzle can extrude gets bands of its own.
+        // Printing a thinner one as sliced is what put a 0.1 mm extrusion under a 0.6 nozzle, so it is folded
+        // into a neighbouring band while that band's height stays printable, and otherwise recorded as an
+        // orphan for the resolution pass below.
+        std::string orphans;
+        for (size_t layer_idx = 0; layer_idx < layer_count; ) {
+            if (covered[layer_idx] || ! has_material[layer_idx]) {
+                ++ layer_idx;
+                continue;
+            }
+            size_t run_top = layer_idx;
+            while (run_top + 1 < layer_count && ! covered[run_top + 1] && has_material[run_top + 1])
+                ++ run_top;
+            orphans += "[" + std::to_string(layer_idx) + "," + std::to_string(run_top) + "]";
+
+            // A run this nozzle can extrude on its own is not thin, it is just off the ladder: 0.1 under a 0.4
+            // nozzle. It is cut into printable bands of its own, which then go through arbitration like every
+            // other band. Only a run thinner than one extrusion is left to the repairs below.
+            std::vector<std::pair<size_t, size_t>> own_bands;
+            if (split_adaptive_layer_span(layer_heights, layer_idx, run_top, band_size, range, own_bands)) {
+                for (const std::pair<size_t, size_t> &own : own_bands)
+                    live_bands.push_back({ own.first, own.second, span_height(own.first, own.second) });
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    covered[idx] = 1;
+                layer_idx = run_top + 1;
+                continue;
+            }
+
+            AdaptiveLayerBand *below = nullptr;
+            AdaptiveLayerBand *above = nullptr;
+            for (AdaptiveLayerBand &band : live_bands) {
+                if (layer_idx > 0 && band.top_idx == layer_idx - 1)
+                    below = &band;
+                if (band.bottom_idx == run_top + 1)
+                    above = &band;
+            }
+            // Growing the band above pulls its floor down; growing the one below lifts this colour's top face
+            // by the run. Either keeps the material, so prefer them over giving the run away. The band above
+            // goes first: it keeps its group top, so no new print Z appears off the ladder.
+            auto absorb = [&](double ceiling) {
+                if (above != nullptr) {
+                    const double height = span_height(layer_idx, above->top_idx);
+                    if (height >= range.min_height - EPSILON && height <= ceiling + EPSILON) {
+                        above->bottom_idx    = layer_idx;
+                        above->merged_height = height;
+                        return true;
+                    }
+                }
+                if (below != nullptr) {
+                    const double height = span_height(below->bottom_idx, run_top);
+                    if (height >= range.min_height - EPSILON && height <= ceiling + EPSILON) {
+                        below->top_idx       = run_top;
+                        below->merged_height = height;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            // Re-cut the band below and the run into two slabs inside the window, keeping both outer faces.
+            auto split = [&]() {
+                size_t split_top_idx;
+                if (below == nullptr ||
+                    ! split_before_tail(below->bottom_idx, below->top_idx, run_top, range, split_top_idx))
+                    return false;
+                below->top_idx       = split_top_idx;
+                below->merged_height = span_height(below->bottom_idx, split_top_idx);
+                // Invalidates below and above, so nothing may follow a successful split.
+                live_bands.push_back({ split_top_idx + 1, run_top, span_height(split_top_idx + 1, run_top) });
+                return true;
+            };
+            // Heights inside the preferred window come first, and a whole slab before a cut one: both neighbours
+            // are offered the preferred ceiling, then the run may be re-cut with the band below, and only then
+            // may a neighbour grow to the relaxed ceiling. Same order as the orphan resolution below.
+            if (absorb(range.max_height) || split() || absorb(nozzle))
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    covered[idx] = 1;
+            else {
+                Polygons run_area;
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    polygons_append(run_area, to_polygons(m_layers[idx]->get_region(region_id)->raw_slices));
+                pending_orphans.push_back({ region_id, range, nozzle, layer_idx, run_top, "no-band",
+                                            union_ex(run_area) });
+            }
+            layer_idx = run_top + 1;
+        }
+
+        std::string span;
+        for (const AdaptiveLayerBand &band : live_bands) {
+            span += "[" + std::to_string(band.bottom_idx) + "," + std::to_string(band.top_idx) + "]";
+            events.push_back({ region_id, nozzle, range, band, band.bottom_idx, true });
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id << " nozzle=" << nozzle
+                                 << " band_size=" << band_size
+                                 << " range=[" << range.min_height << "," << range.max_height << "]"
+                                 << " bands=" << live_bands.size() << " " << span
+                                 << " orphans=" << (orphans.empty() ? "none" : orphans);
+    }
+    // Bottom to top for merged slabs. Outside the layer-0 reservation of a first band, fixed-grid events are
+    // registered as immutable occupancy before this arbitration, so a coarse band cannot claim a layer that
+    // a fine nozzle will extrude later. Where two merged ladders start together the coarser one still wins.
+    std::stable_sort(events.begin(), events.end(), [](const MergeEvent &lhs, const MergeEvent &rhs) {
+        if (lhs.band.bottom_idx != rhs.band.bottom_idx)
+            return lhs.band.bottom_idx < rhs.band.bottom_idx;
+        if (std::abs(lhs.nozzle - rhs.nozzle) > EPSILON)
+            return lhs.nozzle > rhs.nozzle;
+        if (lhs.band.top_idx != rhs.band.top_idx)
+            return lhs.band.top_idx < rhs.band.top_idx;
+        return lhs.region_id < rhs.region_id;
+    });
+
+    // Physical occupancy on the fine slicing grid. A merged patch occupies every step of its Z span even
+    // though its G-code is emitted only on the group-top layer.
+    std::vector<ExPolygons> occupied(layer_count);
+    auto occupy = [&occupied](size_t layer_idx, const ExPolygons &area) {
+        if (area.empty())
+            return;
+        Polygons combined = to_polygons(occupied[layer_idx]);
+        polygons_append(combined, to_polygons(area));
+        occupied[layer_idx] = union_ex(combined);
+    };
+    struct FirstBandClaim {
+        size_t     region_id;
+        size_t     top_idx;
+        ExPolygons area;
+    };
+    std::vector<FirstBandClaim> first_band_claims;
+    // Resolved slabs, kept in planning order until the orphan resolution below can no longer change them.
+    struct PlannedPatch {
+        size_t             region_id;
+        // The band's planned floor. Marker copies start here even when the patch itself was clipped higher.
+        size_t             store_bottom_idx;
+        AdaptiveMergePatch patch;
+    };
+    std::vector<PlannedPatch> planned;
+
+    // The first coarse band is anchored to its true layer-0 contour, which owns that footprint throughout
+    // the band. Reserve it before registering fixed-grid regions; later coarse bands still yield to those
+    // immutable fine-nozzle extrusions.
+    std::vector<ExPolygons> first_band_reservations(layer_count);
+    for (const MergeEvent &event : events) {
+        if (! event.merged || event.band.bottom_idx != 0)
+            continue;
+        const ExPolygons &anchor = m_layers.front()->get_region(event.region_id)->raw_slices;
+        if (anchor.empty())
+            continue;
+        for (size_t layer_idx = 0; layer_idx <= event.band.top_idx; ++ layer_idx) {
+            Polygons combined = to_polygons(first_band_reservations[layer_idx]);
+            polygons_append(combined, to_polygons(anchor));
+            first_band_reservations[layer_idx] = union_ex(combined);
+        }
+    }
+
+    // Fixed-grid regions are emitted exactly as sliced and have no later clipping pass. Register their
+    // unreserved footprint first, including events whose layer lies inside a non-first merged band's span.
+    for (const MergeEvent &event : events) {
+        if (event.merged)
+            continue;
+        ExPolygons area = m_layers[event.band.top_idx]->get_region(event.region_id)->raw_slices;
+        if (! first_band_reservations[event.band.top_idx].empty())
+            area = diff_ex(area, first_band_reservations[event.band.top_idx]);
+        occupy(event.band.top_idx, area);
+    }
+
+    for (const MergeEvent &event : events) {
+        m_print->throw_if_canceled();
+        const size_t region_id = event.region_id;
+        if (! event.merged)
+            continue;
+
+        const AdaptiveLayerBand &band       = event.band;
+        const bool               first_band = band.bottom_idx == 0;
+        // Planning already resolved the top against the material this region owns.
+        const AdaptiveLayerBand &live = band;
+        if (first_band && m_layers.front()->get_region(region_id)->raw_slices.empty()) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = live.bottom_idx;
+            patch.top_idx       = live.top_idx;
+            patch.merged_height = live.merged_height;
+            patch.set_area({});
+            for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx; ++ layer_idx) {
+                AdaptiveMergePatch stored = patch;
+                stored.group_top = layer_idx == live.top_idx;
+                m_layers[layer_idx]->get_region(region_id)->adaptive_merge_patches.emplace_back(std::move(stored));
+            }
+            continue;
+        }
+        // The first band is a snapshot of the true first layer. Later bands use their top contour.
+        const size_t anchor_idx  = first_band ? 0 : live.top_idx;
+        const ExPolygons  anchor = m_layers[anchor_idx]->get_region(region_id)->raw_slices;
+        const double top_area    = ::Slic3r::area(anchor) * SCALING_FACTOR * SCALING_FACTOR;
+
+        // A band shows one contour over its whole Z span, so a volume whose top face falls inside the band
+        // is not in that contour at all: on the steps it does occupy it would be neither walled nor filled.
+        // Give what ends inside the band its own group top, on the highest step where it still exists.
+        //
+        // The fringe by which a shrinking shape - a cone, a dome - exceeds the contour above it is not such a
+        // volume: it cannot hold a bead, and the ladder has always accepted it as inherent underfill. Only
+        // what this nozzle could really lay a bead into is worth a ceiling of its own.
+        //
+        // The first band is excluded. Its anchor is the object base by design, and pulling side-wall
+        // material up into it is exactly what that choice exists to prevent.
+        struct Slab {
+            size_t     top_idx;
+            ExPolygons area;
+        };
+        std::vector<Slab> slabs { { live.top_idx, anchor } };
+        if (! first_band) {
+            Polygons inside;
+            for (size_t layer_idx = live.bottom_idx; layer_idx < live.top_idx; ++ layer_idx)
+                polygons_append(inside, to_polygons(m_layers[layer_idx]->get_region(region_id)->raw_slices));
+            ExPolygons ends_inside =
+                adaptive_printable_core(diff_ex(union_ex(inside), anchor), event.nozzle);
+            // Top down, so each piece is claimed by the highest step it still exists on.
+            for (size_t layer_idx = live.top_idx; layer_idx-- > live.bottom_idx && ! ends_inside.empty();) {
+                ExPolygons here = adaptive_printable_core(
+                    intersection_ex(ends_inside, m_layers[layer_idx]->get_region(region_id)->raw_slices),
+                    event.nozzle);
+                if (here.empty())
+                    continue;
+                ends_inside = diff_ex(ends_inside, here);
+                slabs.push_back({ layer_idx, std::move(here) });
+            }
+        }
+
+        std::vector<AdaptiveMergePatch> patches;
+        // Too-thin orphans recorded for this band, kept to decide whether the empty marker is still needed.
+        struct BandOrphan {
+            size_t     bottom_idx;
+            size_t     top_idx;
+            ExPolygons area;
+        };
+        std::vector<BandOrphan> band_orphans;
+        for (const Slab &slab : slabs) {
+            ExPolygons area = occupied[slab.top_idx].empty() ?
+                slab.area : diff_ex(slab.area, occupied[slab.top_idx]);
+
+            // Partition the XY footprint by the highest occupied step underneath it. Every piece keeps this
+            // slab's group top, but starts immediately above its own local obstruction. This avoids both
+            // overlap and the gap that would result from raising the complete patch for a partial conflict.
+            ExPolygons assigned;
+            // The first step whose clear span is too thin to extrude. From there up this slab can place
+            // nothing, so whatever footprint is still unassigned has lost its owner.
+            size_t     thin_bottom_idx = slab.top_idx + 1;
+            // A merged extrusion is laid onto whatever is below its floor, so it cannot reach down into a step
+            // that holds no object material under its footprint: a colour starting on a bridge in the middle
+            // of a band would otherwise hang below the real bottom face. The first band rests on the bed.
+            // Fringes too narrow to hold a bead of this nozzle are the usual underfill of a sloped wall.
+            //
+            // Only a face too thin for this nozzle is held off, and then dropped as an orphan. A face that could be
+            // extruded on its own is not cut out of the slab: a patch of its own would wall it off from the
+            // material it rests against, so it hangs from the band floor with the rest of the contour.
+            std::vector<ExPolygons> unsupported(slab.top_idx + 1);
+            if (! first_band && ! area.empty()) {
+                Polygons thin_faces;
+                for (size_t layer_idx = live.bottom_idx; layer_idx < slab.top_idx; ++ layer_idx) {
+                    unsupported[layer_idx] = adaptive_printable_pieces(
+                        diff_ex(area, m_layers[layer_idx]->lslices), event.nozzle);
+                    // Missing on this step, so it starts on the step above at the earliest.
+                    if (span_height(layer_idx + 1, slab.top_idx) < event.range.min_height - EPSILON)
+                        polygons_append(thin_faces, to_polygons(unsupported[layer_idx]));
+                }
+                const ExPolygons thin_area = union_ex(thin_faces);
+                for (size_t layer_idx = live.bottom_idx; layer_idx < slab.top_idx; ++ layer_idx)
+                    unsupported[layer_idx] = thin_area.empty() ? ExPolygons{} : adaptive_printable_pieces(
+                        intersection_ex(unsupported[layer_idx], thin_area), event.nozzle);
+            }
+            for (size_t bottom_idx = live.bottom_idx; bottom_idx <= slab.top_idx && ! area.empty(); ++ bottom_idx) {
+                const double height = span_height(bottom_idx, slab.top_idx);
+                // A band that absorbed an orphan may exceed the preferred 0.7D ceiling. Keep the same 1.0D
+                // ceiling used when it was accepted; otherwise it is turned into an empty patch here.
+                if (height > event.nozzle + EPSILON)
+                    continue;
+                if (height < event.range.min_height - EPSILON) {
+                    thin_bottom_idx = bottom_idx;
+                    break;
+                }
+
+                Polygons blockers;
+                for (size_t layer_idx = bottom_idx; layer_idx < slab.top_idx; ++ layer_idx) {
+                    polygons_append(blockers, to_polygons(occupied[layer_idx]));
+                    polygons_append(blockers, to_polygons(unsupported[layer_idx]));
+                }
+                ExPolygons clear = blockers.empty() ? area : diff_ex(area, union_ex(blockers));
+                if (! assigned.empty())
+                    clear = diff_ex(clear, assigned);
+                if (clear.empty())
+                    continue;
+
+                AdaptiveMergePatch patch;
+                patch.bottom_idx    = bottom_idx;
+                patch.top_idx       = slab.top_idx;
+                patch.merged_height = height;
+                patch.set_area(std::move(clear));
+                Polygons combined = to_polygons(assigned);
+                polygons_append(combined, to_polygons(patch.area()));
+                assigned = union_ex(combined);
+                patches.emplace_back(std::move(patch));
+            }
+
+            // Steps the partition had to give up on are the second way a step loses its owner: a slab does
+            // cover them, but everything underneath is occupied and the clear span left is below this
+            // nozzle's minimum. Recorded for the same reason as a step no band could take - the alternative
+            // is rediscovering it later from the raw slices, where it cannot be told from a fringe.
+            const ExPolygons unassigned = diff_ex(area, assigned);
+            if (thin_bottom_idx <= slab.top_idx && ! unassigned.empty()) {
+                const bool floating = thin_bottom_idx > 0 && ! adaptive_printable_pieces(
+                    diff_ex(unassigned, m_layers[thin_bottom_idx - 1]->lslices), event.nozzle).empty();
+                pending_orphans.push_back({ region_id, event.range, event.nozzle,
+                                            thin_bottom_idx, slab.top_idx, "too-thin", unassigned, floating });
+                band_orphans.push_back({ thin_bottom_idx, slab.top_idx, unassigned });
+            }
+
+            BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id
+                                     << " band=[" << band.bottom_idx << "," << band.top_idx << "]"
+                                     << " slab=[" << live.bottom_idx << "," << slab.top_idx << "]"
+                                     << (slab.top_idx == live.top_idx ? " anchor" : " local_top")
+                                     << " raw_area="
+                                     << ::Slic3r::area(slab.area) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " after_occupied="
+                                     << ::Slic3r::area(area) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " unassigned="
+                                     << ::Slic3r::area(unassigned) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " thin_from=" << (thin_bottom_idx > slab.top_idx ?
+                                                          std::string("none") : std::to_string(thin_bottom_idx))
+                                     << (area.empty() ? " DROPPED" : " KEPT");
+        }
+
+        // The empty marker suppresses the whole region over the band. It can be left out only when every piece
+        // of material the region holds inside the band belongs to one of its too-thin orphans: orphan resolution
+        // then absorbs or suppresses all of it, while the marker would void the orphan's own fill (a bridge,
+        // say) before the slab absorbing it could lift it. Anything else - material under another nozzle's
+        // occupancy, a fringe no slab took - would otherwise fall back to the base layer height.
+        bool orphans_own_band = ! band_orphans.empty();
+        for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx && orphans_own_band; ++ layer_idx) {
+            const ExPolygons &raw = m_layers[layer_idx]->get_region(region_id)->raw_slices;
+            if (raw.empty())
+                continue;
+            Polygons owned;
+            for (const BandOrphan &orphan : band_orphans)
+                if (orphan.bottom_idx <= layer_idx && layer_idx <= orphan.top_idx)
+                    polygons_append(owned, to_polygons(orphan.area));
+            // Only numerical slivers between the two polygonisations may be left over.
+            orphans_own_band = ! owned.empty() &&
+                opening_ex(diff_ex(raw, union_ex(owned)), float(scale_(0.01))).empty();
+        }
+        if (patches.empty() && ! orphans_own_band) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = live.bottom_idx;
+            patch.top_idx       = live.top_idx;
+            patch.merged_height = live.merged_height;
+            patch.set_area({});
+            patches.emplace_back(std::move(patch));
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id
+                                 << " band=[" << band.bottom_idx << "," << band.top_idx << "]"
+                                 << " live=[" << live.bottom_idx << "," << live.top_idx << "]"
+                                 << " top_raw_area=" << top_area
+                                 << " slabs=" << slabs.size()
+                                 << " patches=" << patches.size();
+
+        for (AdaptiveMergePatch &patch : patches) {
+            for (size_t layer_idx = patch.bottom_idx; layer_idx <= patch.top_idx; ++ layer_idx)
+                occupy(layer_idx, patch.area());
+
+            // Held back until orphan resolution below has had its say: it may still drop a slab's floor,
+            // and the marker layers under a locally clipped patch have to grow with it.
+            planned.push_back({ region_id, event.source_bottom_idx, std::move(patch) });
+        }
+    }
+
+    // Resolve the runs recorded while planning, in the same order as a run is resolved during planning:
+    // heights inside the preferred window come first, a whole slab before a cut one, and the relaxed 1.0D
+    // ceiling is the last resort before giving the run away.
+    //   1. the slab above lowers its floor over the run, within 0.7D;
+    //   2. the slab below lifts its top over the run, within 0.7D;
+    //   3. the run is re-cut with the slab below into two slabs inside the window;
+    //   4. as 1. and 2., up to the relaxed ceiling.
+    // A floating face skips all of them: the slab above keeps its floor and bridges over it.
+    //
+    // A run nobody can absorb keeps its empty group top. That marker is the established "nothing is
+    // extruded here": it clears the perimeters and makes combine_adaptive_infill() void the fill, so the
+    // step cannot fall back to a base-grid extrusion this nozzle is unable to lay down.
+    enum class Recovery { FromAbove, FromBelow, Split };
+    for (const PendingOrphan &orphan : pending_orphans) {
+        m_print->throw_if_canceled();
+        ExPolygons remaining = orphan.area;
+
+        // Take the run back column by column into a slab of its region touching it. Only the column over the
+        // lost footprint changes; the rest of that slab keeps its own span.
+        //   FromAbove - the slab above lowers the column's floor to the run's bottom, keeping its group top.
+        //   FromBelow - the slab below lifts the column's top to the run's top, keeping its floor.
+        //   Split     - the column is re-cut with the slab below into two slabs inside the window, keeping
+        //               the slab's floor and the run's top.
+        // A slab resting on the bed belongs to the first band, whose height is fixed; it is never lifted or cut.
+        auto recover = [&](Recovery mode, double ceiling) {
+            const size_t planned_count = planned.size();
+            for (size_t planned_idx = 0; planned_idx < planned_count && ! remaining.empty(); ++ planned_idx) {
+                PlannedPatch &donor = planned[planned_idx];
+                if (donor.region_id != orphan.region_id || donor.patch.area().empty())
+                    continue;
+                if (mode == Recovery::FromAbove ? donor.patch.bottom_idx != orphan.top_idx + 1 :
+                        donor.patch.bottom_idx == 0 || donor.patch.top_idx + 1 != orphan.bottom_idx)
+                    continue;
+                size_t split_top_idx = 0;
+                if (mode == Recovery::Split) {
+                    if (! split_before_tail(donor.patch.bottom_idx, donor.patch.top_idx, orphan.top_idx,
+                                            orphan.range, split_top_idx))
+                        continue;
+                } else if (mode == Recovery::FromAbove ?
+                               span_height(orphan.bottom_idx, donor.patch.top_idx) > ceiling + EPSILON :
+                               span_height(donor.patch.bottom_idx, orphan.top_idx) > ceiling + EPSILON)
+                    continue;
+
+                m_print->throw_if_canceled();
+                ExPolygons recovered = intersection_ex(donor.patch.area(), remaining);
+                // The column has to exist on every step from where a new group top starts: the run's bottom, or
+                // the split when cut, where the lower slab now ends and shows its contour. Below that the donor
+                // already holds it. Only the run is checked against other occupancy: the donor owns its own steps.
+                // A nozzle cannot dip below an extrusion standing on the run, so a conflict only removes its own
+                // part of the column.
+                const size_t check_from = mode == Recovery::Split ? split_top_idx : orphan.bottom_idx;
+                for (size_t idx = check_from; idx <= orphan.top_idx && ! recovered.empty(); ++ idx) {
+                    recovered = intersection_ex(recovered, m_layers[idx]->get_region(orphan.region_id)->raw_slices);
+                    if (idx >= orphan.bottom_idx && ! occupied[idx].empty())
+                        recovered = diff_ex(recovered, occupied[idx]);
+                }
+                recovered = adaptive_printable_pieces(std::move(recovered), region_nozzles[orphan.region_id]);
+                if (recovered.empty())
+                    continue;
+
+                std::vector<PlannedPatch> pieces;
+                if (mode == Recovery::Split) {
+                    PlannedPatch lower = donor;
+                    lower.patch.top_idx       = split_top_idx;
+                    lower.patch.merged_height = span_height(lower.patch.bottom_idx, split_top_idx);
+                    lower.patch.set_area(recovered);
+                    pieces.emplace_back(std::move(lower));
+                }
+                PlannedPatch column = donor;
+                if (mode == Recovery::FromAbove)
+                    column.patch.bottom_idx = orphan.bottom_idx;
+                else {
+                    if (mode == Recovery::Split) {
+                        column.store_bottom_idx = split_top_idx + 1;
+                        column.patch.bottom_idx = split_top_idx + 1;
+                    }
+                    column.patch.top_idx = orphan.top_idx;
+                }
+                column.patch.merged_height = span_height(column.patch.bottom_idx, column.patch.top_idx);
+                column.patch.set_area(recovered);
+                pieces.emplace_back(std::move(column));
+
+                ExPolygons unchanged = diff_ex(donor.patch.area(), recovered);
+                remaining = diff_ex(remaining, recovered);
+                // Occupancy outside the run is unchanged; only the run is filled in.
+                for (size_t idx = orphan.bottom_idx; idx <= orphan.top_idx; ++ idx)
+                    occupy(idx, recovered);
+                const AdaptiveMergePatch &taken = pieces.back().patch;
+                if (mode == Recovery::Split)
+                    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                             << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                             << " " << orphan.source << " rebalanced from below, split=" << split_top_idx
+                                             << " h=" << pieces.front().patch.merged_height << "+" << taken.merged_height;
+                else
+                    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                             << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                             << " " << orphan.source
+                                             << (mode == Recovery::FromAbove ? " absorbed from above into [" :
+                                                                               " lifted from below into [")
+                                             << taken.bottom_idx << "," << taken.top_idx << "] h=" << taken.merged_height
+                                             << (taken.merged_height > orphan.range.max_height + EPSILON ?
+                                                 " RELAXED_MAX" : "");
+                // The donor itself is reused for the first piece, or keeps what the column left of it.
+                // Do not use donor after appending: growing planned may invalidate the reference.
+                size_t first_new = 0;
+                if (unchanged.empty())
+                    donor = std::move(pieces[first_new ++]);
+                else
+                    donor.patch.set_area(std::move(unchanged));
+                for (size_t idx = first_new; idx < pieces.size(); ++ idx)
+                    planned.emplace_back(std::move(pieces[idx]));
+            }
+            return remaining.empty();
+        };
+
+        if (! orphan.floating &&
+            (recover(Recovery::FromAbove, orphan.range.max_height) ||
+             recover(Recovery::FromBelow, orphan.range.max_height) ||
+             recover(Recovery::Split, orphan.range.max_height) ||
+             recover(Recovery::FromAbove, orphan.max_height) ||
+             recover(Recovery::FromBelow, orphan.max_height)))
+            continue;
+
+        for (size_t idx = orphan.bottom_idx; idx <= orphan.top_idx; ++ idx) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = idx;
+            patch.top_idx       = idx;
+            patch.group_top     = true;
+            patch.merged_height = layer_heights[idx];
+            patch.set_area({});
+            patch.set_suppressed_area(intersection_ex(
+                remaining, m_layers[idx]->get_region(orphan.region_id)->raw_slices));
+            m_layers[idx]->get_region(orphan.region_id)->adaptive_merge_patches.emplace_back(std::move(patch));
+        }
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                 << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                 << " " << orphan.source << (orphan.floating ? " floating" : "") << " suppressed";
+    }
+
+    for (const PlannedPatch &planned_patch : planned) {
+        // Orphan recovery may lower a patch after the initial partition. Build claims from the final span,
+        // but only for patches whose source band and resolved floor are both truly anchored at layer 0.
+        if (planned_patch.store_bottom_idx == 0 && planned_patch.patch.bottom_idx == 0 &&
+            ! planned_patch.patch.area().empty())
+            first_band_claims.push_back(
+                { planned_patch.region_id, planned_patch.patch.top_idx, planned_patch.patch.area() });
+
+        // Marker copies reach down to the band's planned floor as well as to the absorbed one: every step
+        // the slab stands on is swallowed and must not fall back to a thin-layer toolpath.
+        const size_t store_bottom = std::min(planned_patch.store_bottom_idx, planned_patch.patch.bottom_idx);
+        for (size_t layer_idx = store_bottom; layer_idx <= planned_patch.patch.top_idx; ++ layer_idx) {
+            AdaptiveMergePatch stored = planned_patch.patch;
+            stored.group_top = layer_idx == planned_patch.patch.top_idx;
+            m_layers[layer_idx]->get_region(planned_patch.region_id)
+                ->adaptive_merge_patches.emplace_back(std::move(stored));
+        }
+    }
+
+    // The layer-0 snapshot owns its XY footprint through its group top against fixed-grid regions. Merged
+    // regions were already partitioned through patch.area(); trimming their source slices here would corrupt
+    // the layer-0 contour from which their own first-band walls are generated.
+    for (const FirstBandClaim &claim : first_band_claims)
+        for (size_t layer_idx = 0; layer_idx <= claim.top_idx; ++ layer_idx)
+            for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+                if (region_id == claim.region_id)
+                    continue;
+                LayerRegion *region = m_layers[layer_idx]->get_region(region_id);
+                if (! region->adaptive_merge_patches.empty())
+                    continue;
+                Surfaces kept;
+                for (const Surface &surface : region->slices.surfaces)
+                    for (ExPolygon &expolygon : diff_ex(ExPolygons{ surface.expolygon }, claim.area))
+                        kept.emplace_back(surface, std::move(expolygon));
+                region->slices.set(std::move(kept));
+            }
+}
+
+void AdaptiveMergePlanAccess::compute(PrintObject &object)
+{
+    object.compute_adaptive_merge_groups();
 }
 
 void PrintObject::_generate_support_material()

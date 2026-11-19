@@ -67,12 +67,12 @@ TEST_CASE("an address is never a printer name", "[ReprintNames]")
     }
     SECTION("a tailnet or other dotted host name")
     {
-        CHECK(GcodeArchive::name_is_address("reaper.tail2dff02.ts.net"));
+        CHECK(GcodeArchive::name_is_address("example-host.tail1234.ts.net"));
         CHECK(GcodeArchive::name_is_address("mainsail.example.com:80"));
     }
     SECTION("names people give printers")
     {
-        for (const char* name : { "ToyPrinterX1C", "Optimuscle", "3DPO", "H2D2", "U1 left bench", "Snapmaker U1",
+        for (const char* name : { "Workshop X1C", "Test Printer 1", "Workshop H2C", "Garage H2D", "Office U1 bench", "Snapmaker U1",
                                   "Voron 2.4", "Ender-3 V3 SE", "Prusa MK4S", "Printer v1.2.3", "Bench #2: U1" })
             CHECK_FALSE(GcodeArchive::name_is_address(name));
         CHECK_FALSE(GcodeArchive::name_is_address(""));
@@ -81,8 +81,8 @@ TEST_CASE("an address is never a printer name", "[ReprintNames]")
 
 TEST_CASE("the name shown falls back to the model, then to the kind", "[ReprintNames]")
 {
-    CHECK(GcodeArchive::display_printer_name("H2D2", "Bambu Lab H2D", "bambu") == "H2D2");
-    CHECK(GcodeArchive::display_printer_name("  Optimuscle ", "", "snapmaker") == "Optimuscle");
+    CHECK(GcodeArchive::display_printer_name("Garage H2D", "Bambu Lab H2D", "bambu") == "Garage H2D");
+    CHECK(GcodeArchive::display_printer_name("  Test Printer 1 ", "", "snapmaker") == "Test Printer 1");
 
     INFO("an address gives way to the model");
     CHECK(GcodeArchive::display_printer_name("Snapmaker 192.168.1.50:8883", "Snapmaker U1", "connect") == "Snapmaker U1");
@@ -160,9 +160,9 @@ TEST_CASE("a record filed under the Snapmaker cloud is listed under its printer"
     SECTION("every other record is left exactly as it was")
     {
         for (const char* text : {
-                 R"({"id":"a","printer":{"id":"01P00A123","kind":"bambu","name":"ToyPrinterX1C","model":"X1C"}})",
+                 R"({"id":"a","printer":{"id":"01P00A123","kind":"bambu","name":"Workshop X1C","model":"X1C"}})",
                  R"({"id":"b","printer":{"id":"sm:SN0001","kind":"snapmaker","name":"U1 left","model":"Snapmaker U1"}})",
-                 R"({"id":"c","printer":{"id":"ph:3dpo","kind":"printhost","name":"3DPO","model":""}})",
+                 R"({"id":"c","printer":{"id":"ph:workshop-h2c","kind":"printhost","name":"Workshop H2C","model":""}})",
                  R"({"id":"d"})" }) {
             json r = json::parse(text);
             const json before = r;
@@ -239,17 +239,17 @@ TEST_CASE("a record's model is one spelling, whatever named it", "[ReprintModels
 TEST_CASE("a record with no model takes its printer's from the printer's other records", "[ReprintModels]")
 {
     // The owner's archive: one H2C record was written with no model and the printer's serial as
-    // its name; 24 others of the same printer say "Bambu Lab H2C" / "3DPO".
+    // its name; 24 others of the same printer say "Bambu Lab H2C" / "Workshop H2C".
     std::vector<json> records = {
-        rec("new", "31B8AK5C0900288", "bambu", "31B8AK5C0900288", ""),
-        rec("mid", "31B8AK5C0900288", "bambu", "3DPO", "Bambu Lab H2C"),
-        rec("old", "31B8AK5C0900288", "bambu", "3DPO", "Bambu Lab H2C"),
-        rec("x1c", "00M09D542800682", "bambu", "ToyPrinterX1C", "Bambu Lab X1 Carbon"),
+        rec("new", "31B00C000000001", "bambu", "31B00C000000001", ""),
+        rec("mid", "31B00C000000001", "bambu", "Workshop H2C", "Bambu Lab H2C"),
+        rec("old", "31B00C000000001", "bambu", "Workshop H2C", "Bambu Lab H2C"),
+        rec("x1c", "00M00A000000001", "bambu", "Workshop X1C", "Bambu Lab X1 Carbon"),
         rec("lone", "ph:bench", "printhost", "Bench", ""),
     };
     CHECK(GcodeArchive::fill_from_siblings(records) == 1);
     CHECK(records[0]["printer"]["model"] == "Bambu Lab H2C");
-    CHECK(records[0]["printer"]["name"] == "3DPO");
+    CHECK(records[0]["printer"]["name"] == "Workshop H2C");
     INFO("a printer with no model anywhere stays without one: it is Other");
     CHECK(records[4]["printer"]["model"] == "");
     CHECK(GcodeArchive::model_key(GcodeArchive::canonical_model(records[4]["printer"]["model"].get<std::string>(), names())) == "other");
@@ -305,12 +305,12 @@ TEST_CASE("the archive is grouped by model, each with the printers it may be rep
     // jobs (one H2C record without its model), an X1C job and a print host job of no known model.
     std::vector<json> records = {
         rec("u1", "connect", "connect", "Snapmaker U1", "Snapmaker U1"),
-        rec("h2d-new", "0948AD561201535", "bambu", "H2D2", "Bambu Lab H2D"),
-        rec("h2c-bare", "31B8AK5C0900288", "bambu", "31B8AK5C0900288", ""),
-        rec("h2c", "31B8AK5C0900288", "bambu", "3DPO", "Bambu Lab H2C"),
-        rec("x1c", "00M09D542800682", "bambu", "ToyPrinterX1C", "Bambu Lab X1 Carbon"),
+        rec("h2d-new", "0948AD000000001", "bambu", "Garage H2D", "Bambu Lab H2D"),
+        rec("h2c-bare", "31B00C000000001", "bambu", "31B00C000000001", ""),
+        rec("h2c", "31B00C000000001", "bambu", "Workshop H2C", "Bambu Lab H2C"),
+        rec("x1c", "00M00A000000001", "bambu", "Workshop X1C", "Bambu Lab X1 Carbon"),
         rec("bench", "ph:bench", "printhost", "Bench", ""),
-        rec("h2d-old", "0948AD561201535", "bambu", "H2D2", "Bambu Lab H2D"),
+        rec("h2d-old", "0948AD000000001", "bambu", "Garage H2D", "Bambu Lab H2D"),
     };
     GcodeArchive::annotate_models(records, names());
     CHECK(records[0]["model_key"] == "snapmaker u1");
@@ -325,9 +325,9 @@ TEST_CASE("the archive is grouped by model, each with the printers it may be rep
         {"id":"sm:811002","name":"U1","model":"Snapmaker U1","kind":"snapmaker","online":true},
         {"id":"sm:811003","name":"U3","model":"Snapmaker U1","kind":"snapmaker","online":true,"stale":true},
         {"id":"connect","name":"Snapmaker (cloud)","model":"Snapmaker U1","kind":"connect","online":true},
-        {"id":"0948AD561201535","name":"H2D2","model":"O1D","kind":"bambu","online":true},
-        {"id":"31B8AK5C0900288","name":"3DPO","model":"O1C2","kind":"bambu","online":false},
-        {"id":"00M09D542800682","name":"ToyPrinterX1C","model":"BL-P001","kind":"bambu","online":true},
+        {"id":"0948AD000000001","name":"Garage H2D","model":"O1D","kind":"bambu","online":true},
+        {"id":"31B00C000000001","name":"Workshop H2C","model":"O1C2","kind":"bambu","online":false},
+        {"id":"00M00A000000001","name":"Workshop X1C","model":"BL-P001","kind":"bambu","online":true},
         {"id":"ph:v24","name":"192.168.1.40:7125","model":"Voron 2.4","kind":"printhost","online":true}
     ])J");
     const json models = GcodeArchive::archive_models(records, rows, names());
@@ -349,7 +349,7 @@ TEST_CASE("the archive is grouped by model, each with the printers it may be rep
     CHECK(u1[1]["id"] == "sm:811003");
     CHECK(u1[1]["online"] == false);
     REQUIRE(models[1]["printers"].size() == 1);
-    CHECK(models[1]["printers"][0]["name"] == "H2D2");
+    CHECK(models[1]["printers"][0]["name"] == "Garage H2D");
     CHECK(models[2]["printers"][0]["online"] == false);
     INFO("Other offers no other printer; a model nobody holds offers none");
     CHECK(models[4]["printers"].empty());

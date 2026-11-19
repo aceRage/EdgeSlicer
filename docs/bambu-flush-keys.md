@@ -178,7 +178,7 @@ the situation `remove_invalid_keys` exists to report.
   A cleaner follow-up (not done here, it changes saved files): stop writing it into the print preset in
   `set_mixed_string()`.
 
-## Port proposal (not done in this PR)
+## Port proposal (as researched; done in feat/bambu-flush-keys, see below)
 
 Goal: make these profile values take effect so H2D/H2C/H2S/P2S/X2D/A2L output matches Bambu Studio.
 Following the precedent of `filament_pre_cooling_temperature_nc` / `filament_retract_length_nc` (commit
@@ -210,3 +210,74 @@ check, and it should be listed as an accepted behaviour change. Two things to de
   is 10; keep that, since every BBL profile states it explicitly anyway.
 
 Not needed for the log noise, which is fixed independently (fix/preset-key-log-noise).
+
+## The port (feat/bambu-flush-keys)
+
+Done as proposed, with these differences:
+
+* **Per-variant list.** Our per-variant list is `filament_flow_variant_options()` (PrintConfig.cpp), the
+  Standard / High Flow columns that `BambuFlowSupport` maps Bambu's extruder-variant slots onto. All four keys
+  are there, so a composed config packs them per filament and flow column like `nozzle_temperature`. They are
+  **not** in `m_filament_option_keys` (~8508): that list is resized to the filament count by
+  `set_num_filaments()`, which would cut a packed vector.
+* **Reads.** `GCode.cpp` builds `flush_volumetric_speeds`, `flush_temperatures` and
+  `filament_cooling_before_tower` in one helper (`bambu_flush_placeholders`), reading each filament's slot with
+  `get_config_idx(..., ConfigFlowDomain::Filament, id)`. A nil flush slot reads as the option default, a nil
+  cooling slot as 0. Fast `prime_volume_mode` reads `filament_flush_temp_fast`. The cooling comes from
+  `filament_cooling_before_tower_at()` (PrintConfig), which GCode and the tower share; on a tower toolchange it
+  adds Bambu's extra 10 degrees for a filament switcher feeding extruders of different types. The start G-code
+  also gets the unpacked per-filament values of the four keys themselves (Prusa CORE One INDX reads
+  `filament_flush_volumetric_speed[next_extruder]`).
+* **Defaults.** The filament default preset nulls its nullable options (nil = use the printer value, for the
+  retract overrides). These four have no printer value, so the default preset holds what Bambu Studio's base
+  filament profile `BBL/filament/fdm_filament_common.json` (which every Bambu filament inherits; ours lacks the
+  keys) says: flush 0, flush speed 0, **cooling 0**. The option default of `filament_cooling_before_tower` stays
+  Bambu's 10; the BBL presets that cool say so explicitly. A first version held 10 here and made A2L PLA / PETG
+  HF slices cool where Bambu does not.
+* **Invalidation.** The flush keys only invalidate the G-code export (`steps_gcode`);
+  `filament_cooling_before_tower` invalidates `psWipeTower`, as in Bambu (Print.cpp 328), because the tower writes
+  the reheat from it.
+* **UI.** Filament > Basic information: "Wipe tower cooling" (Develop mode, as in Bambu). Filament >
+  Multimaterial > "Tool change parameters with multi extruder MM printers": the flush temperature, Fast flush
+  temperature and flush volumetric speed, before the extruder-change retraction (Bambu's "Multi Filament"
+  page order). Only one flush temperature line shows: the Fast one when the project's `prime_volume_mode` is
+  Fast (we have no purge-mode switch; a Bambu project can set Fast).
+
+### "Wipe tower reheat before wipe" (ported after the H2D hand-test)
+
+The first version of the port left the reheat out. The owner's H2D test showed what that does: after
+`M620.15 C210` the nozzle never came back to 220 and the rest of the print ran 10 degrees cold.
+
+Bambu Studio: the tower copies the value into `m_filpar[idx].filament_cooling_before_tower` (WipeTower.cpp 1980).
+`toolchange_wipe_new` (4071-4096, every BBL tower toolchange) sets
+`should_heating = cooling > EPSILON && !solid_tool_toolchange && !is_first_layer()` and, before the first wipe
+extrusion (after the line / flat ironing nub when the gap wall is on), writes
+
+    M104 T<physical extruder> S<nozzle_temperature> N0 ;Wipe tower reheat before wipe
+
+through `format_line_M104(target, extruder, is_heating=true, ...)`: no M400 for heating. GCode.cpp 1001-1026
+publishes the cooling to change_filament_gcode only on such toolchanges (zero on the first layer and on a contact
+toolchange); a toolchange that does not go through the tower publishes zeros (8318-8337).
+
+Ours (`WipeTower::tool_change`): the same line, with the same conditions (the tower's first layer, an interface
+toolchange = Bambu's contact), right after the load, i.e. after the `[change_filament_gcode]` block that carries
+`M620.15 C` and before the new filament's first extrusion on the tower. Bambu's first extrusion after the load is
+the wipe; ours is the tower wall, which our tower prints inside the toolchange, so the M104 goes before the wall.
+The tower reports the decision in `ToolChangeResult::reheats_after_cooling`, and GCode publishes the cooling only
+when it is set (and not on layer 0), so a cool-down without its reheat cannot happen.
+
+Paths:
+* **Tower toolchange** (any BBL printer with the prime tower, by layer, or by object with the tower: the by-object
+  export only takes its own path when there is no tower): cool-down and reheat as above.
+* **No tower / WipeTower2 / by object without the tower**: the toolchange goes through `GCode::set_extruder`, which
+  publishes zeros, so `M620.15 C` is the print temperature and no reheat is due (Bambu: the same).
+* **First layer, interface toolchange**: no cool-down, no reheat.
+* **H2C rack**: the rack nozzle change sits in the same tower toolchange (end-filament slot); the reheat names the
+  physical extruder, which holds the new nozzle.
+* **A2L**: its template has no `M620.15`; the cooling only enters the `SYNC T` heat-up compensation. With the
+  0 default only the A2L presets that set 10 (PETG Matte, TPU 85A 0.6/0.8) cool, and the tower reheats after them,
+  as Bambu's does.
+
+`tests/libslic3r/test_h2d_byobject_toolchange.cpp` (`bambu_flush_keys::check_reheats()`) is the rule: every `M620.15 C` below the print
+temperature of the filament being loaded is followed by the reheat to that temperature before the toolchange ends
+and before anything prints, and every reheat answers such a cool-down.

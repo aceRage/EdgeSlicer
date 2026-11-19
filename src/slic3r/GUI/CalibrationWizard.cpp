@@ -504,10 +504,10 @@ void PressureAdvanceWizard::update(MachineObject* obj)
         return;
 
     if (!m_show_result_dialog) {
-        if (obj->cali_version != -1 && obj->cali_version != cali_version) {
+        if (obj->cali_version != -1 && obj->cali_version != cali_version && !obj->skip_auto_command_if_secured("extrusion_cali_get")) {
             cali_version = obj->cali_version;
             PACalibExtruderInfo cali_info;
-            cali_info.nozzle_diameter = obj->m_extder_data.extders[0].current_nozzle_diameter;
+            cali_info.nozzle_diameter = obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255
             cali_info.use_extruder_id        = false;
             cali_info.use_nozzle_volume_type = false;
             CalibUtils::emit_get_PA_calib_infos(cali_info);

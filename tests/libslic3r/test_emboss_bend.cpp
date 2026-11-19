@@ -1361,7 +1361,7 @@ TEST_CASE("Curve settings sweep on surfaces never throws", "[EmbossBend][surface
     report(failures);
 }
 
-TEST_CASE("Bent letters at a tiny angle on a sphere stay valid for the surface cut", "[EmbossBend][surface][letters]")
+TEST_CASE("Bent letters at a tiny angle on a sphere stay valid for the surface cut", "[EmbossBend][surface][letters][slow]")
 {
     // Regression (EDGESLICER-5): a 5 degree arc is far wider than the sphere, the curve is limited to
     // the widest circle and is locally straight. Facet noise gave a tiny, random local radius, the

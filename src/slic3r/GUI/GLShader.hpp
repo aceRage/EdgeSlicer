@@ -52,7 +52,8 @@ private:
     mutable std::vector<SamplerUniform> m_samplers;
     // EDGE: (unit, texture target) of the samplers set_sampler_units() parked on their own units.
     // start_using() binds OpenGLManager's 1x1 fallback texture there, so a draw that does not use
-    // the feature behind the sampler (gouraud's curved/drawn cut) never samples texture 0.
+    // the feature behind the sampler (gouraud's curved/drawn cut, Showcase's environment cube) never
+    // samples texture 0.
     mutable std::vector<std::pair<int, unsigned int>> m_parked_units;
 
     void bind_parked_fallback_textures() const;
@@ -79,8 +80,8 @@ public:
     const std::vector<SamplerUniform>& get_samplers() const;
     // The same for any linked program, e.g. one another library made (libvgcode). Not cached.
     static std::vector<SamplerUniform> list_samplers(unsigned int program);
-    // GL_TEXTURE_2D / GL_TEXTURE_3D / GL_TEXTURE_BUFFER for the 2D / 3D / buffer sampler types (float,
-    // int, unsigned), 0 otherwise.
+    // GL_TEXTURE_2D / GL_TEXTURE_3D / GL_TEXTURE_BUFFER / GL_TEXTURE_CUBE_MAP for the 2D / 3D / buffer /
+    // cube sampler types (float, int, unsigned), 0 otherwise.
     static unsigned int sampler_target(unsigned int sampler_type);
     // Returns a description of every pair of active samplers of DIFFERENT types that read the same
     // texture unit, empty if there is none. Such a program is invalid at draw time (GL spec:

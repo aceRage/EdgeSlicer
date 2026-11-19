@@ -21,6 +21,7 @@
 
 #include "libslic3r/Geometry.hpp" // to range pi pi
 #include "libslic3r/Timer.hpp" 
+#include "libslic3r/FontFallback.hpp" // bundled_text_font_path
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -1233,8 +1234,8 @@ EmbossStyles GLGizmoEmboss::create_default_styles()
         styles.push_back(WxFontUtils::create_emboss_style(wx_font, _u8L("First font")));
     } else {
         // On current OS is not installed any correct TTF font
-        // use font packed with Slic3r
-        std::string font_path = Slic3r::resources_dir() + "/fonts/NotoSans-Regular.ttf";
+        // use font packed with Slic3r (NotoSans-Regular.ttf, PrusaSlicer's, is not shipped here)
+        std::string font_path = Slic3r::bundled_text_font_path();
         styles.push_back(EmbossStyle{_u8L("Default font"), font_path, EmbossStyle::Type::file_path});
     }
     return styles;
@@ -2815,12 +2816,14 @@ bool GLGizmoEmboss::rev_input(const std::string &name, T &value, const T *defaul
     const std::string &undo_tooltip, T step, T step_fast, const char *format, ImGuiInputTextFlags flags) const
 {
     // draw offseted input
-    auto draw_offseted_input = [&offset = m_gui_cfg->input_offset, &width = m_gui_cfg->input_width,
+    auto draw_offseted_input = [this, &offset = m_gui_cfg->input_offset, &width = m_gui_cfg->input_width,
                                 &name, &value, &step, &step_fast, format, flags](){
         ImGui::SameLine(offset);
         ImGui::SetNextItemWidth(width);
-        return imgui_input(("##" + name).c_str(),
+        bool changed = imgui_input(("##" + name).c_str(),
             &value, step, step_fast, format, flags);
+        m_imgui->request_frames_while_held(); // ORCA auto-repeat of the +/- buttons
+        return changed;
     };
     float undo_offset = ImGui::GetStyle().WindowPadding.x;
     return revertible(name, value, default_value, undo_tooltip, undo_offset, draw_offseted_input);

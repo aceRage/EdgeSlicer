@@ -64,7 +64,6 @@
     ],
     "inherits": "Generic PLA Silk @System",
     "instantiation": "true",
-    "is_custom_defined": "0",
     "name": "Generic PLA Silk @FF C5",
     "nozzle_temperature": [
         "230"
@@ -87,5 +86,5 @@
     "textured_plate_temp_initial_layer": [
         "65"
     ],
-    "version": "2.3.0.3"
+    "type": "filament"
 }

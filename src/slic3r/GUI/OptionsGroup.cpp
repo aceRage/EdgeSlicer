@@ -249,6 +249,24 @@ void OptionsGroup::append_separator()
     m_lines.emplace_back(Line());
 }
 
+bool line_is_legend(const Line& line)
+{
+    const std::vector<Option>& options = line.get_options();
+    return !options.empty() && options.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
+}
+
+ConfigOptionMode line_mode(const Line& line)
+{
+    const std::vector<Option>& options = line.get_options();
+    return options.empty() ? comSimple : options.front().opt.mode;
+}
+
+const t_config_option_key* line_first_option_id(const Line& line)
+{
+    const std::vector<Option>& options = line.get_options();
+    return options.empty() ? nullptr : &options.front().opt_id;
+}
+
 void OptionsGroup::activate_line(Line& line)
 {
     if (line.is_separator())
@@ -279,7 +297,10 @@ void OptionsGroup::activate_line(Line& line)
     }
 
 	auto option_set = line.get_options();
-	bool is_legend_line = option_set.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
+	// Per-nozzle process P9 (owner crash, H2C Printer settings > Extruder 1 / 2; minidump: null + 0x30 read here): a line made
+	// only of a widget (the Extruder page's rack and "Nozzle size in this project" rows) has no option, and front() of the
+	// empty vector read through a null pointer whenever such a line was the first of its group.
+	const bool is_legend_line = line_is_legend(line);
 
     if (!custom_ctrl && m_use_custom_ctrl) {
         custom_ctrl = new OG_CustomCtrl(is_legend_line || !staticbox ? this->parent() : static_cast<wxWindow*>(this->stb), this);
@@ -361,6 +382,7 @@ void OptionsGroup::activate_line(Line& line)
             }
             if (label != nullptr && line.label_tooltip != "")
                 label->SetToolTip(line.label_tooltip);
+            line.label_widget = label;
         }
     }
 
@@ -550,6 +572,7 @@ void OptionsGroup::clear(bool destroy_custom_ctrl)
 	for (Line& line : m_lines) {
         if (line.near_label_widget_win)
             line.near_label_widget_win = nullptr;
+        line.label_widget = nullptr;
 
         if (line.widget_sizer) {
             line.widget_sizer->Clear(true);
@@ -584,11 +607,12 @@ void OptionsGroup::clear(bool destroy_custom_ctrl)
 
 Line OptionsGroup::create_single_option_line(const Option& option, const std::string& path/* = std::string()*/) const
 {
-    wxString tooltip = _(option.opt.tooltip);
-    edit_tooltip(tooltip);
+    wxString tooltip = _(get_formatted_tooltip_text(option.opt, option.opt_id));
+
 	Line retval{ _(option.opt.label), tooltip };
 	retval.label_path = path;
     retval.append_option(option);
+
     return retval;
 }
 

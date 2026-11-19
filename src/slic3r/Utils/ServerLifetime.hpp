@@ -24,6 +24,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace Slic3r {
 
@@ -53,10 +54,19 @@ public:
         Tracked(const Tracked&)            = delete;
         Tracked& operator=(const Tracked&) = delete;
 
+        // Label the connection (the hub: the go2rtc stream a camera WebSocket tunnel plays), so
+        // shut_tagged() can end just the connections that belong to it.
+        void tag(const std::string& tag);
+
     private:
         std::shared_ptr<void>          m_state; // the lifetime's State (opaque here)
         boost::asio::ip::tcp::socket*  m_socket;
     };
+
+    // Shut down every tracked socket whose tag `match` accepts (untagged sockets have the tag "").
+    // It ends the blocking call on each, exactly as stop() does, but refuses nothing: new
+    // connections keep being served. Answers how many sockets it shut.
+    int shut_tagged(const std::function<bool(const std::string&)>& match);
 
     bool stopping() const;
     int  running() const; // threads spawn() started that have not returned yet

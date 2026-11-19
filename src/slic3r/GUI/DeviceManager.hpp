@@ -2,6 +2,7 @@
 #define slic3r_DeviceManager_hpp_
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -18,9 +19,16 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "LanAccessCodeWatch.hpp"
+#include "BambuCloudWatch.hpp"
+#include "FirstRequestGate.hpp"
+#include "SsdpConnectType.hpp"
+#include "BindListRefresh.hpp"
 #include "AmsDrying.hpp"
+#include "AmsTypes.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -170,6 +178,9 @@ struct Nozzle
     int              stat{0};
     std::string      fila_id;
     std::string      color_m;
+    int              addr_id{-1}; // rack position 0..8 (H3C), -1 = not reported
+    int              snow{-1};    // slot feeding it now: ams_id << 8 | slot_id, -1 = not reported
+    bool             exist{true}; // its bit in device.nozzle.exist (bit n = report id n); true when not reported
     bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
     bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
@@ -184,7 +195,7 @@ struct NozzleData
 
 struct Extder
 {
-    int id; // 0-right 1-left
+    int id{0}; // 0-right 1-left (initialised: the default extruder pushed when none is reported is the main one)
 
     int ext_has_filament{0};
     int buffer_has_filament{0};
@@ -207,7 +218,9 @@ struct Extder
 
     //current nozzle
     NozzleType     current_nozzle_type{NozzleType::ntUndefine};            // 0-hardened_steel 1-stainless_steel
-    float current_nozzle_diameter = {0.4f}; // 0-0.2mm  1-0.4mm 2-0.6 mm3-0.8mm
+    // 0 = unknown until the printer reports it (Orca #12814; NozzleInfo.hpp). Was 0.4, which made a
+    // printer that never reports its nozzle look like a 0.4 mm one.
+    float current_nozzle_diameter = {0.0f};
     // Ultra: reported nozzle flow variant (nvtStandard=Standard, nvtBigTraffic=High Flow),
     // used to auto-match the sliced nozzle_volume_type to the installed nozzle.
     NozzleVolumeType current_nozzle_flow{NozzleVolumeType::nvtStandard};
@@ -297,6 +310,8 @@ public:
     bool            is_exists = false;
     int             hold_count = 0;
     int             remain = 0;         // filament remain: 0 ~ 100
+    int             remain_g = -1;      // grams left as the printer counts them, -1 = not reported
+    int             state = -1;         // the tray's "state" (H3C: 27 loaded, 160 empty), -1 = not reported
 
     AmsRoadPosition road_position;
     AmsStep         step_state;
@@ -336,9 +351,24 @@ public:
     std::map<std::string, AmsTray *> trayList;
 
     int nozzle;
-    int type{1}; // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+    int type{1}; // GUI::AmsTypes: 0 dummy, 1 AMS, 2 AMS Lite, 3 AMS 2 Pro, 4 AMS HT, 5 AMS Lite (N9), 6 AMS 3H, 7 AMS-B
     // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
     GUI::AmsDrying::DryState dry;
+
+    // The drying zones of an AMS 3H (zone_info[]): each has its own slots, humidity and temperature,
+    // and the unit itself reports neither (Bambu Studio DevAms::DevAmsZone).
+    struct Zone
+    {
+        int              id{-1};
+        std::vector<int> slots;
+        int              humidity{-1};     // level 1..5, larger is drier; -1 = not reported
+        int              humidity_raw{-1}; // percent, -1 = not reported
+        float            temperature{INVALID_AMS_TEMPERATURE};
+        int              left_dry_time{0};
+    };
+    std::vector<Zone> zones;
+
+    bool is_rack() const { return GUI::AmsTypes::is_rack_ams(type); }
 };
 
 enum PrinterFirmwareType {
@@ -412,13 +442,6 @@ public:
 #define UpgradePrinting         -4
 
 // calc distance map
-struct DisValue {
-    int  tray_id;
-    float distance;
-    bool  is_same_color = true;
-    bool  is_type_match = true;
-};
-
 class Preset;
 class MachineObject
 {
@@ -528,6 +551,9 @@ public:
     /* properties */
     std::string dev_name;
     std::string dev_ip;
+    // The address the printer reports in push_status net.info. Only the camera falls back to it
+    // while dev_ip is empty (no SSDP announcement got through); see BambuNetInfo.hpp.
+    std::string net_reported_ip;
     std::string dev_id;
     bool        local_use_ssl_for_mqtt { true };
     bool        local_use_ssl_for_ftp { true };
@@ -583,6 +609,38 @@ public:
     bool m_lan_session_up{false};
     void set_lan_session_up(bool up) { m_lan_session_up = up; }
     bool lan_session_up() const { return m_lan_session_up; }
+    // The first request after a selection (FirstRequestGate.hpp): a status request made while the
+    // session this selection started is still being dialled is held - the connected callback asks
+    // for the same report - and each connect logs one line when the session is up and one when the
+    // first status report lands, in milliseconds from the selection.
+    // Any other command published while the session is dialled waits in the gate (publish_json):
+    // it goes out as soon as the session is up (note_session_up, whichever event reports it), or is
+    // reported as not sent when the session fails, the hold runs out or a new selection replaces it.
+    FirstRequestGate::SelectionGate m_gate;
+    // A selection or a re-dial started. `session_already_up`: the session it needs is up (a cloud
+    // printer while the cloud session is connected).
+    void note_selected(bool session_already_up);
+    // The plug-in reported this printer's session up (`kind`: "LAN" / "cloud") - this also sends
+    // whatever was held for it - or failed / lost.
+    void note_session_up(const char* kind);
+    void note_session_down();
+    // The plug-in reported this printer's LAN dial failed. True: it is the selection's first
+    // refusal, held requests stay held and lan_reconnect_tick dials again at m_redial_at. False:
+    // the session is reported down (note_session_down).
+    bool note_dial_failed();
+    // connect() is dialling the printer: arms the gate when no selection did (FirstRequestGate.hpp
+    // SelectionGate::dial_started).
+    void note_dial_started();
+    // connect(..., session_up = true): the printer's LAN session is already up (a re-selection
+    // that keeps it). Does not arm the gate (SelectionGate::dial_on_live_session).
+    void note_dial_on_live_session();
+    bool m_redial_due { false };
+    std::chrono::steady_clock::time_point m_redial_at {};
+    // True (and logged) when the status request `what` is to be held back for the session.
+    bool hold_status_request(const char* what);
+    void note_status_received();
+    void report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d);
+    void send_held(const std::vector<FirstRequestGate::HeldCommand>& held);
     // Ultra: whether a report carrying the AMS / external spools has been parsed in full for this
     // printer, and when DeviceManager::full_report_tick last asked it for one (see there).
     bool m_full_report_seen{false};
@@ -602,11 +660,13 @@ public:
 
     /* ams properties */
     std::map<std::string, Ams*> amsList;    // key: ams[id], start with 0
-    long  ams_exist_bits = 0;
-    long  tray_exist_bits = 0;
-    long  tray_is_bbl_bits = 0;
-    long  tray_read_done_bits = 0;
-    long  tray_reading_bits = 0;
+    // 64-bit like BambuStudio's (DeviceManager.hpp, "[N10] support N10"): the H3C's AMS 3H reports its
+    // nine slots as tray bits 28..36, past a 32-bit long (MSVC), and stol threw on them.
+    long long ams_exist_bits = 0;
+    long long tray_exist_bits = 0;
+    long long tray_is_bbl_bits = 0;
+    long long tray_read_done_bits = 0;
+    long long tray_reading_bits = 0;
     int   ams_rfid_status = 0;
     bool  ams_insert_flag { false };
     bool  ams_power_on_flag { false };
@@ -805,8 +865,10 @@ public:
     // Don't-remind buttons on every surface. Mirrors Bambu Studio's method of the same name.
     // `command` is the refused command's name: only a refused print action (project_file, pause,
     // resume, stop, ...) is offered Stop / Resume Printing; anything else gets OK.
+    // `job_id` is the job the refusal names, when the reply carries one; Stop / Resume are only
+    // offered for a job the printer itself named.
     void add_command_error_code_dlg(int command_err, const nlohmann::json& action_json = nlohmann::json(),
-                                    const std::string& command = std::string());
+                                    const std::string& command = std::string(), const std::string& job_id = std::string());
 
     // What this slicer has published to the printer and is still waiting on an answer for,
     // sequence id -> command name. A reply only counts as a refusal when it answers one of these;
@@ -979,6 +1041,7 @@ public:
     bool is_support_auto_recovery_step_loss{false};
     bool is_support_ams_humidity {false};
     bool is_support_remote_dry {false}; // fun2 bit 5: "ams_filament_drying" is accepted
+    bool is_support_print_with_emmc {false}; // fun2 bit 0: the printer can print from its internal storage
     bool is_support_prompt_sound{false};
     bool is_support_filament_tangle_detect{false};
     bool is_support_1080dpi {false};
@@ -1014,7 +1077,9 @@ public:
     std::vector<HMSItem>    hms_list;
 
     /* machine mqtt apis */
-    int connect(bool is_anonymous = false, bool use_openssl = true);
+    // `session_up`: the LAN session to this printer is already up and this call only confirms it
+    // (the plug-in's connect_printer is idempotent); the first-request gate is not armed.
+    int connect(bool is_anonymous = false, bool use_openssl = true, bool session_up = false);
     int disconnect();
 
     json_diff print_json;
@@ -1031,6 +1096,27 @@ public:
     // and Developer Mode are not both on. Written on the GUI thread, read by the send jobs, which
     // compare it before and after a send (BambuSendDiagnosis).
     std::atomic<int> project_file_refusals { 0 };
+
+    // Secured mode (Developer Mode off). Bambu firmware with Authorization Control rejects every
+    // control command that is not signed by Bambu, and EdgeSlicer never signs. The push_status
+    // field print.fun carries the mode in bit 29 (clear: Developer Mode, set: secured). Unknown
+    // until the first report that carries "fun"; unknown is never treated as secured. When no report
+    // has carried the bit, a printer's own "mqtt message verify failed" answer stands in for it.
+    bool is_secured_mode() const;
+    // Why a print-control command ("stop", "resume", ...) cannot be sent to this printer right now:
+    // "status_only" (a Bambu Connect printer EdgeSlicer only reads), "secured" (Developer Mode off,
+    // unsigned commands rejected), or "" when it can - over LAN or cloud alike. The error dialog asks
+    // this to hide a button whose command would be dropped instead of showing one that does nothing.
+    std::string print_command_blocker(const std::string& command) const;
+    void update_secured_mode_from_fun(const std::string& fun);
+    // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
+    // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.
+    void note_unsigned_refusal(const std::string& command, int err_code);
+    // For commands the host fires on its own: true when the printer is secured and the command must
+    // not be sent (logged once per command per printer, no message to the user).
+    bool skip_auto_command_if_secured(const char* what) const;
+    // Tells the user why a user-initiated command was not sent (rate limited per printer).
+    void show_secured_mode_message(bool once_per_session);
     BBLSliceInfo* slice_info {nullptr};
     boost::thread* get_slice_info_thread { nullptr };
     boost::thread* get_model_task_thread { nullptr };
@@ -1265,16 +1351,86 @@ public:
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray
     // Two-extruder machines report one external spool per extruder in print.vir_slot[] (ids 254 =
-    // deputy/left, 255 = main/right). Display only: vt_tray keeps driving the legacy paths.
+    // deputy/left, 255 = main/right). vt_tray keeps driving the one-extruder paths.
     std::vector<AmsTray> vir_slots;
+    // The external spool holders a two-extruder job can map filaments to: vir_slots, or, from a
+    // report without vir_slot[], vt_tray as the main extruder's (id 255) - BambuStudio's vt_slot.
+    // Empty on a one-extruder printer, whose send paths keep using vt_tray as they always did.
+    std::vector<AmsTray> external_spools() const;
+    // The external spool holder (ams id 254 / 255) as an AMS mapping candidate: tray_id = id = the
+    // holder's ams id, slot "0" (BambuStudio _parse_tray_info for EXT_SPOOL). False when the
+    // holder is not reported or holds no identified spool.
+    bool external_spool_mapping_info(int ext_ams_id, FilamentInfo& info) const;
     //std::vector<AmsTray> vt_trays;          // virtual tray for new
     AmsTray parse_vt_tray(json vtray);
     /*for parse new info*/
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
+    // print.ams of a push_status report (jj = the "print" object). May throw; parse_json catches it
+    // on its own so the rest of the report is still read.
+    void parse_ams_report(const json& jj, bool key_field_only);
     bool is_nozzle_data_invalid();
+    // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
+    // the printer has not reported it (Orca #12814).
+    float nozzle_diameter(int extder_id) const
+    {
+        for (const Extder& e : m_extder_data.extders)
+            if (e.id == extder_id)
+                return e.current_nozzle_diameter;
+        return 0.f;
+    }
+    // Orca #13330 (DevExtderSystem::NozzleDiameterMatchesOrUnknown): true when the nozzle on
+    // extder_id has target_diameter, or when the printer has not reported its diameter.
+    bool nozzle_diameter_matches_or_unknown(int extder_id, float target_diameter) const
+    {
+        return GUI::NozzleInfo::diameter_matches_or_unknown(nozzle_diameter(extder_id), target_diameter);
+    }
+    // Orca #13255: the diameter to look filament and calibration presets up by - the reported one,
+    // or the selected printer preset's first nozzle while the printer has not reported it (a "0.0"
+    // lookup finds nothing and empties the filament lists).
+    float nozzle_diameter_or_preset(int extder_id) const;
     int  get_flag_bits(std::string str, int start, int count = 1) const;
+    std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
+    std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
+    // A hex bitmask from the status report ("ams_exist_bits", "tray_exist_bits", ...) into 64 bits.
+    // Never throws: a value that is not hex, or does not fit, leaves `bits` as it was and returns false.
+    static bool parse_hex_bits(const json& value, long long& bits);
+    // Bit `index` of a 64-bit report mask; an index outside 0..63 is not set.
+    static bool hex_bit_set(long long bits, int index) { return index >= 0 && index < 64 && ((bits >> index) & 1LL) != 0; }
+
+    // Rack AMS units (the H3C's AMS 3H, GUI::AmsTypes::is_rack_ams): each slot feeds one rack nozzle.
+    bool has_rack_ams() const;
+    // A printer with a nozzle rack's spool holders (one per rack position, ids 255 down to 247).
+    bool is_rack_printer() const { return has_rack_ams() || vir_slots.size() > 2; }
+    // zone_info[] of one AMS unit into ams.zones (strings or numbers, never throws).
+    static void parse_ams_zones(const json& zone_info, Ams& ams);
+    bool is_rack_ams_id(const std::string& ams_id) const;
+    // The tray number a send mapping names (ams_id, slot_id) by (GUI::AmsTypes::mapping_tray_index):
+    // 28 + slot on the AMS 3H, the holder's own id for a spool holder, ams_id * 4 + slot otherwise.
+    int  tray_index_of(const std::string& ams_id, const std::string& slot_id) const;
+    int  tray_index_of(int ams_id, int slot_id) const { return tray_index_of(std::to_string(ams_id), std::to_string(slot_id)); }
+    // The inverse: false when the number names no unit this printer reports.
+    bool decode_tray_index(int tray_index, std::string& ams_id, std::string& slot_id) const;
+    // Whether the printer reports that slot (Bambu Studio get_tray: a spool holder ignores the slot).
+    bool slot_reported(int ams_id, int slot_id) const;
+    // The slot each rack nozzle is fed from (GUI::AmsTypes::bound_slot): what the send mapping may
+    // map to on a rack printer. A spool holder comes back as (holder id, 0).
+    std::vector<std::pair<int, int>> rack_bound_slots() const;
+    // Kept as the one switch for slots that cannot be sent to: none since the AMS 3H numbering and the
+    // rack pairing are ported (phase 2). The gates that call it stay in place.
+    bool mapping_blocked_ams_id(const std::string& ams_id) const;
+    std::set<std::string> mapping_blocked_ams_ids() const;
+    // Takes every entry that names a blocked slot out of a mapping result (tray -1, no ams/slot) and
+    // returns how many it took out.
+    int strip_blocked_mapping(std::vector<FilamentInfo>& result) const;
+    // Device page actions (load, unload, edit, RFID re-read) refused on that slot: none since phase 2.
+    bool slot_actions_blocked(const std::string& ams_id) const { return mapping_blocked_ams_id(ams_id); }
+    // Load / unload on a rack AMS slot or rack spool holder, as Bambu Studio's hotend page sends it
+    // (GUI::FilamentCommands::rack_change_filament_json).
+    int command_rack_change_filament(bool load, const std::string& ams_id, const std::string& slot_id, int old_temp, int new_temp);
+    // RFID re-read of one rack AMS slot (Bambu Studio command_ams_refresh_rfid2, mode 0).
+    int command_ams_get_rfid(int ams_id, int slot_id, int mode = 0);
 
     /* Device Filament Check */
     struct FilamentData
@@ -1342,6 +1498,15 @@ public:
     void lan_watch_tick();
     static constexpr long long LAN_WATCH_SET_MS = 10 * 1000;
 
+    // Ultra: a cloud-bound printer only reports to a client subscribed to it, and the plug-in
+    // subscribes the selected printer and the Multi-device pages' list - nothing else. So every
+    // other cloud printer had no status at all on the hub's rows (BambuCloudWatch.hpp). This hands
+    // every online cloud printer to add_subscribe, and again one that has gone quiet, at the pace in
+    // BambuCloudWatch::subscribe_due. Signed in only; GUI thread, off the same heartbeat, every
+    // CLOUD_WATCH_TICK_MS.
+    void cloud_watch_tick();
+    static constexpr long long CLOUD_WATCH_TICK_MS = 5 * 1000;
+
     // The backoff ladder, in milliseconds: how long a LAN printer must have looked disconnected
     // before the first retry, and how long between retries after that. The numbers and the formula
     // live in LanReconnectLadder.hpp, which is wx-free, so a unit test can check the
@@ -1351,7 +1516,30 @@ public:
 
     static constexpr long long lan_backoff_ms(int attempts) { return LanReconnectLadder::backoff_ms(attempts); }
 
+    // EdgeSlicer: a LAN printer that refuses its saved access code (LanAccessCodeWatch.hpp).
+    // MachineObject::connect reports every LAN dial and the code it used; the on_local_connect
+    // handler reports how each one ended. REFUSALS_FOR_NOTICE refused dials in a row with one code
+    // show one notice whose button opens the printer's edit dialog; a session that stays up closes
+    // it. GUI thread only.
+    void note_lan_dial_started(const std::string& dev_id, const std::string& code);
+    void note_lan_dial_up(const std::string& dev_id);
+    void note_lan_dial_ended(const std::string& dev_id, const std::string& msg);
+    // The last LAN dial to this printer with its current code was refused.
+    bool lan_access_code_refused(const std::string& dev_id) const;
+    // The printer refused its saved code often enough to raise the notice, and it has not worked
+    // since: the Device page says so and the visible slicer stops redialling it
+    // (LanAccessCode::redial_paused).
+    bool lan_access_code_blocked(const std::string& dev_id) const;
+    // The Device page says the code was refused (from the second refused dial in a row).
+    bool lan_access_code_bar(const std::string& dev_id) const;
+    // The user saved a new access code for this LAN printer: forget the refusals, close the
+    // notice, and - when it is the printer this instance holds a session to - redial it now with
+    // the new code instead of waiting out the reconnect backoff.
+    void lan_access_code_changed(MachineObject* obj);
+
 private:
+    std::map<std::string, LanAccessCode::Watch> m_lan_code_watch;
+    void lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v);
     // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
     // inherit another's backoff.
     // (down_since / probe_at / last_try / attempts - see LanReconnectLadder::lan_tick_step.)
@@ -1360,12 +1548,19 @@ private:
     // One reconnect attempt against one LAN machine: the same three steps the Device tab's
     // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).
     void lan_reconnect_now(MachineObject* obj, const char* why);
+    // Whether the plug-in's cloud MQTT session is up, as its on_server_connected callback last
+    // reported (UltraNet opens it lazily, on the first subscribe or cloud selection). A cloud
+    // printer selected while it is still connecting holds its early status requests.
+    bool m_cloud_session_up{false};
 
     // The hidden hub-managed instance's round robin over its LAN printers (see the .cpp): which
     // printer currently holds the agent's single LAN session, and since when.
     std::string m_lan_watch_id;
     std::chrono::steady_clock::time_point m_lan_watch_set_at {};
     std::string m_lan_watch_set; // the last set handed to the plug-in, for the log
+    // cloud_watch_tick: when each cloud printer was last handed to add_subscribe, and the last tick.
+    BambuCloudWatch::Asked m_cloud_watch_asked;
+    std::chrono::steady_clock::time_point m_cloud_watch_at {};
     long long   m_lan_watch_since { 0 };
     MachineObject* lan_watch_rotate();
     // When something other than the rotation last chose a printer (set_selected_machine: a send,
@@ -1397,6 +1592,10 @@ public:
     void reload_printer_settings();
 
     bool set_selected_machine(std::string dev_id,  bool need_disconnect = false);
+    // GUI_App's on_server_connected handler: the cloud session came up (code 0) or failed / was
+    // lost (anything else). A selected cloud printer waiting for it gets its "connected" line.
+    void on_cloud_session(int code);
+    bool cloud_session_up() const { return m_cloud_session_up; }
     MachineObject* get_selected_machine();
     void add_user_subscribe();
     void del_user_subscribe();
@@ -1413,6 +1612,47 @@ public:
 
     /* create machine or update machine properties */
     void on_machine_alive(std::string json_str);
+    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp). `list` is
+    // "local" or "user", for the log line written whenever the outcome for that printer and list
+    // changes.
+    void apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                 const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
+    std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
+    std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    // Bind-list refresh (BindListRefresh.hpp): the gate that rate-limits and debounces it, and each
+    // local printer's last state after the SSDP rules, to see a change in.
+    BindListRefresh::Gate                                  m_bind_refresh;
+    std::map<std::string, BindListRefresh::PrinterState>   m_ssdp_state;
+    class RefreshTimer;                                    // wxTimer with a callback (the .cpp)
+    RefreshTimer*                                          m_auto_refresh_timer { nullptr };
+    RefreshTimer*                                          m_probe_timer { nullptr };
+    std::shared_ptr<int>                                   m_refresh_token { std::make_shared<int>(0) };
+    // Fetch the account's bind list off the GUI thread, parse it on the GUI thread, then `done`.
+    void fetch_bind_list_async(std::function<void()> done);
+    void arm_auto_refresh();
+    void set_probe_sending(bool sending);
+    static long long                                       ssdp_now_ms();
+    // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
+    bool lan_announced_recently(const std::string& dev_id) const;
+    // The printer picker's "Other Device" click (SelectMachinePop): which dialog to offer for `obj`.
+    // A printer that announced "lan" recently is offered the access-code dialog, never the cloud
+    // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
+    // here so the access code can be entered. Logs the decision (never the access code).
+    SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
+
+    // "Refresh printers" (the Device tab's printer picker, the send dialogs): re-read SSDP
+    // discovery (an active search for a few seconds, then back to listening) and, when signed in,
+    // fetch the account's bind list again - without signing out. Rate-limited
+    // (BindListRefresh::Gate). `done`, if given, runs on the GUI thread once the list is up to
+    // date (immediately when signed out); it does not run when the press was too soon (the
+    // return value is false then) or there is no network agent.
+    bool refresh_printers(const char* why, std::function<void()> done = {});
+    // Only the discovery half: the send dialogs fetch the bind list themselves. `rate_limited`:
+    // from a button press, shares the Refresh button's minimum gap.
+    bool restart_discovery(const char* why, bool rate_limited = false);
+    // A known printer's connect_type / bind_state changed (LAN <-> cloud, bound <-> free) after
+    // the SSDP rules: schedule a debounced, rate-limited re-fetch of the bind list.
+    void note_printer_state_change(const std::string& dev_id, const std::string& connect_type, const std::string& bind_state);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();
@@ -1451,6 +1691,10 @@ public:
     }
 
     static std::string parse_printer_type(std::string type_str);
+    // The printer_type a device is: parse_printer_type of its reported code, else the model its
+    // serial number's prefix names, else the reported code itself (possibly empty) so a message
+    // can name it. Use this wherever a device's printer_type is set.
+    static std::string identify_printer_type(const std::string& code, const std::string& dev_id);
     static std::string get_printer_display_name(std::string type_str);
     static std::string get_printer_thumbnail_img(std::string type_str);
     static std::string get_printer_ams_type(std::string type_str);

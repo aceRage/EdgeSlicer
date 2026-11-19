@@ -30,10 +30,10 @@
         "nil"
     ],
     "hot_plate_temp": [
-        "55"
+        "65"
     ],
     "hot_plate_temp_initial_layer": [
-        "55"
+        "65"
     ],
     "pellet_flow_coefficient": [
         "0.4157"

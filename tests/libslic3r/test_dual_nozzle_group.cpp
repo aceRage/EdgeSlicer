@@ -135,3 +135,48 @@ TEST_CASE("Four filaments group onto a dual-nozzle machine without leaving the m
         REQUIRE(nozzle < 2);
     }
 }
+
+// Orca #14773: the k-medoids grouping is an anytime search under a wall clock, so its result can depend on how
+// many restarts the machine completes. ClusteringBudget lets a caller bound it by restart count alone; with the
+// clock off, the same input must give the same grouping every time. Slicing keeps the default budget.
+TEST_CASE("k-medoids filament grouping is deterministic under a fixed search budget", "[FilamentGroup][MultiNozzle][Orca14773]")
+{
+    CHECK(ClusteringBudget{}.timeout_ms == 3000);
+    CHECK(ClusteringBudget{}.max_restarts == 30);
+
+    // Sixteen filaments on two nozzles: 2^16 / 2 candidate groupings, past the enumeration threshold.
+    const int filament_num = 16;
+    FilamentGroupContext ctx = make_context(filament_num, 2);
+    ctx.machine_info.max_group_size.assign(2, filament_num);
+    for (auto &matrix : ctx.model_info.flush_matrix)
+        for (int from = 0; from < filament_num; ++from)
+            for (int to = 0; to < filament_num; ++to)
+                if (from != to)
+                    matrix[from][to] = 100.f + float((from * 7 + to * 13) % 17) * 20.f;
+    ctx.model_info.layer_filaments.clear();
+    for (int layer = 0; layer < 12; ++layer) {
+        std::vector<unsigned int> filaments;
+        for (int f = 0; f < filament_num; ++f)
+            if ((f + layer) % 3 != 0)
+                filaments.emplace_back((unsigned int) f);
+        ctx.model_info.layer_filaments.emplace_back(std::move(filaments));
+    }
+
+    const ClusteringBudget fixed_budget{ /*timeout_ms*/ 0, /*max_restarts*/ 4 };
+    auto run = [&ctx, &fixed_budget](int &cost) {
+        FilamentGroup group(ctx);
+        group.set_clustering_budget(fixed_budget);
+        return group.calc_filament_group(&cost);
+    };
+    int cost_first = 0, cost_second = 0;
+    const std::vector<int> first  = run(cost_first);
+    const std::vector<int> second = run(cost_second);
+
+    REQUIRE(first.size() == size_t(filament_num));
+    for (int nozzle : first) {
+        REQUIRE(nozzle >= 0);
+        REQUIRE(nozzle < 2);
+    }
+    CHECK(first == second);
+    CHECK(cost_first == cost_second);
+}

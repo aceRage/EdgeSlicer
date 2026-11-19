@@ -57,6 +57,14 @@ void SwitchButton::SetValue(bool value)
 	update();
 }
 
+#ifdef __WXMSW__
+bool SwitchButton::MSWCommand(WXUINT param, WXWORD id)
+{
+    // See CheckBox::MSWCommand.
+    return param == BN_DBLCLK || wxBitmapToggleButton::MSWCommand(param, id);
+}
+#endif
+
 void SwitchButton::Rescale()
 {
 	if (labels[0].IsEmpty()) {

@@ -29,6 +29,7 @@
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,7 +348,7 @@ void GLVolume::set_render_color()
     bool outside = is_outside || is_below_printbed();
 
     if (force_native_color || force_neutral_color) {
-#ifdef ENABBLE_OUTSIDE_COLOR
+#ifdef ENABLE_OUTSIDE_COLOR
         if (outside && shader_outside_printer_detection_enabled)
             set_render_color(OUTSIDE_COLOR);
         else {
@@ -491,7 +492,22 @@ BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d& 
 
 BoundingBoxf3 GLVolume::transformed_non_sinking_bounding_box(const Transform3d& trafo) const
 {
-    return GUI::wxGetApp().plater()->model().objects[object_idx()]->volumes[volume_idx()]->mesh().transformed_bounding_box(trafo, 0.0);
+    // Snapmaker #753: the plater, the object or the volume may already be gone while the GUI is torn down / recreated.
+    auto* plater = GUI::wxGetApp().plater();
+    if (!plater)
+        return bounding_box().transformed(trafo);
+
+    const auto& objects = plater->model().objects;
+    int         obj_idx = object_idx();
+    if (obj_idx < 0 || obj_idx >= (int) objects.size() || !objects[obj_idx])
+        return bounding_box().transformed(trafo);
+
+    const auto& volumes = objects[obj_idx]->volumes;
+    int         vol_idx = volume_idx();
+    if (vol_idx < 0 || vol_idx >= (int) volumes.size())
+        return bounding_box().transformed(trafo);
+
+    return volumes[vol_idx]->mesh().transformed_bounding_box(trafo, 0.0);
 }
 
 const BoundingBoxf3& GLVolume::transformed_non_sinking_bounding_box() const
@@ -554,7 +570,8 @@ void GLVolume::render()
 void GLVolume::simple_render(GLShaderProgram*        shader,
                              ModelObjectPtrs&        model_objects,
                              std::vector<ColorRGBA>& extruder_colors,
-                             bool                    ban_light)
+                             bool                    ban_light,
+                             bool                    ban_color_volume)
 {
     if (this->is_left_handed())
         glFrontFace(GL_CW);
@@ -588,7 +605,7 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         }
     } while (0);
 
-    if (color_volume && !picking) {
+    if (color_volume && !picking && !ban_color_volume) {
         // Orca #15776 adapt: keep per-triangle MMU paint under selection and lift
         // the painted extruder colors so the volume still reads as selected.
         // force_native_color / force_neutral_color cover paint, color-clip, and
@@ -749,14 +766,10 @@ int GLVolumeCollection::load_object_volume(const ModelObject* model_object,
     v.set_color(color_from_model_volume(*model_volume));
     v.name = model_volume->name;
 
-#if ENABLE_SMOOTH_NORMALS
-    v.model.init_from(mesh, true);
-#else
     v.model.init_from(*mesh);
     if (need_raycaster) {
         v.mesh_raycaster = std::make_unique<GUI::MeshRaycaster>(mesh);
     }
-#endif // ENABLE_SMOOTH_NORMALS
     v.composite_id = GLVolume::CompositeID(obj_idx, volume_idx, instance_idx);
 
     if (model_volume->is_model_part()) {
@@ -804,13 +817,9 @@ void GLVolumeCollection::load_object_auxiliary(const SLAPrintObject* print_objec
         const ModelInstance& model_instance = *print_object->model_object()->instances[instance_idx.first];
         this->volumes.emplace_back(new GLVolume((milestone == slaposPad) ? GLVolume::SLA_PAD_COLOR : GLVolume::SLA_SUPPORT_COLOR));
         GLVolume& v = *this->volumes.back();
-#if ENABLE_SMOOTH_NORMALS
-        v.model.init_from(mesh, true);
-#else
         v.model.init_from(mesh);
         v.model.set_color((milestone == slaposPad) ? GLVolume::SLA_PAD_COLOR : GLVolume::SLA_SUPPORT_COLOR);
         v.mesh_raycaster = std::make_unique<GUI::MeshRaycaster>(std::make_shared<const TriangleMesh>(mesh));
-#endif // ENABLE_SMOOTH_NORMALS
         v.composite_id = GLVolume::CompositeID(obj_idx, -int(milestone), (int) instance_idx.first);
         v.geometry_id  = std::pair<size_t, size_t>(timestamp, model_instance.id().id);
         // Create a copy of the convex hull mesh for each instance. Use a move operator on the last instance.
@@ -959,12 +968,25 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs&                  vo
     return list;
 }
 
-int GLVolumeCollection::get_selection_support_threshold_angle(bool& enable_support) const
+// ORCA #12650, Edge: slope.normal_z of the 3D view's overhang highlight, from the automatic
+// supports' own layer rule (Support/SupportOverhangHighlight.hpp): the threshold angle (+1,
+// inclusive), the 30 degree tree fallback, normal supports' overlap mode at this layer height and
+// outer wall width, and normal supports' minimum overhang width. Per object, so an object's
+// support, layer height or wall filament overrides show. The support painting gizmo uses the same rule.
+SupportOverhangRule GUI::support_overhang_rule_for(const ModelObject *mo)
 {
-    const DynamicPrintConfig& glb_cfg = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    enable_support                    = glb_cfg.opt_bool("enable_support");
-    int support_threshold_angle       = glb_cfg.opt_int("support_threshold_angle");
-    return support_threshold_angle;
+    const PresetBundle &bundle = *GUI::wxGetApp().preset_bundle;
+    return support_overhang_rule(support_overhang_rule_config(bundle.prints.get_edited_preset().config,
+                                                              bundle.printers.get_edited_preset().config, bundle.project_config,
+                                                              bundle.filament_presets.size(), mo != nullptr ? &mo->config.get() : nullptr));
+}
+
+float GLVolumeCollection::get_support_normal_z(int object_idx)
+{
+    const Model      &model = GUI::wxGetApp().model();
+    const ModelObject *mo   = object_idx >= 0 && size_t(object_idx) < model.objects.size() ? model.objects[object_idx] : nullptr;
+    const double angle_deg  = GUI::support_overhang_rule_for(mo).effective_angle_deg();
+    return static_cast<float>(-std::cos(Geometry::deg2rad(std::clamp(angle_deg, 0.0, 89.0))));
 }
 
 // BBS: add outline drawing logic
@@ -1001,6 +1023,20 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     glsafe(::glCullFace(GL_BACK));
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
+
+    // Only the overhang (slope) view reads it; the shader ignores slope.normal_z while slope.actived is off, so
+    // the preset lookups run only for that view, once per object and render pass.
+    std::vector<std::pair<int, float>> support_normal_z_cache;
+    auto support_normal_z_for = [this, &support_normal_z_cache](int object_idx) -> float {
+        if (! m_slope.isGlobalActive)
+            return 0.f;
+        for (const std::pair<int, float> &entry : support_normal_z_cache)
+            if (entry.first == object_idx)
+                return entry.second;
+        const float normal_z = get_support_normal_z(object_idx);
+        support_normal_z_cache.emplace_back(object_idx, normal_z);
+        return normal_z;
+    };
 
     // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
     // has to stop writing depth - otherwise it would keep occluding the cut sheet
@@ -1130,6 +1166,13 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("draw_field_origin", m_draw_field_origin);
             shader->set_uniform("draw_field_size", m_draw_field_size);
         }
+        // Orca #14702: the shadow map, bound again for every volume because start_using() above parks
+        // a fallback texture on its unit (see GLShaderProgram::set_sampler_units).
+        if (m_shadow_map_tex != 0) {
+            glsafe(::glActiveTexture(GL_TEXTURE5));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_shadow_map_tex));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+        }
         // BOOST_LOG_TRIVIAL(info) << boost::format("set uniform_color to {%1%, %2%, %3%, %4%}, with_outline=%5%, selected %6%")
         //     %volume.first->render_color[0]%volume.first->render_color[1]%volume.first->render_color[2]%volume.first->render_color[3]
         //     %with_outline%volume.first->selected;
@@ -1149,17 +1192,12 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("print_volume.type", -1);
         }
 
-        bool enable_support;
-        int  support_threshold_angle = get_selection_support_threshold_angle(enable_support);
-
-        float normal_z = -::cos(Geometry::deg2rad((float) support_threshold_angle));
-
         shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
         shader->set_uniform("slope.actived", m_slope.isGlobalActive && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix",
                             static_cast<Matrix3f>(
                                 volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
-        shader->set_uniform("slope.normal_z", normal_z);
+        shader->set_uniform("slope.normal_z", support_normal_z_for(volume.first->object_idx()));
 
 #if ENABLE_ENVIRONMENT_MAP
         unsigned int environment_texture_id  = GUI::wxGetApp().plater()->get_environment_texture_id();
@@ -1223,7 +1261,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
 bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, ModelInstanceEPrintVolumeState* out_state) const
 {
-    if (GUI::wxGetApp().plater() == NULL) {
+    if (GUI::wxGetApp().plater() == NULL || GUI::wxGetApp().is_recreating_gui()) {
         if (out_state != nullptr)
             *out_state = ModelInstancePVS_Inside;
         return false;
@@ -1327,30 +1365,35 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
                 contained_min_one |= !volume->is_outside;
             }
 
-            ModelInstanceEPrintVolumeState volume_state;
-            // if (volume->is_outside && (plate_build_volume.bounding_volume().intersects(volume->bounding_box())))
-            if (volume->is_outside && (state == BuildVolume::ObjectState::Colliding))
-                volume_state = ModelInstancePVS_Partly_Outside;
-            else if (volume->is_outside)
-                volume_state = ModelInstancePVS_Fully_Outside;
-            else
-                volume_state = ModelInstancePVS_Inside;
+            // Orca #16564: track each instance across its printable model-part volumes only. A multipart
+            // instance with one volume inside and another outside is partly outside; a volume completely
+            // below the bed is intentionally ignored when deciding whether an instance is printable.
+            if (volume->printable && state != BuildVolume::ObjectState::Below) {
+                ModelInstanceEPrintVolumeState volume_state;
+                // if (volume->is_outside && (plate_build_volume.bounding_volume().intersects(volume->bounding_box())))
+                if (volume->is_outside && (state == BuildVolume::ObjectState::Colliding))
+                    volume_state = ModelInstancePVS_Partly_Outside;
+                else if (volume->is_outside)
+                    volume_state = ModelInstancePVS_Fully_Outside;
+                else
+                    volume_state = ModelInstancePVS_Inside;
 
-            if (model_state.find(comp_id) != model_state.end()) {
-                if (model_state[comp_id] != ModelInstancePVS_Partly_Outside) {
-                    if (volume_state == ModelInstancePVS_Partly_Outside)
-                        model_state[comp_id] = ModelInstancePVS_Partly_Outside;
-                    else if (model_state[comp_id] != volume_state) {
-                        model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                if (model_state.find(comp_id) != model_state.end()) {
+                    if (model_state[comp_id] != ModelInstancePVS_Partly_Outside) {
+                        if (volume_state == ModelInstancePVS_Partly_Outside)
+                            model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                        else if (model_state[comp_id] != volume_state) {
+                            model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                        }
                     }
+                } else {
+                    model_state[comp_id] = volume_state;
                 }
-            } else {
-                model_state[comp_id] = volume_state;
-            }
 
-            if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
-                overall_state = ModelInstancePVS_Partly_Outside;
-                BOOST_LOG_TRIVIAL(debug) << "instance includes " << volume->name << " is partially outside of bed";
+                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
+                    overall_state = ModelInstancePVS_Partly_Outside;
+                    BOOST_LOG_TRIVIAL(debug) << "instance includes " << volume->name << " is partially outside of bed";
+                }
             }
         }
     }
@@ -1360,7 +1403,8 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
             (volume->shader_outside_printer_detection_enabled || (!volume->is_wipe_tower && volume->composite_id.volume_id >= 0))) {
             int64_t comp_id = ((int64_t) volume->composite_id.object_id << 32) | ((int64_t) volume->composite_id.instance_id);
             if (model_state.find(comp_id) != model_state.end()) {
-                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
+                // Highlight only the printable parts of a partly-outside instance (Orca #16564).
+                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside && volume->printable && !volume_below(*volume)) {
                     volume->partly_inside = true;
                 } else
                     volume->partly_inside = false;

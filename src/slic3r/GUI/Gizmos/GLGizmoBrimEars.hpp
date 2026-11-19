@@ -96,18 +96,18 @@ private:
 
     void render_points(const Selection& selection);
 
-    float m_new_point_head_diameter;        // Size of a new point.
+    float m_new_point_head_radius;          // Radius of a new point.
     float m_max_angle = 125.f;
     float m_detection_radius = 1.f;
     double m_detection_radius_max = .0f;
     CacheEntry m_point_before_drag;         // undo/redo - so we know what state was edited
-    float m_old_point_head_diameter = 0.;   // the same
+    float m_old_point_head_radius = 0.;     // the same
     mutable std::vector<CacheEntry> m_editing_cache; // a support point and whether it is currently selectedchanges or undo/redo
     std::map<int, CacheEntry> m_single_brim;
     ObjectID m_old_mo_id;
     const Vec3d m_world_normal = {0, 0, 1};
     std::map<GLVolume*, std::shared_ptr<PickRaycaster>>   m_mesh_raycaster_map;
-    GLVolume* m_last_hit_volume;
+    GLVolume* m_last_hit_volume{nullptr};
     std::optional<CacheEntry> render_hover_point;
 
     bool m_link_text_hover = false;

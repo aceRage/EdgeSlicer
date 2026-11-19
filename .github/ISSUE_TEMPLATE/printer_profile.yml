@@ -1,0 +1,76 @@
+name: 🖨️ Printer, filament or profile request
+description: Ask for a new printer, a missing filament, or a fix to a bundled profile
+labels: ["profiles"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Profiles are easiest to add when we can copy known-good values. The more of the details below you can give, the faster this goes.
+
+        **Privacy:** don't paste access codes, serial numbers or IP addresses.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What do you need?
+      options:
+        - A new printer
+        - A missing filament profile
+        - A fix to an existing printer, filament or process profile
+        - Sending / connection support for a printer that's already listed
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Printer (brand and model)
+      placeholder: e.g. Creality K2 Plus, Anycubic Kobra S1, Prusa Core One
+    validations:
+      required: true
+  - type: input
+    id: filament
+    attributes:
+      label: Filament (if this is about a filament)
+      placeholder: e.g. Polymaker Panchroma PLA Silk, 1.75 mm
+    validations:
+      required: false
+  - type: input
+    id: source
+    attributes:
+      label: Where do good settings come from?
+      description: The vendor's own slicer and version, an OrcaSlicer profile, a manufacturer page…
+      placeholder: e.g. Creality Print 6.1, OrcaSlicer 2.4 profile, manufacturer datasheet link
+    validations:
+      required: true
+  - type: dropdown
+    id: firmware
+    attributes:
+      label: Firmware / connection
+      options:
+        - Klipper / Moonraker
+        - Marlin
+        - Bambu Lab
+        - Vendor app or cloud
+        - Don't know
+    validations:
+      required: false
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a fix, say which value is wrong and what it should be. For a new printer, bed size, nozzle sizes, multi-material system and start/end G-code are a great help.
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Exported profiles or example G-code
+      description: Zip and drop exported printer, filament or process presets, or a G-code file sliced by the vendor's slicer.
+    validations:
+      required: false
+  - type: checkboxes
+    id: test
+    attributes:
+      label: Testing
+      options:
+        - label: I own this printer and can test a profile before it ships
+          required: false

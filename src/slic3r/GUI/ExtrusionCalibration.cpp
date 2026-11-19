@@ -83,6 +83,7 @@ void ExtrusionCalibration::create()
     m_comboBox_filament = new wxComboBox(m_step_1_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, EXTRUSION_CALIBRATION_BED_COMBOX, 0, nullptr, wxCB_READONLY);
 #else
     m_comboBox_filament = new ComboBox(m_step_1_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, EXTRUSION_CALIBRATION_BED_COMBOX, 0, nullptr, wxCB_READONLY);
+    m_comboBox_filament->EnableTypeToFilter();
 #endif
     select_sizer->Add(m_comboBox_filament, 0, wxEXPAND);
     select_sizer->Add(0, EXTRUSION_CALIBRATION_WIDGET_GAP, 0, 0);
@@ -460,7 +461,7 @@ void ExtrusionCalibration::on_click_cali(wxCommandEvent& event)
         if (preset_bundle) {
             for (auto it = preset_bundle->filaments.begin(); it != preset_bundle->filaments.end(); it++) {
                 wxString filament_name = wxString::FromUTF8(it->name);
-                if (filament_name.compare(m_comboBox_filament->GetValue()) == 0) {
+                if (filament_name.compare(selected_filament_name()) == 0) {
                     try {
                         bed_temp = get_bed_temp(&it->config);
                         const ConfigOptionInts* nozzle_temp_opt = it->config.option<ConfigOptionInts>("nozzle_temperature");
@@ -581,7 +582,7 @@ void ExtrusionCalibration::on_click_save(wxCommandEvent &event)
     if (preset_bundle) {
         for (auto it = preset_bundle->filaments.begin(); it != preset_bundle->filaments.end(); it++) {
             wxString filament_name = wxString::FromUTF8(it->name);
-            if (filament_name.compare(m_comboBox_filament->GetValue()) == 0) {
+            if (filament_name.compare(selected_filament_name()) == 0) {
                 if (obj) {
                     bed_temp    = get_bed_temp(&it->config);
                     const ConfigOptionInts* nozzle_temp_opt = it->config.option<ConfigOptionInts>("nozzle_temperature");
@@ -627,6 +628,15 @@ bool ExtrusionCalibration::Show(bool show)
     return DPIDialog::Show(show); 
 }
 
+wxString ExtrusionCalibration::selected_filament_name() const
+{
+    if (m_filament_list) {
+        const int entry = m_filament_list->selected_entry();
+        return entry >= 0 ? m_filament_list->entries()[entry].text : wxString();
+    }
+    return m_comboBox_filament->GetValue();
+}
+
 void ExtrusionCalibration::update_combobox_filaments()
 {
     m_comboBox_filament->SetValue(wxEmptyString);
@@ -635,6 +645,7 @@ void ExtrusionCalibration::update_combobox_filaments()
     int filament_index = -1;
     int curr_selection = -1;
     wxArrayString filament_items;
+    std::vector<FavoriteFilamentsUI::FavoriteComboList::Entry> filament_entries;
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
     if (preset_bundle && obj) {
         BOOST_LOG_TRIVIAL(trace) << "system_preset_bundle filament number=" << preset_bundle->filaments.size();
@@ -689,16 +700,19 @@ void ExtrusionCalibration::update_combobox_filaments()
 
                     wxString filament_name = wxString::FromUTF8(filament_it->name);
                     filament_items.Add(filament_name);
+                    filament_entries.push_back({filament_name, FavoriteFilamentsUI::key_for(*filament_it)});
                     break;
                 }
             }
         }
-        m_comboBox_filament->Set(filament_items);
-        m_comboBox_filament->SetSelection(curr_selection);
+        // Favourite filaments on top; user_filaments stays in entry order (see selected_filament_name()).
+        if (!m_filament_list)
+            m_filament_list = std::make_unique<FavoriteFilamentsUI::FavoriteComboList>(m_comboBox_filament);
+        m_filament_list->set_entries(std::move(filament_entries), curr_selection);
         post_select_event();
     }
 
-    if (m_comboBox_filament->GetValue().IsEmpty())
+    if (selected_filament_name().IsEmpty())
         m_button_cali->Disable();
     else
         m_button_cali->Enable();
@@ -717,7 +731,7 @@ wxString ExtrusionCalibration::get_bed_type_incompatible(bool incompatible)
         if (preset_bundle) {
             for (auto filament_it = preset_bundle->filaments.begin(); filament_it != preset_bundle->filaments.end(); filament_it++) {
                 wxString filament_name = wxString::FromUTF8(filament_it->name);
-                if (filament_name.compare(m_comboBox_filament->GetValue()) == 0) {
+                if (filament_name.compare(selected_filament_name()) == 0) {
                     filament_alias = filament_it->alias;
                 }
             }
@@ -781,7 +795,7 @@ void ExtrusionCalibration::on_select_filament(wxCommandEvent &evt)
 
 void ExtrusionCalibration::update_filament_info()
 {
-    if (m_comboBox_filament->GetValue().IsEmpty()) {
+    if (selected_filament_name().IsEmpty()) {
         m_nozzle_temp->GetTextCtrl()->SetValue(wxEmptyString);
         m_bed_temp->GetTextCtrl()->SetValue(wxEmptyString);
         m_max_flow_ratio->GetTextCtrl()->SetValue(wxEmptyString);
@@ -793,7 +807,7 @@ void ExtrusionCalibration::update_filament_info()
     if (preset_bundle) {
         for (auto filament_it = preset_bundle->filaments.begin(); filament_it != preset_bundle->filaments.end(); filament_it++) {
             wxString filament_name = wxString::FromUTF8(filament_it->name);
-            if (filament_name.compare(m_comboBox_filament->GetValue()) == 0) {
+            if (filament_name.compare(selected_filament_name()) == 0) {
                 m_filament_type = filament_it->name;
 
                 if (obj) {

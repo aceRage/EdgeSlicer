@@ -17,6 +17,8 @@
 
 #include <glad/gl.h>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <boost/log/trivial.hpp>
 
 namespace Slic3r::GUI {
@@ -73,6 +75,8 @@ void GLGizmoMmuSegmentation::on_opening()
 
 void GLGizmoMmuSegmentation::on_shutdown()
 {
+    // Edge (Airbrush): strokes still waiting for their bake go into the model before the gizmo closes.
+    airbrush_finish_pending();
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
 }
@@ -209,6 +213,7 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["perform"]              = _L("Perform");
 
     m_desc["remove_all"]           = _L("Erase all painting");
+    m_desc["color_pattern"]        = _L("Color Pattern...");
     m_desc["circle"]               = _L("Circle");
     m_desc["sphere"]               = _L("Sphere");
     m_desc["pointer"]              = _L("Triangles");
@@ -229,6 +234,43 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["toggle_wireframe_caption"]        = alt + shift + _L("Enter");
     m_desc["toggle_wireframe"]                = _L("Toggle Wireframe");
 
+    // Edge: Spread tool
+    m_desc["tool_spread"]                     = _L("Spread");
+    m_desc["tool_spread_tip"]                 = _L("Spread: press and hold on the model. The colour grows over the surface from that point "
+                                                   "until you let go, and stops at edges sharper than the angle limit. "
+                                                   "Shift erases; Esc while holding cancels.");
+    m_desc["spread_paint_caption"]            = _L("Hold left mouse button");
+    m_desc["spread_paint"]                    = _L("Spread");
+    m_desc["spread_cancel_caption"]           = _L("Esc");
+    m_desc["spread_cancel"]                   = _L("Cancel the spread");
+    m_desc["spread_speed"]                    = _L("Spread speed");
+    m_desc["spread_max_radius"]               = _L("Max radius");
+    m_desc["spread_max_radius_tip"]           = _L("How far the colour can spread from where you pressed, measured over the surface. "
+                                                   "0 means no limit.");
+    m_desc["spread_unlimited"]                = _L("Unlimited");
+    m_desc["spread_relative_to_seed"]         = _L("Relative to seed");
+    m_desc["spread_relative_to_seed_tip"]     = _L("Measure the angle limit against the face you pressed on instead of against each "
+                                                   "neighbouring face, so the colour stays on surfaces that face about the same way.");
+    m_desc["spread_keep_existing"]            = _L("Keep existing paint");
+    m_desc["spread_keep_existing_tip"]        = _L("Only paint unpainted areas and leave other colours as they are. Faces painted "
+                                                   "completely in another colour stop the spread; a painted line thinner than one "
+                                                   "mesh triangle does not.");
+
+    // Edge: Airbrush tool (P2)
+    m_desc["tool_airbrush_tip"]              = _L("Airbrush: hold or drag on the model to spray the selected filament. Holding still builds "
+                                                   "up colour. When you let go, the spray turns into printable specks and steps. Shift erases.");
+    m_desc["airbrush_paint_caption"]         = _L("Hold or drag left mouse button");
+    m_desc["airbrush_paint"]                 = _L("Spray");
+    m_desc["airbrush_erase_caption"]         = shift + _L("Left mouse button");
+    m_desc["airbrush_erase"]                 = _L("Erase spray");
+    m_desc["airbrush_radius"]                = _L("Radius");
+    m_desc["airbrush_hardness"]              = _L("Hardness");
+    m_desc["airbrush_flow"]                  = _L("Flow");
+    m_desc["airbrush_grain"]                 = _L("Grain");
+    m_desc["airbrush_seed"]                  = _L("Seed");
+    m_desc["airbrush_cancel_caption"]        = _L("Esc");
+    m_desc["airbrush_cancel"]                = _L("Cancel what has not been baked yet");
+
     // Filament remapping descriptions
     m_desc["perform_remap"]                   = _L("Remap filaments");
     m_desc["remap"]                           = _L("Remap");
@@ -239,10 +281,7 @@ bool GLGizmoMmuSegmentation::on_init()
     return true;
 }
 
-GLGizmoMmuSegmentation::GLGizmoMmuSegmentation(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
-    : GLGizmoPainterBase(parent, icon_filename, sprite_id), m_current_tool(ImGui::CircleButtonIcon)
-{
-}
+// The constructor and destructor are in GLGizmoMmuSegmentationAirbrush.cpp (the airbrush state is complete there).
 
 void GLGizmoMmuSegmentation::render_painter_gizmo()
 {
@@ -252,6 +291,8 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
     glsafe(::glEnable(GL_DEPTH_TEST));
 
     render_triangles(selection);
+    // Edge (Airbrush): strokes still waiting for their bake, drawn as the field itself.
+    airbrush_render_overlay();
 
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
@@ -303,6 +344,7 @@ void GLGizmoMmuSegmentation::refresh_from_model()
     // Also resets the pending remap table to identity and may change the selected filament.
     init_extruders_data();
     init_model_triangle_selectors();
+    update_used_filaments();
 }
 
 bool GLGizmoMmuSegmentation::on_number_key_down(int number)
@@ -429,6 +471,12 @@ void GLGizmoMmuSegmentation::show_tooltip_information(float caption_max, float x
             case ToolType::GAP_FILL:
                 tip_items = {"gap_area", "toggle_wireframe"};
                 break;
+            case ToolType::SPREAD:
+                tip_items = {"spread_paint", "erase", "spread_cancel", "smart_fill_angle", "clipping_of_view", "toggle_wireframe"};
+                break;
+            case ToolType::AIRBRUSH:
+                tip_items = {"airbrush_paint", "airbrush_erase", "cursor_size", "airbrush_cancel", "clipping_of_view", "toggle_wireframe"};
+                break;
             default:
                 break;
         }
@@ -464,11 +512,16 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     const float edge_detect_slider_left = m_imgui->calc_text_size(m_desc.at("edge_detection")).x + m_imgui->scaled(1.f);
     const float gap_area_slider_left = m_imgui->calc_text_size(m_desc.at("gap_area")).x + m_imgui->scaled(1.5f) + space_size;
     const float height_range_slider_left = m_imgui->calc_text_size(m_desc.at("height_range")).x + m_imgui->scaled(2.f);
+    const float spread_slider_left = std::max({ m_imgui->calc_text_size(m_desc.at("spread_speed")).x,
+                                                m_imgui->calc_text_size(m_desc.at("spread_max_radius")).x,
+                                                m_imgui->calc_text_size(m_desc.at("airbrush_hardness")).x,
+                                                m_imgui->calc_text_size(m_desc.at("airbrush_radius")).x }) + m_imgui->scaled(1.5f);
 
     const float remove_btn_width = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
     const float filter_btn_width = m_imgui->calc_text_size(m_desc.at("perform")).x + m_imgui->scaled(1.f);
     const float remap_btn_width = m_imgui->calc_text_size(m_desc.at("perform_remap")).x + m_imgui->scaled(1.f);
-    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + m_imgui->scaled(2.f);
+    const float pattern_btn_width = m_imgui->calc_text_size(m_desc.at("color_pattern")).x + m_imgui->scaled(1.f);
+    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + pattern_btn_width + m_imgui->scaled(2.f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
     const float color_button_width = m_imgui->calc_text_size(std::string_view{""}).x + m_imgui->scaled(1.75f);
     const size_t total_filament_count = m_extruders_colors.size();
@@ -477,7 +530,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     float caption_max = 0.f;
     float total_text_max = 0.f;
-    for (const auto &t : std::array<std::string, 6>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view"}) {
+    for (const auto &t : std::array<std::string, 9>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view", "spread_paint", "spread_cancel", "airbrush_paint"}) {
         caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc[t + "_caption"]).x);
         total_text_max = std::max(total_text_max, m_imgui->calc_text_size(m_desc[t]).x);
     }
@@ -486,9 +539,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     const float circle_max_width = std::max(clipping_slider_left,cursor_slider_left);
     const float height_max_width = std::max(clipping_slider_left,height_range_slider_left);
-    const float sliders_left_width = std::max(smart_fill_slider_left,
-                                         std::max(cursor_slider_left, std::max(edge_detect_slider_left, std::max(gap_area_slider_left, std::max(height_range_slider_left,
-                                                                                                                                              clipping_slider_left))))) + space_size;
+    const float sliders_left_width = std::max({ smart_fill_slider_left, cursor_slider_left, edge_detect_slider_left, gap_area_slider_left,
+                                                height_range_slider_left, clipping_slider_left, spread_slider_left }) + space_size;
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
     float window_width = minimal_slider_width + sliders_left_width + slider_icon_width;
     const int max_filament_items_per_line = 8;
@@ -681,14 +733,15 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc.at("tool_type"));
 
-    std::array<wchar_t, 6> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wchar_t, 6> icons;
+    // Edge: Spread sits after Fill, Airbrush after Spread.
+    std::array<wchar_t, 8> tool_ids;
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::AirbrushPaintIcon, ImGui::GapFillIcon };
+    std::array<wchar_t, 8> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::SpreadPaintDarkIcon, ImGui::AirbrushPaintDarkIcon, ImGui::GapFillDarkIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wxString, 6> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::AirbrushPaintIcon, ImGui::GapFillIcon };
+    std::array<wxString, 8> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), m_desc.at("tool_spread_tip"), m_desc.at("tool_airbrush_tip"), _L("Gap Fill") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -880,6 +933,136 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
         if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
     }
+    else if (m_current_tool == ImGui::SpreadPaintIcon) {
+        // Edge: Spread. Press and hold; the colour grows over the surface until the release.
+        m_tool_type   = ToolType::SPREAD;
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+        bool spread_changed = false;
+        // Labels are shown through a printf format: keep a translated '%' literal.
+        auto as_format = [](const wxString &label) {
+            std::string out;
+            for (char c : into_u8(label)) {
+                out += c;
+                if (c == '%')
+                    out += '%';
+            }
+            return out;
+        };
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("spread_speed"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        const std::array<wxString, SpreadSpeedStops> stop_names = { _L("Slowest"), _L("Slower"), _L("Normal"), _L("Faster"), _L("Fastest") };
+        const std::string speed_format = as_format(stop_names[std::clamp(m_spread_speed, 0, SpreadSpeedStops - 1)]);
+        float             speed_f      = float(m_spread_speed);
+        if (m_imgui->bbl_slider_float_style("##spread_speed", &speed_f, 0.f, float(SpreadSpeedStops - 1), speed_format.c_str(), 1.0f, true)) {
+            const int stop = std::clamp(int(std::lround(speed_f)), 0, SpreadSpeedStops - 1);
+            if (stop != m_spread_speed) {
+                m_spread_speed = stop;
+                spread_changed = true;
+            }
+        }
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("spread_max_radius"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        const std::string radius_format = m_spread_max_radius > 0.f ? "%.1f " + as_format(_L("mm")) : as_format(m_desc.at("spread_unlimited"));
+        if (ImGui::BBLDragFloat("##spread_max_radius", &m_spread_max_radius, 0.1f, 0.f, 1000.f, radius_format.c_str())) {
+            m_spread_max_radius = std::clamp(m_spread_max_radius, 0.f, 1000.f);
+            spread_changed      = true;
+        }
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(m_desc.at("spread_max_radius_tip"), max_tooltip_width);
+
+        m_imgui->bbl_checkbox(m_desc["edge_detection"], m_detect_geometry_edge);
+        if (m_detect_geometry_edge) {
+            // Fill leaves -1 ("no limit") behind when its edge detection is off.
+            if (m_smart_fill_angle < 0.f)
+                m_smart_fill_angle = 30.f;
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc["smart_fill_angle"]);
+            std::string format_str = std::string("%.f") + I18N::translate_utf8("°", "Face angle threshold,"
+                                                                                    "placed after the number with no whitespace in between.");
+            ImGui::SameLine(sliders_left_width);
+            ImGui::PushItemWidth(sliders_width);
+            m_imgui->bbl_slider_float_style("##spread_angle", &m_smart_fill_angle, SmartFillAngleMin, SmartFillAngleMax, format_str.data(), 1.0f, true);
+            ImGui::SameLine(drag_left_width + sliders_left_width);
+            ImGui::PushItemWidth(1.5 * slider_icon_width);
+            ImGui::BBLDragFloat("##spread_angle_input", &m_smart_fill_angle, 0.05f, 0.0f, 0.0f, "%.2f");
+
+            if (m_imgui->bbl_checkbox(m_desc.at("spread_relative_to_seed"), m_spread_relative_to_seed))
+                spread_changed = true;
+            if (ImGui::IsItemHovered())
+                m_imgui->tooltip(m_desc.at("spread_relative_to_seed_tip"), max_tooltip_width);
+        } else {
+            // set to negative value to disable the angle limit
+            m_smart_fill_angle = -1.f;
+        }
+        if (m_imgui->bbl_checkbox(m_desc.at("spread_keep_existing"), m_spread_keep_existing))
+            spread_changed = true;
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(m_desc.at("spread_keep_existing_tip"), max_tooltip_width);
+
+        if (spread_changed)
+            save_spread_settings();
+
+        ImGui::Separator();
+        if (m_c->object_clipper()->get_position() == 0.f) {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("clipping_of_view"));
+        }
+        else {
+            if (m_imgui->button(m_desc.at("reset_direction"))) {
+                wxGetApp().CallAfter([this]() {
+                    m_c->object_clipper()->set_position_by_ratio(-1., false);
+                    });
+            }
+        }
+
+        auto clp_dist = float(m_c->object_clipper()->get_position());
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
+
+        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+
+        // The radius label next to the cursor while a spread is held.
+        render_spread_label();
+    }
+    else if (m_current_tool == ImGui::AirbrushPaintIcon) {
+        // Edge: Airbrush (P2). Hold or drag to spray into the colour field; the release bakes it.
+        m_tool_type   = ToolType::AIRBRUSH;
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+        airbrush_render_panel(sliders_left_width, sliders_width, drag_left_width, max_tooltip_width, window_width);
+
+        ImGui::Separator();
+        if (m_c->object_clipper()->get_position() == 0.f) {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("clipping_of_view"));
+        }
+        else {
+            if (m_imgui->button(m_desc.at("reset_direction"))) {
+                wxGetApp().CallAfter([this]() {
+                    m_c->object_clipper()->set_position_by_ratio(-1., false);
+                    });
+            }
+        }
+
+        auto clp_dist = float(m_c->object_clipper()->get_position());
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
+
+        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+    }
     else if (m_current_tool == ImGui::GapFillIcon) {
         m_tool_type = ToolType::GAP_FILL;
         m_cursor_type = TriangleSelector::CursorType::POINTER;
@@ -894,36 +1077,70 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
     }
 
-    ImGui::Separator();
-    if(m_imgui->bbl_checkbox(_L("Vertical"), m_vertical_only)){
-        if(m_vertical_only){
-            m_horizontal_only = false;
-        }
-    }
-    if(m_imgui->bbl_checkbox(_L("Horizontal"), m_horizontal_only)){
-        if(m_horizontal_only){
-            m_vertical_only = false;
-        }
-    }
-
-    ImGui::Separator();
-
-
-    if (m_imgui->button(m_desc.at("perform_remap"))) {
-        m_show_filament_remap_ui = !m_show_filament_remap_ui;
-        if (m_show_filament_remap_ui) {
-            // reset remap to identity on opening
-            m_extruder_remap.resize(m_extruders_colors.size());
-            for (size_t i = 0; i < m_extruder_remap.size(); ++i)
-                m_extruder_remap[i] = i;
-        }
-    }
-    
-    // Render filament swap UI if enabled
-    if (m_show_filament_remap_ui) {
+    // The axis locks act on brush drags; Spread has no drag and Airbrush lays its own dabs, so both hide them.
+    if (m_tool_type != ToolType::SPREAD && m_tool_type != ToolType::AIRBRUSH) {
         ImGui::Separator();
-        render_filament_remap_ui(window_width, max_tooltip_width);
+        if(m_imgui->bbl_checkbox(_L("Vertical"), m_vertical_only)){
+            if(m_vertical_only){
+                m_horizontal_only = false;
+            }
+        }
+        if(m_imgui->bbl_checkbox(_L("Horizontal"), m_horizontal_only)){
+            if(m_horizontal_only){
+                m_vertical_only = false;
+            }
+        }
     }
+
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.5f));
+
+    // ORCA: Remap filaments section, drawn as a panel for visual grouping.
+    if (m_imgui->button(m_desc.at("perform_remap"))) {
+        m_show_remap_panel = !m_show_remap_panel;
+        if (m_show_remap_panel) {
+            // reset remap to identity on opening
+            reset_filament_remap();
+            update_used_filaments();
+        }
+    }
+
+    if (m_show_remap_panel) {
+        ImDrawList *draw_list       = ImGui::GetWindowDrawList();
+        const float available_width = ImGui::GetContentRegionAvail().x;
+
+        // ORCA: Draw the background behind the panel; its height is remembered from the previous frame.
+        static float remap_panel_high = 40.0f;
+        ImVec2       p_bg_min         = ImGui::GetCursorScreenPos();
+        draw_list->AddRectFilled({p_bg_min.x - 10.0f, p_bg_min.y - 7.0f},
+                                 {p_bg_min.x + available_width + ImGui::GetFrameHeight(), p_bg_min.y + remap_panel_high},
+                                 ImGui::GetColorU32(ImGuiCol_FrameBgActive, 1.0f), 5.0f);
+
+        const float start_y = ImGui::GetCursorPos().y;
+
+        ImGui::BeginGroup();
+        // ORCA: Reduce vertical spacing within this group
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(m_imgui->scaled(0.4f), m_imgui->scaled(0.2f)));
+        render_filament_remap_ui(window_width, max_tooltip_width);
+        ImGui::PopStyleVar();
+        ImGui::EndGroup();
+
+        // ORCA: Update height for next frame fill
+        remap_panel_high = ImGui::GetCursorPos().y - start_y;
+
+        // ORCA: Remap and Cancel buttons (outside the panel)
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.2f));
+        if (m_imgui->button(m_desc.at("remap"))) {
+            remap_filament_assignments();
+            // Reset mapping to identity after apply
+            reset_filament_remap();
+        }
+        ImGui::SameLine();
+        if (m_imgui->button(m_desc.at("cancel_remap")))
+            reset_filament_remap();
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.5f));
     ImGui::Separator();
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 10.0f));
@@ -962,9 +1179,23 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 m_triangle_selectors[idx]->reset();
                 m_triangle_selectors[idx]->request_update_render_data(true);
             }
+        // Edge (Airbrush): the colour fields go with the paint they were baked into.
+        airbrush_clear_fields(mo);
 
         update_model_object();
         m_parent.set_as_dirty();
+    }
+
+    // Shortcut to the Color Pattern dialog (bands by height) for the painted object. The dialog is
+    // modal and rebuilds the object list, so leave the gizmo first and open it once this frame is done.
+    ImGui::SameLine();
+    if (m_imgui->button(m_desc.at("color_pattern"))) {
+        const int obj_idx = m_parent.get_selection().get_object_idx();
+        wxGetApp().CallAfter([obj_idx]() {
+            if (GLCanvas3D *cnv = wxGetApp().plater()->get_view3D_canvas3D())
+                cnv->get_gizmos_manager().reset_all_states();
+            wxGetApp().obj_list()->height_pattern_dialog(obj_idx);
+        });
     }
     ImGui::PopStyleVar(2);
     GizmoImguiEnd();
@@ -986,7 +1217,15 @@ void GLGizmoMmuSegmentation::update_model_object()
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
     }
 
-    if (updated) {
+    if (updated)
+        notify_paint_changed(mo);
+}
+
+void GLGizmoMmuSegmentation::notify_paint_changed(ModelObject *mo)
+{
+    if (mo == nullptr)
+        return;
+    {
         const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
         size_t       num_total    = num_physical;
         if (wxGetApp().preset_bundle != nullptr)
@@ -1012,10 +1251,15 @@ void GLGizmoMmuSegmentation::update_model_object()
 
         const ModelObjectPtrs &mos = wxGetApp().model().objects;
         size_t obj_idx = std::find(mos.begin(), mos.end(), mo) - mos.begin();
+        if (obj_idx >= mos.size())
+            return;
         wxGetApp().obj_list()->update_info_items(obj_idx);
         wxGetApp().plater()->get_partplate_list().notify_instance_update(obj_idx, 0);
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
         wxGetApp().plater()->notify_filament_usage_changed();
+
+        // ORCA: Refresh cache
+        this->update_used_filaments();
     }
 }
 
@@ -1083,7 +1327,13 @@ void GLGizmoMmuSegmentation::update_from_model_object(bool first_update)
         prev_extruders_count != int(current_extruder_colors.size()) || current_extruder_colors != m_extruders_colors)
         this->init_extruders_data(current_extruder_colors);
 
+    // Edge (Airbrush): strokes waiting for a bake belonged to the model that was just replaced.
+    this->airbrush_reset();
     this->init_model_triangle_selectors();
+    this->airbrush_sync_from_model();
+
+    // ORCA: Refresh cache when model changes
+    this->update_used_filaments();
 }
 
 void GLGizmoMmuSegmentation::tool_changed(wchar_t old_tool, wchar_t new_tool)
@@ -1269,9 +1519,46 @@ void GLMmSegmentationGizmo3DScene::finalize_triangle_indices()
     }
 }
 
+void GLGizmoMmuSegmentation::reset_filament_remap()
+{
+    m_extruder_remap.resize(m_display_filament_ids.size());
+    for (size_t i = 0; i < m_extruder_remap.size(); ++i)
+        m_extruder_remap[i] = i;
+}
+
+// ORCA: Update the cache of used filaments (both base volume extruders and painted triangles).
+// Edge: the cache holds display slots, which map to filament ids (mixed filaments included) through
+// m_display_filament_ids.
+void GLGizmoMmuSegmentation::update_used_filaments()
+{
+    m_used_filaments.clear();
+
+    auto add_filament = [this](unsigned int filament_id) {
+        const auto it = std::find(m_display_filament_ids.begin(), m_display_filament_ids.end(), filament_id);
+        if (it != m_display_filament_ids.end())
+            m_used_filaments.insert(size_t(std::distance(m_display_filament_ids.begin(), it)));
+    };
+
+    // Base filament of the volumes (unpainted areas); 0 = default, which prints with filament 1.
+    for (int ext_id : m_volumes_extruder_idxs)
+        add_filament(ext_id > 0 ? unsigned(ext_id) : 1u);
+
+    // Painted states
+    for (const auto &selector : m_triangle_selectors) {
+        if (!selector)
+            continue;
+        const TriangleSelector::TriangleSplittingData data = selector->serialize();
+        for (EnforcerBlockerType s : TriangleSelector::extract_used_facet_states(data))
+            if (s >= EnforcerBlockerType::Extruder1)
+                add_filament(unsigned(s));
+    }
+}
+
 void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float max_tooltip_width)
 {
     size_t n_extr = std::min((size_t)EnforcerBlockerType::ExtruderMax, m_display_filament_ids.size());
+    if (m_extruder_remap.size() != m_display_filament_ids.size())
+        reset_filament_remap();
 
     const std::string max_label = std::to_string(std::max<size_t>(n_extr, 1));
     const ImVec2 max_label_size = ImGui::CalcTextSize(max_label.c_str(), NULL, true);
@@ -1280,23 +1567,35 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
     const float item_width = button_size.x + m_imgui->scaled(1.5f);
     const float start_pos_x = ImGui::GetCursorPosX();
 
-    for (int src = 0; src < (int)n_extr; ++src) {
-        const unsigned int dst_filament_id = m_extruder_remap[src] < m_display_filament_ids.size() ? m_display_filament_ids[m_extruder_remap[src]] : 0;
-        if (dst_filament_id == 0 || dst_filament_id > m_extruders_colors.size())
-            continue;
-        const ColorRGBA &dst_col = m_extruders_colors[dst_filament_id - 1];
-        ImVec4 col_vec = ImGuiWrapper::to_ImVec4(dst_col);
+    int displayed_count = 0;
 
-        if (src % max_items_per_line != 0) {
-            ImGui::SameLine(start_pos_x + item_width * (src % max_items_per_line));
-        }
+    // ORCA: Show only the filaments this object uses as sources.
+    for (size_t src : m_used_filaments) {
+        if (src >= n_extr)
+            continue;
+        const unsigned int src_filament_id = m_display_filament_ids[src];
+        const unsigned int dst_filament_id = m_extruder_remap[src] < m_display_filament_ids.size() ? m_display_filament_ids[m_extruder_remap[src]] : 0;
+        if (src_filament_id == 0 || src_filament_id > m_extruders_colors.size() ||
+            dst_filament_id == 0 || dst_filament_id > m_extruders_colors.size())
+            continue;
+        const ColorRGBA &src_col = m_extruders_colors[src_filament_id - 1];
+        const ColorRGBA &dst_col = m_extruders_colors[dst_filament_id - 1];
+
+        // ORCA: The button shows the SOURCE colour, so the UI stays stable until "Remap" is clicked.
+        ImVec4 col_vec = ImGuiWrapper::to_ImVec4(src_col);
+
+        if (displayed_count % max_items_per_line != 0)
+            ImGui::SameLine(start_pos_x + item_width * (displayed_count % max_items_per_line));
         std::string btn_id = "##remap_src_" + std::to_string(src);
-        
+        std::string pop_id = "popup_" + std::to_string(src);
+
         ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs |
                                     ImGuiColorEditFlags_NoLabel  | ImGuiColorEditFlags_NoPicker |
                                     ImGuiColorEditFlags_NoTooltip;
-        if (m_selected_extruder_idx != src) flags |= ImGuiColorEditFlags_NoBorder;
-        
+        // ORCA: Border only while the popup is open (feedback for the active selection).
+        if (!ImGui::IsPopupOpen(pop_id.c_str()))
+            flags |= ImGuiColorEditFlags_NoBorder;
+
         #ifdef __APPLE__
             ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGuiWrapper::COL_ORCA);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
@@ -1313,13 +1612,13 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
             ImGui::PopStyleColor(1);
         #endif
 
-        // overlay destination number with proper contrast calculation
+        // ORCA: The text shows the DESTINATION slot, with contrast against the SOURCE colour.
         std::string dst_txt = std::to_string(m_extruder_remap[src] + 1);
-        float gray = 0.299f * dst_col.r() + 0.587f * dst_col.g() + 0.114f * dst_col.b();
+        float gray = 0.299f * src_col.r() + 0.587f * src_col.g() + 0.114f * src_col.b();
         ImVec2 txt_sz = ImGui::CalcTextSize(dst_txt.c_str());
         ImVec2 pos = ImGui::GetItemRectMin();
         ImVec2 size = ImGui::GetItemRectSize();
-        
+
         if (gray * 255.f < 80.f)
             ImGui::GetWindowDrawList()->AddText(
                 ImVec2(pos.x + (size.x - txt_sz.x) * 0.5f, pos.y + (size.y - txt_sz.y) * 0.5f),
@@ -1329,29 +1628,43 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
                 ImVec2(pos.x + (size.x - txt_sz.x) * 0.5f, pos.y + (size.y - txt_sz.y) * 0.5f),
                 IM_COL32(0,0,0,255), dst_txt.c_str());
 
+        // ORCA: Show the NEW colour as a small triangle in the corner when remapped.
+        if (src != m_extruder_remap[src]) {
+            const float s      = m_imgui->scaled(0.55f);
+            const float offset = m_imgui->scaled(0.15f); // Inset to avoid rounded corner clipping
+            const ImVec2 p(pos.x + offset, pos.y + offset);
+            // Contrast outline: white on dark colours, black on light ones.
+            const float dst_gray    = 0.299f * dst_col.r() + 0.587f * dst_col.g() + 0.114f * dst_col.b();
+            const ImU32 outline_col = (dst_gray * 255.f < 80.f) ? IM_COL32(255, 255, 255, 180) : IM_COL32(0, 0, 0, 180);
+            ImDrawList *draw_list   = ImGui::GetWindowDrawList();
+            draw_list->AddTriangleFilled(p, ImVec2(p.x + s, p.y), ImVec2(p.x, p.y + s), ImGuiWrapper::to_ImU32(dst_col));
+            draw_list->AddTriangle(p, ImVec2(p.x + s, p.y), ImVec2(p.x, p.y + s), outline_col, 0.5f);
+        }
+
         // popup with possible destinations
-        std::string pop_id = "popup_" + std::to_string(src);
         if (clicked) {
             // Calculate popup position centered below the current button
             ImVec2 button_pos = ImGui::GetItemRectMin();
             ImVec2 button_size = ImGui::GetItemRectSize();
             ImVec2 popup_pos(button_pos.x + button_size.x * 0.5f, button_pos.y + button_size.y);
-            
+
             // Set popup styling BEFORE opening popup
             ImGui::SetNextWindowPos(popup_pos, ImGuiCond_Appearing, ImVec2(0.5f, -0.1f));
             ImGui::SetNextWindowBgAlpha(1.0f); // Ensure full opacity
             ImGui::OpenPopup(pop_id.c_str());
         }
-        
+
         // Apply popup styling before BeginPopup using standard Orca colors
         ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 4.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, m_is_dark_mode ? ImGuiWrapper::COL_WINDOW_BG_DARK : ImGuiWrapper::COL_WINDOW_BG);
+        // ORCA: FrameBgActive for consistency and so white filaments stay visible
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
         ImGui::PushStyleColor(ImGuiCol_Border, m_is_dark_mode ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-        
+
         if (ImGui::BeginPopup(pop_id.c_str())) {
+            m_imgui->text(_L("To:"));
             const float popup_start_pos_x = ImGui::GetCursorPosX();
-            
+
             for (int dst = 0; dst < (int)n_extr; ++dst) {
                 const unsigned int popup_filament_id = m_display_filament_ids[dst];
                 if (popup_filament_id == 0 || popup_filament_id > m_extruders_colors.size())
@@ -1361,14 +1674,14 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
                 if (dst % max_items_per_line != 0)
                     ImGui::SameLine(popup_start_pos_x + item_width * (dst % max_items_per_line));
                 std::string dst_btn = "##dst_" + std::to_string(src) + "_" + std::to_string(dst);
-                
+
                 // Apply same styling to destination buttons
                 ImGuiColorEditFlags dst_flags = ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs |
                                                ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoPicker |
                                                ImGuiColorEditFlags_NoTooltip;
                 // Show border for currently selected destination filament
                 if (m_extruder_remap[src] != dst) dst_flags |= ImGuiColorEditFlags_NoBorder;
-                
+
                 #ifdef __APPLE__
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGuiWrapper::COL_ORCA);
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
@@ -1384,14 +1697,14 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
                     ImGui::PopStyleVar(2);
                     ImGui::PopStyleColor(1);
                 #endif
-                
+
                 // overlay destination number on popup buttons
                 std::string dst_num_txt = std::to_string(dst + 1);
                 float dst_gray = 0.299f * dst_col_popup.r() + 0.587f * dst_col_popup.g() + 0.114f * dst_col_popup.b();
                 ImVec2 dst_txt_sz = ImGui::CalcTextSize(dst_num_txt.c_str());
                 ImVec2 dst_pos = ImGui::GetItemRectMin();
                 ImVec2 dst_size = ImGui::GetItemRectSize();
-                
+
                 if (dst_gray * 255.f < 80.f)
                     ImGui::GetWindowDrawList()->AddText(
                         ImVec2(dst_pos.x + (dst_size.x - dst_txt_sz.x) * 0.5f, dst_pos.y + (dst_size.y - dst_txt_sz.y) * 0.5f),
@@ -1400,32 +1713,22 @@ void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float 
                     ImGui::GetWindowDrawList()->AddText(
                         ImVec2(dst_pos.x + (dst_size.x - dst_txt_sz.x) * 0.5f, dst_pos.y + (dst_size.y - dst_txt_sz.y) * 0.5f),
                         IM_COL32(0,0,0,255), dst_num_txt.c_str());
-                
+
                 if (dst_clicked)
                 {
                     m_extruder_remap[src] = dst;
-                    // update the source button color immediately
                     ImGui::CloseCurrentPopup();
                 }
             }
             ImGui::EndPopup();
         }
-        
+
         // Clean up popup styling (always pop, whether popup was open or not)
         ImGui::PopStyleColor(2); // PopupBg and Border
         ImGui::PopStyleVar(2);   // PopupRounding and PopupBorderSize
+
+        ++displayed_count;
     }
-
-    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.3f));
-
-    if (m_imgui->button(m_desc.at("remap"))) {
-        remap_filament_assignments();
-        m_show_filament_remap_ui = false;
-    }
-
-    ImGui::SameLine();
-    if (m_imgui->button(m_desc.at("cancel_remap")))
-        m_show_filament_remap_ui = false;
 }
 
 void GLGizmoMmuSegmentation::remap_filament_assignments()
@@ -1433,33 +1736,13 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
     if (m_extruder_remap.empty())
         return;
 
-    constexpr size_t MAX_EBT = (size_t)EnforcerBlockerType::ExtruderMax;
     EnforcerBlockerStateMap state_map;
-
-    // identity mapping by default
-    for (size_t i = 0; i <= MAX_EBT; ++i)
-        state_map[i] = static_cast<EnforcerBlockerType>(i);
-
-    size_t n_extr = std::min({m_extruder_remap.size(), m_display_filament_ids.size(), MAX_EBT});
-    bool   any_change = false;
-    for (size_t src = 0; src < n_extr; ++src) {
-        const size_t dst = m_extruder_remap[src];
-        if (dst >= m_display_filament_ids.size())
-            continue;
-
-        const unsigned int src_state = m_display_filament_ids[src];
-        const unsigned int dst_state = m_display_filament_ids[dst];
-        if (src_state == 0 || dst_state == 0 || src_state == dst_state)
-            continue;
-
-        state_map[src_state] = static_cast<EnforcerBlockerType>(dst_state);
-        if (src_state == 1)
-            state_map[0] = static_cast<EnforcerBlockerType>(dst_state);
-
-        any_change = true;
-    }
-    if (!any_change)
+    if (!TriangleSelector::build_filament_remap_state_map(m_display_filament_ids, m_extruder_remap, state_map))
         return;
+
+    // Edge (Airbrush P3, A1): sprays still waiting for their bake go in first (their own undo steps),
+    // so the remap below sees every field together with the paint baked from it.
+    airbrush_flush_pending(true);
 
     Plater::TakeSnapshot snapshot(wxGetApp().plater(),
                                   "Remap filament assignments",
@@ -1470,21 +1753,59 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
     ModelObject* mo = m_c->selection_info()->model_object();
     if (!mo) return;
 
+    bool volume_extruder_changed = false;
+    const std::vector<int> filaments_before = get_extruder_id_for_volumes(*mo);
+
     for (ModelVolume* mv : mo->volumes) {
         if (!mv->is_model_part()) continue;
         ++idx;
         TriangleSelectorGUI* ts = m_triangle_selectors[idx].get();
         if (!ts) continue;
+
+        // Remap painted triangles
         ts->remap_triangle_state(state_map);
         ts->request_update_render_data(true);
+
+        // ORCA: Remap the base volume filament as well when it is remapped.
+        // Edge: read from the filaments taken before this loop. A volume that uses the object's filament
+        // changes the object's, which a later volume on the object's filament would otherwise read back
+        // as its own and remap a second time (a 1<->2 swap ended where it started).
+        const int          current_ext_id = size_t(idx) < filaments_before.size() ? filaments_before[idx] : mv->extruder_id();
+        const unsigned int current_id     = current_ext_id > 0 ? unsigned(current_ext_id) : 1u;
+        const unsigned int dest_id        = current_id <= size_t(EnforcerBlockerType::ExtruderMax) ? unsigned(state_map[current_id]) : current_id;
+        if (dest_id != current_id) {
+            // Orca #12437: a volume with its own filament changes; one that uses the object's filament
+            // changes the object's.
+            const ConfigOption *vol_opt = mv->config.option("extruder");
+            if (vol_opt != nullptr && vol_opt->getInt() != 0)
+                mv->config.set("extruder", int(dest_id));
+            else
+                mo->config.set("extruder", int(dest_id));
+            if (size_t(idx) < m_volumes_extruder_idxs.size())
+                m_volumes_extruder_idxs[idx] = int(dest_id);
+            volume_extruder_changed = true;
+        }
+
         updated = true;
     }
 
     if (updated) {
-        wxGetApp().plater()->get_notification_manager()->push_notification(
-            _L("Filament remapping finished.").ToStdString());
+        // ORCA: Update renderer colors if base volume extruder changed
+        if (volume_extruder_changed) {
+            this->update_triangle_selectors_colors();
+            // ORCA: Update the object list's filament column to the new value
+            wxGetApp().obj_list()->update_objects_list_filament_column(wxGetApp().filaments_cnt());
+        }
+
+        // ORCA: No "Filament remapping finished" notification, to reduce UI noise.
         update_model_object();
+        // Edge (Airbrush P3, A1): the colour fields' filament slots follow the paint, so the next
+        // bake does not read the remapped paint as a foreign edit.
+        airbrush_after_remap(mo, state_map);
         m_parent.set_as_dirty();
+
+        // ORCA: Refresh used filaments cache
+        this->update_used_filaments();
     }
 }
 

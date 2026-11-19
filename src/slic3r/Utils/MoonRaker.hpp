@@ -53,6 +53,11 @@ public:
     std::string get_host() const override { return m_host; }
     const std::string& get_apikey() const { return m_apikey; }
     const std::string& get_cafile() const { return m_cafile; }
+    // `path` on port 8080 of the host in `host` (a print_host value: "ip", "ip:7125",
+    // "http://ip:7125/", ...), keeping its scheme and any user:password@.
+    static std::string url_on_port_8080(const std::string& host, const std::string& path);
+    // Whether an upload that failed with HTTP `status` (0: no HTTP answer) is tried again on port 8080.
+    static bool retry_on_port_8080(unsigned status);
 
     // set auth info
     virtual void set_auth_info(const nlohmann::json& info) override {};
@@ -161,8 +166,12 @@ protected:
     std::string m_cafile;
     bool        m_ssl_revoke_best_effort;
 
-    // Time synchronization manager
+    // Time synchronization manager. Read on the Paho callback threads (response handlers) while
+    // Moonraker_Mqtt::disconnect() clears it on the UI thread: go through tsm() / clear_tsm(),
+    // which use the atomic shared_ptr accessors, never the member directly.
     std::shared_ptr<TimeSyncManager> time_sync_manager_;
+    std::shared_ptr<TimeSyncManager> tsm() const { return std::atomic_load(&time_sync_manager_); }
+    void clear_tsm() { std::atomic_store(&time_sync_manager_, std::shared_ptr<TimeSyncManager>()); }
 
     // Helper methods
     virtual void set_auth(Http &http) const;
@@ -366,6 +375,10 @@ public:
     // does it itself; a caller that handed over an already-connected engine (set_engine) has to
     // ask, or no reply to a request would ever come back.
     bool subscribe_device_topics(std::string& msg);
+
+    // Wait up to timeout_ms for this printer's response topic to be subscribed on the engine in
+    // use (the Device page subscribes it itself, on another worker). True once it is.
+    bool wait_response_subscribed(int timeout_ms);
 
     // Callback structure for MQTT requests
     struct RequestCallback {

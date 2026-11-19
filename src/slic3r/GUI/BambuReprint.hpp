@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -78,7 +79,7 @@ struct Tray
 {
     int         ams_id { -1 };
     int         slot_id { -1 };
-    int         tray_id { -1 };        // ams_id * 4 + slot_id, MachineObject::ams_filament_mapping's numbering
+    int         tray_id { -1 };        // ams_id * 4 + slot_id, MachineObject::ams_filament_mapping's numbering (external: 254/255)
     int         physical_extruder { -1 }; // Ams::nozzle
     int         extruder { -1 };        // logical (0 left, 1 right) on a two-extruder printer, else -1
     std::string name;                   // "A1", "HT-A"
@@ -92,8 +93,9 @@ struct Tray
     bool        ready { false };        // its type and colour are known: it can be picked
 };
 
-// GUI thread. Every slot of every AMS unit of the printer (external spool holders are not offered,
-// exactly as the desktop's tray picker does not offer them). `physical_extruder_map` is the job's.
+// GUI thread. Every slot of every AMS unit of the printer, and on a two-extruder printer each
+// extruder's external spool holder (ams id = tray id = 254 left / 255 right, slot 0), as the
+// desktop's tray picker offers them. `physical_extruder_map` is the job's.
 std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_extruder_map);
 
 // The phone's override of one filament: "<filament>:<ams_id>-<slot_id>", comma separated,
@@ -175,6 +177,7 @@ struct Printer
     std::vector<int>                 nozzle_hrc;  // per logical extruder: the current nozzle's hardness, 0 unknown
     std::vector<Tray>                trays;
     std::vector<DualNozzleSync::PrinterNozzle> nozzles; // for the nozzle-mapping request
+    std::set<std::string>            blocked_ams_ids; // MachineObject::mapping_blocked_ams_ids (H3C AMS 3H)
 };
 
 // What the checks read from the app: the send dialog's remembered checkboxes and the hardness a

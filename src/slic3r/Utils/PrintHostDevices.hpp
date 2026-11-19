@@ -32,8 +32,10 @@
 // callers.
 //
 // Secrets: an API key / password is written in clear, exactly as the printer preset writes
-// printhost_apikey today - there is no secret store anywhere in this codebase (no wxSecretStore, no
-// CredWrite, no keychain call), so this file is no more exposed than the preset next to it.
+// printhost_apikey / printhost_password. On POSIX the file is created readable by its owner alone
+// (save_store); the preset files are not. Moving both into the OS credential store (wxSecretStore,
+// as HomeVendors does for vendor tokens) is the full fix and has to cover the preset too, or the
+// same key stays in clear one folder over.
 
 namespace Slic3r {
 
@@ -114,6 +116,44 @@ std::string                                     last_used_id(const std::string& 
 // Records that this device was just used: the model's last_used_id and the device's own
 // last_used timestamp, together.
 void                                            set_last_used(const std::string& model_key, const std::string& id);
+
+// ---- what the printer lists show ----
+
+// One saved device as the printer lists (/api/printers, the Printers tab) show it.
+struct ListedDevice
+{
+    std::string model_key;
+    Device      device;
+    // The device belongs to the selected printer preset's model: only such a row may offer a send
+    // (the plate was sliced for that model). Every other model's devices are listed for monitoring.
+    bool        selected_model { false };
+};
+
+struct HostListing
+{
+    // Whether the preset's own print_host still needs its "host" row: false when one of the
+    // selected model's Elegoo Link devices is the same printer (it is then listed once, under the
+    // device's stable ph: id, the way RemoteEvents already watches it).
+    bool                      host_row { false };
+    std::vector<ListedDevice> devices;
+};
+
+// Every saved device of every model, whatever printer preset is selected - a saved printer is
+// listed like a Bambu printer or a LAN Snapmaker is, not only while its own preset is selected.
+// The selected model's devices come first, in their stored order, then every other model's.
+//
+//   all                - all_devices().
+//   selected_model_key - current_model_key() of the selected printer preset; "" when the selected
+//                        preset is not a print-host one (a Bambu preset on the Bambu network).
+//   preset_address     - the selected preset's print_host; "" when there is no "host" row to make.
+//   preset_host_type   - the selected preset's host_type key.
+HostListing host_listing(const std::map<std::string, std::vector<Device>>& all,
+                         const std::string&                                selected_model_key,
+                         const std::string&                                preset_address,
+                         const std::string&                                preset_host_type);
+
+// The bare host of an address ("http://10.0.0.5:3030/" -> "10.0.0.5"), lower-cased.
+std::string bare_host(const std::string& address);
 
 // ---- "can this plate go anywhere?" ----
 

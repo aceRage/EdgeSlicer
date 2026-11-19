@@ -3,9 +3,11 @@
 
 #include "GUI_App.hpp"
 #include "RemoteHub.hpp" // hub_dir
+#include "slic3r/Utils/PrintersMonitor.hpp" // the "Remove printer" tombstones
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/Utils/Bonjour.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/MoonrakerProgress.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -333,6 +335,13 @@ static void store_device(const Device& d)
 {
     if (d.ip.empty())
         return;
+    // Removed on the Printers tab ("Remove printer"): discovery, the Device tab's saved devices and
+    // the camera list must not bring it back. Adding it by hand clears the tombstone (add()).
+    if (d.added_by != "manual") {
+        const json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        if (PrintersMonitor::tombstoned(removed, "sm:" + d.id, d.ip))
+            return;
+    }
     std::lock_guard<std::mutex> lock(s_store_mutex);
     json                        store = load_store();
     const std::vector<Device>   raw   = stored_devices(store);
@@ -439,6 +448,12 @@ bool add(const std::string& ip_in, int port, Device& out, std::string& error)
         return false;
     }
     out.added_by = "manual";
+    // Added again by hand: whatever "Remove printer" said about it no longer holds.
+    {
+        json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        if (PrintersMonitor::clear_tombstone(removed, "sm:" + out.id, out.ip))
+            PrintersMonitor::save_tombstones(RemoteHub::removed_printers_path(), removed);
+    }
     store_device(out);
     return true;
 }
@@ -590,7 +605,7 @@ bool Presence::observe(bool answered, long long now)
 // address's history, and two list entries can never read each other's answer. (They could: the
 // cloud broker and the LAN address of one U1 were stored under the same serial number, the two
 // cards shared one slot, and the broker's failed probe was served as the LAN card's state - U2
-// "offline · 10.0.0.106" while it answered on that address, 2026-09-25.)
+// "offline · 192.0.2.106" while it answered on that address, 2026-09-25.)
 struct Cached
 {
     Status                st;          // what the cards show: the last good reading while online
@@ -679,6 +694,67 @@ std::vector<std::pair<double, double>> nozzle_temps_of(const json& status_obj)
     return out;
 }
 
+// ---- the job's file, for percent and time left ----
+//
+// The Device page's percent and time left need the printed file's metadata (gcode_start_byte,
+// gcode_end_byte, estimated_time; MoonrakerProgress.hpp). It only changes with the job, so it is
+// asked once per file per printer, not on every probe: again when the printer starts a file of a
+// different name or size, and at most every META_RETRY_MS while the printer cannot answer it.
+struct MetaSlot
+{
+    std::string                   filename;
+    long long                     file_size { -1 };
+    MoonrakerProgress::FileMeta   meta;
+    bool                          have { false };
+    long long                     tried_ms { -1 };
+};
+static std::mutex                      s_meta_mutex;
+static std::map<std::string, MetaSlot> s_meta;
+static const long long                 META_RETRY_MS = 30000;
+
+static MoonrakerProgress::FileMeta file_meta_for(const Device& d, const MoonrakerProgress::Sample& s)
+{
+    const std::string name = s.metadata_filename();
+    if (name.empty()) return {};
+    const bool        on_job = s.state == "printing" || s.state == "paused";
+    const std::string slot   = slot_of(d);
+    const long long   now    = now_ms();
+    {
+        std::lock_guard<std::mutex> lock(s_meta_mutex);
+        MetaSlot&                   m = s_meta[slot];
+        // A file of the same name uploaded again (a reprint of a re-slice) is a different file.
+        const bool same = m.filename == name && (s.file_size < 0 || m.file_size < 0 || m.file_size == s.file_size);
+        if (!same) {
+            m           = MetaSlot();
+            m.filename  = name;
+        }
+        if (s.file_size >= 0) m.file_size = s.file_size;
+        if (m.have) return m.meta;
+        // Only a running job is worth a request; a finished one keeps whatever was found.
+        if (!on_job || (m.tried_ms >= 0 && now - m.tried_ms < META_RETRY_MS)) return {};
+        m.tried_ms = now;
+    }
+    json        j;
+    std::string error;
+    const bool  ok = get_json(base_url(d) + "/server/files/metadata?filename=" + Http::url_encode(name), j, error, 3, 2) &&
+                    j.contains("result");
+    MoonrakerProgress::FileMeta meta = ok ? MoonrakerProgress::parse_metadata(j) : MoonrakerProgress::FileMeta();
+    std::lock_guard<std::mutex> lock(s_meta_mutex);
+    MetaSlot&                   m = s_meta[slot];
+    if (m.filename != name) return meta; // the job changed while we asked
+    if (meta.valid) {
+        m.meta = meta;
+        m.have = true;
+        BOOST_LOG_TRIVIAL(info) << "[SnapmakerLan] " << d.ip << ": " << name << " estimated_time " << meta.estimated_time
+                                << " s, body bytes " << meta.gcode_start_byte << ".." << meta.gcode_end_byte;
+    } else {
+        BOOST_LOG_TRIVIAL(info) << "[SnapmakerLan] " << d.ip << ": no metadata for " << name << " (" << error
+                                << "); percent from display_status, time left only past "
+                                << (int) (MoonrakerProgress::MIN_LINEAR_FRACTION * 100) << " %";
+    }
+    return meta;
+}
+
 // What one round of requests to a printer found. `queried` says whether the status query answered
 // too (a printer can answer /server/info and then time out on the bigger query while it is busy).
 struct Probe
@@ -723,7 +799,7 @@ static Probe probe(const Device& d, bool ask_access)
     json        q;
     std::string qerror;
     if (get_json(base_url(d) +
-                     "/printer/objects/query?print_stats&display_status&heater_bed&extruder&extruder1&extruder2&extruder3&"
+                     "/printer/objects/query?print_stats&display_status&virtual_sdcard&heater_bed&extruder&extruder1&extruder2&extruder3&"
                      "print_task_config&" + DeviceControls::moonraker_controls_query(),
                  q, qerror, 3, 2) &&
         q.contains("result") && q["result"].contains("status")) {
@@ -742,8 +818,13 @@ static Probe probe(const Device& d, bool ask_access)
                 s.total_layers = (int) num_of(ps["info"], "total_layer");
             }
         }
-        if (st.contains("display_status"))
-            s.progress = num_of(st["display_status"], "progress");
+        {
+            // Percent and time left the way the printer's own Device page works them out.
+            const MoonrakerProgress::Sample   sample = MoonrakerProgress::parse_sample(st);
+            const MoonrakerProgress::Estimate e      = MoonrakerProgress::estimate(sample, file_meta_for(d, sample));
+            s.progress    = e.fraction;
+            s.left_time_s = e.left_s;
+        }
         if (st.contains("heater_bed")) {
             s.bed_temp   = num_of(st["heater_bed"], "temperature");
             s.bed_target = num_of(st["heater_bed"], "target");
@@ -957,11 +1038,8 @@ static json toolheads_json(const std::vector<Toolhead>& heads)
     return out;
 }
 
-// The printer reports elapsed time and progress; the desktop's "time left" is the rest.
-static int left_time_s(const Status& s)
-{
-    return (s.progress > 0.01 && s.print_duration > 0) ? (int) (s.print_duration / s.progress - s.print_duration) : 0;
-}
+// Worked out at probe time (MoonrakerProgress::estimate), on the Device page's basis.
+static int left_time_s(const Status& s) { return s.left_time_s; }
 
 static json status_json(const Device& d, const Status& s)
 {
@@ -1102,9 +1180,21 @@ void prefer_lan(json& printers)
 // --------------------------------------------------------------- sending ----
 
 bool upload(const Device& d, const std::string& source_path, const std::string& filename, std::function<void(int)> progress,
-            std::string& error)
+            std::string& error, int stall_s)
 {
     bool ok = false;
+    // No time limit for the whole upload - a big file on slow Wi-Fi takes as long as it takes - but
+    // one that stops moving is given up: curl's progress callback runs about once a second even
+    // when nothing goes out, and a printer that stopped reading would otherwise hang the send for good.
+    // Once the last byte is out the printer still writes the file away (and, on some firmware, scans it)
+    // before it answers, with nothing moving: that wait gets a limit of its own, UPLOAD_ANSWER_FACTOR
+    // times longer (10 min for the default 120 s), so a big file on slow storage is not cut off while a
+    // printer that never answers still does not hang the send for good.
+    using Clock               = std::chrono::steady_clock;
+    size_t            sent      = 0;
+    Clock::time_point moved     = Clock::now();
+    bool              stalled   = false;
+    bool              answering = false;
     // print=false always: a print that will not start must still leave a file the person can use
     // from the printer's own screen.
     Http::post(base_url(d) + "/server/files/upload").tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
@@ -1112,8 +1202,21 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
         .form_add("print", "false")
         .form_add("root", "gcodes")
         .form_add_file("file", fs::path(source_path), filename)
-        .on_progress([&progress](Http::Progress prog, bool& cancel) {
+        .on_progress([&](Http::Progress prog, bool& cancel) {
             cancel = false;
+            if (stalled)
+                return;
+            const Clock::time_point now = Clock::now();
+            answering                   = prog.ultotal > 0 && prog.ulnow >= prog.ultotal;
+            const int limit_s           = answering ? stall_s * UPLOAD_ANSWER_FACTOR : stall_s;
+            if (prog.ulnow != sent) {
+                sent  = prog.ulnow;
+                moved = now;
+            } else if (stall_s > 0 && now - moved >= std::chrono::seconds(limit_s)) {
+                stalled = true;
+                cancel  = true;
+                return;
+            }
             if (progress && prog.ultotal > 0)
                 progress((int) std::min<size_t>(100, prog.ulnow * 100 / prog.ultotal));
         })
@@ -1130,6 +1233,11 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
             }
         })
         .perform_sync();
+    if (stalled) {
+        error = answering ? "the printer took the whole file but did not answer for " + std::to_string(stall_s * UPLOAD_ANSWER_FACTOR) + " s" :
+                            "the printer stopped taking the file: nothing was sent for " + std::to_string(stall_s) + " s";
+        ok    = false;
+    }
     return ok;
 }
 
@@ -1163,13 +1271,21 @@ bool metadata(const Device& d, const std::string& filename, long long& size, std
 // printer's websocket and MQTT transports only: over HTTP it answers "Method not found".
 bool run_script(const Device& d, const std::string& script, std::string& error)
 {
+    return run_script(base_url(d), std::string(), script, error);
+}
+
+bool run_script(const std::string& base, const std::string& apikey, const std::string& script, std::string& error)
+{
     bool ok = false;
-    Http::post(base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(script)).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+    auto http = Http::post(base + "/printer/gcode/script?script=" + Http::url_encode(script));
+    http.tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(5)
-        .timeout_max(60) // the printer answers a script only once it has run it
-        // Everything is in the query string, but the body has to be set: without it the Http
-        // wrapper leaves CURLOPT_POSTFIELDS alone and curl waits for a body nobody will write.
-        .header("Content-Type", "application/json")
+        .timeout_max(60); // the printer answers a script only once it has run it
+    if (!apikey.empty())
+        http.header("X-Api-Key", apikey);
+    // Everything is in the query string, but the body has to be set: without it the Http
+    // wrapper leaves CURLOPT_POSTFIELDS alone and curl waits for a body nobody will write.
+    http.header("Content-Type", "application/json")
         .set_post_body(std::string("{}"))
         .on_complete([&ok](std::string, unsigned) { ok = true; })
         .on_error([&error](std::string body, std::string err, unsigned status) {

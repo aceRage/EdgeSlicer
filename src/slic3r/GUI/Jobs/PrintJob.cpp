@@ -3,6 +3,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/GUI/BambuSendDiagnosis.hpp"
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 #include "slic3r/GUI/GcodeArchive.hpp"
 #include "slic3r/GUI/PlatePrintHistoryRecorder.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -148,6 +149,12 @@ void PrintJob::process(Ctl &ctl)
     }
 
     ctl.update_status(0, msg);
+    // A status-only printer prints through Bambu Connect; EdgeSlicer only reads its status.
+    if (config != nullptr && BambuConnectStatus::is_status_only(*config, m_dev_id)) {
+        ctl.update_status(0, _u8L("This printer is added for status only and prints through Bambu Connect. "
+                                  "Use Send to Bambu Connect to print on it."));
+        return;
+    }
     ctl.call_on_main_thread([this] { prepare(); }).wait();
 
     int result = -1;
@@ -207,8 +214,12 @@ void PrintJob::process(Ctl &ctl)
     params.username = "bblp";
     params.password = m_access_code;
 
-    // check access code and ip address
-    if (this->connection_type == "lan" && m_print_type == "from_normal") {
+    // check access code and ip address. The check is a small upload to the printer's card, so a
+    // printer without one that prints from its internal storage skips it, as Bambu Studio does (it
+    // checks the access code over the internal-storage service instead).
+    if (this->connection_type == "lan" && m_print_type == "from_normal" && !this->has_sdcard && this->could_emmc_print) {
+        BOOST_LOG_TRIVIAL(info) << "print_job: no usable card, the printer prints from internal storage: no FTPS access-code check";
+    } else if (this->connection_type == "lan" && m_print_type == "from_normal") {
         params.dev_id = m_dev_id;
         params.project_name = "verify_job";
         params.filename = job_data._temp_path.string();
@@ -343,7 +354,6 @@ void PrintJob::process(Ctl &ctl)
         params.origin_model_id = "";
     }
 
-    wxString error_text;
     std::string msg_text;
 
 
@@ -367,7 +377,6 @@ void PrintJob::process(Ctl &ctl)
         &msg, 
         &error_str, 
         &curr_percent, 
-        &error_text,
         &last_error_info,
         StagePercentPoint
     ](int stage, int code, std::string info) {
@@ -465,6 +474,15 @@ void PrintJob::process(Ctl &ctl)
     // printer's object one is on its way, so a refusal of this job is still recognised as ours
     // while refusals of anybody else's commands are not.
     if (obj) obj->note_agent_command_sent("project_file");
+
+    // A secured printer (Developer Mode off) rejects the unsigned project_file command, and
+    // EdgeSlicer never signs. Say so now instead of uploading the file and waiting for the refusal.
+    if (obj && obj->is_secured_mode()) {
+        const std::string secured_text = bambu_secured_mode_message();
+        BOOST_LOG_TRIVIAL(error) << "print_job: " << m_dev_id << " is in secured mode (Developer Mode off), not sending the print";
+        ctl.show_error_info(secured_text, 0, "", "");
+        return;
+    }
 
     auto wait_fn = [this, curr_percent, &obj](int state, std::string job_info) {
             BOOST_LOG_TRIVIAL(info) << "print_job: get_job_info = " << job_info;
@@ -570,7 +588,8 @@ void PrintJob::process(Ctl &ctl)
     auto             printer_refused = [&obj, refusals_before]() { return obj && obj->project_file_refusals.load() != refusals_before; };
 
     if (params.connection_type != "lan") {
-        const BambuLanSkip lan_skip = bambu_lan_skip_reason(!params.dev_ip.empty(), this->cloud_print_only, this->has_sdcard,
+        const BambuLanSkip lan_skip = bambu_lan_skip_reason(!params.dev_ip.empty(), this->cloud_print_only,
+                                                            this->has_sdcard || this->could_emmc_print,
                                                             !params.password.empty());
         params.comments = bambu_lan_skip_tag(lan_skip);
 
@@ -584,7 +603,6 @@ void PrintJob::process(Ctl &ctl)
         else if (!wxGetApp().app_config->get("lan_mode_only").empty() && wxGetApp().app_config->get("lan_mode_only") == "1") {
             diag.cloud_bound = false;
             if (params.password.empty() || params.dev_ip.empty()) {
-                error_text = wxString::Format(_L("Access code:%s IP address:%s"), params.password, params.dev_ip);
                 result = BAMBU_NETWORK_ERR_FTP_UPLOAD_FAILED;
                 diag.lan_skip     = bambu_lan_skip_reason(!params.dev_ip.empty(), false, true, !params.password.empty());
                 diag.skipped_code = result;
@@ -597,7 +615,6 @@ void PrintJob::process(Ctl &ctl)
                 is_try_lan_mode = true;
                 result = m_agent->start_local_print_with_record(params, update_fn, cancel_fn, wait_fn);
                 if (result < 0) {
-                    error_text = wxString::Format(_L("Access code:%s IP address:%s"), params.password, params.dev_ip);
                     // try to send with cloud
                     BOOST_LOG_TRIVIAL(warning) << "print_job: use ftp send print failed";
                     diag.lan_code        = result;
@@ -664,8 +681,10 @@ void PrintJob::process(Ctl &ctl)
         } 
     } else {
         diag.cloud_bound = false;
-        if (this->has_sdcard) {
-            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, send over LAN";
+        // Bambu Studio: a card, or a printer that prints from its internal storage.
+        if (this->has_sdcard || (this->could_emmc_print && m_print_type != "from_sdcard_view")) {
+            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, send over LAN"
+                                    << (this->has_sdcard ? "" : " (no usable card: the printer prints from internal storage)");
             ctl.update_status(curr_percent, _u8L("Sending print job over LAN"));
             const std::string job_id_before       = obj ? obj->job_id_ : std::string();
             const bool        was_printing_before = obj && obj->is_in_printing_status(obj->print_status);
@@ -689,8 +708,19 @@ void PrintJob::process(Ctl &ctl)
                 use_diag             = true;
             }
         } else {
-            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, no_sdcard";
-            ctl.update_status(curr_percent, _u8L("An SD card needs to be inserted before printing via LAN."));
+            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, storage not usable, state " << this->sdcard_state;
+            // Say which: a missing card, one the printer flags as abnormal (Orca #10981), or a read-only one.
+            switch (bambu_storage_issue(this->sdcard_state, false)) {
+            case BambuStorageIssue::Abnormal:
+                ctl.update_status(curr_percent, _u8L("The storage in the printer is abnormal. Replace it with a normal storage, or turn on Preferences > Bambu Network > Allow Abnormal Storage, before sending the print job."));
+                break;
+            case BambuStorageIssue::ReadOnly:
+                ctl.update_status(curr_percent, _u8L("The storage in the printer is read-only. Please replace it with a normal storage before sending the print job to the printer."));
+                break;
+            default:
+                ctl.update_status(curr_percent, _u8L("An SD card needs to be inserted before printing via LAN."));
+                break;
+            }
             return;
         }
     }
@@ -734,8 +764,6 @@ void PrintJob::process(Ctl &ctl)
         BOOST_LOG_TRIVIAL(error) << "print_job: failed, result = " << result;
     } else {
         // wait for printer mqtt ready the same job id
-
-        wxGetApp().plater()->record_slice_preset("print");
 
         // Ultra: keep a copy of the gcode 3mf that went to the printer (Preferences > Ultra >
         // G-Code Archive). Archiving never fails a send: GcodeArchive swallows its own errors.

@@ -18,6 +18,16 @@ public:
     // process, is built that way).
     static wxWebView *CreateWebView(wxWindow *parent, wxString const &url, wxString const &brand_tag = "SM-Slicer",
                                     bool script_bridge = true);
+
+    // True when the linked WebKitGTK predates 2.42, where accelerated compositing
+    // could fail silently on XWayland sessions, so it is forced off as a fallback.
+    // False on every other platform. Safe to call before GTK initialises.
+    static bool NeedsCompositingWorkaround();
+
+    // True when the linked WebKitGTK is new enough (>= 2.44) to honour
+    // WEBKIT_DMABUF_RENDERER_FORCE_SHM, the shared-memory transport switch.
+    // False on every other platform. Safe to call before GTK initialises.
+    static bool SupportsForceSharedMemory();
 #if wxUSE_WEBVIEW_EDGE
     static bool CheckWebViewRuntime();
     static bool DownloadAndInstallWebViewRuntime();
@@ -25,6 +35,13 @@ public:
     static void LoadUrl(wxWebView * webView, wxString const &url);
 
     static bool RunScript(wxWebView * webView, wxString const & msg);
+
+    // Deletes the cookies called `names` that the browser would send to `uri` - only those, never
+    // the rest of the shared profile (Bambu, Stream tab, ... sign-ins live there too).
+    // Windows: through the WebView2 cookie manager of the profile every CreateWebView view shares,
+    // using any live view. Elsewhere: by script in `page`, which must show a page of that site
+    // (the cookies must not be HttpOnly). false when nothing could do it.
+    static bool DeleteSiteCookies(const std::vector<std::string> &names, const std::string &uri, wxWebView *page = nullptr);
 
     // After a theme change: refresh every view's User-Agent (it carries the theme token) and
     // reload it - except views that opted out with SetReloadOnThemeChange(view, false), which

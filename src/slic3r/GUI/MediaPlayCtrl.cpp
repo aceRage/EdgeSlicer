@@ -6,8 +6,15 @@
 #include "libslic3r/AppConfig.hpp"
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
-#include "DownloadProgressDialog.hpp"
 #include "PluginGuard.hpp"
+#include "RemoteHub.hpp"
+#include "BambuNetInfo.hpp"
+#include "slic3r/Utils/TeardownJoin.hpp"
+
+#include <nlohmann/json.hpp>
+#include <wx/webview.h>
+#include <wx/weakref.h>
+#include <thread>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
@@ -131,16 +138,52 @@ MediaPlayCtrl::MediaPlayCtrl(wxWindow *parent, wxMediaCtrl2 *media_ctrl, const w
     m_lan_passwd = "bblp";
 }
 
+// Serves what the camera worker may be blocked on while ~MediaPlayCtrl waits for it, and nothing
+// else (see Utils/TeardownJoin.hpp, EDGESLICER-A). Never a plain Yield(): that ran timers, wx
+// pending events and idle processing (a nested DeletePendingObjects) in the middle of the window
+// tree's teardown, and a Plater timer then repainted the half-destroyed MainFrame.
+static void pump_for_media_worker(TeardownPump stage)
+{
+#ifdef _WIN32
+    // The worker's WMP / DirectShow calls are marshalled to this (UI) apartment through COM's hidden
+    // window, and the BambuSource filter reports to the player window with WM_USER + 1000. Messages
+    // sent from another thread are delivered inside PeekMessage whatever its filter; posted ones are
+    // taken only from WM_USER up, so WM_TIMER, input, WM_PAINT and WM_QUIT stay queued untouched.
+    MSG msg;
+    while (::PeekMessage(&msg, nullptr, WM_USER, 0xFFFF, PM_REMOVE))
+        ::DispatchMessage(&msg);
+    if (stage == TeardownPump::Service)
+        return;
+#else
+    (void) stage;
+#endif
+    // Wide stage on Windows; every stage elsewhere (wxGTK / wxOSX cannot filter native events the
+    // same way). A category mask other than "all" skips wx pending events and idle processing, and
+    // on Windows also WM_TIMER and user input.
+    if (wxEventLoopBase *loop = wxEventLoopBase::GetActive())
+        loop->YieldFor(wxEVT_CATEGORY_UI | wxEVT_CATEGORY_UNKNOWN);
+}
+
 MediaPlayCtrl::~MediaPlayCtrl()
 {
     {
         boost::unique_lock lock(m_mutex);
-        m_tasks.push_back("<exit>");
+        // The worker finishes the task it is running and leaves; queued loads / plays are dropped.
+        m_exiting = true;
         m_cond.notify_all();
     }
-    while (!m_thread.try_join_for(boost::chrono::milliseconds(10))) {
-        wxEventLoopBase::GetActive()->Yield();
-    }
+    bool logged_wide = false;
+    const auto res = join_without_reentry(
+        [this] { return m_thread.try_join_for(boost::chrono::milliseconds(10)); },
+        [&logged_wide](TeardownPump stage) {
+            if (stage == TeardownPump::Wide && !logged_wide) {
+                logged_wide = true;
+                BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: camera worker still busy at teardown, widening the message pump";
+            }
+            pump_for_media_worker(stage);
+        },
+        std::chrono::seconds(3));
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: camera worker joined after " << res.rounds << " pump rounds";
 }
 
 void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
@@ -152,7 +195,10 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
         m_lan_mode       = obj->is_lan_mode_printer();
         m_lan_proto      = obj->liveview_local;
         m_remote_proto   = obj->get_liveview_remote();
-        m_lan_ip         = obj->dev_ip;
+        // A cloud-bound printer whose SSDP announcements never arrive (Windows Firewall on a Public
+        // network) still reports its address in push_status: the camera uses that until discovery
+        // finds it, instead of "[1:3]" on every Play for the whole session (BambuNetInfo.hpp).
+        m_lan_ip         = BambuNetInfo::camera_address(obj->dev_ip, obj->net_reported_ip);
         m_lan_passwd     = obj->get_access_code();
         m_device_busy    = obj->is_camera_busy_off();
         m_tutk_state     = obj->tutk_state;
@@ -282,6 +328,12 @@ void MediaPlayCtrl::Play()
         return;
     }
 
+    // "New Bambu LiveView" (liveview_go2rtc, on by default): a LAN camera plays through the hub's
+    // go2rtc and the Bambu player (BambuSource / live555) is never asked for anything. Setting off,
+    // or a printer the own view cannot play: the Bambu-player path below, exactly as before.
+    if (try_play_own())
+        return;
+
     NetworkAgent *agent = wxGetApp().getAgent();
     std::string  agent_version = agent ? agent->get_version() : "";
     if (m_lan_proto > MachineObject::LVL_Disable && (m_lan_mode || !m_remote_proto) && !m_disable_lan && !m_lan_ip.empty()) {
@@ -357,7 +409,20 @@ void MediaPlayCtrl::Play()
                 if (m_last_state == MEDIASTATE_INITIALIZING) {
                     if (url.empty() || !boost::algorithm::starts_with(url, "bambu:///")) {
                         m_failed_code = 3;
-                        Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
+                        if (m_lan_ip.empty() && m_lan_proto > MachineObject::LVL_Disable)
+                            // No cloud stream, and no LAN address to play the printer's own stream
+                            // from: say which of the two is missing rather than "check the network".
+#ifdef _WIN32
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked: see Help > Check Windows Firewall."),
+                                 from_u8(url));
+#else
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked by a firewall."),
+                                 from_u8(url));
+#endif
+                        else
+                            Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
                     } else {
                         m_url = url;
                         load();
@@ -374,6 +439,10 @@ void start_ping_test();
 
 void MediaPlayCtrl::Stop(wxString const &msg, wxString const &msg2)
 {
+    if (m_own_busy) { // the own live view never touches the Bambu player, stopping included
+        stop_own(msg);
+        return;
+    }
     int last_state = m_last_state;
 
     if (m_last_state != MEDIASTATE_IDLE) {
@@ -486,36 +555,16 @@ void MediaPlayCtrl::ToggleStream()
                 // real component rather than failing mutely.
                 namespace fs = boost::filesystem;
                 const fs::path plugin_source = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
-                if (is_ultranet_bambusource_stub(plugin_source))
+                if (is_ultranet_bambusource_stub(plugin_source) && !wxGetApp().has_bambu_camera_component())
                     wxGetApp().offer_bambu_camera_component(this);
                 return;
             }
-            auto res = MessageDialog(this->GetParent(), _L("Virtual Camera Tools is required for this task!\nDo you want to install them?"), _L("Info"),
-                                    wxOK | wxCANCEL).ShowModal();
-            if (res == wxID_OK) {
-                // download tools
-                struct DownloadProgressDialog2 : DownloadProgressDialog
-                {
-                    MediaPlayCtrl *ctrl;
-                    DownloadProgressDialog2(MediaPlayCtrl *ctrl) : DownloadProgressDialog(_L("Downloading Virtual Camera Tools")), ctrl(ctrl) {}
-                    struct UpgradeNetworkJob2 : UpgradeNetworkJob
-                    {
-                        UpgradeNetworkJob2(std::shared_ptr<ProgressIndicator> pri) : UpgradeNetworkJob() {
-                            name         = "cameratools";
-                            package_name = "camera_tools.zip";
-                        }
-                    };
-                    std::shared_ptr<UpgradeNetworkJob> make_job(std::shared_ptr<ProgressIndicator> pri)
-                    { return std::make_shared<UpgradeNetworkJob2>(pri); }
-                    void                               on_finish() override
-                    {
-                        ctrl->CallAfter([ctrl = this->ctrl] { ctrl->ToggleStream(); });
-                        EndModal(wxID_CLOSE);
-                    }
-                };
-                DownloadProgressDialog2 dlg(this);
-                dlg.ShowModal();
-            }
+            // The virtual camera tools used to be fetched from the Bambu CDN here. EdgeSlicer does not
+            // download Bambu components other than the camera component, so say what is missing.
+            MessageDialog(this->GetParent(),
+                          _L("Virtual Camera Tools are required for this task, and EdgeSlicer does not download them. "
+                             "Reinstall EdgeSlicer to restore them."),
+                          _L("Info"), wxOK | wxICON_INFORMATION).ShowModal();
             return;
         }
     }
@@ -594,6 +643,131 @@ void MediaPlayCtrl::ultra_pause(bool pause)
     // Ultra: quiesce the DirectShow video graph around the modal print-send flow.
     if (pause) Stop();
     else       Play();
+}
+
+// ---- "New Bambu LiveView": EdgeSlicer's own live view (liveview_go2rtc, on by default) ---------
+// The camera plays through the hub's go2rtc - the same relay the phone uses - in a web view that
+// loads the hub's player page (resources/web/orca/player.html), exactly as the Stream tab embeds a
+// go2rtc camera. RTSPS printers (X1/H2/P2S) play as MSE over the hub's WebSocket tunnel: loopback
+// TCP only, no WebRTC port and no firewall prompt for the desktop. P1/A1 (port 6000) go through
+// the hub's BambuCamRelay into go2rtc and play as MJPEG frames on the same WebSocket.
+// Plan, findings and the owner's clean-data-dir test: tests/plan_own_camera_view.md.
+
+void MediaPlayCtrl::SetOwnView(std::function<wxWebView *()> make_view, std::function<void(bool own)> show_own)
+{
+    m_make_own_view = std::move(make_view);
+    m_show_own      = std::move(show_own);
+}
+
+bool MediaPlayCtrl::try_play_own()
+{
+    // One warning-level line per Play naming the path it took, so a support log shows it at the
+    // default log level. Never the address or the access code.
+    auto bambu_path = [](const std::string &reason) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: Play -> Bambu player: " << reason;
+        return false;
+    };
+    if (!m_make_own_view)
+        return bambu_path("no own-view slot on this panel");
+    if (!wxGetApp().app_config->get_bool("liveview_go2rtc"))
+        return bambu_path("New Bambu LiveView is off"); // the Bambu-player path, untouched
+    std::string kind;
+    if (m_lan_proto == MachineObject::LVL_Rtsps)      kind = "rtsps";
+    else if (m_lan_proto == MachineObject::LVL_Rtsp)  kind = "rtsp";
+    else if (m_lan_proto == MachineObject::LVL_Local) kind = "local";
+    // Only a printer this path can actually play: a LAN stream, its address and its access code.
+    // Anything else (LAN liveview switched off, cloud-only remote liveview, no access code yet) goes
+    // on to the Bambu-player path, which has its own messages and its own fallbacks for those.
+    if (kind.empty())
+        return bambu_path(m_lan_proto == MachineObject::LVL_Disable ? "no LAN stream (LAN liveview is off on the printer)"
+                                                                     : "no LAN stream (lan proto " + std::to_string(m_lan_proto) + ")");
+    if (m_lan_ip.empty())
+        return bambu_path("no LAN address");
+    if (m_lan_passwd.empty())
+        return bambu_path("no access code");
+    if (m_own_view == nullptr)
+        m_own_view = m_make_own_view();
+    if (m_own_view == nullptr)
+        return bambu_path("no web view could be created");
+    BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: Play -> own view (go2rtc, " << (kind == "local" ? "mjpeg" : "mse") << ")";
+    m_failed_code = 0;
+    m_own_busy    = true;
+    m_last_state  = MEDIASTATE_INITIALIZING;
+    m_button_play->SetIcon("media_stop");
+    m_label_stat->SetLabel({});
+    SetStatus(_L("Starting live view..."), false);
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] " << kind
+                            << " live view through the hub's go2rtc; the Bambu player (BambuSource/live555) is not used";
+
+    const int         seq     = ++m_own_seq;
+    const std::string machine = m_machine, ip = m_lan_ip, code = m_lan_passwd;
+    wxWeakRef<MediaPlayCtrl> weak(this);
+    std::thread([weak, seq, machine, kind, ip, code]() {
+        // The hub is the one owner of go2rtc on this PC (phone, Stream tab and now this panel): start
+        // it if no window has yet. Phone access is left as it is.
+        RemoteHub::Info info = RemoteHub::ensure_running("", false);
+        std::pair<int, std::string> res { 503, std::string() };
+        if (info.alive && info.go2rtc_port > 0)
+            res = RemoteHub::register_own_camera(kind, ip, code);
+        wxGetApp().CallAfter([weak, seq, machine, info, res]() {
+            if (weak)
+                weak->own_ready(seq, machine, info.port, info.go2rtc_port, info.secret, res.first, res.second);
+        });
+    }).detach();
+    return true;
+}
+
+void MediaPlayCtrl::own_ready(int seq, const std::string &machine, int port, int go2rtc_port, const std::string &secret,
+                              int status, const std::string &body)
+{
+    // Stopped, restarted or switched to another printer while the hub was asked: not ours any more.
+    if (seq != m_own_seq || machine != m_machine || !m_own_busy || m_last_state != MEDIASTATE_INITIALIZING)
+        return;
+    if (port <= 0 || go2rtc_port <= 0) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub or its go2rtc is not running";
+        if (RemoteHub::no_hub()) {
+            stop_own(_L("No hub is running, and this copy was started with --no-hub, so it does not start one. Start the hub from the main EdgeSlicer, or start this copy with --take-hub."));
+            return;
+        }
+        stop_own(_L("The camera relay (go2rtc) is not running. See hub.log in the log folder, or turn off \"New Bambu LiveView\" in Preferences."));
+        return;
+    }
+    std::string name, mode, error;
+    try {
+        const nlohmann::json j = nlohmann::json::parse(body);
+        name  = j.value("name", std::string());
+        mode  = j.value("mode", std::string());
+        error = j.value("error", std::string());
+    } catch (...) {}
+    if (status != 200 || name.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub refused the stream: " << status << " " << error;
+        stop_own(wxString::Format(_L("Live view could not start (%s)."), error.empty() ? wxString::Format("%d", status) : from_u8(error)));
+        return;
+    }
+    // The player page at the hub's root; `lt` is the hub secret, accepted from loopback only.
+    const wxString url = wxString::Format("http://127.0.0.1:%d/stream.html?src=%s&mode=%s&lt=%s", port, from_u8(name),
+                                          from_u8(mode.empty() ? std::string("mse") : mode), from_u8(secret));
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] playing go2rtc stream " << name << " as " << mode;
+    if (m_show_own) m_show_own(true);
+    m_own_view->LoadURL(url);
+    m_last_state = wxMEDIASTATE_PLAYING;
+    SetStatus(_L("Playing (EdgeSlicer live view)"), false);
+}
+
+void MediaPlayCtrl::stop_own(wxString const &msg)
+{
+    ++m_own_seq; // a hub answer still on its way is dropped
+    if (m_own_view) {
+        // Leaving the page closes its WebSocket: go2rtc drops this consumer, and closes the printer
+        // connection when it was the last one (the phone's, if it is watching, stays).
+        m_own_view->LoadURL("about:blank");
+    }
+    if (m_show_own) m_show_own(false);
+    m_own_busy   = false;
+    m_last_state = MEDIASTATE_IDLE;
+    m_button_play->SetIcon("media_play");
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] stopped";
+    SetStatus(msg.IsEmpty() ? _L("Video Stopped.") : msg, false);
 }
 
 void MediaPlayCtrl::onStateChanged(wxMediaEvent &event)
@@ -704,12 +878,15 @@ void MediaPlayCtrl::media_proc()
 {
     boost::unique_lock lock(m_mutex);
     while (true) {
-        while (m_tasks.empty()) {
+        while (m_tasks.empty() && !m_exiting) {
             m_cond.wait(lock);
         }
+        if (m_exiting)
+            break; // ~MediaPlayCtrl is waiting; queued tasks would only drive a player being destroyed
         wxString url = m_tasks.front();
         if (m_tasks.size() >= 2 && !url.IsEmpty() && url[0] != '<' && m_tasks[1] == "<stop>") {
-            BOOST_LOG_TRIVIAL(trace) << "MediaPlayCtrl: busy skip url: " << url;
+            // Not the URL itself: a LAN one carries the printer's access code ("passwd=", "bblp:<code>@").
+            BOOST_LOG_TRIVIAL(trace) << "MediaPlayCtrl: busy, skipped a queued url";
             m_tasks.pop_front();
             m_tasks.pop_front();
             continue;

@@ -103,5 +103,7 @@
     "filament_flow_support": [
         "standard",
         "high_flow"
-    ]
+    ],
+    "graphic_effect_plate_temp": ["0"],
+    "graphic_effect_plate_temp_initial_layer": ["0"]
 }

@@ -3,6 +3,8 @@
 
 #include <map>
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/ProcessPresetExport.hpp"
+#include "libslic3r/FilamentPresetExport.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_Utils.hpp"
 #include "Widgets/Label.hpp"
@@ -14,6 +16,9 @@
 #include "Widgets/DialogButtons.hpp"
 #include "miniz.h"
 #include "ParamsDialog.hpp"
+
+class wxWebView;
+class wxWebViewEvent;
 
 namespace Slic3r { 
 namespace GUI {
@@ -296,6 +301,17 @@ private:
     ExportCase  archive_printer_preset_to_file(const wxString &path);
     ExportCase  archive_filament_preset_to_file(const wxString &path);
     ExportCase  archive_process_preset_to_file(const wxString &path);
+    // "Process presets(.zip)" and "Filament presets(.zip)" are tables (resources/web/guide/export_presets):
+    // one row per user preset, filters, sorting, individual ticks. Each lives in an embedded web view
+    // that replaces the checkbox grid below the radio buttons while that export type is chosen.
+    enum TableKind { PROCESS_TABLE = 0, FILAMENT_TABLE = 1, TABLE_COUNT };
+    int         current_table() const; // the table of the chosen export type, or -1
+    bool        show_export_table(int which);
+    void        hide_export_tables();
+    void        send_export_rows(int which);
+    void        on_export_table_message(wxWebViewEvent &evt, int which);
+    void        apply_table_dialog_size();
+    ExportCase  archive_table_selection(int which, const std::string &export_file);
 
 private:
     std::vector<std::pair<RadioBox *, wxString>>           m_export_type_btns;
@@ -311,6 +327,16 @@ private:
     wxGridSizer *                                          m_preset_sizer   = nullptr;
     wxPanel *                                              m_presets_window = nullptr;
     wxStaticText *                                         m_serial_text    = nullptr;
+    wxBoxSizer *                                           m_select_sizer   = nullptr; // label + the grid / the tables
+    struct ExportTable
+    {
+        wxWebView *       view   = nullptr;
+        bool              failed = false;    // the web view could not be created: the checkbox grid is used
+        PresetExportModel model;
+        std::vector<size_t> selected;        // row ids ticked in the table
+    };
+    ExportTable                                            m_tables[TABLE_COUNT];
+    bool                                                   m_table_size_used = false; // a table was shown: remember the dialog's size
 };
 
 class CreatePresetForPrinterDialog : public DPIDialog

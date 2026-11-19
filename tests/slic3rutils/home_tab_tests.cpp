@@ -16,6 +16,9 @@ TEST_CASE("home tab: sections", "[HomeTab]")
     CHECK_FALSE(valid_section(""));
     CHECK(valid_section("library"));
     CHECK(valid_section("vendors"));
+    CHECK(valid_section("vaults"));
+    CHECK(section_or_default("vaults") == "vaults");
+    CHECK(section_or_default("vendors") == "vendors");
     CHECK_FALSE(valid_section("hub"));
     CHECK_FALSE(valid_section("Recent"));
     CHECK(section_or_default("history") == "history");
@@ -35,6 +38,31 @@ TEST_CASE("home tab: how an archived file opens again", "[HomeTab]")
     CHECK(archive_open_kind("job.bgcode") == ArchiveOpen::None);
     CHECK(archive_open_kind("") == ArchiveOpen::None);
     CHECK(archive_open_kind("gcode") == ArchiveOpen::None);
+}
+
+TEST_CASE("home tab: how a downloaded vendor file opens", "[HomeTab]")
+{
+    // A project, sliced ones included.
+    CHECK(download_open_kind("model.3mf") == DownloadOpen::Project);
+    CHECK(download_open_kind("Model.3MF") == DownloadOpen::Project);
+    CHECK(download_open_kind("job.gcode.3mf") == DownloadOpen::Project);
+    // Meshes go onto the current plate.
+    CHECK(download_open_kind("part.stl") == DownloadOpen::AddToPlate);
+    CHECK(download_open_kind("PART.STL") == DownloadOpen::AddToPlate);
+    CHECK(download_open_kind("part.step") == DownloadOpen::AddToPlate);
+    CHECK(download_open_kind("part.stp") == DownloadOpen::AddToPlate);
+    CHECK(download_open_kind("part.obj") == DownloadOpen::AddToPlate);
+    CHECK(download_open_kind("part.amf") == DownloadOpen::AddToPlate);
+    // G-code is previewed.
+    CHECK(download_open_kind("plate_1.gcode") == DownloadOpen::Gcode);
+    CHECK(download_open_kind("PLATE_1.GCODE") == DownloadOpen::Gcode);
+    CHECK(download_open_kind("part.gco") == DownloadOpen::Gcode);
+    // Nothing is opened for a file EdgeSlicer does not load, or a name without an extension.
+    CHECK(download_open_kind("models.zip") == DownloadOpen::None);
+    CHECK(download_open_kind("part.stl.zip") == DownloadOpen::None);
+    CHECK(download_open_kind("job.bgcode") == DownloadOpen::None);
+    CHECK(download_open_kind("stl") == DownloadOpen::None);
+    CHECK(download_open_kind("") == DownloadOpen::None);
 }
 
 TEST_CASE("home tab: filament colours are only ever hex", "[HomeTab]")

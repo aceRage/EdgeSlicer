@@ -359,13 +359,22 @@ void MonitorPanel::update_all()
 
     //BBS check mqtt connections if user is login
     if (wxGetApp().is_user_login()) {
-        dev->check_pushing();
+        // Orca #13802: one throwing step must not skip the other, or the rest of the refresh.
+        try {
+            dev->check_pushing();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all check_pushing exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all check_pushing unknown exception";
+        }
         // check mqtt connection and reconnect if disconnected
         try {
-            m_agent->refresh_connection();
-        }
-        catch (...) {
-            ;
+            if (m_agent)
+                m_agent->refresh_connection();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all refresh_connection exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all refresh_connection unknown exception";
         }
     }
 
@@ -387,6 +396,23 @@ void MonitorPanel::update_all()
         m_hms_panel->clear_hms_tag();
         m_tabpanel->GetBtnsListCtrl()->showNewTag(3, false);
         return;
+    }
+
+    // EdgeSlicer: a LAN printer that keeps refusing its saved access code is not "Connecting...":
+    // from the second refused dial in a row the bar says the code was refused and its link opens
+    // the edit dialog (once the notice is up the redials pause until then, LanAccessCodeWatch.hpp).
+    {
+        DeviceManager* dev = wxGetApp().getDeviceManager();
+        const bool refused = dev && obj->is_lan_mode_printer() && dev->lan_access_code_bar(obj->dev_id) &&
+                             (obj->is_connecting() || !obj->is_connected());
+        if (refused) {
+            // show_status() resets the panel (set_default) and with it `obj`: keep the serial first.
+            const std::string dev_id = obj->dev_id;
+            show_status((int) MONITOR_DISCONNECTED);
+            m_side_tools->set_access_code_refused(dev_id);
+            return;
+        }
+        m_side_tools->set_access_code_refused(std::string());
     }
 
     if (obj->is_connecting()) {

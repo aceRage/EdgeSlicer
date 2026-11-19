@@ -34,10 +34,10 @@
         "Slope Lift"
     ],
     "graphic_effect_plate_temp": [
-        "0"
+        "70"
     ],
     "graphic_effect_plate_temp_initial_layer": [
-        "0"
+        "70"
     ],
     "pellet_flow_coefficient": [
         "0.4157"

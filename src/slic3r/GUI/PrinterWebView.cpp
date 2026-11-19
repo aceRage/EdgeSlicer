@@ -5,6 +5,12 @@
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
+#include "slic3r/GUI/Widgets/Button.hpp"
+#include "slic3r/GUI/ElegooCanvasUI.hpp"
+#include "slic3r/GUI/PrinterRowsBridge.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
+#include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/PrintersMonitor.hpp"
 #include "common_func/common_func.hpp"
 
 #include <wx/sizer.h>
@@ -17,6 +23,7 @@
 #include "libslic3r/PresetBundle.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <wx/webview.h>
@@ -30,6 +37,27 @@ namespace pt = boost::property_tree;
 namespace Slic3r {
 namespace GUI {
 
+static int64_t device_page_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// What the log calls a page: our own pages by their path and route (no host, no token); anybody
+// else's page (a print host's web UI, with its address) only by kind.
+static std::string device_page_name(const std::string& url)
+{
+    if (!WebLoadRetry::is_loopback_url(url))
+        return url.empty() ? std::string("(blank)") : std::string("a print host page");
+    const std::string page = WebLoadRetry::page_of(url);
+    const size_t      sep  = page.find("://");
+    const size_t      path = sep == std::string::npos ? std::string::npos : page.find('/', sep + 3);
+    std::string       name = path == std::string::npos ? page : page.substr(path);
+    const size_t      route = url.find("path=");
+    if (route != std::string::npos)
+        name += "?" + url.substr(route, url.find_first_of("&#", route) - route);
+    return name;
+}
+
 PrinterWebView::PrinterWebView(wxWindow *parent)
         : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
  {
@@ -38,13 +66,44 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 
     wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
     auto     real_url = wxGetApp().get_international_url(url);
-    // CreateWebView still takes the Flutter URL. On macOS, WebViewWebKit holds it
-    // until the script-message handler is installed (SM #857/#865).
-    m_browser = WebView::CreateWebView(this, real_url);
+    // During startup the view is made blank and the Flutter page is held until startup is over
+    // (DevicePageLoad.hpp): booted now, its first requests would wait out the GUI thread's
+    // post-init work and time out. A view made later (recreate_GUI) loads it straight away.
+    // On macOS, WebViewWebKit holds a URL until the script-message handler is installed
+    // (SM #857/#865).
+    m_load_gate = DevicePageLoad::Gate(wxGetApp().startup_settled());
+    const bool load_now = m_load_gate.released();
+    m_browser = WebView::CreateWebView(this, load_now ? real_url : wxString());
     if (m_browser == nullptr) {
         wxLogError("Could not init m_browser");
         return;
     }
+    const std::string initial_url = real_url.ToUTF8().data();
+    if (load_now) {
+        m_load_gate.started(initial_url, device_page_now_ms());
+    } else {
+        m_load_gate.request(initial_url, std::string(), DevicePageLoad::Kind::Show, device_page_now_ms());
+        m_held_is_initial = true;
+        BOOST_LOG_TRIVIAL(info) << "[DevicePage] holding " << device_page_name(initial_url) << " until startup is over";
+    }
+    // Opening the tab before startup is over loads it at once.
+    Bind(wxEVT_SHOW, [this](wxShowEvent& evt) {
+        evt.Skip();
+        if (evt.IsShown())
+            release_startup_hold("the Device tab was opened");
+        // The shared device page polls only while it is on screen.
+        set_device_page_active(evt.IsShown());
+        // The CANVAS card reads the printer when the tab is opened (at most every 10 s).
+        if (evt.IsShown() && m_canvas && m_canvas->has_target())
+            m_canvas->refresh(true);
+        // The Storage tab reads the printer only while it is on screen.
+        if (m_storage) {
+            if (evt.IsShown() && m_storage_shown)
+                m_storage->activate();
+            else if (!evt.IsShown())
+                m_storage->deactivate();
+        }
+    });
 
     // Panel bind so WebViewWebKit's navigation gate (also on the webview) still sees LOADED/ERROR.
     Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this, m_browser->GetId());
@@ -53,11 +112,25 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     m_retry_timer.SetOwner(this);
     Bind(wxEVT_TIMER, &PrinterWebView::OnRetryTimer, this, m_retry_timer.GetId());
 
-    // The device picker, above the page. Created empty and hidden; Sidebar::update_all_preset_
-    // comboboxes fills it in for a print-host printer whose model has devices.
+    // The bar above the page: the Storage tab's two buttons (the printer's page / its files) and
+    // the device picker. Created empty and hidden; Sidebar::update_all_preset_comboboxes fills the
+    // picker in for a print-host printer whose model has devices, and sets the Storage tab's printer.
     m_device_bar   = new wxPanel(this, wxID_ANY);
     auto* bar_sizer = new wxBoxSizer(wxHORIZONTAL);
-    bar_sizer->Add(new wxStaticText(m_device_bar, wxID_ANY, _L("Printer") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    m_tab_page      = new ::Button(m_device_bar, _L("Printer page"));
+    m_tab_page->SetToolTip(_L("The printer's own page"));
+    m_tab_page->SetName(_L("Printer page"));
+    m_tab_page->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { show_storage(false); });
+    m_tab_storage = new ::Button(m_device_bar, _L("Storage"));
+    m_tab_storage->SetToolTip(_L("The G-code files on the printer"));
+    m_tab_storage->SetName(_L("Storage"));
+    m_tab_storage->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { show_storage(true); });
+    bar_sizer->Add(m_tab_page, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, FromDIP(4));
+    bar_sizer->Add(m_tab_storage, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, FromDIP(4));
+    m_tab_page->Hide();
+    m_tab_storage->Hide();
+    m_device_label = new wxStaticText(m_device_bar, wxID_ANY, _L("Printer") + ":");
+    bar_sizer->Add(m_device_label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
     m_device_choice = new wxChoice(m_device_bar, wxID_ANY);
     bar_sizer->Add(m_device_choice, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(4));
     m_device_bar->SetSizer(bar_sizer);
@@ -67,6 +140,9 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     SetSizer(topsizer);
 
     topsizer->Add(m_device_bar, 0, wxEXPAND);
+    // The CANVAS card, hidden until set_canvas_device() names a Centauri Carbon 1 on Elegoo Link.
+    m_canvas = new ElegooCanvasPanel(this);
+    topsizer->Add(m_canvas, 0, wxEXPAND);
     topsizer->Add(m_browser, wxSizerFlags().Expand().Proportion(1));
 
     update_mode();
@@ -82,6 +158,7 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 PrinterWebView::~PrinterWebView()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Start";
+    *m_alive = false;
     m_retry_timer.Stop();
     SetEvtHandlerEnabled(false);
     SSWCP::on_webview_delete(m_browser);
@@ -92,10 +169,36 @@ PrinterWebView::~PrinterWebView()
 }
 
 
-void PrinterWebView::load_url(wxString& url, wxString apikey)
+void PrinterWebView::load_url(wxString& url, wxString apikey, DevicePageLoad::Kind kind)
 {
     if (m_browser == nullptr)
         return;
+    const std::string            u = url.ToUTF8().data();
+    const DevicePageLoad::Action a = m_load_gate.request(u, apikey.ToUTF8().data(), kind, device_page_now_ms());
+    if (a != DevicePageLoad::Action::Load) {
+        if (a == DevicePageLoad::Action::Hold)
+            m_held_is_initial = false;
+        BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << DevicePageLoad::to_string(kind) << " " << device_page_name(u) << ": "
+                                << DevicePageLoad::to_string(a);
+        return;
+    }
+    navigate(url, apikey, true, kind);
+}
+
+void PrinterWebView::release_startup_hold(const char* why)
+{
+    if (m_browser == nullptr)
+        return;
+    DevicePageLoad::Request r;
+    if (!m_load_gate.release(r))
+        return;
+    BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << why << ": loading " << device_page_name(r.url) << ", held since startup";
+    navigate(wxString::FromUTF8(r.url), wxString::FromUTF8(r.apikey), !m_held_is_initial, DevicePageLoad::Kind::Show);
+    m_held_is_initial = false;
+}
+
+void PrinterWebView::navigate(const wxString& url, const wxString& apikey, bool register_view, DevicePageLoad::Kind kind)
+{
     m_apikey = apikey;
     // A page asked for on purpose starts with a clean slate: no retry of whatever failed before.
     m_retry_timer.Stop();
@@ -103,14 +206,21 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     m_retry_page.clear();
     m_retry_count = 0;
 
-    if (url.find("path=2") != std::string::npos) {
-        wxGetApp().fltviews().add_printer_view(this, url, apikey);
-    } else {
-        wxGetApp().fltviews().remove_printer_view(this);
+    if (register_view) {
+        if (url.find("path=2") != std::string::npos) {
+            wxGetApp().fltviews().add_printer_view(this, url, apikey);
+        } else {
+            wxGetApp().fltviews().remove_printer_view(this);
+        }
     }
 
-    m_browser->Show();
+    // The page loads behind the Storage tab when that is the one on screen.
+    if (!m_storage_shown)
+        m_browser->Show();
     m_browser->LoadURL(url);
+    const std::string u = url.ToUTF8().data();
+    m_load_gate.started(u, device_page_now_ms());
+    BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << DevicePageLoad::to_string(kind) << " " << device_page_name(u) << ": load";
 
     UpdateState();
 }
@@ -128,10 +238,7 @@ void PrinterWebView::set_devices(const std::string& model_key, const std::vector
     m_devices   = devices;
     if (devices.empty()) {
         m_device_choice->Clear();
-        if (m_device_bar->IsShown()) {
-            m_device_bar->Hide();
-            Layout();
-        }
+        update_bar();
         return;
     }
     if (!same) {
@@ -148,10 +255,7 @@ void PrinterWebView::set_devices(const std::string& model_key, const std::vector
         if (!select_id.empty() && devices[i].id == select_id)
             sel = (int) i;
     m_device_choice->SetSelection(sel);
-    if (!m_device_bar->IsShown()) {
-        m_device_bar->Show();
-        Layout();
-    }
+    update_bar();
 }
 
 std::string PrinterWebView::picked_device() const
@@ -192,12 +296,146 @@ void PrinterWebView::load_picked_device()
     } catch (...) {}
     wxString wurl   = from_u8(url);
     wxString apikey = from_u8(d.apikey);
+    // A printer with no page of its own (the Centauri Carbon 2) gets the shared device page.
+    const wxString shared = shared_device_page_url(d, m_canvas_model, "ph:" + d.id);
+    if (!shared.empty()) {
+        wurl   = shared;
+        apikey = wxString();
+    }
     load_url(wurl, apikey);
+    // The Storage tab and the CANVAS card follow the picker.
+    set_storage_device(d, "ph:" + d.id, m_canvas_model);
+    set_canvas_device(d, m_canvas_model);
+}
+
+void PrinterWebView::set_canvas_device(const PrintHostDevices::Device& device, const std::string& preset_model)
+{
+    if (!m_canvas)
+        return;
+    m_canvas_model          = preset_model;
+    const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
+    const bool        was   = m_canvas->IsShown();
+    // A Centauri Carbon 2's CANVAS is on its shared device page: no second card above it.
+    const bool        own_page = device.host_type == "elegoolink" && !ElegooCc2::is_cc2_model(model);
+    const bool        shown = m_canvas->set_target(own_page ? device.address : std::string(), model, device.apikey);
+    if (was != shown)
+        Layout();
+}
+
+void PrinterWebView::set_storage_device(const PrintHostDevices::Device& device, const std::string& key, const std::string& preset_model)
+{
+    const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
+    // An Elegoo CC1 starts a stored file with the Elegoo send dialog's remembered choices
+    // (ElegooPrintHostSendDialog's "recent" keys; the plate side falls back to the project's bed).
+    std::map<std::string, std::string> start_options;
+    if (device.host_type == "elegoolink") {
+        if (const AppConfig* cfg = wxGetApp().app_config) {
+            start_options["timeLapse"]         = cfg->get("recent", "elegoolink_timelapse");
+            start_options["heatedBedLeveling"] = cfg->get("recent", "elegoolink_heated_bed_leveling");
+            std::string bed                    = cfg->get("recent", "elegoolink_bed_type");
+            start_options["bedType"]           = bed.empty() ? cfg->get("curr_bed_type") : bed;
+        }
+    }
+    const PrinterStorage::Target t = PrinterStorage::target_for_host(device.host_type, device.address, device.apikey,
+                                                                     device.display_name(), key, model, start_options);
+    set_storage_source(t.kind == PrinterStorage::Target::Kind::None ? PrinterStoragePanel::Source() :
+                                                                     PrinterStoragePanel::fixed_source(t));
+}
+
+void PrinterWebView::set_storage_source(PrinterStoragePanel::Source source)
+{
+    const bool has       = (bool) source;
+    m_storage_has_source = has;
+    if (has && !m_storage) {
+        m_storage = new PrinterStoragePanel(this);
+        m_storage->Hide();
+        GetSizer()->Add(m_storage, wxSizerFlags().Expand().Proportion(1));
+    }
+    if (m_storage)
+        m_storage->set_source(has ? std::move(source) : PrinterStoragePanel::Source());
+    if (!has && m_storage_shown)
+        show_storage(false);
+    else
+        update_bar();
+}
+
+void PrinterWebView::show_storage(bool show)
+{
+    if (show && (!m_storage || !m_storage_has_source))
+        show = false;
+    m_storage_shown = show;
+    if (m_storage) {
+        m_storage->Show(show);
+        if (show && IsShownOnScreen())
+            m_storage->activate();
+        else if (!show)
+            m_storage->deactivate();
+    }
+    if (m_browser)
+        m_browser->Show(!show);
+    update_bar();
+    if (show && m_storage)
+        m_storage->SetFocus();
+}
+
+void PrinterWebView::update_bar()
+{
+    if (!m_device_bar)
+        return;
+    const bool has_devices = !m_devices.empty();
+    const bool storage_tab = m_storage != nullptr && m_storage_has_source;
+    // The preset comboboxes call in here often: lay out only when something changed.
+    const int state = (has_devices ? 1 : 0) | (storage_tab ? 2 : 0) | (m_storage_shown ? 4 : 0);
+    if (state == m_bar_state)
+        return;
+    m_bar_state = state;
+    m_device_label->Show(has_devices);
+    m_device_choice->Show(has_devices);
+    m_tab_page->Show(storage_tab);
+    m_tab_storage->Show(storage_tab);
+    // The tab on screen is the highlighted one.
+    m_tab_page->SetStyle(m_storage_shown ? ButtonStyle::Regular : ButtonStyle::Confirm, ButtonType::Window);
+    m_tab_storage->SetStyle(m_storage_shown ? ButtonStyle::Confirm : ButtonStyle::Regular, ButtonType::Window);
+    m_device_bar->Show(has_devices || storage_tab);
+    m_device_bar->Layout();
+    Layout();
+}
+
+void PrinterWebView::sys_color_changed()
+{
+    if (m_canvas)
+        m_canvas->sys_color_changed();
+    if (m_tab_page) {
+        m_tab_page->Rescale();
+        m_tab_storage->Rescale();
+        m_bar_state = -1;
+        update_bar();
+    }
+    if (m_storage)
+        m_storage->sys_color_changed();
+    // The shared device page switches in place (window.__edgeTheme also updates its ?theme=).
+    if (m_browser != nullptr && !PrintersMonitor::device_page_id(m_browser->GetCurrentURL().ToUTF8().data()).empty())
+        WebView::RunScript(m_browser, wxString::FromUTF8(HubHome::theme_script(wxGetApp().dark_mode())));
+}
+
+void PrinterWebView::msw_rescale()
+{
+    if (m_canvas)
+        m_canvas->msw_rescale();
+    if (m_tab_page) {
+        m_tab_page->Rescale();
+        m_tab_storage->Rescale();
+        m_bar_state = -1;
+        update_bar();
+    }
+    if (m_storage)
+        m_storage->msw_rescale();
 }
 
 void PrinterWebView::reload()
 {
     m_browser->Reload();
+    m_load_gate.started(m_browser->GetCurrentURL().ToUTF8().data(), device_page_now_ms());
 }
 
 bool PrinterWebView::isSnapmakerPage()
@@ -344,6 +582,9 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
     facts.superseded     = !current.empty() && WebLoadRetry::page_of(current) != page;
     facts.retries_so_far = m_retry_count;
     const WebLoadRetry::Decision d = WebLoadRetry::decide(facts);
+    // A cancelled load was replaced by another one, which is the load that counts.
+    if (failure != WebLoadRetry::Failure::Cancelled)
+        m_load_gate.finished(url, false);
     // Never fatal: a page that does not load is not the application failing.
     const auto what = boost::format(":PrinterWebView error loading page %1% %2% %3% %4%") % evt.GetURL() % evt.GetTarget() % e % evt.GetString();
     if (d.retry) {
@@ -369,15 +610,18 @@ void PrinterWebView::OnRetryTimer(wxTimerEvent&)
         return;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": loading " << WebLoadRetry::page_of(m_retry_url) << " again";
     m_browser->LoadURL(wxString::FromUTF8(m_retry_url));
+    m_load_gate.started(m_retry_url, device_page_now_ms());
 }
 
 void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
 {
     evt.Skip();
-    if (evt.GetURL().IsEmpty())
+    // The web view's initial empty document (about:blank on WebKit) is not the requested page.
+    if (evt.GetURL().IsEmpty() || evt.GetURL() == "about:blank")
         return;
     if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
+    m_load_gate.finished(evt.GetURL().ToUTF8().data(), true);
     if (WebLoadRetry::page_of(evt.GetURL().ToUTF8().data()) == m_retry_page) {
         if (m_retry_count > 0)
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << m_retry_page << " loaded after " << m_retry_count << " retr" << (m_retry_count == 1 ? "y" : "ies");
@@ -386,8 +630,55 @@ void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
     SendAPIKey();
 }
 
+wxString PrinterWebView::shared_device_page_url(const PrintHostDevices::Device& device, const std::string& preset_model,
+                                               const std::string& row_id)
+{
+    if (!ElegooCc2::wants_shared_device_page(device.host_type, device.address, device.printer_model, preset_model))
+        return wxString();
+    return shared_device_page_url(row_id);
+}
+
+wxString PrinterWebView::shared_device_page_url(const std::string& row_id)
+{
+    const std::string path = PrintersMonitor::device_page_path(row_id, wxGetApp().dark_mode());
+    return path.empty() ? wxString() : wxString::FromUTF8(wxGetApp().page_url(path));
+}
+
+void PrinterWebView::set_device_page_active(bool active)
+{
+    if (m_browser == nullptr || PrintersMonitor::device_page_id(m_browser->GetCurrentURL().ToUTF8().data()).empty())
+        return;
+    WebView::RunScript(m_browser, wxString::Format("if (window.__printersActive) window.__printersActive(%s);", active ? "true" : "false"));
+}
+
 void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt) {
     // BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetString().ToUTF8().data();
+    const std::string raw = evt.GetString().ToUTF8().data();
+    if (raw.compare(0, 9, "printers_") == 0) {
+        // The shared device page (device.html) - only our own page, and only for the printer it is
+        // about: it reads the rows, and pauses / resumes / stops that one printer (PrinterRowsBridge,
+        // the Printers tab's own answers).
+        const std::string url = m_browser ? std::string(m_browser->GetCurrentURL().ToUTF8().data()) : std::string();
+        const std::string id  = PrintersMonitor::device_page_id(url);
+        if (id.empty() || !wxGetApp().is_own_page_url(url)) {
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: ignored a printers_ message from a page that is not the device page";
+            return;
+        }
+        const PrintersMonitor::Message m = PrintersMonitor::parse_message(raw);
+        if (m.kind == PrintersMonitor::Message::Kind::Control && m.id != id) {
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: the device page asked to control another printer; refused";
+            return;
+        }
+        wxWebView* browser = m_browser;
+        PrinterRowsBridge::Reply reply = [browser](const std::string& fn, const nlohmann::json& arg) {
+            const std::string js = PrintersMonitor::script_call(fn, arg);
+            if (browser != nullptr && !js.empty())
+                WebView::RunScript(browser, wxString::FromUTF8(js));
+        };
+        if (!PrinterRowsBridge::handle(m, m_alive, m_rows_reading, reply))
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: refused message \"" << raw.substr(0, 80) << "\"";
+        return;
+    }
 
     // if (wxGetApp().get_mode() == comDevelop)
     //     wxLogMessage("Script message received; value = %s, handler = %s", evt.GetString(), evt.GetMessageHandler());

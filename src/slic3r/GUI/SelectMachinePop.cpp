@@ -1,4 +1,5 @@
 #include "SelectMachinePop.hpp"
+#include "PopupRowIcons.hpp"
 #include "I18N.hpp"
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
@@ -74,18 +75,6 @@ MachineObjectPanel::MachineObjectPanel(wxWindow *parent, wxWindowID id, const wx
     this->Bind(wxEVT_ENTER_WINDOW, &MachineObjectPanel::on_mouse_enter, this);
     this->Bind(wxEVT_LEAVE_WINDOW, &MachineObjectPanel::on_mouse_leave, this);
     this->Bind(wxEVT_LEFT_UP, &MachineObjectPanel::on_mouse_left_up, this);
-
-#ifdef __APPLE__
-    wxPlatformInfo platformInfo;
-    auto major = platformInfo.GetOSMajorVersion();
-    auto minor = platformInfo.GetOSMinorVersion();
-    auto micro = platformInfo.GetOSMicroVersion();
-
-    //macos 13.1.0
-    if (major >= 13 && minor >= 1 && micro >= 0) {
-        m_is_macos_special_version = true;
-    }
-#endif
 
 }
 
@@ -200,9 +189,9 @@ void MachineObjectPanel::doRender(wxDC &dc)
     dc.DrawText(finally_name, wxPoint(left, (size.y - sizet.y) / 2));
 
 
-    if (m_hover || m_is_macos_special_version) {
-
-        if (m_hover && !m_is_macos_special_version) {
+    // The pencil and log-out icons are always drawn; hovering adds the highlight frame.
+    {
+        if (m_hover) {
             dc.SetPen(SELECT_MACHINE_BRAND);
             dc.SetBrush(*wxTRANSPARENT_BRUSH);
             dc.DrawRectangle(0, 0, size.x, size.y);
@@ -291,11 +280,17 @@ void MachineObjectPanel::on_mouse_left_up(wxMouseEvent &evt)
             wxGetApp().mainframe->jump_to_monitor(m_info->dev_id);
         }
     } else {
-        if (m_info && m_info->is_lan_mode_printer()) {
+        // "Other Device": a LAN printer gets the access-code dialog, anything else the cloud bind.
+        // A printer that announced "lan" recently is a LAN printer here even if a stray "cloud"
+        // announcement switched it (SsdpConnectType.hpp); the decision is logged.
+        DeviceManager* dev = wxGetApp().getDeviceManager();
+        const bool lan = m_info && (dev ? dev->picker_offer_for(m_info, "Other Device") == SsdpConnectType::PickerOffer::AccessCode
+                                        : m_info->is_lan_mode_printer());
+        if (lan) {
             wxCommandEvent event(EVT_CONNECT_LAN_PRINT);
             event.SetEventObject(this);
             wxPostEvent(this, event);
-        } else {
+        } else if (m_info) {
             wxCommandEvent event(EVT_BIND_MACHINE);
             event.SetEventObject(this);
             wxPostEvent(this, event);
@@ -389,9 +384,17 @@ void SelectMachinePopup::Popup(wxWindow *WXUNUSED(focus))
         if (!get_print_info_thread) {
             get_print_info_thread = new boost::thread(Slic3r::create_thread([this, token = std::weak_ptr<int>(m_token)] {
                 NetworkAgent* agent = wxGetApp().getAgent();
-                unsigned int http_code;
+                unsigned int http_code = 0;
                 std::string body;
-                int result = agent->get_user_print_info(&http_code, &body);
+                // A thread body: the agent can be gone (no plug-in) and the plug-in can throw, and either
+                // would take the whole slicer down (std::terminate / null dereference).
+                int result = -1;
+                try {
+                    if (agent)
+                        result = agent->get_user_print_info(&http_code, &body);
+                } catch (...) {
+                    BOOST_LOG_TRIVIAL(error) << "get_user_print_info threw";
+                }
                 CallAfter([token, this, result, body]() {
                     if (token.expired()) {return;}
                     if (result == 0) {
@@ -500,11 +503,11 @@ void SelectMachinePopup::update_other_devices()
 
     for (auto &elem : m_free_machine_list) {
         MachineObject *     mobj = elem.second;
-        /* do not show printer bind state is empty */
-        if (!mobj->is_avaliable()) continue;
-
-        if (!wxGetApp().is_user_login() && !mobj->is_lan_mode_printer())
-            continue;
+        // Bind state empty or "occupied" hides a printer; signed out, a printer that is not in LAN
+        // mode is not hidden either - the access code is the way in (SsdpConnectType.hpp).
+        const SsdpConnectType::OtherEntry entry =
+            SsdpConnectType::other_devices_entry(wxGetApp().is_user_login(), mobj->is_lan_mode_printer(), mobj->is_avaliable());
+        if (entry == SsdpConnectType::OtherEntry::Hide) continue;
 
         /* do not show printer in my list */
         auto it = m_bind_machine_list.find(mobj->dev_id);
@@ -516,6 +519,7 @@ void SelectMachinePopup::update_other_devices()
             op = m_other_list_machine_panel[i]->mPanel;
         } else {
             op = new MachineObjectPanel(m_scrolledWindow, wxID_ANY);
+            wire_panel(op);
             MachinePanel* mpanel = new MachinePanel();
             mpanel->mIndex = wxString::Format("%d", i);
             mpanel->mPanel = op;
@@ -536,7 +540,9 @@ void SelectMachinePopup::update_other_devices()
 
         op->update_machine_info(mobj);
 
-        if (mobj->is_lan_mode_printer()) {
+        if (entry == SsdpConnectType::OtherEntry::Lan) {
+            op->show_edit_printer_name(false);
+            op->show_printer_bind(false, PrinterBindState::NONE);
             if (mobj->has_access_right()) {
                 op->set_printer_state(PrinterState::IN_LAN);
             } else {
@@ -552,26 +558,6 @@ void SelectMachinePopup::update_other_devices()
                 op->set_printer_state(IDLE);
             }
         }
-
-        op->Bind(EVT_CONNECT_LAN_PRINT, [this, mobj](wxCommandEvent &e) {
-            if (mobj) {
-                if (mobj->is_lan_mode_printer()) {
-                    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
-                    dlg.set_machine_object(mobj);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
-                    }
-                }
-            }
-        });
-
-        op->Bind(EVT_BIND_MACHINE, [this, mobj](wxCommandEvent &e) {
-            BindMachineDialog dlg;
-            dlg.update_machine_info(mobj);
-            int dlg_result = wxID_CANCEL;
-            dlg_result     = dlg.ShowModal();
-            if (dlg_result == wxID_OK) { wxGetApp().mainframe->jump_to_monitor(mobj->dev_id); }
-        });
     }
 
     for (int j = i; j < m_other_list_machine_panel.size(); j++) {
@@ -585,6 +571,7 @@ void SelectMachinePopup::update_other_devices()
         m_placeholder_panel = nullptr;
         m_firewall_link     = nullptr; // was a child of the panel
         m_setup_link        = nullptr;
+        m_refresh_link      = nullptr;
     }
 
     const bool firewall_link = FirewallCheckDialog::supported();
@@ -606,6 +593,19 @@ void SelectMachinePopup::update_other_devices()
         m_firewall_link->SetCursor(wxCURSOR_HAND);
         placeholder_sizer->Add(m_firewall_link, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM, 5);
     }
+
+    // A printer that switched between LAN-only and cloud mode (or was bound or unbound) while the
+    // app ran can be missing here until the next sign-in; this asks again without one.
+    m_refresh_link = new wxStaticText(m_placeholder_panel, wxID_ANY, _L("Refresh printers"));
+    {
+        wxFont f = m_refresh_link->GetFont();
+        f.SetUnderlined(true);
+        m_refresh_link->SetFont(f);
+    }
+    m_refresh_link->SetForegroundColour(StateColor::darkModeColorFor("#009789"));
+    m_refresh_link->SetCursor(wxCURSOR_HAND);
+    m_refresh_link->SetToolTip(_L("Search the network again and reload the printers of your account, without signing out."));
+    placeholder_sizer->Add(m_refresh_link, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
     // What a Bambu Lab printer needs to show up and connect (the first-time notice's checklist).
     m_setup_link = new wxStaticText(m_placeholder_panel, wxID_ANY, _L("Bambu printer setup"));
@@ -686,6 +686,7 @@ void SelectMachinePopup::update_user_devices()
 #endif
         } else {
             op = new MachineObjectPanel(m_scrolledWindow, wxID_ANY);
+            wire_panel(op);
             MachinePanel* mpanel = new MachinePanel();
             mpanel->mIndex = wxString::Format("%d", i);
             mpanel->mPanel = op;
@@ -696,47 +697,30 @@ void SelectMachinePopup::update_user_devices()
         op->update_machine_info(mobj, true);
         //set in lan
         if (mobj->is_lan_mode_printer()) {
-            if (!mobj->is_online()) {
-                continue;
+            // Rows are reused: reset what the previous printer in this slot showed.
+            op->show_printer_bind(false, PrinterBindState::NONE);
+            op->show_edit_printer_name(false);
+            const bool online = mobj->is_online();
+            const RowEditIcons icons = edit_icons_for_row(true, online, mobj->has_access_right(), mobj->is_avaliable());
+            // The pencil edits the name and the saved access code, so a refused (LOCK) or
+            // unreachable printer can get its code re-entered here. Log-out stays where it was.
+            op->show_edit_printer_name(icons.pencil);
+            if (!online) {
+                op->set_printer_state(PrinterState::OFFLINE);
+                op->SetToolTip(_L("Offline"));
+            }
+            else if (mobj->has_access_right() && mobj->is_avaliable()) {
+                op->set_printer_state(PrinterState::IN_LAN);
+                if (icons.logout)
+                    op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
+                op->SetToolTip(_L("Online"));
             }
             else {
-                op->show_printer_bind(false, PrinterBindState::NONE);
-                op->show_edit_printer_name(false);
-                if (mobj->has_access_right() && mobj->is_avaliable()) {
-                    op->set_printer_state(PrinterState::IN_LAN);
-                    op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
-                    op->SetToolTip(_L("Online"));
-                }
-                else {
-                    op->set_printer_state(PrinterState::LOCK);
-                }
+                op->set_printer_state(PrinterState::LOCK);
             }
-            op->Bind(EVT_UNBIND_MACHINE, [this, dev, mobj](wxCommandEvent& e) {
-                dev->set_selected_machine("");
-                if (mobj) {
-                    AppConfig* config = wxGetApp().app_config;
-                    if (config) {
-                        config->erase_local_machine(mobj->dev_id);
-                    }
-
-                    mobj->set_access_code("");
-                    mobj->erase_user_access_code();
-                }
-
-                MessageDialog msg_wingow(nullptr, _L("Log out successful."), "", wxAPPLY | wxOK);
-                if (msg_wingow.ShowModal() == wxOK) { return; }
-                });
         }
         else {
             op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
-            op->Bind(EVT_UNBIND_MACHINE, [this, mobj, dev](wxCommandEvent& e) {
-                // show_unbind_dialog
-                UnBindMachineDialog dlg;
-                dlg.update_machine_info(mobj);
-                if (dlg.ShowModal() == wxID_OK) {
-                    dev->set_selected_machine("");
-                }
-                });
 
             if (!mobj->is_online()) {
                 op->SetToolTip(_L("Offline"));
@@ -755,24 +739,6 @@ void SelectMachinePopup::update_user_devices()
                 }
             }
         }
-
-        op->Bind(EVT_CONNECT_LAN_PRINT, [this, mobj](wxCommandEvent &e) {
-            if (mobj) {
-                if (mobj->is_lan_mode_printer()) {
-                    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
-                    dlg.set_machine_object(mobj);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
-                    }
-                }
-            }
-        });
-
-         op->Bind(EVT_EDIT_PRINT_NAME, [this, mobj](wxCommandEvent &e) {
-            EditDevNameDialog dlg;
-            dlg.set_machine_obj(mobj);
-            dlg.ShowModal();
-         });
     }
 
     for (int j = i; j < m_user_list_machine_panel.size(); j++) {
@@ -821,10 +787,125 @@ void SelectMachinePopup::update_machine_list(wxCommandEvent &event)
     BOOST_LOG_TRIVIAL(trace) << "SelectMachinePopup update_machine_list end";
 }
 
+void SelectMachinePopup::on_refresh_printers()
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    if (!dev) return;
+    auto token = std::weak_ptr<int>(m_token);
+    const bool started = dev->refresh_printers("printer picker", [this, token]() {
+        if (token.expired()) return;
+        wxCommandEvent event(EVT_UPDATE_USER_MACHINE_LIST);
+        event.SetEventObject(this);
+        wxPostEvent(this, event);
+    });
+    if (started && m_refresh_link)
+        m_refresh_link->SetLabel(_L("Refreshing printers..."));
+}
+
 void SelectMachinePopup::start_ssdp(bool start)
 {
     return;
     //if (wxGetApp().getAgent()) { wxGetApp().getAgent()->start_discovery(true, start); }
+}
+
+namespace {
+// Clears a flag on scope exit, so a dialog that throws or returns early never leaves it set.
+struct PanelDialogOpenGuard
+{
+    bool& flag;
+    explicit PanelDialogOpenGuard(bool& f) : flag(f) { flag = true; }
+    ~PanelDialogOpenGuard() { flag = false; }
+};
+} // namespace
+
+void SelectMachinePopup::wire_panel(MachineObjectPanel *op)
+{
+    op->Bind(EVT_CONNECT_LAN_PRINT, [this, op](wxCommandEvent &) { on_panel_connect_lan(op->machine_info()); });
+    op->Bind(EVT_BIND_MACHINE, [this, op](wxCommandEvent &) { on_panel_bind(op->machine_info()); });
+    op->Bind(EVT_UNBIND_MACHINE, [this, op](wxCommandEvent &) { on_panel_unbind(op->machine_info()); });
+    op->Bind(EVT_EDIT_PRINT_NAME, [this, op](wxCommandEvent &) { on_panel_edit_name(op->machine_info()); });
+}
+
+void SelectMachinePopup::on_panel_connect_lan(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open || !mobj->is_lan_mode_printer())
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
+    dlg.set_machine_object(mobj);
+    if (dlg.ShowModal() == wxID_OK) {
+        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
+    }
+}
+
+void SelectMachinePopup::on_panel_bind(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    BindMachineDialog dlg;
+    dlg.update_machine_info(mobj);
+    if (dlg.ShowModal() == wxID_OK) { wxGetApp().mainframe->jump_to_monitor(mobj->dev_id); }
+}
+
+void SelectMachinePopup::on_panel_unbind(MachineObject *mobj)
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    if (!mobj || !dev || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    if (mobj->is_lan_mode_printer()) {
+        // A LAN printer: forget its access code ("log out" of the printer).
+        dev->set_selected_machine("");
+        AppConfig* config = wxGetApp().app_config;
+        if (config) {
+            config->erase_local_machine(mobj->dev_id);
+        }
+        mobj->set_access_code("");
+        mobj->erase_user_access_code();
+
+        MessageDialog msg_wingow(nullptr, _L("Log out successful."), "", wxAPPLY | wxOK);
+        msg_wingow.ShowModal();
+    } else {
+        UnBindMachineDialog dlg;
+        dlg.update_machine_info(mobj);
+        if (dlg.ShowModal() == wxID_OK) {
+            dev->set_selected_machine("");
+        }
+    }
+}
+
+void SelectMachinePopup::on_panel_edit_name(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    EditDevNameDialog dlg;
+    dlg.set_machine_obj(mobj);
+    dlg.ShowModal();
+}
+
+void open_printer_edit_dialog(const std::string &dev_id)
+{
+    DeviceManager *dev = wxGetApp().getDeviceManager();
+    if (!dev || dev_id.empty())
+        return;
+    MachineObject *obj = dev->get_my_machine(dev_id);
+    if (!obj)
+        obj = dev->get_local_machine(dev_id);
+    if (!obj) {
+        BOOST_LOG_TRIVIAL(info) << "edit printer: dev_id=" << dev_id << " is not known any more";
+        return;
+    }
+    // One at a time: a second click on the notice while the dialog is open does nothing.
+    static bool open = false;
+    if (open)
+        return;
+    open = true;
+    EditDevNameDialog dlg;
+    dlg.set_machine_obj(obj);
+    dlg.ShowModal();
+    open = false;
 }
 
 void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)
@@ -886,6 +967,16 @@ void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)
             }
         }
 
+        //Refresh printers
+        if (m_refresh_link != nullptr) {
+            auto r_rect = m_refresh_link->ClientToScreen(wxPoint(0, 0));
+            if (mouse_pos.x > r_rect.x && mouse_pos.y > r_rect.y && mouse_pos.x < (r_rect.x + m_refresh_link->GetSize().x) &&
+                mouse_pos.y < (r_rect.y + m_refresh_link->GetSize().y)) {
+                on_refresh_printers();
+                return;
+            }
+        }
+
         //Bambu printer setup checklist
         if (m_setup_link != nullptr) {
             auto s_rect = m_setup_link->ClientToScreen(wxPoint(0, 0));
@@ -907,10 +998,26 @@ EditDevNameDialog::EditDevNameDialog(Plater *plater /*= nullptr*/)
     m_line_top->SetBackgroundColour(wxColour(166, 169, 170));
     m_sizer_main->Add(m_line_top, 0, wxEXPAND, 0);
     m_sizer_main->Add(0, 0, 0, wxTOP, FromDIP(38));
+    // The two labels and the access code field are shown for a LAN-mode printer only (set_machine_obj).
+    m_name_label = new wxStaticText(this, wxID_ANY, _L("Printer name"));
+    m_name_label->SetFont(::Label::Body_13);
+    m_name_label->Hide();
+    m_sizer_main->Add(m_name_label, 0, wxLEFT | wxRIGHT, FromDIP(40));
     m_textCtr = new ::TextInput(this, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), FromDIP(40)), wxTE_PROCESS_ENTER);
     m_textCtr->GetTextCtrl()->SetSize(wxSize(-1, FromDIP(22)));
     m_textCtr->SetMinSize(wxSize(FromDIP(260), FromDIP(40)));
     m_sizer_main->Add(m_textCtr, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(40));
+
+    m_code_label = new wxStaticText(this, wxID_ANY, _L("Access code (shown on the printer's screen)"));
+    m_code_label->SetFont(::Label::Body_13);
+    m_code_label->Hide();
+    m_sizer_main->Add(0, 0, 0, wxTOP, FromDIP(8));
+    m_sizer_main->Add(m_code_label, 0, wxLEFT | wxRIGHT, FromDIP(40));
+    m_codeCtr = new ::TextInput(this, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), FromDIP(40)), wxTE_PROCESS_ENTER);
+    m_codeCtr->GetTextCtrl()->SetSize(wxSize(-1, FromDIP(22)));
+    m_codeCtr->SetMinSize(wxSize(FromDIP(260), FromDIP(40)));
+    m_codeCtr->Hide();
+    m_sizer_main->Add(m_codeCtr, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(40));
 
     m_static_valid = new wxStaticText(this, wxID_ANY, wxT(""), wxDefaultPosition, wxDefaultSize, 0);
     m_static_valid->Wrap(-1);
@@ -946,6 +1053,19 @@ void EditDevNameDialog::set_machine_obj(MachineObject *obj)
     m_info = obj;
     if (m_info)
         m_textCtr->GetTextCtrl()->SetValue(from_u8(m_info->dev_name));
+    // A LAN-mode printer: its name and its access code in one dialog. The saved code is shown as
+    // it is, so it can be compared with the one on the printer's screen.
+    const bool lan = m_info && m_info->is_lan_mode_printer();
+    m_name_label->Show(lan);
+    m_code_label->Show(lan);
+    m_codeCtr->Show(lan);
+    if (lan) {
+        SetTitle(_L("Edit printer"));
+        m_codeCtr->GetTextCtrl()->SetValue(from_u8(m_info->get_access_code()));
+    }
+    Layout();
+    Fit();
+    Centre(wxBOTH);
 }
 
 void EditDevNameDialog::on_dpi_changed(const wxRect &suggested_rect)
@@ -992,9 +1112,59 @@ void EditDevNameDialog::on_edit_name(wxCommandEvent &e)
         m_valid_type = NoValid;
     }
 
+    // A LAN-mode printer's access code: letters and digits only, as in ConnectPrinterDialog.
+    const bool lan      = m_info && m_info->is_lan_mode_printer() && m_codeCtr->IsShown();
+    wxString   new_code = lan ? m_codeCtr->GetTextCtrl()->GetValue().Strip(wxString::both) : wxString();
+    if (m_valid_type == Valid && lan) {
+        if (new_code.empty()) {
+            info_line    = _L("The access code is not allowed to be empty.");
+            m_valid_type = NoValid;
+        }
+        for (wxUniChar c : new_code) {
+            if (!(('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'))) {
+                info_line    = _L("The access code may only contain letters and digits.");
+                m_valid_type = NoValid;
+                break;
+            }
+        }
+    }
+
     if (m_valid_type == NoValid) {
         m_static_valid->SetLabel(info_line);
         Layout();
+        Fit();
+    }
+
+    if (m_valid_type == Valid && lan) {
+        m_static_valid->SetLabel(wxEmptyString);
+        DeviceManager *dev  = Slic3r::GUI::wxGetApp().getDeviceManager();
+        auto           utf8 = new_dev_name.ToUTF8();
+        const std::string name(utf8.data(), utf8.length());
+        const std::string code    = new_code.ToStdString();
+        const std::string dev_id  = m_info->dev_id;
+        const bool        changed = code != m_info->get_access_code();
+        // The name is the slicer's own for a LAN printer: kept on the object and in the saved
+        // local printer entry (no account to rename it through).
+        if (name != m_info->dev_name) {
+            m_info->dev_name = name;
+            if (dev)
+                if (MachineObject *local = dev->get_local_machine(dev_id); local && local != m_info)
+                    local->dev_name = name;
+            DeviceManager::update_local_machine(*m_info);
+            BOOST_LOG_TRIVIAL(info) << "edit printer: dev_id=" << dev_id << " LAN printer renamed";
+        }
+        // The same persistence as the first connect (ConnectPrinterDialog::on_button_confirm):
+        // app_config user_access_code and the saved local printer entry.
+        // A code the printer has been refusing is redialled on OK even when it was saved unchanged
+        // (the printer's code may have been set back): the user asked for another try.
+        if (changed) {
+            m_info->set_user_access_code(code);
+            BOOST_LOG_TRIVIAL(warning) << "edit printer: dev_id=" << dev_id << " access code changed by the user";
+        }
+        if (dev && (changed || dev->lan_access_code_refused(dev_id)))
+            dev->lan_access_code_changed(m_info);
+        DPIDialog::EndModal(wxID_OK);
+        return;
     }
 
     if (m_valid_type == Valid) {

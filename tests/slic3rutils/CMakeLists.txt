@@ -2,26 +2,56 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
+    post_processor_tests.cpp
+    creality_discovery_tests.cpp
+    qidi_send_policy_tests.cpp
+    slot_send_policy_tests.cpp
+    printhost_error_tests.cpp
+    print_host_secrets_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
+    print_host_sending_tests.cpp
     plugin_guard_tests.cpp
+    camera_module_tests.cpp
+    plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
+    hub_mosaic_tests.cpp
     hub_handover_tests.cpp
+    hub_quit_tests.cpp
     web_load_retry_tests.cpp
+    webview2_args_tests.cpp
+    webview2_userdata_tests.cpp
+    device_page_load_tests.cpp
+    flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
+    main_tabs_tests.cpp
+    project_sessions_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
     library_index_tests.cpp
     vendor_connector_tests.cpp
+    vault_provider_tests.cpp
+    vendor_csv_split_tests.cpp
     step_mesh_tests.cpp
     http_body_redirect_tests.cpp
     snapmaker_silent_login_tests.cpp
     bambu_sync_policy_tests.cpp
+    bambu_cloud_watch_tests.cpp
+    hub_job_thumbnail_tests.cpp
+    preset_sync_policy_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
+    elegoo_start_print_tests.cpp
+    elegoo_canvas_mapping_tests.cpp
+    elegoo_cc2_tests.cpp
+    elegoo_cc2_monitor_tests.cpp
+    third_party_filament_map_tests.cpp
+    elegoo_sdcp_tests.cpp
+    emulator_e2e_tests.cpp
+    elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
     remote_hub_tests.cpp
@@ -33,57 +63,111 @@ add_executable(${_TEST_NAME}_tests
     hosted_push_tests.cpp
     app_push_levels_tests.cpp
     push_privacy_tests.cpp
+    live_activity_push_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
+    mqtt_log_redact_tests.cpp
+    mqtt_teardown_tests.cpp
+    mqtt_connect_refused_tests.cpp
+    first_request_gate_tests.cpp
+    lan_access_code_watch_tests.cpp
+    popup_row_icons_tests.cpp
+    bind_list_refresh_tests.cpp
+    ssdp_connect_type_tests.cpp
+    bambu_net_info_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
+    tailscale_cli_tests.cpp
+    hub_platform_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    gizmo_volume_refs_tests.cpp
+    camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
+    plate_cut_membership_tests.cpp
+    plate_duplicate_tests.cpp
     preset_mirror_tests.cpp
+    preset_mirror_skip_tests.cpp
+    vendor_install_stamp_tests.cpp
+    plate_recentre_tests.cpp
+    plate_arrange_overflow_tests.cpp
+    bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
+    change_opt_value_tests.cpp
+    option_group_line_tests.cpp
+    layer_range_edit_tests.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
+    bambu_connect_tests.cpp
+    bambu_connect_status_tests.cpp
     blender_launcher_tests.cpp
     freecad_launcher_tests.cpp
     instance_routing_tests.cpp
     startup_wizard_tests.cpp
     page_server_security_tests.cpp
+    login_result_page_tests.cpp
     sentry_scrub_tests.cpp
+    local_minidump_tests.cpp
+    login_diagnostics_tests.cpp
+    login_ticket_gate_tests.cpp
+    stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    nozzle_info_tests.cpp
     device_controls_tests.cpp
     bambu_fans_tests.cpp
+    bambu_ams_report_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
     emboss_picking_tests.cpp
+    svg_import_routing_tests.cpp
     emboss_free_transform_tests.cpp
     dark_mode_background_tests.cpp
     # After the other wx-window tests: it starts a plain wxApp when none is up, and the tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
     theme_live_tests.cpp
     bambu_send_diagnosis_tests.cpp
+    ams_match_tests.cpp
     win_firewall_tests.cpp
     bambu_setup_notice_tests.cpp
     saved_printers_tests.cpp
     ff_printer_sources_tests.cpp
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
+    imgui_font_ranges_tests.cpp
+    imgui_tooltip_utf8_tests.cpp
+    emboss_style_preview_tests.cpp
     printers_monitor_tests.cpp
+    moonraker_progress_tests.cpp
+    printer_storage_tests.cpp
+    elegoo_sdcp_files_tests.cpp
+    u1_local_first_tests.cpp
+    u1_moonraker_probe_tests.cpp
+    u1_ws_route_tests.cpp
     # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp
+    layer_height_check_tests.cpp
+    test_texture_island_view.cpp
+    bind_detect_guard_tests.cpp
+    ams_filament_order_tests.cpp
+    favorite_filaments_tests.cpp
+    teardown_join_tests.cpp
+    slice_v1_tests.cpp
+    paint_v1_tests.cpp
+    mixed_sublayer_ui_tests.cpp
+    flushing_volumes_dialog_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -92,17 +176,25 @@ add_executable(${_TEST_NAME}_tests
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
 # handful of translation units next to it that call the crash-reporter and version wrappers. Those
 # wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
-# does the same), so the test executable has to carry the same four files or it cannot link.
-if (WIN32)
+# does the same), so the test executable has to carry the same files or it cannot link. The
+# Sentry SDK itself comes with libslic3r_gui (SLIC3R_SENTRY and sentry::sentry are PUBLIC there).
+if (WIN32 OR APPLE)
     target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+        )
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+endif ()
+if (WIN32)
+    target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/StackWalker.cpp
         )
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE BURY_EXPORTS)
-    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+elseif (APPLE)
+    # common_func.cpp reads the machine's network interfaces through IOKit, as the app does.
+    target_link_libraries(${_TEST_NAME}_tests "-framework IOKit" "-framework CoreFoundation")
 endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
@@ -117,15 +209,16 @@ endif ()
 # lives in <prefix>/include/msvc rather than <prefix>/include, and only wxWidgets_USE_FILE adds it.
 # find_package(wxWidgets) runs in src/, whose variables do not reach this sibling directory, so it
 # is repeated here - it is cached, so this costs nothing.
-find_package(wxWidgets 3.1 QUIET COMPONENTS html adv gl core base webview aui net media)
+find_package(wxWidgets 3.1 QUIET COMPONENTS stc html adv gl core base webview aui net media)
 if (wxWidgets_FOUND)
     # Set on the target, not through wxWidgets_USE_FILE: that one calls include_directories(),
     # which only affects targets created after it, and this target already exists above.
     target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE ${wxWidgets_DEFINITIONS})
 endif ()
-# chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
-target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
+# SLIC3R_TEST_RESOURCES_DIR (the shipped resources/), SLICE_V1_FIXTURES_DIR and PAINT_V1_FIXTURES_DIR
+# (the JSON fixtures next to slice_v1_tests.cpp / paint_v1_tests.cpp) come from tests/edge_test_paths.hpp
+# through test_common, not from -D values: see tests/CMakeLists.txt.
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

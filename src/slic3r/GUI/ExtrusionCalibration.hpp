@@ -16,6 +16,8 @@
 #include "ParamsDialog.hpp"
 #include "GUI_App.hpp"
 #include "wx/hyperlink.h"
+#include "FavoriteFilamentsUI.hpp"
+#include <memory>
 
 #define EXTRUSION_CALIBRATION_DEF_COLOUR    wxColour(255, 255, 255)
 #define EXTRUSION_CALIBRATION_GREY900       wxColour(38, 46, 48)
@@ -85,6 +87,9 @@ protected:
 
     void update_filament_info();
     void update_combobox_filaments();
+    // The selected filament's preset name, without the favourite star a native (macOS) list shows.
+    wxString selected_filament_name() const;
+    std::unique_ptr<FavoriteFilamentsUI::FavoriteComboList> m_filament_list;
     wxString get_bed_type_incompatible(bool incompatible);
     void show_info(bool show, bool is_error, wxString text);
 

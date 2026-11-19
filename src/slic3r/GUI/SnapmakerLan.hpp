@@ -44,7 +44,14 @@ struct Status
     std::string state;        // print_stats: standby | printing | paused | complete | cancelled | error
     std::string filename;     // the job the printer is on
     std::string message;      // the printer's own error / display message
-    double      progress { 0 };   // 0..1
+    // 0..1, on the basis the printer's own Device page uses: the share of the G-code body consumed
+    // (virtual_sdcard.file_position against the file's gcode_start_byte / gcode_end_byte), falling
+    // back to display_status.progress. See MoonrakerProgress.hpp.
+    double      progress { 0 };
+    // Seconds left, as the Device page shows it: the slicer's estimated_time scaled by `progress`
+    // (linear extrapolation only past the first few percent, when the file has no estimate).
+    // 0 = unknown or no job.
+    int         left_time_s { 0 };
     double      bed_temp { 0 }, bed_target { 0 }, nozzle_temp { 0 }, nozzle_target { 0 };
     // (temperature, target) of every toolhead heater that answered, toolhead order; nozzle_temp /
     // nozzle_target above are the first one's, kept for the readers that show a single nozzle.
@@ -187,8 +194,13 @@ void   prefer_lan(nlohmann::json& printers);
 // ---- sending ----
 // Multipart upload to /server/files/upload with print=false, so a failed print start still leaves
 // a usable file on the printer. `progress` is called with 0..100.
+// An upload the printer stops taking - nothing sent for `stall_s` seconds - is given up rather than
+// left to hang the send. Once the whole file is sent, the wait for the printer's answer (it writes the
+// file away first) may last UPLOAD_ANSWER_FACTOR times as long.
+constexpr int UPLOAD_STALL_S       = 120;
+constexpr int UPLOAD_ANSWER_FACTOR = 5;
 bool upload(const Device& d, const std::string& source_path, const std::string& filename,
-            std::function<void(int)> progress, std::string& error);
+            std::function<void(int)> progress, std::string& error, int stall_s = UPLOAD_STALL_S);
 // GET /server/files/metadata?filename= - proof that the file really landed.
 bool metadata(const Device& d, const std::string& filename, long long& size, std::string& error);
 // The file is still on the printer, byte for byte as far as a size can tell: what lets a reprint
@@ -217,6 +229,9 @@ std::vector<int> auto_match(const std::vector<FileFilament>& filaments, const st
 // POST /printer/gcode/script?script= - one or more macros, run at once. The transport every
 // task-config command below travels on.
 bool run_script(const Device& d, const std::string& script, std::string& error);
+// The same at a print host's own origin ("https://host:7125", see PrinterStorage::base_url_of),
+// with its Moonraker API key as X-Api-Key when it has one.
+bool run_script(const std::string& base_url, const std::string& apikey, const std::string& script, std::string& error);
 
 // The macros for one mapping, without the start (what a dry run reports).
 // `unload_at_end` adds END_UNLOAD_FILAMENT=[..] to SET_PRINT_PREFERENCES: a 1 for every toolhead

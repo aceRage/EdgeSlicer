@@ -752,30 +752,9 @@ void BBLTopbar::OnMobileHubToolItem(wxAuiToolBarEvent &evt)
     wxAuiToolBar *tb = static_cast<wxAuiToolBar *>(evt.GetEventObject());
     tb->SetToolSticky(evt.GetId(), true);
 
-    // The hub is a separate process. Asking it where it lives - and starting it when it is not
-    // running - takes seconds, so it happens on a worker thread and the browser is opened back
-    // on the GUI thread. The seeds are the ones GUI_App::start_remote_access() uses, so a hub
-    // started from this button comes up exactly as the slicer itself would have started it,
-    // phone access included (or not) as the user left it.
-    const std::string token = wxGetApp().app_config->get("stream_phone_token");
-    const bool        phone = wxGetApp().app_config->get("stream_phone_access") == "1";
-    std::thread([token, phone]() {
-        RemoteHub::Info info = RemoteHub::query();
-        if (!info.alive || info.admin_port == 0)
-            info = RemoteHub::ensure_running(token, phone);
-        wxGetApp().CallAfter([info]() {
-            if (info.alive && info.admin_port > 0) {
-                // The hub page is served by the loopback-only control plane, never by the
-                // listener a tunnel can front. No secret in the URL: /hub/ itself is the one
-                // route that does not need it, and the page sends it as a header afterwards.
-                wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
-            } else {
-                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
-                              _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
-                    .ShowModal();
-            }
-        });
-    }).detach();
+    // The hub is a separate process; MainFrame::open_mobile_hub() finds or starts it on a worker
+    // thread and opens its page in the browser (the same code the macOS View menu entry runs).
+    Slic3r::GUI::wxGetApp().mainframe->open_mobile_hub();
 
     tb->SetToolSticky(evt.GetId(), false);
 }

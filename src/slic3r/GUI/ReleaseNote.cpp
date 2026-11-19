@@ -1,6 +1,7 @@
 #include "ReleaseNote.hpp"
 #include "RemoteAccess.hpp"
 #include "DeviceManager.hpp"
+#include "BindDetectGuard.hpp"
 #include "PrintErrorCommands.hpp"
 #include "I18N.hpp"
 
@@ -27,10 +28,13 @@
 #include <wx/hyperlink.h>
 #include <miniz.h>
 #include <algorithm>
+#include <functional>
 #include "Plater.hpp"
 #include "BitmapCache.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "MsgDialog.hpp"
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 
 namespace Slic3r { namespace GUI {
 
@@ -1060,6 +1064,8 @@ void PrintErrorDialog::refit_to_content()
     set_wrapped(m_staticText_release_note, m_message_text);
     set_wrapped(m_staticText_error_code, m_code_text);
     m_staticText_error_code->Show(!m_code_text.IsEmpty());
+    // Why Stop / Resume are missing, when they are (update_title_style).
+    m_staticText_error_code->SetToolTip(m_hidden_reason);
 
     // The height of what is inside, capped. Past the cap the area scrolls (genuinely long text);
     // the cap also respects a small display, since the buttons need room beneath it.
@@ -1124,13 +1130,45 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
     m_sizer_button->Clear();
     m_used_button = button_style;
 
-    // A command that carries "job_id" is rejected by the printer when the id is empty or stale,
-    // so those buttons are shown greyed rather than armed with something that cannot work. The
-    // user can still see what the printer would have offered, which is the point of showing them
-    // at all instead of hiding them.
-    const bool have_job_id = !m_job_id.empty();
+    // A command that carries "job_id" (Stop, the Resume family, Ignore and resume) is offered only
+    // when the printer named a job for this error and the command can go out on this connection.
+    // Otherwise the button is hidden - it used to be shown greyed, which on a refused new job (no
+    // job at all) left two dead buttons and no explanation - and the reason goes in a tooltip on
+    // what is left.
+    std::string blocker;
+    if (!m_obj)
+        blocker = "no_printer";
+    else {
+        blocker = m_obj->print_command_blocker("stop");
+        if (blocker.empty()) blocker = m_obj->print_command_blocker("resume");
+    }
+    const PrintErrorButtonLayout layout = layout_print_error_buttons(button_style, m_job_id, blocker.empty());
+    wxString why_hidden;
+    switch (layout.why) {
+    case PrintErrorButtonLayout::Why::NoJobId:
+        why_hidden = _L("Stop and Resume are not offered: the printer reported no print job with this error "
+                        "(for example a new job it refused to start), so there is nothing to stop or resume.");
+        break;
+    case PrintErrorButtonLayout::Why::CannotSend:
+        if (blocker == "status_only")
+            why_hidden = _L("Stop and Resume are not offered: this printer is connected through Bambu Connect in "
+                            "status-only mode, so EdgeSlicer cannot send it print commands.");
+        else if (blocker == "secured")
+            why_hidden = _L("Stop and Resume are not offered: this printer has Developer Mode off and rejects "
+                            "print commands that are not signed by Bambu. Use the printer's screen.");
+        else
+            why_hidden = _L("Stop and Resume are not offered: there is no connection to the printer to send them on.");
+        break;
+    default: break;
+    }
+    if (!layout.hidden.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action ids [" << format_action_ids(layout.hidden) << "] hidden ("
+                                << (layout.why == PrintErrorButtonLayout::Why::NoJobId ? std::string("no job_id for this error") : blocker)
+                                << ")";
+    }
+    m_hidden_reason = why_hidden;
 
-    for (int button_id : button_style) {
+    for (int button_id : layout.shown) {
         // Not a button: the table asking for it means "this error must not be dismissed by
         // closing the window", so the close box goes away and the user has to pick an action.
         if (button_id == REMOVE_CLOSE_BTN) continue;
@@ -1143,12 +1181,8 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
             BOOST_LOG_TRIVIAL(warning) << "PrintErrorDialog: no button for action id " << button_id;
             continue;
         }
-        const bool enabled = have_job_id || !print_error_action_needs_job_id(button_id);
-        it->second->Enable(enabled);
-        if (!enabled) {
-            BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action id " << button_id
-                                    << " disabled, no job_id for this error";
-        }
+        it->second->Enable(true);
+        it->second->SetToolTip(why_hidden);
         m_sizer_button->Add(it->second, 0, wxALL | wxEXPAND, FromDIP(5));
         it->second->Show();
     }
@@ -2037,13 +2071,11 @@ void InputIpAddressDialog::switch_input_panel(int index)
 
 void InputIpAddressDialog::on_cancel()
 {
-    if (m_thread) {
-        m_thread->interrupt();
-        m_thread->detach();
-        delete m_thread;
-        m_thread = nullptr;
-    }
-    
+    // The worker (bind_detect can take seconds) is not stopped, it is cut off: from here on none of
+    // its posts reach the dialog. It ends by itself and owns everything it still touches.
+    kill_alive_token(m_alive);
+    closeTimer->Stop();
+
     EndModal(wxID_CANCEL);
 }
 
@@ -2163,7 +2195,19 @@ void InputIpAddressDialog::on_ok(wxMouseEvent& evt)
     Refresh();
     Layout();
     Fit();
-    m_thread = new boost::thread(boost::bind(&InputIpAddressDialog::workerThreadFunc, this, str_ip, str_access_code, str_sn, str_model_id, str_name));
+    // A new attempt cuts off the previous worker, if any, and gets its own token.
+    kill_alive_token(m_alive);
+    m_alive = make_alive_token();
+    const int input_index = current_input_index;
+    try {
+        boost::thread worker([this, alive = m_alive, input_index, str_ip, str_access_code, str_sn, str_model_id, str_name]() {
+            workerThreadFunc(alive, input_index, str_ip, str_access_code, str_sn, str_model_id, str_name);
+        });
+        worker.detach();
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "InputIpAddressDialog: could not start the bind thread: " << e.what();
+        update_test_msg(_L("Failed to connect to printer."), false);
+    }
 }
 
 void InputIpAddressDialog::update_test_msg_event(wxCommandEvent& evt)
@@ -2184,86 +2228,181 @@ void InputIpAddressDialog::post_update_test_msg(wxString text, bool beconnect)
     wxPostEvent(this, event);
 }
 
-void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_access_code, std::string sn, std::string model_id, std::string name)
+void InputIpAddressDialog::workerThreadFunc(std::shared_ptr<std::atomic<bool>> alive, int input_index, std::string str_ip, std::string str_access_code, std::string sn, std::string model_id, std::string name)
 {
-    post_update_test_msg(_L("connecting..."), true);
+    // Runs on a plain thread, so two rules (BindDetectGuard.hpp):
+    //  * an exception must not leave it: that is std::terminate and the whole slicer vanishes (macOS /
+    //    Linux crash on "connect via IP", 2026-10). run_guarded turns it into a failure message.
+    //  * the dialog may be cancelled and destroyed while bind_detect waits on the network, so this
+    //    function never touches `this` itself. ui() queues a closure on the UI thread that checks the
+    //    alive token first; the token is cleared on the UI thread, so the dialog cannot go away while
+    //    the closure runs.
+    auto ui = [this, alive](std::function<void()> fn) {
+        if (!ui_alive(alive) || wxTheApp == nullptr)
+            return;
+        wxTheApp->CallAfter([this, alive, fn = std::move(fn)]() {
+            if (!ui_alive(alive))
+                return;
+            run_guarded(fn, [](const std::string& what) {
+                BOOST_LOG_TRIVIAL(error) << "InputIpAddressDialog: UI step failed: " << what;
+            });
+        });
+    };
+    auto post_msg = [&ui, this](wxString text, bool ok) {
+        ui([this, text, ok]() { update_test_msg(text, ok); });
+    };
+    auto post_failure = [&ui, this]() {
+        ui([this]() {
+            update_test_msg(wxEmptyString, true);
+            update_test_msg(_L("Failed to connect to printer."), false);
+        });
+    };
 
-    detectResult detectData;
-    auto result = -1;
-    if (current_input_index == 0) {
+    run_guarded(
+        [&]() {
+            post_msg(_L("connecting..."), true);
+
+            detectResult detectData;
+            auto result = -1;
+            if (input_index == 0) {
+#ifdef __APPLE__
+                result = -3;
+#else
+                // No network plug-in loaded: there is no agent to ask.
+                auto* agent = wxGetApp().getAgent();
+                if (agent == nullptr) {
+                    BOOST_LOG_TRIVIAL(error) << "InputIpAddressDialog: no network agent, cannot run bind_detect";
+                    result = -1;
+                } else {
+                    result = agent->bind_detect(str_ip, "secure", detectData);
+                }
+#endif
+            } else {
+                result = 0;
+                detectData.model_id = model_id;
+                detectData.dev_name = name;
+                detectData.dev_id = sn;
+                detectData.connect_type = "lan";
+                detectData.bind_state   = "free";
+            }
+
+            // Auto-detect: never insert a printer without a serial number. A plug-in that reports success
+            // with an empty (or unusable) serial is a failed detection, and the dialog asks for the serial
+            // instead (manual entry, as macOS does). The result is normalised too (serial upper-cased, name
+            // defaulting to the serial, connect_type / bind_state lower-cased, empty ones taken as "lan" /
+            // "free"). Manual entry has its own checks (on_text: a 15-character serial and a name).
+            if (input_index == 0) {
+                const int raw = result;
+                result        = vet_bind_detect_result(result, detectData);
+                if (raw >= 0 && result < 0)
+                    BOOST_LOG_TRIVIAL(warning) << "InputIpAddressDialog: bind_detect returned " << raw
+                                               << " without a usable serial number; asking for it instead";
+                else if (raw < 0)
+                    BOOST_LOG_TRIVIAL(info) << "InputIpAddressDialog: bind_detect failed, code " << raw << " ("
+                                            << detectData.result_msg << ")";
+            }
+
+            if (result < 0) {
+                post_msg(wxEmptyString, true);
+                if (result == -1) {
+                    post_msg(_L("Failed to connect to printer."), false);
+                } else if (result == -2) {
+                    post_msg(_L("Failed to publish login request."), false);
+                } else if (result == -3) {
+                    ui([this]() {
+                        wxCommandEvent event(EVT_CHECK_IP_ADDRESS_LAYOUT);
+                        event.SetEventObject(this);
+                        event.SetInt(1);
+                        wxPostEvent(this, event);
+                    });
+                } else {
+                    // Any other negative code from the plug-in: still say it failed, never leave the
+                    // dialog on "connecting..." with a disabled button.
+                    post_msg(_L("Failed to connect to printer."), false);
+                }
+                return;
+            }
+
+            // Bound to a Bambu account (cloud mode): the printer refuses print commands EdgeSlicer could
+            // send, but still reports its status over LAN to the access code. Offer it for status only:
+            // EdgeSlicer reads AMS, nozzles and errors, and prints go through Bambu Connect
+            // (Utils/BambuConnectStatus.hpp). Nothing is signed and no print command is sent to it.
+            const bool account_bound = detectData.bind_state == "occupied" || detectData.connect_type == "cloud";
+
+            ui([this, detectData, str_ip, str_access_code, account_bound]() {
+                const bool ok = run_guarded(
+                    [&]() {
+                        bool status_only = false;
+                        if (account_bound) {
+                            MessageDialog ask(this,
+                                _L("This printer is bound to a Bambu account (cloud mode). EdgeSlicer cannot start prints on it, "
+                                   "but it can read its status over LAN with the access code: AMS filaments, nozzles and errors. "
+                                   "Print on it with Send to Bambu Connect.\n\nAdd it for status only?"),
+                                _L("Printer bound to a Bambu account"), wxYES_NO | wxICON_QUESTION);
+                            if (ask.ShowModal() != wxID_YES) {
+                                update_test_msg(wxEmptyString, true);
+                                update_test_msg(_L("The printer is bound to a Bambu account. Switch it to LAN Only, or add it for status only."), false);
+                                return;
+                            }
+                            status_only = true;
+                        }
+                        // The modal question above pumps events: the dialog may have been cancelled meanwhile.
+                        if (!ui_alive(m_alive))
+                            return;
+                        DeviceManager* dev = wxGetApp().getDeviceManager();
+                        if (dev == nullptr) {
+                            update_test_msg(wxEmptyString, true);
+                            update_test_msg(_L("Failed to connect to printer."), false);
+                            return;
+                        }
+                        BBLocalMachine machine;
+                        machine.dev_name = detectData.dev_name;
+                        machine.dev_ip = str_ip;
+                        machine.dev_id = detectData.dev_id;
+                        machine.printer_type = detectData.model_id;
+                        // Before the printer is inserted and selected: the connect that follows already sends it
+                        // only the status requests. A printer added the normal way stops being status-only.
+                        if (AppConfig* cfg = wxGetApp().app_config)
+                            BambuConnectStatus::set_status_only(*cfg, machine.dev_id, status_only);
+                        // A status-only printer is kept as a saved LAN printer, so the LAN session reads its status.
+                        m_obj = dev->insert_local_device(machine, status_only ? std::string("lan") : detectData.connect_type,
+                                                         status_only ? std::string("free") : detectData.bind_state, detectData.version, str_access_code);
+
+                        if (!m_obj) {
+                            update_test_msg(wxEmptyString, true);
+                            update_test_msg(_L("Failed to connect to printer."), false);
+                            return;
+                        }
+
+                        m_obj->set_user_access_code(str_access_code);
+                        dev->set_selected_machine(m_obj->dev_id, true);
+
+                        closeCount = 1;
+
+                        update_test_msg(wxEmptyString, true);
+                        update_test_msg(wxString::Format(_L("Connecting to printer... The dialog will close later"), closeCount), true);
 
 #ifdef __APPLE__
-        result = -3;
+                        wxCommandEvent event(EVT_CLOSE_IPADDRESS_DLG);
+                        wxPostEvent(this, event);
 #else
-        result = wxGetApp().getAgent()->bind_detect(str_ip, "secure", detectData);
+                        closeTimer->Start(1000);
 #endif
-
-    } else {
-        result = 0;
-        detectData.model_id = model_id;
-        detectData.dev_name = name;
-        detectData.dev_id = sn;
-        detectData.connect_type = "lan";
-        detectData.bind_state   = "free";
-    }
-
-    if (result < 0) {
-        post_update_test_msg(wxEmptyString, true);
-        if (result == -1) {
-            post_update_test_msg(_L("Failed to connect to printer."), false);
-        }
-        else if (result == -2) {
-            post_update_test_msg(_L("Failed to publish login request."), false);
-        }
-        else if (result == -3) {
-            wxCommandEvent event(EVT_CHECK_IP_ADDRESS_LAYOUT);
-            event.SetEventObject(this);
-            event.SetInt(1);
-            wxPostEvent(this, event);
-        }
-        return;
-    }
-
-    if (detectData.bind_state == "occupied") {
-        post_update_test_msg(wxEmptyString, true);
-        post_update_test_msg(_L("The printer has already been bound."), false);
-        return;
-    }
-
-    if (detectData.connect_type == "cloud") {
-        post_update_test_msg(wxEmptyString, true);
-        post_update_test_msg(_L("The printer mode is incorrect, please switch to LAN Only."), false);
-        return;
-    }
-
-    CallAfter([this, detectData, str_ip, str_access_code]() {
-        DeviceManager* dev = wxGetApp().getDeviceManager();
-        BBLocalMachine machine;
-        machine.dev_name = detectData.dev_name;
-        machine.dev_ip = str_ip;
-        machine.dev_id = detectData.dev_id;
-        machine.printer_type = detectData.model_id;
-        m_obj = dev->insert_local_device(machine, detectData.connect_type, detectData.bind_state, detectData.version, str_access_code);
-
-
-        if (m_obj) {
-            m_obj->set_user_access_code(str_access_code);
-            wxGetApp().getDeviceManager()->set_selected_machine(m_obj->dev_id, true);
-        }
-
-
-        closeCount = 1;
-
-        post_update_test_msg(wxEmptyString, true);
-        post_update_test_msg(wxString::Format(_L("Connecting to printer... The dialog will close later"), closeCount), true);
-
-#ifdef __APPLE__
-        wxCommandEvent event(EVT_CLOSE_IPADDRESS_DLG);
-        wxPostEvent(this, event);
-#else
-        closeTimer->Start(1000);
-#endif
-    });
+                    },
+                    [](const std::string& what) {
+                        BOOST_LOG_TRIVIAL(error) << "InputIpAddressDialog: adding the printer failed: " << what;
+                    });
+                if (!ok && ui_alive(m_alive)) {
+                    m_obj = nullptr;
+                    update_test_msg(wxEmptyString, true);
+                    update_test_msg(_L("Failed to connect to printer."), false);
+                }
+            });
+        },
+        [&](const std::string& what) {
+            BOOST_LOG_TRIVIAL(error) << "InputIpAddressDialog: bind worker failed: " << what;
+            post_failure();
+        });
 }
 
 void InputIpAddressDialog::OnTimer(wxTimerEvent& event) {
@@ -2313,7 +2452,7 @@ void InputIpAddressDialog::on_text(wxCommandEvent &evt)
     for (char c : str_access_code) {
         if (!(('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'))) {
             invalid_access_code = false;
-            return;
+            break; // the button update below still runs: the buttons go off
         }
     }
 
@@ -2349,7 +2488,8 @@ void InputIpAddressDialog::on_text(wxCommandEvent &evt)
 
 InputIpAddressDialog::~InputIpAddressDialog()
 {
-
+    // UI thread. After this the bind worker's posted closures see a dead token and do nothing.
+    kill_alive_token(m_alive);
 }
 
 void InputIpAddressDialog::on_dpi_changed(const wxRect& suggested_rect)

@@ -29,12 +29,14 @@
 #include <boost/filesystem.hpp>
 
 #include "MainFrame.hpp"
+#include "Plater.hpp"
 #include <boost/dll.hpp>
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <slic3r/Utils/Http.hpp>
 #include <libslic3r/miniz_extension.hpp>
 #include <libslic3r/Utils.hpp>
 #include "CreatePresetsDialog.hpp"
+#include <algorithm>
 #include <mutex>
 #include <vector>
 #include <tbb/parallel_for.h>
@@ -250,6 +252,8 @@ wxString GuideFrame::SetStartPage(GuidePage startpage, bool load)
         else
             TargetUrl = guide_url + "?target=21";
     } else if (startpage == BBL_FILAMENT_ONLY) {
+        // Not reached from the app any more: "Add/Remove filaments" opens the Filament manager
+        // (PresetManagerDialog) and guide/23 is gone. Kept for WebPresetDialog's copy of the enum.
         SetTitle("");
         TargetUrl = guide_url + "?target=23";
     } else if (startpage == BBL_MODELS_ONLY) {
@@ -391,6 +395,19 @@ void GuideFrame::OnFullScreenChanged(wxWebViewEvent &evt)
     ShowFullScreen(evt.GetInt() != 0);
 }
 
+// The data is often ready before the loading page has run its scripts, and a
+// call into a page without HandleStudio is lost, so the message waits for both.
+void GuideFrame::notify_profile_loaded()
+{
+    if (!m_profile_ready || !m_page_ready || m_destroy)
+        return;
+    json res           = json::object();
+    res["command"]     = "userguide_profile_load_finish";
+    res["sequence_id"] = "10001";
+    wxString strJS     = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+    RunScript(strJS);
+}
+
 void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
 {
     try {
@@ -401,7 +418,11 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
         wxString strCmd = j["command"];
         // BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;Command:" << strCmd;
 
-        if (strCmd == "close_page") {
+        if (strCmd == "userguide_loading_page_ready") {
+            m_page_ready = true;
+            notify_profile_loaded();
+        }
+        else if (strCmd == "close_page") {
             this->EndModal(wxID_CANCEL);
         }
         if (strCmd == "user_clause") {
@@ -525,7 +546,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
             this->EndModal(wxID_OK);
 
             if (InstallNetplugin)
-                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
 
             if (bLogin)
                 GUI::wxGetApp().CallAfter([this] { login(); });
@@ -887,18 +908,89 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
     // Not switch filament
     //get_first_added_material_preset(AppConfig::SECTION_FILAMENTS, first_added_filament);
 
+    // For each @System filament, check if a vendor-specific override exists
+    // in the loaded profiles. If so, replace the @System variant with the
+    // override (e.g. replace "Generic ABS @System" with BBL "Generic ABS").
+    // When printers from the default bundle are also selected, keep @System
+    // too since those printers need it.
+    static const std::string system_suffix              = " @System";
+    // Upstream calls this PresetBundle::ORCA_DEFAULT_BUNDLE; our bundle of generic printers is the "Custom" vendor.
+    static const std::string ORCA_DEFAULT_BUNDLE        = "Custom";
+    auto                     it_default                 = enabled_vendors.find(ORCA_DEFAULT_BUNDLE);
+    bool                     has_default_bundle_printer = it_default != enabled_vendors.end() && !it_default->second.empty();
+    bool                     has_filament_profiles      = m_ProfileJson.contains("filament");
+
+    // Check if any non-default vendor has selected printers
+    bool has_vendor_printer = false;
+    for (const auto& [vendor, models] : enabled_vendors) {
+        if (vendor != ORCA_DEFAULT_BUNDLE && !models.empty()) {
+            has_vendor_printer = true;
+            break;
+        }
+    }
+
+    std::map<std::string, std::string> supplemented_filaments;
+    for (const auto& [name, value] : enabled_filaments) {
+        if (name.size() > system_suffix.size() &&
+            name.compare(name.size() - system_suffix.size(), system_suffix.size(), system_suffix) == 0) {
+            std::string short_name = name.substr(0, name.size() - system_suffix.size());
+            if (has_vendor_printer && has_filament_profiles && m_ProfileJson["filament"].contains(short_name)) {
+                supplemented_filaments[short_name] = value;
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Replacing @System filament: '" << name << "' -> '" << short_name << "'";
+                if (has_default_bundle_printer) {
+                    supplemented_filaments[name] = value;
+                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Also keeping '" << name << "' for default bundle printers";
+                }
+                continue;
+            }
+        }
+        supplemented_filaments[name] = value;
+    }
+
     //update the app_config
-    app_config->set_section(AppConfig::SECTION_FILAMENTS, enabled_filaments);
     app_config->set_vendors(m_appconfig_new);
-
-    if (check_unsaved_preset_changes)
-        preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::Enable,
-                                    {preferred_model, preferred_variant, first_added_filament, std::string()});
-
-    // Update the selections from the compatibilty.
-    preset_bundle->export_selections(*app_config);
+    // The filament half (shared with the Filament manager): [filaments], the reload, the active filament.
+    apply_enabled_filaments(*app_config, *preset_bundle, supplemented_filaments,
+                            check_unsaved_preset_changes ? FilamentsReload::Full : FilamentsReload::None,
+                            {preferred_model, preferred_variant, first_added_filament, std::string()});
 
     return true;
+}
+
+void apply_enabled_filaments(AppConfig &app_config, PresetBundle &bundle, const std::map<std::string, std::string> &enabled,
+                             FilamentsReload reload, const PresetBundle::PresetPreferences &preferences, bool keep_shown_active)
+{
+    app_config.set_section(AppConfig::SECTION_FILAMENTS, enabled);
+
+    if (reload == FilamentsReload::Full)
+        bundle.load_presets(app_config, ForwardCompatibilitySubstitutionRule::Enable, preferences);
+    else if (reload == FilamentsReload::Visibility)
+        bundle.refresh_enabled_presets(app_config);
+
+    // If the active filament is not in the wizard-selected filaments, switch to the first
+    // compatible wizard-selected filament. This handles the first-run case where load_presets
+    // falls back to "Generic PLA" even though the user selected a different filament.
+    bool active_filament_selected = enabled.empty() || bundle.filament_presets.empty()
+        || enabled.count(bundle.filament_presets.front()) > 0;
+    // The Filament manager keeps an active filament that is still shown (a user preset is always shown).
+    if (!active_filament_selected && keep_shown_active) {
+        const Preset *active = bundle.filaments.find_preset(bundle.filament_presets.front());
+        if (active != nullptr && active->is_visible)
+            active_filament_selected = true;
+    }
+    if (!active_filament_selected) {
+        for (const auto& [filament_name, _] : enabled) {
+            const Preset* preset = bundle.filaments.find_preset(filament_name);
+            if (preset && preset->is_visible && preset->is_compatible) {
+                bundle.filaments.select_preset_by_name(filament_name, true);
+                bundle.filament_presets.front() = bundle.filaments.get_selected_preset_name();
+                break;
+            }
+        }
+    }
+
+    // Update the selections from the compatibilty.
+    bundle.export_selections(app_config);
 }
 
 bool GuideFrame::run()
@@ -935,6 +1027,9 @@ bool GuideFrame::run()
 
         app.app_config->set_legacy_datadir(false);
         app.update_mode();
+        // Orca #15916: the printers chosen in the guide may not take the plates' bed types.
+        if (Plater *plater = app.plater())
+            plater->normalize_bed_types(false);
         // BBS
         //app.obj_manipul()->update_ui_from_settings();
         BOOST_LOG_TRIVIAL(info) << "GuideFrame applied";
@@ -1032,12 +1127,11 @@ int GuideFrame::GetFilamentInfo(const std::string& VendorDirectory, const json& 
                 }
                 std::string FPath = inherited["sub_path"];
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Before Format Inherits Path: VendorDirectory - " << VendorDirectory << ", sub_path - " << FPath;
-                wxString strNewFile = wxString::Format("%s%c%s", wxString(VendorDirectory.c_str(), wxConvUTF8), boost::filesystem::path::preferred_separator, FPath);
-                boost::filesystem::path inherits_path(w2s(strNewFile));
+                // Snapmaker #729: avoid w2s()/mb_str(); the ANSI code page breaks Unicode paths on Windows.
+                boost::filesystem::path inherits_path = (boost::filesystem::path(VendorDirectory) / FPath).make_preferred();
                 if (!boost::filesystem::exists(inherits_path))
                     inherits_path = (boost::filesystem::path(m_OrcaFilaLibPath) / boost::filesystem::path(FPath)).make_preferred();
 
-                //boost::filesystem::path nf(strNewFile.c_str());
                 if (boost::filesystem::exists(inherits_path))
                     return GetFilamentInfo(VendorDirectory,pFilaList, inherits_path.string(), sVendor, sType, visiting);
                 else {
@@ -1122,49 +1216,63 @@ int GuideFrame::LoadProfileData()
         if (m_destroy)
             return 0;
 
+        // The vendors are read by name, not in the order the folder lists them: that order is the file
+        // system's (by name on NTFS, not on APFS or ext4), and it is the order of m_ProfileJson["model"],
+        // which is the order of the printer table until a column is sorted.
+        const auto entries_by_name = [](const boost::filesystem::path &dir) {
+            std::vector<boost::filesystem::directory_entry> entries;
+            for (boost::filesystem::directory_iterator iter(dir), end; iter != end; ++iter)
+                entries.emplace_back(*iter);
+            std::sort(entries.begin(), entries.end(), [](const boost::filesystem::directory_entry &a, const boost::filesystem::directory_entry &b) {
+                const std::string name_a = a.path().filename().string(), name_b = b.path().filename().string();
+                if (boost::ilexicographical_compare(name_a, name_b) != boost::ilexicographical_compare(name_b, name_a))
+                    return boost::ilexicographical_compare(name_a, name_b);
+                return name_a < name_b;
+            });
+            return entries;
+        };
+
         //load custom bundle from user data path
-        boost::filesystem::directory_iterator endIter;
-        for (boost::filesystem::directory_iterator iter(vendor_dir); iter != endIter; iter++) {
-            if (!boost::filesystem::is_directory(*iter)) {
-                wxString strVendor = from_u8(iter->path().string()).BeforeLast('.');
+        for (const boost::filesystem::directory_entry &entry : entries_by_name(vendor_dir)) {
+            if (!boost::filesystem::is_directory(entry)) {
+                wxString strVendor = from_u8(entry.path().string()).BeforeLast('.');
                 strVendor          = strVendor.AfterLast('\\');
                 strVendor          = strVendor.AfterLast('/');
 
-                wxString strExtension = from_u8(iter->path().string()).AfterLast('.').Lower();
+                wxString strExtension = from_u8(entry.path().string()).AfterLast('.').Lower();
                 if(strExtension.CmpNoCase("json") != 0 || loaded_vendors.find(w2s(strVendor)) != loaded_vendors.end())
                     continue;
 
-                LoadProfileFamily(w2s(strVendor), iter->path().string());
+                LoadProfileFamily(w2s(strVendor), entry.path().string());
                 loaded_vendors.insert(w2s(strVendor));
             }
             if (m_destroy)
                 return 0;
         }
 
-        boost::filesystem::directory_iterator others_endIter;
-        for (boost::filesystem::directory_iterator iter(rsrc_vendor_dir); iter != others_endIter; iter++) {
-            if (!boost::filesystem::is_directory(*iter)) {
-                wxString strVendor = from_u8(iter->path().string()).BeforeLast('.');
+        for (const boost::filesystem::directory_entry &entry : entries_by_name(rsrc_vendor_dir)) {
+            if (!boost::filesystem::is_directory(entry)) {
+                wxString strVendor = from_u8(entry.path().string()).BeforeLast('.');
                 strVendor          = strVendor.AfterLast('\\');
                 strVendor          = strVendor.AfterLast('/');
-                wxString strExtension = from_u8(iter->path().string()).AfterLast('.').Lower();
+                wxString strExtension = from_u8(entry.path().string()).AfterLast('.').Lower();
                 if (strExtension.CmpNoCase("json") != 0 || loaded_vendors.find(w2s(strVendor)) != loaded_vendors.end())
                     continue;
 
-                LoadProfileFamily(w2s(strVendor), iter->path().string());
+                LoadProfileFamily(w2s(strVendor), entry.path().string());
                 loaded_vendors.insert(w2s(strVendor));
             }
             if (m_destroy)
                 return 0;
         }
 
-        //sync to web
-        json m_Res           = json::object();
-        m_Res["command"]     = "userguide_profile_load_finish";
-        m_Res["sequence_id"] = "10001";
-        wxString strJS       = wxString::Format("HandleStudio(%s)", m_Res.dump(-1, ' ', true));
+        // The data is often ready before the loading page has run its scripts, and a
+        // call into a page without HandleStudio is lost, so the message waits for both.
         if (!m_destroy)
-            CallAfter([this, strJS] { RunScript(strJS); });
+            CallAfter([this] {
+                m_profile_ready = true;
+                notify_profile_loaded();
+            });
 
         //sync to appconfig
         if (!m_destroy)
@@ -1610,25 +1718,6 @@ bool GuideFrame::LoadFile(std::string jPath, std::string &sContent)
     }
 
     return true;
-}
-
-int GuideFrame::DownloadPlugin()
-{
-    return wxGetApp().download_plugin(
-        "plugins", "network_plugin.zip",
-        [this](int status, int percent, bool& cancel) {
-            return ShowPluginStatus(status, percent, cancel);
-        }
-    , nullptr);
-}
-
-int GuideFrame::InstallPlugin()
-{
-    return wxGetApp().install_plugin("plugins", "network_plugin.zip",
-        [this](int status, int percent, bool &cancel) {
-            return ShowPluginStatus(status, percent, cancel);
-        }
-    );
 }
 
 int GuideFrame::ShowPluginStatus(int status, int percent, bool& cancel)

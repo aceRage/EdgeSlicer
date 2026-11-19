@@ -58,6 +58,9 @@ private:
     std::vector<Model>          m_models;
 
     bool setup(int argc, char **argv);
+    // Showcase S5: --showcase-render <project.3mf> ... (ShowcaseRenderCli.hpp): checks the arguments and
+    // the path file here, then runs a hidden GUI instance that renders and exits with the job's code.
+    int  run_showcase_render(int argc, char **argv);
 
     /// Prints usage of the CLI.
     void print_help(bool include_print_options = false, PrinterTechnology printer_technology = ptAny) const;

@@ -99,6 +99,9 @@ public:
 	//BBS
 	static Http put2(std::string url);
 	static Http patch(std::string url);
+	// Any other method by name (WebDAV's PROPFIND for the Home tab's vaults). A request body, if
+	// any, goes in with set_post_body(); the method stays `method`.
+	static Http custom(const std::string &method, std::string url);
 
 	//BBS set global header for each http request
 	static void set_extra_headers(std::map<std::string, std::string> headers);
@@ -129,6 +132,15 @@ public:
 	Http& size_limit(size_t sizeLimit);
 	// range  of donloaded bytes. example: curl_easy_setopt(curl, CURLOPT_RANGE, "0-199");
 	Http& set_range(const std::string& range);
+	// Follows at most `max_redirects` redirects, only to https, and refuses the transfer when the
+	// redirects end anywhere other than a public https host name: not behind a user name, and not
+	// an IP literal of any kind - a public one too, so a hop to an IP-literal CDN or OSS endpoint
+	// is refused along with loopback and the LAN (see untrusted::redirect_target_refusal()).
+	// A request whose own address is https is held to https for its first hop as well.
+	// For downloading a file that a web page, another program or a third-party service named: the
+	// link was checked before the request, and the address it redirects to never is.
+	// Do not use it for a printer or another LAN device that serves its own files over plain http.
+	Http& restrict_redirects(long max_redirects);
 	// Sets a HTTP header field.
 	Http& header(std::string name, const std::string &value);
 	// Removes a header field.
@@ -225,9 +237,26 @@ public:
     static std::string tls_global_init();
     static std::string tls_system_cert_store();
 
+	// The check restrict_redirects() makes once the transfer is over, as a pure function so a unit
+	// test can run the very logic http_perform() runs (tests/slic3rutils/http_body_redirect_tests.cpp).
+	// `redirect_count` is CURLINFO_REDIRECT_COUNT and `effective_url` is CURLINFO_EFFECTIVE_URL, or
+	// empty when curl reported none. Returns empty when the transfer may stand, else the reason
+	// to refuse it.
+	static std::string redirect_end_refusal(long redirect_count, const std::string &effective_url);
+	// Whether a URL starts with `scheme`://, compared without case.
+	static bool url_scheme_is(const std::string &url, const char *scheme);
+	// Whether an error string is that refusal. A refusal is a decision about where the transfer
+	// went, not a transport failure, so a caller's retry loop must not re-send the request.
+	static bool error_is_redirect_refusal(const std::string &error);
 	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
 	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
 	static std::string url_host(const std::string &url);
+	// The URL without its "user:password@", for the log: an address typed as
+	// https://user:password@host keeps working, but its password is never written out.
+	static std::string url_without_userinfo(const std::string &url);
+	// url_without_userinfo plus the value of secret query parameters (apikey=, token=, password= ...)
+	// replaced by ***: the form to put in a log line.
+	static std::string url_for_log(const std::string &url);
 	// True for hosts on this machine or the local network: localhost, loopback, RFC 1918, link-local,
 	// CGNAT/Tailscale (100.64/10), IPv6 ULA and link-local, single-label names and the usual LAN
 	// suffixes (.local, .lan, .home, .internal, .localdomain, .home.arpa, .ts.net).

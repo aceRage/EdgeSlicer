@@ -11,6 +11,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ProjectConfigFill.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
@@ -236,7 +237,7 @@ bool fits_every_printer(const Preset *preset) { return preset != nullptr && Pres
 
 } // namespace
 
-TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string first = make_project("roundtrip.3mf");
 
@@ -404,7 +405,7 @@ TEST_CASE("A printer saved to the project comes back and keeps its project on it
 // in the Save Preset dialog. The project preset then has no printer list and no condition of its
 // own, so it is listed for every printer and a printer switch keeps it selected. Not ticked, nothing
 // changes.
-TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string path = make_project("every_printer.3mf", ProjectPresetPrinters::EveryPrinter);
 
@@ -499,4 +500,232 @@ TEST_CASE("Unticking Use-for-every-printer gives a project preset its parent's p
     user.is_project_embedded = false;
     bundle->prints.set_project_preset_printers(user, ProjectPresetPrinters::EveryPrinter);
     CHECK_FALSE(Preset::fits_every_printer(user.config));
+}
+
+namespace {
+
+std::vector<std::string> project_different_keys(const std::string &path, size_t slot)
+{
+    const nlohmann::json cfg = nlohmann::json::parse(zip_entry(path, "Metadata/project_settings.config"));
+    std::vector<std::string> keys;
+    if (cfg.contains("different_settings_to_system") && cfg["different_settings_to_system"].size() > slot)
+        unescape_strings_cstyle(cfg["different_settings_to_system"][slot].get<std::string>(), keys);
+    return keys;
+}
+
+bool has_key(const std::vector<std::string> &keys, const std::string &key)
+{
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+} // namespace
+
+// Hand test 2026-11-15 (curved tops spike, PR #1021): a changed SYSTEM process (edited, not saved as
+// a preset) was stored with no "different_settings_to_system" entry for the process. Per-nozzle
+// process P8 asked get_preset_parent(), which has no parent for a system preset, so every open put
+// the changed values back to the system preset's. Filaments and printers use the selected preset's
+// parent and were not affected; they are checked here too.
+TEST_CASE("Edited system process, filament and printer keep their changes through save and re-open", "[Preset][Bundle][ProjectPreset][slow]")
+{
+    auto check_values = [](PresetBundle &bundle, const std::string &where) {
+        INFO(where);
+        CHECK(bundle.prints.get_selected_preset_name() == X1C_PROC);
+        CHECK(bundle.prints.get_edited_preset().config.opt_int("top_shell_layers") == 9);
+        CHECK(bundle.prints.get_edited_preset().config.opt_int("wall_loops") == 5);
+        CHECK(bundle.prints.get_edited_preset().is_dirty);
+        REQUIRE(!bundle.filament_presets.empty());
+        const Preset *pla = bundle.filaments.find_preset(bundle.filament_presets[0], true);
+        REQUIRE(pla != nullptr);
+        CHECK(pla->config.opt_int("nozzle_temperature", 0) == 231);
+        CHECK(bundle.printers.get_selected_preset_name() == X1C);
+        CHECK(bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] == Approx(1.5));
+    };
+
+    std::string path;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        REQUIRE(bundle->prints.get_selected_preset().is_system);
+        REQUIRE(bundle->filaments.get_selected_preset().is_system);
+        REQUIRE(bundle->printers.get_selected_preset().is_system);
+        REQUIRE(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") != 9);
+        REQUIRE(bundle->filaments.get_edited_preset().config.opt_int("nozzle_temperature", 0) != 231);
+        REQUIRE(bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] != Approx(1.5));
+        bundle->prints.get_edited_preset().config.set_key_value("top_shell_layers", new ConfigOptionInt(9));
+        bundle->prints.get_edited_preset().config.set_key_value("wall_loops", new ConfigOptionInt(5));
+        bundle->prints.update_dirty();
+        bundle->filaments.get_edited_preset().config.option<ConfigOptionInts>("nozzle_temperature")->values[0] = 231;
+        bundle->filaments.update_dirty();
+        bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("retraction_length")->values[0] = 1.5;
+        bundle->printers.update_dirty();
+        REQUIRE(bundle->prints.get_edited_preset().is_dirty);
+        REQUIRE(bundle->filaments.get_edited_preset().is_dirty);
+        REQUIRE(bundle->printers.get_edited_preset().is_dirty);
+        path = project_path("edited_system_presets.3mf");
+        store_project(*bundle, path);
+    }
+    // [process, filament 1, filament 2, printer]
+    CHECK(has_key(project_different_keys(path, 0), "top_shell_layers"));
+    CHECK(has_key(project_different_keys(path, 0), "wall_loops"));
+    CHECK(has_key(project_different_keys(path, 1), "nozzle_temperature"));
+    CHECK(has_key(project_different_keys(path, 3), "retraction_length"));
+
+    // Opened in a new session: the changes are there, shown as changes to the system presets.
+    auto second = bbl_bundle();
+    select_machine(*second, X1C, X1C_PROC, X1C_PLA);
+    open_project(*second, path);
+    check_values(*second, "first re-open");
+
+    // Saved again (as after a slice) and opened once more.
+    const std::string again = project_path("edited_system_presets_again.3mf");
+    store_project(*second, again);
+    CHECK(has_key(project_different_keys(again, 0), "top_shell_layers"));
+    auto third = bbl_bundle();
+    select_machine(*third, X1C, X1C_PROC, X1C_PLA);
+    open_project(*third, again);
+    check_values(*third, "second re-open");
+}
+
+// The CLI's side: a setting given on the command line over a named system process. Without a
+// record the GUI loader resets it; with the record_cli_overrides_as_different() entry it stays.
+TEST_CASE("A CLI project's command-line setting survives opening it in the GUI", "[Preset][Bundle][ProjectPreset]")
+{
+    DynamicPrintConfig project;
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        project = bundle->full_config_secure();
+    }
+    REQUIRE(project.opt_int("top_shell_layers") != 9);
+    // What the CLI holds: one empty slot per preset (process, 2 filaments, printer), then the override.
+    project.option<ConfigOptionStrings>("different_settings_to_system", true)->values = { "", "", "", "" };
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("top_shell_layers", new ConfigOptionInt(9));
+    project.apply(overrides);
+
+    SECTION("not recorded: the loader puts the system value back")
+    {
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") != 9);
+    }
+    SECTION("recorded: kept")
+    {
+        CHECK(record_cli_overrides_as_different(project, overrides, Preset::print_options(), Preset::filament_options(),
+                                                Preset::printer_options()) == 1);
+        auto bundle = bbl_bundle();
+        select_machine(*bundle, X1C, X1C_PROC, X1C_PLA);
+        bundle->load_config_model("cli.3mf", DynamicPrintConfig(project));
+        CHECK(bundle->prints.get_selected_preset_name() == X1C_PROC);
+        CHECK(bundle->prints.get_edited_preset().config.opt_int("top_shell_layers") == 9);
+    }
+}
+
+// Snapmaker #996: a 3MF pads filament_settings_id to the machine's slot count with empty names
+// (e.g. a dual-head Bambu project using two of four slots). validate_presets() took each empty
+// name for a preset that inherits from nothing and reported the project as using customized
+// presets. An empty name is an unused slot and is skipped; a real non-system name still counts.
+TEST_CASE("validate_presets skips the empty names of padded filament slots", "[Preset][Bundle][Regression]")
+{
+    PresetBundle      bundle;
+    const std::string printer  = bundle.printers.default_preset().name;
+    const std::string filament = bundle.filaments.default_preset().name;
+    REQUIRE_FALSE(printer.empty());
+    REQUIRE_FALSE(filament.empty());
+
+    DynamicPrintConfig config;
+    config.set_key_value("printer_settings_id", new ConfigOptionString(printer));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({ 1.75, 1.75, 1.75, 1.75 }));
+
+    config.set_key_value("filament_settings_id", new ConfigOptionStrings({ filament, filament, "", "" }));
+    std::set<std::string> different;
+    CHECK(bundle.validate_presets("padded.3mf", config, different) == VALIDATE_PRESETS_SUCCESS);
+    CHECK(different.empty());
+
+    // Control: a named filament that is neither a system nor a default preset is still reported.
+    config.set_key_value("filament_settings_id", new ConfigOptionStrings({ filament, "Edge Test Custom PLA", "", "" }));
+    different.clear();
+    CHECK(bundle.validate_presets("padded.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
+    CHECK(different == std::set<std::string>{ "Edge Test Custom PLA" });
+}
+
+// Owner, 2026-10-30: an H2S project preset saved "for every printer", with every option of
+// Process > Speed > Overhang speed changed - Inner wall slowdown / reach (Edge-only percents), the
+// four overhang speeds and the external / internal bridge speeds (per-flow-mode vectors) - lost
+// them after switching to another preset and back. The cause was in the settings tab
+// (GUI::change_opt_value dropped coFloatsOrPercents edits, see slic3rutils change_opt_value_tests);
+// this pins the library side: once the edit is in the config, the project preset keeps all eight
+// through a process switch, a printer switch and a store / re-open, in the flow slot that was edited.
+TEST_CASE("A project preset keeps the whole Overhang speed section", "[Preset][Bundle][ProjectPreset][FlowVariant]")
+{
+    const std::string H2S          = "Bambu Lab H2S 0.4 nozzle";
+    const std::string H2S_PROC     = "0.16mm High Quality @BBL H2S";
+    const std::string H2S_OTHER    = "0.20mm Standard @BBL H2S";
+    const std::string H2S_PLA      = "Bambu PLA Basic @BBL H2S";
+    const std::string PROJ_H2S     = "0.16mm @H2S - Custom HQ";
+    const char       *fop_keys[]   = { "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed", "internal_bridge_speed" };
+    const FloatOrPercent fop_vals[] = { { 41, false }, { 32, false }, { 23, false }, { 14, false }, { 135, true } };
+
+    auto check_section = [&](const DynamicPrintConfig &cfg, const std::string &where) {
+        INFO(where);
+        CHECK(cfg.option<ConfigOptionPercent>("overhang_shadow_speed_ratio")->value == Approx(55.));
+        CHECK(cfg.option<ConfigOptionPercent>("overhang_shadow_distance")->value == Approx(150.));
+        REQUIRE(cfg.option<ConfigOptionFloats>("bridge_speed") != nullptr);
+        CHECK(cfg.option<ConfigOptionFloats>("bridge_speed")->values.front() == Approx(31.));
+        for (size_t i = 0; i < 5; ++i) {
+            INFO(fop_keys[i]);
+            const auto *opt = cfg.option<ConfigOptionFloatsOrPercents>(fop_keys[i]);
+            REQUIRE(opt != nullptr);
+            REQUIRE(!opt->values.empty());
+            CHECK(opt->values.front() == fop_vals[i]);
+        }
+    };
+
+    auto bundle = bbl_bundle();
+    select_machine(*bundle, H2S, H2S_PROC, H2S_PLA);
+
+    // What the settings tab writes into the edited preset: the Standard (first) flow slot of each
+    // vector, the scalars as they are.
+    DynamicPrintConfig &edited = bundle->prints.get_edited_preset().config;
+    edited.set_key_value("overhang_shadow_inner_wall", new ConfigOptionBool(true));
+    edited.set_key_value("overhang_shadow_speed_ratio", new ConfigOptionPercent(55.));
+    edited.set_key_value("overhang_shadow_distance", new ConfigOptionPercent(150.));
+    edited.option<ConfigOptionFloats>("bridge_speed")->values.front() = 31.;
+    for (size_t i = 0; i < 5; ++i)
+        edited.option<ConfigOptionFloatsOrPercents>(fop_keys[i], true)->values.front() = fop_vals[i];
+    bundle->prints.update_dirty();
+    REQUIRE(bundle->prints.current_is_dirty());
+
+    save_to_project(*bundle, bundle->prints, PROJ_H2S, ProjectPresetPrinters::EveryPrinter);
+    REQUIRE(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    REQUIRE(fits_every_printer(find(bundle->prints, PROJ_H2S)));
+    check_section(find(bundle->prints, PROJ_H2S)->config, "saved");
+
+    // Another process preset and back.
+    REQUIRE(bundle->prints.select_preset_by_name(H2S_OTHER, true));
+    bundle->update_compatible(PresetSelectCompatibleType::Never);
+    REQUIRE(bundle->prints.select_preset_by_name(PROJ_H2S, true));
+    bundle->update_compatible(PresetSelectCompatibleType::Never);
+    CHECK_FALSE(bundle->prints.current_is_dirty());
+    check_section(bundle->prints.get_edited_preset().config, "after switching presets and back");
+
+    // Another printer and back: "for every printer" keeps it selected throughout.
+    switch_printer(*bundle, X1C);
+    CHECK(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(bundle->prints.get_edited_preset().config, "on another printer");
+    switch_printer(*bundle, H2S);
+    CHECK(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(bundle->prints.get_edited_preset().config, "back on the H2S");
+
+    // Stored and opened in a new session (restart).
+    const std::string path = project_path("overhang_section.3mf");
+    store_project(*bundle, path);
+    auto next = bbl_bundle();
+    select_machine(*next, H2S, H2S_OTHER, H2S_PLA);
+    REQUIRE(open_project(*next, path) >= 1);
+    REQUIRE(find(next->prints, PROJ_H2S) != nullptr);
+    check_section(find(next->prints, PROJ_H2S)->config, "re-opened, project preset");
+    CHECK(next->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(next->prints.get_edited_preset().config, "re-opened, selected");
 }

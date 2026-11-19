@@ -1,0 +1,30 @@
+{
+  "result": {
+    "size": 6380500,
+    "modified": 1760190000.0,
+    "uuid": "00000000-0000-4000-8000-000000000000",
+    "slicer": "EdgeSlicer",
+    "slicer_version": "2.4.5.4",
+    "gcode_start_byte": 330500,
+    "gcode_end_byte": 6330500,
+    "layer_count": 322,
+    "object_height": 64.4,
+    "estimated_time": 4948,
+    "nozzle_diameter": 0.4,
+    "layer_height": 0.2,
+    "first_layer_height": 0.2,
+    "first_layer_extr_temp": 220.0,
+    "first_layer_bed_temp": 60.0,
+    "chamber_temp": 0.0,
+    "filament_name": "Generic PLA",
+    "filament_type": "PLA",
+    "filament_total": 21543.2,
+    "filament_weight_total": 64.21,
+    "thumbnails": [
+      { "width": 300, "height": 300, "size": 61234, "relative_path": ".thumbs/plate_1-300x300.png" }
+    ],
+    "print_start_time": null,
+    "job_id": null,
+    "filename": "plate_1.gcode"
+  }
+}

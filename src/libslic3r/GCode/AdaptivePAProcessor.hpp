@@ -69,6 +69,17 @@ public:
      */
     static std::string reset_marker(double PA);
 
+    /**
+     * @brief Orca #14198: validates an adaptive pressure advance model string.
+     *
+     * Checks that each non-empty line has exactly 3 comma-separated values (PA, flow, acceleration),
+     * that PA is less than 2, that flow is greater than PA and that acceleration is greater than flow.
+     *
+     * @param model_str The model string to validate (one filament's adaptive_pressure_advance_model).
+     * @return Empty string if valid, or a message describing the first issue found.
+     */
+    static std::string validate_adaptive_pa_model(const std::string &model_str);
+
 private:
     GCode &m_gcodegen; ///< Reference to the GCode object.
     std::unordered_map<unsigned int, std::unique_ptr<AdaptivePAInterpolator>> m_AdaptivePAInterpolators; ///< Map between Interpolator objects and tool ID's
@@ -77,6 +88,7 @@ private:
     double m_max_next_feedrate; ///< Maximum feed rate (speed) for the upcomming island. If no speed is found, the previous island speed is used.
     double m_next_feedrate; ///< First feed rate (speed) for the upcomming island.
     double m_current_feedrate; ///< Current, latest feedrate.
+    double m_modal_feedrate; ///< Feedrate the last move with an F word set, travels and wipes included: what an extrusion without its own G1 F runs at.
     int m_last_extruder_id; ///< Last used extruder ID.
     bool m_enabled{false}; ///< Whether any used tool has both PA and adaptive PA, the only ones that emit PA_CHANGE tags.
 

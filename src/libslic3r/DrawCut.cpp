@@ -6,6 +6,7 @@
 #include "ExPolygon.hpp"
 #include "Tesselate.hpp"
 #include "AABBTreeIndirect.hpp"
+#include "AABBMesh.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -1229,6 +1230,16 @@ CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& param
     return cb;
 }
 
+// The mesh build_core_band() may pin a closed loop's core normal against: the part
+// for a PLUG, nothing for a wrap or for Through all. ONE decision, used by the
+// cutter and by draw_cut_core_face(), so the face the latter reports is the face
+// the former builds. `wraps` is draw_cut_loop_separates() for this loop and mesh.
+const indexed_triangle_set* core_band_pin_mesh(const DrawCutParams& params,
+                                               const indexed_triangle_set* mesh, bool wraps)
+{
+    return (!params.through_all && !wraps) ? mesh : nullptr;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1270,7 +1281,7 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
     const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
 
     const CoreBand cb = build_core_band(stroke, params, ext, depth_along, face_offset,
-                                        (!params.through_all && !wraps) ? mesh : nullptr);
+                                        core_band_pin_mesh(params, mesh, wraps));
     if (!cb.ok || cb.out.size() < 3)
         return its;
 
@@ -2084,7 +2095,8 @@ bool draw_cut_core_face(const DrawCutStroke& stroke,
                         const DrawCutParams& params,
                         const BoundingBoxf3& bbox,
                         Vec3d&               normal,
-                        Vec3d&               point)
+                        Vec3d&               point,
+                        const indexed_triangle_set* mesh)
 {
     normal = Vec3d::UnitZ();
     point  = Vec3d::Zero();
@@ -2099,7 +2111,14 @@ bool draw_cut_core_face(const DrawCutStroke& stroke,
     const double dep  = std::max(0.01, params.depth);
     (void) bbox; // only through-all needs the bbox reach, and that returned above.
 
-    const CoreBand cb = build_core_band(stroke, params, ext, dep, 0.0);
+    // THE SAME NORMAL THE CUTTER BUILDS. Where the samples' normals cancel (a plug
+    // over a strongly curved patch) the cutter pins the core normal against the mesh
+    // (draw_cut_band_core_solid); without the mesh here the sign would be the
+    // drag's winding instead, and with it the band's lean and the plane the core
+    // sits on - a face on the other side of the loop from the one actually cut.
+    const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
+    const CoreBand cb = build_core_band(stroke, params, ext, dep, 0.0,
+                                        core_band_pin_mesh(params, mesh, wraps));
     if (!cb.ok)
         return false;
 
@@ -3171,6 +3190,68 @@ void draw_cut_empty_sides(const indexed_triangle_set& mesh,
             break;
     }
 
+    // A CLOSED LOOP CAN HOLD NO MESH VERTEX AND STILL CUT A PLUG. A loop on one face
+    // of a coarse mesh - a circle on the top of a 12-triangle box - encloses none of
+    // the corners, so the walk above finds the plug's side empty and the panel says
+    // "The stroke does not separate the part" for a cut that does separate it.
+    //
+    // So a side still empty is asked of the CUTTER'S own vertices too. A vertex of a
+    // cutter's surface that lies well inside the part has material on both sides of
+    // that surface round it: the lower face's cutter answers for the inside, the
+    // upper face's (the same one without a kerf) for the outside. "Well inside" is
+    // the 0.05 mm contact floor ray_first_hit() uses: the drawn line itself sits ON
+    // the skin, and its vertices must not count.
+    //
+    // CLOSED LOOPS ONLY. A closed cutter crosses the skin along the drawn line and
+    // nowhere else, so material inside it is a separate piece. An open stroke's
+    // cutter is a slab swept off to one side, and an empty side there is the
+    // "draw the line right across it" advice the panel gives, which a vertex of the
+    // strip inside the part does not answer.
+    //
+    // COST. Only reached when a side is still empty, so a cut that works never
+    // pays it; then one AABB tree over the mesh and two tree queries per cutter
+    // vertex - on a large mesh, about what the walk above already costs there.
+    if (stroke.is_closed() && (inside_empty || outside_empty)) {
+        const AABBTreeIndirect::Tree3f tree =
+            AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh.vertices, mesh.indices);
+        static const double Margin = 0.05;
+        static const Vec3d  RayDir = Vec3d(0.3131592653, 0.4271828182, 0.8481471805).normalized();
+        std::vector<igl::Hit> hits;
+        auto well_inside = [&](const Vec3d& pt) {
+            if (!bbox.contains(pt))
+                return false;
+            size_t hit_idx = 0;
+            Vec3d  hit_pt;
+            const double d2 = AABBTreeIndirect::squared_distance_to_indexed_triangle_set(
+                mesh.vertices, mesh.indices, tree, pt, hit_idx, hit_pt);
+            if (d2 < Margin * Margin)
+                return false;
+            // Parity along a fixed irrational direction, as point_in_solid() does.
+            // A ray through a shared edge reports both triangles at the same t, so
+            // crossings within 1e-6 mm of the previous one count once.
+            AABBTreeIndirect::intersect_ray_all_hits(mesh.vertices, mesh.indices, tree, pt, RayDir, hits);
+            size_t crossings = 0;
+            double last      = -1.0;
+            for (const igl::Hit& h : hits) {
+                if (h.t <= 0.0 || (crossings > 0 && double(h.t) - last < 1e-6))
+                    continue;
+                ++ crossings;
+                last = double(h.t);
+            }
+            return (crossings & 1) != 0;
+        };
+        auto any_well_inside = [&](const indexed_triangle_set& cutter) {
+            for (const Vec3f& v : cutter.vertices)
+                if (well_inside(v.cast<double>()))
+                    return true;
+            return false;
+        };
+        if (inside_empty && any_well_inside(cutter_lo))
+            inside_empty = false;
+        if (outside_empty && any_well_inside(kerf ? cutter_hi : cutter_lo))
+            outside_empty = false;
+    }
+
     if (stroke.is_closed()) {
         upper_empty = inside_empty;   // the plug
         lower_empty = outside_empty;  // the remainder
@@ -3804,6 +3885,27 @@ std::vector<float> draw_cut_inside_field(const indexed_triangle_set& cutter,
     if (field_bbox)
         *field_bbox = fb;
     return field;
+}
+
+double draw_cut_extension_clearance(const AABBMesh& mesh, const Vec3d& from, const Vec3d& dir)
+{
+    const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
+    // Every hit along the ray, nearest first; the first one the ray goes INTO counts.
+    // A face met edge-on (normal square to the ray) is neither entered nor left and is
+    // skipped too - that is the face the line was drawn on, met along its own plane.
+    double t = std::numeric_limits<double>::max();
+    for (const AABBMesh::hit_result& hit : mesh.query_ray_hits(from + 0.05 * d, d))
+        if (hit.is_hit() && hit.normal().dot(d) < -1e-6) {
+            t = hit.distance() + 0.05;
+            break;
+        }
+    // The 0.1 mm margin keeps the extended surface off the wall it stops at.
+    return std::max(0.0, t - 0.1);
+}
+
+void draw_cut_chain_set_edited(DrawCutChain& chain, const std::vector<DrawCutSample>& points)
+{
+    chain.set_samples(points, chain.is_closed(), chain.is_finished_open());
 }
 
 } // namespace Slic3r

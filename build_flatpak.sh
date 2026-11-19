@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Snapmaker_Orca Flatpak Build Script
-# This script builds and packages Snapmaker_Orca as a Flatpak package locally
+# EdgeSlicer Flatpak Build Script
+# This script builds and packages EdgeSlicer as a Flatpak package locally
 # Based on the GitHub Actions workflow in .github/workflows/build_all.yml
 
 set -e
@@ -34,7 +34,7 @@ CACHE_DIR=".flatpak-builder"
 show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Build Snapmaker_Orca as a Flatpak package"
+    echo "Build EdgeSlicer as a Flatpak package"
     echo ""
     echo "Options:"
     echo "  -a, --arch ARCH        Target architecture (x86_64, aarch64) [default: $ARCH]"
@@ -132,7 +132,7 @@ if [[ "$LOW_MEMORY" == true ]]; then
     echo -e "${YELLOW}Low memory mode: parallel jobs capped to ${JOBS}${NC}"
 fi
 
-echo -e "${BLUE}Snapmaker_Orca Flatpak Build Script${NC}"
+echo -e "${BLUE}EdgeSlicer Flatpak Build Script${NC}"
 echo -e "${BLUE}================================${NC}"
 echo -e "Architecture: ${GREEN}$ARCH${NC}"
 echo -e "Build directory: ${GREEN}$BUILD_DIR${NC}"
@@ -366,7 +366,7 @@ echo -e "flatpak remote-add --if-not-exists flathub $FLATHUB_RUNTIME_REPO"
 echo -e "flatpak install --user flathub org.gnome.Platform//49 org.gnome.Sdk//49  # if missing"
 echo -e "flatpak install --user $BUNDLE_NAME"
 echo ""
-echo -e "${BLUE}To run Snapmaker_Orca:${NC}"
+echo -e "${BLUE}To run EdgeSlicer:${NC}"
 echo -e "flatpak run io.github.acerage.EdgeSlicer"
 echo ""
 echo -e "${BLUE}To uninstall:${NC}"

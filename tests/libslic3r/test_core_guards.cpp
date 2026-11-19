@@ -239,3 +239,32 @@ TEST_CASE("PA speed lookup and get_abs_value tolerate a config without the optio
 
     REQUIRE_THROWS_AS(empty.get_abs_value("initial_layer_line_width", 0.4), ConfigurationError);
 }
+
+// Snapmaker #903 + #938: a "nil" item in a non-nullable vector option is skipped (with a warning)
+// instead of throwing "Deserializing nil into a non-nullable object", which used to abort a whole
+// import (Bambu dual-head 3MF after editing an object-level speed). Nullable vectors still keep it.
+TEST_CASE("Non-nullable vector options skip nil items instead of throwing", "[CoreGuards][Config]")
+{
+    ConfigOptionFloats floats;
+    REQUIRE_NOTHROW(floats.deserialize("1.5,nil,2.5"));
+    CHECK(floats.values == std::vector<double>{ 1.5, 2.5 });
+
+    ConfigOptionInts ints;
+    REQUIRE_NOTHROW(ints.deserialize("1,nil,nil,4"));
+    CHECK(ints.values == std::vector<int>{ 1, 4 });
+
+    ConfigOptionBools bools;
+    REQUIRE_NOTHROW(bools.deserialize("1,nil,0"));
+    CHECK(bools.values == std::vector<unsigned char>{ 1, 0 });
+
+    ConfigOptionFloatsOrPercents fop;
+    REQUIRE_NOTHROW(fop.deserialize("10,nil,20%"));
+    REQUIRE(fop.values.size() == 2);
+    CHECK_FALSE(fop.values[0].percent);
+    CHECK(fop.values[1].percent);
+
+    ConfigOptionFloatsNullable nullable;
+    REQUIRE_NOTHROW(nullable.deserialize("1.5,nil,2.5"));
+    REQUIRE(nullable.values.size() == 3);
+    CHECK(nullable.is_nil(1));
+}

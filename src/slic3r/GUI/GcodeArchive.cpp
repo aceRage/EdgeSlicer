@@ -640,10 +640,10 @@ static bool word_is_address(std::string w)
     if (host.empty()) return false;
     if (is_ipv4(host)) return true;
     if (host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-_") != std::string::npos) return false;
-    if (host.find('.') == std::string::npos) return false; // a plain word ("H2D2", "3DPO")
+    if (host.find('.') == std::string::npos) return false; // a plain word ("XJ9Q", "HD2-X")
     if (SnapmakerLan::is_cloud_host(host)) return true;
     // A dotted host name: two dots or more and a top-level label of letters only
-    // ("reaper.tail2dff02.ts.net"), or one of the names a LAN hands out ("u1.local").
+    // ("example-host.tail1234.ts.net"), or one of the names a LAN hands out ("u1.local").
     const size_t last = host.rfind('.');
     const std::string tld = host.substr(last + 1);
     for (const char* lan : { "local", "lan", "home", "internal", "arpa" })
@@ -717,12 +717,13 @@ bool normalize_printer(nlohmann::json& record, const std::vector<SnapmakerLan::D
 
 std::map<std::string, std::string> load_model_names(const std::string& printers_dir)
 {
-    // What resources/printers held on 2026-09-26, for a folder that cannot be read.
+    // What resources/printers holds (2026-10-09: X2D, P2S, A2L, H2D Pro added; 2026-11-03: H3C), for a folder that cannot be read.
     std::map<std::string, std::string> names = {
         { "BL-P001", "Bambu Lab X1 Carbon" }, { "BL-P002", "Bambu Lab X1" }, { "C11", "Bambu Lab P1P" },
         { "C12", "Bambu Lab P1S" },           { "C13", "Bambu Lab X1E" },    { "N1", "Bambu Lab A1 mini" },
-        { "N2S", "Bambu Lab A1" },            { "O1C2", "Bambu Lab H2C" },   { "O1D", "Bambu Lab H2D" },
-        { "O1S", "Bambu Lab H2S" },
+        { "N2S", "Bambu Lab A1" },            { "N6", "Bambu Lab X2D" },     { "N7", "Bambu Lab P2S" },
+        { "N9", "Bambu Lab A2L" },            { "N10", "Bambu Lab H3C" },    { "O1C2", "Bambu Lab H2C" },   { "O1D", "Bambu Lab H2D" },
+        { "O1E", "Bambu Lab H2D Pro" },       { "O1S", "Bambu Lab H2S" },
     };
     boost::system::error_code ec;
     if (printers_dir.empty() || !fs::is_directory(printers_dir, ec)) return names;

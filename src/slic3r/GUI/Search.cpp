@@ -1,12 +1,15 @@
 #include "Search.hpp"
 
 #include <vector>
+#include <map>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
 #include <boost/algorithm/string.hpp>
 #include <boost/optional.hpp>
 #include <boost/nowide/convert.hpp>
+#include <wx/defs.h>
+#include <wx/window.h>
 
 #include "wx/dataview.h"
 #include "wx/numformatter.h"
@@ -17,6 +20,7 @@
 #include "GUI_App.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
+#include "I18N.hpp"
 
 #define FTS_FUZZY_MATCH_IMPLEMENTATION
 #include "fts_fuzzy_match.h"
@@ -33,6 +37,21 @@ wxDEFINE_EVENT(wxCUSTOMEVT_JUMP_TO_OBJECT, wxCommandEvent);
 
 using GUI::from_u8;
 using GUI::into_u8;
+
+namespace {
+// Close a search popup on Esc and stop the key there. Without this, Esc reaches the window holding the search,
+// and a settings dialog closes while the popup keeps the input grab. Only GTK puts the search field inside the
+// popup, so only there does the key pass through it; elsewhere the field stays outside and this never runs.
+template<class Close> void close_on_escape(wxWindow* popup, Close close)
+{
+    popup->Bind(wxEVT_CHAR_HOOK, [close](wxKeyEvent& e) {
+        if (e.GetKeyCode() == WXK_ESCAPE)
+            close();
+        else
+            e.Skip();
+    });
+}
+} // namespace
 
 namespace Search {
 
@@ -69,11 +88,38 @@ void change_opt_key(std::string &opt_key, DynamicPrintConfig *config, int &cnt)
 
 static std::string get_key(const std::string &opt_key, Preset::Type type) { return std::to_string(int(type)) + ";" + opt_key; }
 
+// EdgeSlicer, Fine detail P1 (D5): settings renamed to say what they do stay findable by their old (upstream) label,
+// which the search shows after the new one in brackets.
+static const char *search_alias_label(const std::string &opt_key)
+{
+    static const std::map<std::string, const char *> aliases{
+        { "min_feature_size", L("Minimum feature size") },
+        { "min_bead_width", L("Minimum wall width") },
+        { "initial_layer_min_bead_width", L("First layer minimum wall width") },
+        { "wall_transition_length", L("Wall transition length") },
+        { "wall_transition_angle", L("Wall transitioning threshold angle") },
+        { "wall_transition_filter_deviation", L("Wall transitioning filter margin") },
+        { "wall_distribution_count", L("Wall distribution count") },
+        { "min_length_factor", L("Minimum wall length") },
+    };
+    const auto it = aliases.find(opt_key);
+    return it == aliases.end() ? nullptr : it->second;
+}
+
 void OptionsSearcher::append_options(DynamicPrintConfig *config, Preset::Type type, ConfigOptionMode mode)
 {
     auto emplace = [this, type](const std::string key, const wxString &label) {
         const GroupAndCategory &gc = groups_and_categories[key];
         if (gc.group.IsEmpty() || gc.category.IsEmpty()) return;
+        // EdgeSlicer: "Thinnest line (Minimum wall width)", in English and translated.
+        const std::string opt_key = key.substr(key.find(';') + 1);
+        if (const char *alias = search_alias_label(opt_key.substr(0, opt_key.find('#')))) {
+            const wxString en    = label + " (" + wxString::FromUTF8(alias) + ")";
+            const wxString local = _(label) + " (" + _(alias) + ")";
+            options.emplace_back(Option{boost::nowide::widen(key), type, en.ToStdWstring(), local.ToStdWstring(), gc.group.ToStdWstring(),
+                                        _(gc.group).ToStdWstring(), gc.category.ToStdWstring(), GUI::Tab::translate_category(gc.category, type).ToStdWstring()});
+            return;
+        }
 
         wxString suffix;
         wxString suffix_local;
@@ -633,6 +679,13 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, Preset::Type type, wxWindo
     search_line->Bind(wxEVT_LEFT_UP, &SearchDialog::OnLeftUpInTextCtrl, this);
     search_line2 = search_line->GetTextCtrl();
 
+    close_on_escape(this, [this] {
+        Die();
+        // The focused field hides with the popup. Give the focus back to the search button once the exit event
+        // has shown it again, so a second Esc reaches the dialog.
+        CallAfter([this] { m_search_item_tag->SetFocus(); });
+    });
+
     // scroll window
     m_scrolledWindow = new ScrolledWindow(m_client_panel, wxID_ANY, wxDefaultPosition, wxSize(POPUP_WIDTH * em - (em + em /2), POPUP_HEIGHT * em), wxVSCROLL, 6, 6);
     m_scrolledWindow->SetMarginColor(m_bg_colour);
@@ -870,6 +923,7 @@ SearchObjectDialog::SearchObjectDialog(GUI::ObjectList* object_list, wxWindow* p
     search_line->Bind(wxEVT_TEXT, &SearchObjectDialog::OnInputText, this);
     search_line->Bind(wxEVT_LEFT_UP, &SearchObjectDialog::OnLeftUpInTextCtrl, this);
     search_line2 = search_line->GetTextCtrl();
+    close_on_escape(this, [this] { Die(); });
 
 
     // scroll window

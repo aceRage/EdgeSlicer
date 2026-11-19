@@ -1,5 +1,6 @@
 #include "BambuDualNozzleSync.hpp"
 #include "BambuExtruderMap.hpp"
+#include "LocalesUtils.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -51,9 +52,9 @@ bool same_diameter(const std::string &reported, double preset)
 {
     if (reported.empty() || preset <= 0.)
         return true; // nothing to compare against
-    char *end = nullptr;
-    const double d = std::strtod(reported.c_str(), &end);
-    if (end == reported.c_str())
+    size_t       used = 0;
+    const double d    = string_to_double_decimal_point(reported, &used); // the printer's "0.4", in any UI locale
+    if (used == 0)
         return true;
     return std::abs(d - preset) < 0.01;
 }
@@ -70,11 +71,15 @@ const PrinterState::TrayOnSide *find_tray(const std::vector<PrinterState::TrayOn
 
 // ---------------------------------------------------------------------------------------------
 
+bool AmsUnit::external() const { return BambuExtruderMap::is_external_spool_ams_id(ams_id); }
+
 int PrinterState::logical_extruder_of(const AmsUnit &unit) const
 {
-    if (unit.physical_extruder < 0)
+    // An external spool holder feeds the extruder its id names, whatever the unit says.
+    const int physical = unit.external() ? BambuExtruderMap::external_spool_physical_extruder(unit.ams_id) : unit.physical_extruder;
+    if (physical < 0)
         return -1;
-    return BambuExtruderMap::physical_to_logical(physical_extruder_map, unit.physical_extruder);
+    return BambuExtruderMap::physical_to_logical(physical_extruder_map, physical);
 }
 
 int PrinterState::logical_extruder_of(const PrinterNozzle &nozzle) const
@@ -88,14 +93,24 @@ int PrinterState::logical_extruder_of(const PrinterNozzle &nozzle) const
 std::vector<PrinterState::TrayOnSide> PrinterState::all_trays() const
 {
     std::vector<TrayOnSide> out;
-    for (const AmsUnit &unit : ams) {
-        if (BambuExtruderMap::is_external_spool_ams_id(unit.ams_id))
-            continue;
-        const int side = logical_extruder_of(unit);
-        for (const Tray &t : unit.trays)
-            out.push_back({ t, side, unit.slot_count });
-    }
+    // AMS trays first, then the external spools: trays_for_extruder lists them in this order.
+    for (int pass = 0; pass < 2; ++pass)
+        for (const AmsUnit &unit : ams) {
+            if (unit.external() != (pass == 1))
+                continue;
+            const int side = logical_extruder_of(unit);
+            for (const Tray &t : unit.trays)
+                out.push_back({ t, side, unit.external() ? 1 : unit.slot_count, unit.external() });
+        }
     return out;
+}
+
+bool PrinterState::has_loaded_ams_tray(int logical_extruder) const
+{
+    for (const AmsUnit &unit : ams)
+        if (!unit.external() && !unit.trays.empty() && logical_extruder_of(unit) == logical_extruder)
+            return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -179,8 +194,20 @@ std::string state_fingerprint(const PrinterState &state)
         return "";
     std::vector<std::string> ams_parts;
     for (const AmsUnit &unit : state.ams) {
-        if (BambuExtruderMap::is_external_spool_ams_id(unit.ams_id))
+        if (unit.external()) {
+            // A loaded external spool can carry a filament of the arrangement; an empty holder adds
+            // nothing, so a printer fed by its AMS units alone keeps the fingerprint it always had.
+            std::vector<std::string> trays;
+            for (const Tray &t : unit.trays)
+                trays.push_back(norm_color(t.color) + ":" + upper(t.type));
+            if (trays.empty())
+                continue;
+            std::sort(trays.begin(), trays.end());
+            std::string s = "e" + std::to_string(unit.ams_id) + "@" + std::to_string(state.logical_extruder_of(unit)) + "[";
+            for (const auto &t : trays) s += t + ",";
+            ams_parts.push_back(s + "]");
             continue;
+        }
         std::vector<std::string> trays;
         for (const Tray &t : unit.trays)
             trays.push_back(std::to_string(t.slot_id) + ":" + norm_color(t.color) + ":" + upper(t.type));
@@ -247,6 +274,9 @@ Arrangement propose_arrangement(const PrinterState &state, const std::vector<Pro
     for (size_t f = 0; f < used.size(); ++f)
         for (size_t t = 0; t < trays.size(); ++t) {
             if (trays[t].logical_extruder < 0)
+                continue;
+            // An extruder's external spool only stands in for an AMS it does not have.
+            if (trays[t].external && state.has_loaded_ams_tray(trays[t].logical_extruder))
                 continue;
             double cost = color_distance(used[f].color, trays[t].tray.color);
             if (!used[f].type.empty() && !trays[t].tray.type.empty() && upper(used[f].type) != upper(trays[t].tray.type))

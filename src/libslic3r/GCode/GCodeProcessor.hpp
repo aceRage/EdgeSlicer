@@ -2,6 +2,7 @@
 #define slic3r_GCodeProcessor_hpp_
 
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -9,6 +10,7 @@
 
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <map>
 #include <vector>
 #include <mutex>
@@ -20,6 +22,9 @@
 namespace Slic3r {
 
 class Print;
+
+// For a filament whose density is not set, in g/cm³.
+inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
 namespace PreCooling { struct Plan; }
 
 // Ultra: Bambu machine start/end/change gcode emits reserved T<n> markers (n > 254) that are NOT tool
@@ -218,9 +223,45 @@ inline bool is_bbl_special_tool_command(int tool_number)
             std::vector<std::string> params;    // extra msg info
         };
 
+        // Orca #16291: material extruded for the plate, one object instance or one connected body of it, for their
+        // centers of mass.
+        struct ObjectMass
+        {
+            struct Sum
+            {
+                double mass{ 0. };
+                double volume{ 0. };
+                Vec3d  moment{ Vec3d::Zero() };
+                // Of the mass about the origin along each axis, the sums of m x^2, m y^2 and m z^2.
+                Vec3d second{ Vec3d::Zero() };
+
+                void add(const Sum &other)
+                {
+                    mass += other.mass;
+                    volume += other.volume;
+                    moment += other.moment;
+                    second += other.second;
+                }
+            };
+            // Everything printed up to each layer id, the plate's with brim, raft and supports, and the box it fills.
+            std::vector<Sum> printed_up_to_layer;
+            BoundingBoxf3    box;
+            // Of an object, whether it is an assembly.
+            bool assembly{ false };
+
+            Sum  total() const { return printed_up_to_layer.empty() ? Sum{} : printed_up_to_layer.back(); }
+            void add(const Sum &sum, const BoundingBoxf3 &extent, size_t layer);
+        };
+
         std::string filename;
         unsigned int id;
         std::vector<MoveVertex> moves;
+        ObjectMass plate_mass;
+        // One per object instance, and one per connected body of the instances of several, when the sliced objects were at hand.
+        std::vector<ObjectMass> object_masses;
+        std::vector<ObjectMass> body_masses;
+        // One per object instance, of its supports and raft.
+        std::vector<ObjectMass> support_masses;
         // Positions of ends of lines of the final G-code this->filename after TimeProcessor::post_process() finalizes the G-code.
         std::vector<size_t> lines_ends;
         Pointfs printable_area;
@@ -246,6 +287,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Metadata/filament_sequence.json ("optimal_assignment"); BambuStudio
         // GCodeProcessorResult::optimal_assignment.
         std::vector<int> optimal_assignment;
+        // Per-nozzle process P5: the filament (0-based) each G-code tool prints when the G-code names the tools the
+        // filaments were assigned to (output_tool_filaments of filament_output_tools), empty when it names each
+        // filament's own tool. The send dialog's rows follow it, so they always match the file.
+        std::vector<int> output_tool_filaments;
         SettingsIds settings_ids;
         size_t extruders_count;
         bool backtrace_enabled;
@@ -289,6 +334,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             filename = std::forward<Other>(other).filename;
             id = std::forward<Other>(other).id;
             moves = std::forward<Other>(other).moves;
+            plate_mass = std::forward<Other>(other).plate_mass;
+            object_masses = std::forward<Other>(other).object_masses;
+            body_masses = std::forward<Other>(other).body_masses;
+            support_masses = std::forward<Other>(other).support_masses;
             lines_ends = std::forward<Other>(other).lines_ends;
             printable_area = std::forward<Other>(other).printable_area;
             bed_exclude_area = std::forward<Other>(other).bed_exclude_area;
@@ -302,6 +351,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
             filament_change_sequence = std::forward<Other>(other).filament_change_sequence;
             nozzle_change_sequence = std::forward<Other>(other).nozzle_change_sequence;
             optimal_assignment = std::forward<Other>(other).optimal_assignment;
+            output_tool_filaments = std::forward<Other>(other).output_tool_filaments;
             settings_ids = std::forward<Other>(other).settings_ids;
             extruders_count = std::forward<Other>(other).extruders_count;
             backtrace_enabled = std::forward<Other>(other).backtrace_enabled;
@@ -359,6 +409,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
             Wipe_Tower_Start,
             Wipe_Tower_End,
             PA_Change,
+            Print_Time_Total_Sec_Placeholder,
+            Print_Time_Day_Placeholder,
+            Print_Time_Hour_Placeholder,
+            Print_Time_Minute_Placeholder,
+            Print_Time_Sec_Placeholder,
+            Used_Filament_Length_Placeholder,
+            Normal_Print_Time_Placeholder,
+            Silent_Print_Time_Placeholder,
+            Total_Weight_Placeholder,
+            Total_Cost_Placeholder,
+            Total_Wipe_Tower_Cost_Placeholder,
+            Total_Wipe_Tower_Filament_Placeholder,
         };
 
         static const std::string& reserved_tag(ETags tag) { return s_IsBBLPrinter ? Reserved_Tags[static_cast<unsigned char>(tag)] : Reserved_Tags_compatible[static_cast<unsigned char>(tag)]; }
@@ -489,6 +551,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
                 //For line move, there are same. For arc move, there are different.
                 Vec3f enter_direction;
                 Vec3f exit_direction;
+                // Orca: move direction over all four axes, unit length. Used by
+                // calc_vmax_junction_deviation(); see there for why E is normalized in.
+                Vec4f jd_unit_vec;
 
                 void reset();
             };
@@ -556,13 +621,39 @@ inline bool is_bbl_special_tool_command(int tool_number)
             //BBS: prepare stage time before print model, including start gcode time and mostly same with start gcode time
             float prepare_time;
 
+            // Orca (#14573): extra time (e.g. a filament-change delay) that can't be attributed to a
+            // matching block on this pass is buffered here and retried on a later pass, so it
+            // is never folded into an unrelated move. On the final pass no later pass remains,
+            // so any still-unmatched remainder is added to the machine total (never to a move
+            // vertex) instead of being dropped, keeping get_time() consistent with the
+            // filament-change statistics. Orca-only EOF hardening; BambuStudio drops it.
+            struct AdditionalTime
+            {
+                EMoveType type{ EMoveType::Noop };
+                float     time{ 0.0f };
+                // EDGE: the pre-cooling bookings (GCodeProcessor::m_booked_times) whose time this entry carries.
+                std::vector<size_t> bookings;
+            };
+            using AdditionalBuffer = std::vector<AdditionalTime>;
+            AdditionalBuffer m_additional_time_buffer;
+            // EDGE: where the booked times landed since the last read: (booking, g1 line id from which a
+            // move's elapsed time includes it). Read and cleared by GCodeProcessor::calculate_time().
+            std::vector<std::pair<size_t, unsigned int>> landed_bookings;
+
             void reset();
+
+            // Merge adjacent buffer entries that target the same move type.
+            static AdditionalBuffer merge_adjacent_additional_time_blocks(const AdditionalBuffer& buffer);
 
             // Plans the queued blocks, writes each processed block's time onto its move
             // (result.moves[block.move_id].time[mode]) and, for the Normal machine, collects the actual
             // speed profile. keep_last_n_blocks stay queued.
+            // additional_time is attributed to the first block matching target_move_type
+            // (EMoveType::Noop matches any block, i.e. the first processed block).
             void calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode, bool collect_actual_speed_points,
-                                size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+                                size_t keep_last_n_blocks = 0, float additional_time = 0.0f,
+                                EMoveType target_move_type = EMoveType::Noop, bool is_final = false,
+                                size_t booking = static_cast<size_t>(-1));
         };
 
         struct TimeProcessor
@@ -589,6 +680,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             float filament_unload_times;
             //Orca:  time for tool change
             float machine_tool_change_time;
+            // Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): a change to a rack hotend that already
+            // holds the next filament costs machine_switch_extruder_time instead of unload + load.
+            bool  hotend_as_extruder { false };
+            float extruder_change_time { 0.f };
             // Ultra: fixed prepare seconds added to the total estimate
             float machine_prepare_time { 0.f };
 
@@ -776,8 +871,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
         };
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
+        // Orca #16291: the object instance and the connected body of an instance of several that a point lies in, -1 for none.
+        struct MassLocation
+        {
+            int object{ -1 };
+            int body{ -1 };
+        };
+        // For a support, the object instance only.
+        using MassLocator = std::function<MassLocation(const Vec3d &point, bool support)>;
+
     private:
         GCodeReader m_parser;
+        MassLocator m_mass_locator;
         EUnits m_units;
         EPositioningType m_global_positioning_type;
         EPositioningType m_e_local_positioning_type;
@@ -792,7 +897,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         bool m_flushing;
         bool m_wipe_tower;
         float m_remaining_volume;
-        bool m_manual_filament_change;
+        bool m_manual_filament_change{ false };
         // BBS pre-cooling: where the time estimator booked each synchronising wait (a tool change, G4,
         // ...). calculate_time() adds that time to the OLDEST block still in the planner queue, which
         // can be a few hundred moves before the command; plan_pre_cooling() moves it back onto its line.
@@ -800,12 +905,28 @@ inline bool is_bbl_special_tool_command(int tool_number)
         struct BookedTime
         {
             unsigned int line_id;      // the command's line
-            unsigned int first_g1_id;  // g1 line id the time was added to, (unsigned)-1 when it was dropped
+            // From this g1 line id on a move's elapsed time includes the time, (unsigned)-1 when it is not
+            // part of any move's time (not applied yet, or only added to the machine total at the end of the file).
+            unsigned int first_g1_id;
             float        time;
             bool         tool_change;
         };
         std::vector<BookedTime> m_booked_times;
         bool                    m_booking_tool_change{ false };
+        // hotend_as_extruder: the hotend the next T line goes to (from "; NOZZLE_CHANGE_START ... NN<n>",
+        // -1 = none seen: the filament id is used) and the filament each hotend holds.
+        int                     m_next_hotend_id{ -1 };
+        int                     m_current_hotend_id{ -1 };
+        std::map<int, int>      m_hotend_filament;
+        // Orca (403292cb63): the machine end G-code's timed M400 waits (air filtration, timelapse picture,
+        // sound) are post-print operations, not part of the print time. Set when the
+        // MACHINE_END_GCODE_START marker is parsed; process_M400() then skips the S / P delays.
+        bool                    m_skip_end_gcode_delays{ false };
+        // EDGE (Bambu Studio "M73 E"): between the machine start and end G-code of a Bambu printer's export,
+        // and the <line id, filament> of every filament selection seen there (see end_machine_start_gcode()).
+        bool                    m_filament_change_window{ false };
+        std::vector<std::pair<unsigned int, int>> m_filament_selections;
+        void record_filament_selection(const GCodeReader::GCodeLine &line);
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
@@ -830,6 +951,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         ExtrusionRole m_extrusion_role;
         unsigned char m_extruder_id;
         unsigned char m_last_extruder_id;
+        // False until the G-code selects its first filament. m_extruder_id starts at 0 only as a placeholder
+        // (BambuStudio / OrcaSlicer start at -1): the first selection is a load, not a change away from filament 0.
+        bool m_filament_selected;
+        std::vector<int> m_output_tool_filaments; // Per-nozzle process P4: see set_output_tool_filaments()
         ExtruderColors m_extruder_colors;
         ExtruderTemps m_extruder_temps;
         ExtruderTemps m_extruder_temps_config;
@@ -848,11 +973,14 @@ inline bool is_bbl_special_tool_command(int tool_number)
         size_t m_last_default_color_id;
         bool m_detect_layer_based_on_tag {false};
         int m_seams_count;
+        bool m_g29_time_added {false};
         bool m_single_extruder_multi_material;
         float m_preheat_time;
         int m_delta_temperature;
         int m_preheat_steps;
         bool m_disable_m73;
+        // Orca #14663: printer_model, which picks the M6211 time model.
+        std::string m_printer_model;
 #if ENABLE_GCODE_VIEWER_STATISTICS
         std::chrono::time_point<std::chrono::high_resolution_clock> m_start_time;
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
@@ -895,11 +1023,38 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         void apply_config(const PrintConfig& config);
         void set_print(Print* print) { m_print = print; }
+        // Per-nozzle process P4: the filament each G-code tool prints (output_tool_filaments), when the G-code names
+        // assigned tools rather than filaments; empty otherwise. T<n> is read back as that filament.
+        void set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
+        unsigned int filament_of_output_tool(unsigned int tool) const
+        {
+            return tool < m_output_tool_filaments.size() && m_output_tool_filaments[tool] >= 0 ? unsigned(m_output_tool_filaments[tool]) : tool;
+        }
+        // Orca #16291: locates extrusions in the objects and bodies it numbers, those objects listed beforehand.
+        void set_mass_locator(MassLocator locator, std::vector<GCodeProcessorResult::ObjectMass> objects)
+        {
+            m_mass_locator = std::move(locator);
+            m_result.support_masses.assign(objects.size(), {});
+            m_result.object_masses = std::move(objects);
+        }
         void enable_stealth_time_estimator(bool enabled);
         bool is_stealth_time_estimator_enabled() const {
             return m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].enabled;
         }
         void enable_machine_envelope_processing(bool enabled) { m_time_processor.machine_envelope_processing_enabled = enabled; }
+        // EDGE: what the MACHINE_END_GCODE_START marker does, without writing it: the machine end G-code starts
+        // here and its timed M400 waits are post-print (m_skip_end_gcode_delays). For the streaming export of a
+        // Bambu printer that gets no marker (GCode.cpp writes it only with a pre-cooling plan).
+        void start_machine_end_gcode() { m_skip_end_gcode_delays = true; m_filament_change_window = false; }
+        // EDGE (Bambu Studio "M73 E"): the machine start G-code ends here. GCode.cpp calls it for Bambu printers
+        // only; from here to the machine end G-code every filament selection (T<n>, ";VT<n>", M1020 S<n>) is
+        // recorded, and run_post_process() writes "M73 E<remaining filament changes>" after each change.
+        void end_machine_start_gcode() { m_filament_change_window = true; }
+        // The "M73 E<n>" line run_post_process() writes after each recorded line, keyed on its line id: the
+        // filament changes still to come after that one (Bambu Studio TimeProcessor::post_process(),
+        // GCodeProcessor.cpp:1151-1169). A selection of the filament already in use is not a change.
+        static std::map<unsigned int, std::string> remaining_filament_change_lines(
+            const std::vector<std::pair<unsigned int, int>> &filament_selections);
         void reset();
 
         const GCodeProcessorResult& get_result() const { return m_result; }
@@ -920,6 +1075,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         float get_time(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_prepare_time(PrintEstimatedStatistics::ETimeMode mode) const;
+        float get_first_layer_time(PrintEstimatedStatistics::ETimeMode mode) const;
         std::string get_time_dhm(PrintEstimatedStatistics::ETimeMode mode) const;
         std::vector<std::pair<CustomGCode::Type, std::pair<float, float>>> get_custom_gcode_times(PrintEstimatedStatistics::ETimeMode mode, bool include_remaining) const;
 
@@ -1082,6 +1238,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Unload the current filament into the MK3 MMU2 unit at the end of print.
         void process_M702(const GCodeReader::GCodeLine& line);
 
+        // Orca #14663: Elegoo Centauri Carbon / Carbon 2 filament change (ElegooGCodeProcessorHelper.cpp).
+        void process_M6211(const GCodeReader::GCodeLine& line);
+        void process_elegoo_M6211(const GCodeReader::GCodeLine& line);
+
         // Processes T line (Select Tool)
         void process_T(const GCodeReader::GCodeLine& line);
         void process_T(const std::string_view command);
@@ -1096,6 +1256,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         std::map<unsigned int, std::vector<std::string>> plan_pre_cooling(const PreCooling::Plan &plan) const;
 
         void store_move_vertex(EMoveType type, bool internal_only = false);
+        // Orca #16291: centers of mass. In memory only: nothing is written to the G-code.
+        void add_object_mass(int filament_id, float volume);
+        void finalize_object_masses();
 
         void set_extrusion_role(ExtrusionRole role);
 
@@ -1103,6 +1266,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
         float minimum_travel_feedrate(PrintEstimatedStatistics::ETimeMode mode, float feedrate) const;
         float get_axis_max_feedrate(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         float get_axis_max_acceleration(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
+        float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis, float acceleration) const;
+        float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
+        // Orca: junction deviation for a block at the given acceleration, 0 for a classic jerk machine.
+        float get_junction_deviation(PrintEstimatedStatistics::ETimeMode mode, float acceleration) const;
+        // Orca: acceleration along the junction direction, clamped by the per axis limits.
+        float calc_junction_acceleration(const TimeBlock& block, const Vec4f& junction_unit_vec,
+                                         PrintEstimatedStatistics::ETimeMode mode) const;
+        // Orca: entry speed from the junction deviation model, which limits a corner by its angle alone
+        // and is therefore isotropic, unlike per axis jerk. Negative means classic jerk applies instead.
+        float calc_vmax_junction_deviation(const TimeBlock& block, const TimeMachine::State& prev,
+                                           const TimeMachine::State& curr, bool has_prev_move,
+                                           PrintEstimatedStatistics::ETimeMode mode) const;
         float get_axis_max_jerk(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         Vec3f get_xyz_max_jerk(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_retract_acceleration(PrintEstimatedStatistics::ETimeMode mode) const;
@@ -1119,10 +1294,12 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         // Runs every enabled time machine over its queued blocks (see TimeMachine::calculate_time()) and
         // inserts the collected actual-speed points into the move list.
-        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f,
+                            EMoveType target_move_type = EMoveType::Noop, bool is_final = false,
+                            size_t booking = static_cast<size_t>(-1));
 
         // Simulates firmware st_synchronize() call
-        void simulate_st_synchronize(float additional_time = 0.0f);
+        void simulate_st_synchronize(float additional_time = 0.0f, EMoveType target_move_type = EMoveType::Noop);
 
         void update_estimated_times_stats();
         //BBS:

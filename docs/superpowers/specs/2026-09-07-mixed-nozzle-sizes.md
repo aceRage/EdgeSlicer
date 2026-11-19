@@ -136,7 +136,7 @@ were never affected. Found because Phase 2's proof needs a user printer preset.
 
 ## Phase 2 - the U1 proof
 
-Gate: `C:/Users/acesa/AppData/Local/Temp/snorca_hubtest/gate_mixnozzle.sh`, with
+Gate: `%TEMP%/snorca_hubtest/gate_mixnozzle.sh`, with
 `mixnozzle_presets.py` (writes the user presets), `mixnozzle_flatten.py` (flattens them so the
 baseline build, which lacks the CLI fix above, reads exactly the same config) and
 `mixnozzle_measure.py` (per-feature width from `;WIDTH:` and from E per mm). Isolated `--datadir`

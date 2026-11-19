@@ -45,6 +45,8 @@ wxString get_calibration_wiki_page(CalibMode cali_mode)
         return wxString("https://wiki.bambulab.com/en/software/bambu-studio/calibration_temperature");
     case CalibMode::Calib_Retraction_tower:
         return wxString("https://wiki.bambulab.com/en/software/bambu-studio/calibration_retraction");
+    case CalibMode::Calib_Temp_Retract_Grid:
+        return wxEmptyString;
     default:
         return "";
     }

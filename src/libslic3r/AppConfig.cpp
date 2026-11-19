@@ -2,6 +2,8 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/InstanceLock.hpp"
 #include "AppConfig.hpp"
+#include "ZipOpen.hpp"
+#include "ZipWorkCleaner.hpp"
 //BBS
 #include "Preset.hpp"
 #include "Exception.hpp"
@@ -19,6 +21,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <algorithm>
+#include <limits>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -54,6 +57,7 @@ static const std::string MODELS_STR = "models";
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
 const std::string AppConfig::SECTION_MATERIALS = "sla_materials";
 const std::string AppConfig::SECTION_EMBOSS_STYLE = "font";
+const std::string AppConfig::SECTION_HIDDEN_PROCESSES = "hidden_process_presets";
 
 std::string AppConfig::get_language_code()
 {
@@ -123,6 +127,13 @@ void AppConfig::set_defaults()
             set_bool("background_processing", false);
 #endif
 
+        // Orca #11407: auto slice after changes (Preferences > General), off by default.
+        if (get("auto_slice_after_change").empty())
+            set_bool("auto_slice_after_change", false);
+
+        if (get("auto_slice_change_delay_seconds").empty())
+            set("auto_slice_change_delay_seconds", "1");
+
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
 
@@ -133,11 +144,21 @@ void AppConfig::set_defaults()
             set_bool("associate_stl", false);
         if (get("associate_step").empty())
             set_bool("associate_step", false);
+#endif // _WIN32
+
+#if defined(_WIN32) || defined(__APPLE__)
         // Home > Models (the in-app model browser), beta: on by default while the owner tests it.
+        // Windows (WebView2) and macOS (WKWebView) only; Linux has no model browser. On macOS the
+        // OS version (12+) is checked later, by model_browser_supported(). An explicit "false" the
+        // user saved is not empty, so it stays.
         if (get("model_browser_beta").empty())
             set_bool("model_browser_beta", true);
+#endif // _WIN32 || __APPLE__
 
-#endif // _WIN32
+        // The Layerling tab (LayerlingPanel): shown by default. It only offers the optional download
+        // until Layerling is installed; Preferences can hide it.
+        if (get("show_layerling_tab").empty())
+            set_bool("show_layerling_tab", true);
 
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
@@ -199,6 +220,47 @@ void AppConfig::set_defaults()
 
     if (get("camera_orbit_mult").empty())
         set("camera_orbit_mult", "1.0");
+
+    // Orca #13538: graphics preferences.
+    if (get(SETTING_OPENGL_AA_SAMPLES).empty())
+        set(SETTING_OPENGL_AA_SAMPLES, "4");
+
+    if (get(SETTING_OPENGL_FXAA_ENABLED).empty())
+        set_bool(SETTING_OPENGL_FXAA_ENABLED, false);
+
+    if (get(SETTING_OPENGL_FPS_CAP).empty())
+        set(SETTING_OPENGL_FPS_CAP, "0");
+    else {
+        int fps_cap = 0;
+        try {
+            fps_cap = std::stoi(get(SETTING_OPENGL_FPS_CAP));
+        }
+        catch (...) {
+            fps_cap = 0;
+        }
+        fps_cap = std::max(0, std::min(fps_cap, 240));
+        set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
+    }
+
+    if (get(SETTING_OPENGL_SHOW_FPS_OVERLAY).empty())
+        set_bool(SETTING_OPENGL_SHOW_FPS_OVERLAY, false);
+
+    // Orca #13704: realistic view (off by default; Phong on inside it).
+    if (get(SETTING_OPENGL_REALISTIC_MODE).empty())
+        set_bool(SETTING_OPENGL_REALISTIC_MODE, false);
+    if (get(SETTING_OPENGL_REALISTIC_PHONG).empty())
+        set_bool(SETTING_OPENGL_REALISTIC_PHONG, true);
+    if (get(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS).empty())
+        set_bool(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS, false);
+    if (get(SETTING_OPENGL_PHONG_SSAO).empty())
+        set_bool(SETTING_OPENGL_PHONG_SSAO, false);
+    // Orca #14080
+    if (get(SETTING_OPENGL_PHONG_SMOOTH_NORMALS).empty())
+        set_bool(SETTING_OPENGL_PHONG_SMOOTH_NORMALS, false);
+
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    if (get("show_center_of_mass").empty())
+        set_bool("show_center_of_mass", false);
 
     if (get("zoom_to_mouse").empty())
         set_bool("zoom_to_mouse", false);
@@ -294,6 +356,9 @@ void AppConfig::set_defaults()
     // Orca
     if (get("stealth_mode").empty()) {
         set_bool("stealth_mode", false);
+    }
+    if (get("allow_abnormal_storage").empty()) {
+        set_bool("allow_abnormal_storage", false);
     }
     if (get("legacy_networking").empty()) {
         // Ultra Net targets current Bambu firmware (non-legacy ABI); was true upstream.
@@ -435,6 +500,27 @@ void AppConfig::set_defaults()
         set("download_path", "");
     }
 
+    // ZIP working folder and hidden extract caps (PR B).
+    if (get(ZIP_WORK_DIR_KEY).empty())
+        set(ZIP_WORK_DIR_KEY, "");
+    if (get(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY).empty())
+        set_bool(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY, true);
+    if (get(ZIP_MAX_ENTRIES_SCANNED_KEY).empty())
+        set(ZIP_MAX_ENTRIES_SCANNED_KEY, "10000");
+    if (get(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY).empty())
+        set(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY, "2147483648");
+    if (get(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY).empty())
+        set(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY, "4294967296");
+    if (get(ZIP_MAX_COMPRESSION_RATIO_KEY).empty())
+        set(ZIP_MAX_COMPRESSION_RATIO_KEY, "200");
+    // ZIP work-folder clean-up (PR C): on by default, sessions older than 30 days.
+    if (get(ZIP_WORK_CLEANUP_KEY).empty())
+        set_bool(ZIP_WORK_CLEANUP_KEY, true);
+    if (get(ZIP_WORK_CLEANUP_DAYS_KEY).empty())
+        set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(ZIP_WORK_CLEANUP_DEFAULT_DAYS));
+    if (get(ZIP_WORK_INSTALL_ID_KEY).empty())
+        set(ZIP_WORK_INSTALL_ID_KEY, generate_zip_install_id());
+
     if (get("mouse_wheel").empty()) {
         set("mouse_wheel", "0");
     }
@@ -539,6 +625,14 @@ void AppConfig::set_defaults()
     // value still means "<datadir>/gcode_archive" for a config written by an older build.
     if (get("ultra_gcode_archive").empty()) {
         set_bool("ultra_gcode_archive", false);
+    }
+
+    // "New Bambu LiveView": the Device tab plays Bambu LAN cameras through the hub's go2rtc instead
+    // of Bambu's camera files. On by default for fresh installs and for upgrades (a config written
+    // by an older build has no key); a user who turned it off keeps "false". See
+    // tests/plan_own_camera_view.md.
+    if (get("liveview_go2rtc").empty()) {
+        set_bool("liveview_go2rtc", true);
     }
 
     if (get("ultra_gcode_archive_dir").empty()) {
@@ -947,6 +1041,22 @@ std::string AppConfig::load()
     return "";
 }
 
+int AppConfig::auto_slice_delay_seconds(const std::string &value)
+{
+    if (value.empty())
+        return 0;
+    long long seconds = 0;
+    try {
+        seconds = std::stoll(value);
+    } catch (...) {
+        seconds = 0;
+    }
+    if (seconds < 0)
+        seconds = 0;
+    const long long max_seconds = std::numeric_limits<int>::max() / 1000;
+    return int(std::min(seconds, max_seconds));
+}
+
 AppConfig::VendorMap AppConfig::merge_vendor_maps(const VendorMap &base, const VendorMap &mine, const VendorMap &disk)
 {
     auto has = [](const VendorMap &m, const std::string &vendor, const std::string &model, const std::string &variant) {
@@ -1016,12 +1126,12 @@ void AppConfig::merge_shared_from_disk(const std::string& path)
         // list follows in its order; the whole thing is cut at the cap.
         if (j.contains("recent_projects") && j["recent_projects"].is_object()) {
             const std::vector<std::string>     mine = get_recent_projects();
-            std::map<std::string, std::string> disk; // ordered by the "01".."NN" keys
+            std::map<std::string, std::string> disk; // keyed "01".."NN"
             for (auto it = j["recent_projects"].begin(); it != j["recent_projects"].end(); ++it)
                 if (it.value().is_string()) disk[it.key()] = it.value().get<std::string>();
             std::vector<std::string> merged;
-            for (const auto& kv : disk)
-                if (std::find(mine.begin(), mine.end(), kv.second) == mine.end()) merged.push_back(kv.second);
+            for (const std::string& path : recent_projects_in_order(disk))
+                if (std::find(mine.begin(), mine.end(), path) == mine.end()) merged.push_back(path);
             merged.insert(merged.end(), mine.begin(), mine.end());
             size_t cap = 18;
             try {
@@ -1515,18 +1625,39 @@ std::string AppConfig::get_last_dir() const
     return std::string();
 }
 
+// The recent projects are stored under "01", "02", ... "99", "100", ... in a map ordered by string,
+// where "100" comes between "10" and "11". Order them by the number instead; a key that is not a
+// number (none is written) goes after the numbered ones, in string order.
+std::vector<std::string> recent_projects_in_order(const std::map<std::string, std::string> &by_key)
+{
+    std::vector<std::pair<const std::string*, const std::string*>> items;
+    items.reserve(by_key.size());
+    for (const auto &kv : by_key)
+        items.emplace_back(&kv.first, &kv.second);
+    auto number = [](const std::string &key) -> long long {
+        if (key.empty() || key.size() > 18 || key.find_first_not_of("0123456789") != std::string::npos)
+            return -1;
+        return std::stoll(key);
+    };
+    std::stable_sort(items.begin(), items.end(), [&number](const auto &a, const auto &b) {
+        const long long na = number(*a.first), nb = number(*b.first);
+        if ((na < 0) != (nb < 0))
+            return na >= 0;
+        return na >= 0 && na < nb;
+    });
+    std::vector<std::string> out;
+    out.reserve(items.size());
+    for (const auto &item : items)
+        out.push_back(*item.second);
+    return out;
+}
+
 std::vector<std::string> AppConfig::get_recent_projects() const
 {
-    std::vector<std::string> ret;
     const auto it = m_storage.find("recent_projects");
-    if (it != m_storage.end())
-    {
-        for (const std::map<std::string, std::string>::value_type& item : it->second)
-        {
-            ret.push_back(item.second);
-        }
-    }
-    return ret;
+    if (it == m_storage.end())
+        return {};
+    return recent_projects_in_order(it->second);
 }
 
 void AppConfig::set_recent_projects(const std::vector<std::string>& recent_projects)

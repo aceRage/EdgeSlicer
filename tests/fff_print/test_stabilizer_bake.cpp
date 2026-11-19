@@ -682,9 +682,11 @@ TEST_CASE("Objects whose side stabilizers a Bambu Studio export drops", "[Stabil
     c->config.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
     DynamicPrintConfig print = pin_config("manual");
     CHECK(objects_with_live_stabilizers(model, print) == std::vector<std::string>{ "on by preset" });
+    // Stabilizers do not depend on Enable supports: still dropped by a Bambu Studio export.
     print.set_key_value("enable_support", new ConfigOptionBool(false));
-    CHECK(objects_with_live_stabilizers(model, print).empty());
+    CHECK(objects_with_live_stabilizers(model, print) == std::vector<std::string>{ "on by preset" });
     print = pin_config("off");
+    CHECK(objects_with_live_stabilizers(model, print).empty());
     a->config.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smAuto));
     CHECK(objects_with_live_stabilizers(model, print) == std::vector<std::string>{ "on by preset" });
 }

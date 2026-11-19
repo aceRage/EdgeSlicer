@@ -134,7 +134,7 @@ TEST_CASE("Keep the sliced filament map while its input is unchanged", "[Filamen
     CHECK_FALSE(Print::keep_sliced_filament_map(MANUAL_MAP, {}, h2c_computed));
 }
 
-SCENARIO("Re-applying the settings of a sliced hand-grouped plate keeps the slice", "[FilamentMapReapply]")
+SCENARIO("Re-applying the settings of a sliced hand-grouped plate keeps the slice", "[FilamentMapReapply][slow]")
 {
     for (const Machine *m : { &H2C, &H2D }) {
         GIVEN(std::string("a sliced ") + m->printer + " plate with a manual filament map")

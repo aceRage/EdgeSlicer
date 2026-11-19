@@ -105,10 +105,36 @@ public:
         }
         convert_color_space(this->m_centers8UC3, this->m_centers8UC3, color_space, true);
 
+        // stabilize the cluster order to make sure the same color is assigned to the same filament id.
+        std::vector<int> new_index(best_cluster, -1); // old cluster id -> new cluster id
+        cv::Mat          centers_sorted = this->m_centers8UC3.clone();
+        int              next_id        = 0;
+        for (int i = 0; i < flatten_image8UC3.rows; i++) {
+            int cur_label = this->m_flatten_labels.at<int>(i, 0);
+            if (new_index[cur_label] < 0) {
+                new_index[cur_label]                       = next_id;
+                this->m_centers8UC3.at<cv::Vec3b>(next_id) = centers_sorted.at<cv::Vec3b>(cur_label);
+                next_id++;
+            }
+        }
+        // k-means can emit an empty cluster. Those labels never appear in the first-seen
+        // walk, so the leftover centre slots would stay as the unpermuted originals.
+        // Park empty clusters at the end with their own centres so every id is remapped.
+        for (int old_id = 0; old_id < best_cluster; ++old_id) {
+            if (new_index[old_id] < 0) {
+                new_index[old_id]                          = next_id;
+                this->m_centers8UC3.at<cv::Vec3b>(next_id) = centers_sorted.at<cv::Vec3b>(old_id);
+                next_id++;
+            }
+        }
+
         cluster_results.clear();
         labels.clear();
-        for (int i = 0; i < flatten_image8UC3.rows; i++)
-            labels.emplace_back(this->m_flatten_labels.at<int>(i, 0));
+        for (int i = 0; i < flatten_image8UC3.rows; i++) {
+            int &cur_label = this->m_flatten_labels.at<int>(i, 0);
+            cur_label      = new_index[cur_label];
+            labels.emplace_back(cur_label);
+        }
         for (int i = 0; i < best_cluster; i++) {
             cv::Vec3f center = this->m_centers8UC3.at<cv::Vec3b>(i, 0);
             cluster_results.emplace_back(std::array<float, 4>{center[0] / 255.f, center[1] / 255.f, center[2] / 255.f, 1.f});

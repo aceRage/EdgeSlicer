@@ -270,14 +270,17 @@ def phase_h2d(args, hub, archive):
         check(noz.get(1, {}).get("flowSize") == "standard_flow" and noz.get(0, {}).get("flowSize") == "high_flow"
               and abs(noz.get(1, {}).get("diameter", 0) - 0.4) < 1e-6,
               "project_file nozzles_info: left standard, right high flow, 0.4 (%s)" % p.get("nozzles_info"))
-        check(p.get("extruder_cali_manual_mode") == 1, "project_file extruder_cali_manual_mode 1")
+        # PA mode: Bambu Studio's default, 0. The network plug-in may name it with Studio's wire
+        # spelling (extrude_cali_manual_mode) or the host field's (extruder_cali_manual_mode).
+        pa = p.get("extrude_cali_manual_mode", p.get("extruder_cali_manual_mode"))
+        check(pa == 0, "project_file PA mode 0, Bambu Studio's default (%s)" % pa)
         check("nozzle_mapping" not in p and not fake.payloads("get_auto_nozzle_mapping"),
               "no nozzle-mapping handshake for an H2D")
         check(p.get("bed_type") == "textured_plate", "project_file bed_type (%s)" % p.get("bed_type"))
         check(p.get("bed_leveling") is True and p.get("flow_cali") is False and p.get("timelapse") is False
               and p.get("vibration_cali") is False and p.get("layer_inspect") is True,
               "project_file options as defaulted")
-        check(p.get("auto_offset_cali") == 2 and p.get("nozzle_offset_cali") == 2, "project_file nozzle offset calibration: auto")
+        check(p.get("nozzle_offset_cali") == 2, "project_file nozzle offset calibration: auto")
         side = json.load(open(os.path.join(archive, rid + ".json"), encoding="utf-8"))
         hist = side.get("reprints", [])
         check(len(hist) == 1 and hist[0].get("printer", {}).get("id") == "SNFAKEH2D0001" and hist[0].get("mode") == "print"

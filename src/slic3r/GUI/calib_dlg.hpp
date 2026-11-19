@@ -99,6 +99,8 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
+    CheckBox*  m_cbAutoAdjust; // Orca #14759
+    CheckBox*  m_cbResize;     // Orca #14759
     Plater* m_plater;
 };
 
@@ -121,6 +123,42 @@ protected:
     Plater* m_plater;
 };
 
+class TempRetract_Calibration_Dlg : public DPIDialog
+{
+public:
+    TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater);
+    ~TempRetract_Calibration_Dlg();
+    int  ShowModal() override;
+    void on_dpi_changed(const wxRect &suggested_rect) override;
+
+protected:
+    virtual void on_start(wxCommandEvent &event);
+    void         update_summary();
+    void         reset_to_defaults();
+    static bool  filament_default_params(Calib_Params &params);
+    static const DynamicPrintConfig *slot1_filament_config();
+    bool         read_params(Calib_Params &params, wxString *error) const;
+    double       bed_width() const;
+
+    Calib_Params m_params;
+
+    TextInput *m_tiStartTemp;
+    TextInput *m_tiEndTemp;
+    TextInput *m_tiTempStep;
+    TextInput *m_tiBandHeight;
+    TextInput *m_tiRetractStart;
+    TextInput *m_tiRetractEnd;
+    TextInput *m_tiRetractStep;
+    TextInput *m_tiFilletRadius;
+    CheckBox  *m_cbLabels;
+    CheckBox  *m_cbWaitTemp;
+    CheckBox  *m_cbFillet;
+    CheckBox  *m_cbNoZHop;
+    wxStaticText *m_stSummary;
+    wxStaticText *m_stRangeNote;
+    Plater    *m_plater;
+};
+
 class Input_Shaping_Freq_Test_Dlg : public DPIDialog
 {
 public:
@@ -134,6 +172,7 @@ protected:
     Calib_Params m_params;
 
     RadioGroup* m_rbModel;
+    RadioGroup* m_rbType;
     TextInput* m_tiFreqStartX;
     TextInput* m_tiFreqEndX;
     TextInput* m_tiFreqStartY;
@@ -155,6 +194,7 @@ protected:
     Calib_Params m_params;
 
     RadioGroup* m_rbModel;
+    RadioGroup* m_rbType;
     TextInput* m_tiFreqX;
     TextInput* m_tiFreqY;
     TextInput* m_tiDampingFactorStart;
@@ -162,11 +202,11 @@ protected:
     Plater* m_plater;
 };
 
-class Junction_Deviation_Test_Dlg : public DPIDialog
+class Cornering_Test_Dlg : public DPIDialog
 {
 public:
-    Junction_Deviation_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater);
-    ~Junction_Deviation_Test_Dlg();
+    Cornering_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater);
+    ~Cornering_Test_Dlg();
     void on_dpi_changed(const wxRect& suggested_rect) override;
     
 protected:
@@ -176,6 +216,23 @@ protected:
     RadioGroup* m_rbModel;
     TextInput* m_tiJDStart;
     TextInput* m_tiJDEnd;
+    Plater* m_plater;
+};
+
+class IroningFlow_Test_Dlg : public DPIDialog
+{
+public:
+    IroningFlow_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater);
+    ~IroningFlow_Test_Dlg();
+    void on_dpi_changed(const wxRect& suggested_rect) override;
+
+protected:
+    virtual void on_start(wxCommandEvent& event);
+    Calib_Params m_params;
+
+    TextInput* m_tiStart;
+    TextInput* m_tiEnd;
+    TextInput* m_tiLength;
     Plater* m_plater;
 };
 }} // namespace Slic3r::GUI

@@ -319,6 +319,20 @@ inline stl_normal its_unnormalized_normal(const indexed_triangle_set &its,
 }
 
 float its_volume(const indexed_triangle_set &its);
+// Mass, volume and center of mass of a solid, and the mean over its mass of (x - center)(x - center)^T, from which its
+// moments of inertia about axes through the center follow.
+struct MassProperties
+{
+    double   mass{ 0. };
+    double   volume{ 0. };
+    Vec3d    center{ Vec3d::Zero() };
+    Matrix3d spread{ Matrix3d::Zero() };
+
+    // Under an affine map, which scales mass and volume by its determinant.
+    MassProperties transformed(const Transform3d &trafo) const;
+};
+// The solid a closed mesh bounds at unit density, whichever way its faces turn; nothing for a zero volume.
+MassProperties its_mass_properties(const indexed_triangle_set &its);
 float its_average_edge_length(const indexed_triangle_set &its);
 
 void its_merge(indexed_triangle_set &A, const indexed_triangle_set &B);
@@ -362,9 +376,11 @@ indexed_triangle_set    its_make_swept_loop(const std::vector<Vec3d> &path, doub
 // start angle) and `left_hand` flips the sense of the rise.
 // Unlike its_make_swept_loop the path does NOT close, so there is no residual twist to spread:
 // every step is the same rotation about +Z plus the same rise along it - the helix's own frame,
-// known analytically. `lead_frac` tapers the profile's RADIAL extent linearly to zero over that
-// fraction of a turn at EACH end, which is both the printable lead-in chamfer and what closes
-// the ribbon's ends without a cap mesh; at lead_frac == 0 the ends are capped flat instead.
+// known analytically. `lead_frac` shrinks the profile linearly to nothing over that fraction of
+// a turn at EACH end, about the middle of its innermost edge (so a convex profile stays inside
+// its full self and keeps its root where it was), which is both the printable lead-in chamfer
+// and what closes the ribbon's ends without a cap mesh; at lead_frac == 0 the ends are capped
+// flat instead.
 // The helix runs from z == 0 up to z == pitch * turns. Each returned mesh is watertight.
 // Fewer than 3 profile points, a non-positive radius/pitch/turns, fewer than 3 segments per
 // turn or a starts count outside 1..8 returns an empty vector.

@@ -60,6 +60,23 @@ BambuLanSkip bambu_lan_skip_reason(bool has_ip, bool cloud_print_only, bool has_
     return BambuLanSkip::None;
 }
 
+BambuStorageIssue bambu_storage_issue(int sdcard_state, bool allow_abnormal)
+{
+    switch (sdcard_state) {
+    case 0: return BambuStorageIssue::Missing;
+    case 1: return BambuStorageIssue::None;
+    case 2: return allow_abnormal ? BambuStorageIssue::None : BambuStorageIssue::Abnormal;
+    case 3: return BambuStorageIssue::ReadOnly;
+    default: break;
+    }
+    return BambuStorageIssue::Unknown;
+}
+
+bool bambu_storage_usable_for_lan(int sdcard_state, bool allow_abnormal)
+{
+    return bambu_storage_issue(sdcard_state, allow_abnormal) == BambuStorageIssue::None;
+}
+
 const char* bambu_lan_skip_tag(BambuLanSkip skip)
 {
     switch (skip) {
@@ -79,6 +96,40 @@ bool bambu_reply_is_auth_refusal(const std::string& result, const std::string& r
     const std::string r = lower(result);
     if (r.compare(0, 4, "fail") != 0) return false; // "fail", "failed", "FAIL"
     return mentions_verify_refusal(lower(reason));
+}
+
+bool bambu_fun_secured_bit(const std::string& fun, bool& secured)
+{
+    if (fun.empty() || !std::isxdigit(static_cast<unsigned char>(fun.front())))
+        return false;
+    try {
+        const unsigned long long value = std::stoull(fun, nullptr, 16);
+        secured = ((value >> 29) & 1ULL) != 0;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool bambu_err_code_is_unsigned_refusal(int err_code) { return err_code >= 84033543 && err_code <= 84033548; }
+
+bool bambu_reply_is_unsigned_refusal(int err_code, const std::string& result, const std::string& reason)
+{
+    if (lower(result).compare(0, 4, "fail") != 0) return false;
+    return bambu_err_code_is_unsigned_refusal(err_code) || mentions_verify_refusal(lower(reason));
+}
+
+bool bambu_command_needs_signature(const std::string& ns, const std::string& command)
+{
+    if (ns == "print" || ns == "upgrade" || ns == "camera") return true;
+    if (ns == "system") return command.compare(0, 4, "get_") != 0;
+    return false; // "pushing", "info" and anything unknown are left alone
+}
+
+std::string bambu_secured_mode_message(bool translate)
+{
+    return tr(translate, L("This printer is not in Developer Mode, so it rejects commands from EdgeSlicer. "
+                           "Turn on LAN Only + Developer Mode on the printer."));
 }
 
 BambuLanFailure bambu_classify_lan_failure(int code, const std::string& detail, bool printer_refused)

@@ -1,0 +1,66 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1",
+      "name": "Golden: imperfections at full strength, close-up of the sliced plate (U1 bed: the model at 175, 175)",
+      "plate_index": 0,
+      "source": "model",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "radial_gradient",
+        "color1": "#FFFFFF",
+        "color2": "#D9DCE1"
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "color": "#F2F2F2",
+        "shadow_strength": 0.45
+      },
+      "lighting": {
+        "azimuth": 200,
+        "elevation": 30,
+        "shadow_intensity": 0.4,
+        "key_intensity": 1.2,
+        "environment": "studio",
+        "env_intensity": 0.8
+      },
+      "materials": {
+        "layer_lines": "real",
+        "imperfections": {
+          "wobble": 1.0,
+          "seam": 1.0,
+          "strings": 1.0,
+          "colour": 1.0
+        }
+      },
+      "camera": {
+        "projection": "perspective",
+        "eye": [
+          240.0,
+          95.0,
+          62.0
+        ],
+        "target": [
+          175.0,
+          175.0,
+          22.0
+        ],
+        "up": [
+          0,
+          0,
+          1
+        ],
+        "zoom": 11.0
+      },
+      "view_frame_height": 540,
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      }
+    }
+  ]
+}

@@ -111,7 +111,7 @@ Comment-only in both files; no test logic touched. `[paintdepth]` is byte-for-by
 Slot protocol: `Get-Process cl,link,MSBuild` before the build reported none running (slot free).
 
 ```
-cmd /c "C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat"
+cmd /c "%TEMP%\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat"
 ```
 **exit code 0.** Log: `…\scratchpad\build_task11.log` (74 lines). Recompiled `ColorSplit.cpp`,
 `ColorSplitPartition.cpp`, `ColorSplitShell.cpp`, `ColorSplitDialog.cpp`, `ColorSplitJob.cpp`, `Plater.cpp`,

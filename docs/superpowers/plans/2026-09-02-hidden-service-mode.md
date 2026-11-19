@@ -63,7 +63,7 @@ The drafts were written independently; use these names when implementing:
 - Phone-initiated opens spawn hidden (`POST /r/<t>/api/instances/open`, `?visible=1` opts out); the tray's "Open a new slicer window" stays visible and gains "Open a new hidden slicer".
 - Affirmative defaults only while a phone request is executing; background prompts take the do-nothing branch; destructive or input-needing dialogs are never auto-answered and instead raise attention.
 - The slice request will dispatch its toolbar event synchronously inside `run_on_main` so the pre-slice confirms run under the request scope (Phase 3 change 6); keep `wxPostEvent` as the fallback if re-entrancy bites.
-- Test files, batch files and projects used for hidden-instance testing live at `C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\` (the session scratchpad path exceeds MAX_PATH).
+- Test files, batch files and projects used for hidden-instance testing live at `%TEMP%\snorca_hubtest\` (the session scratchpad path exceeds MAX_PATH).
 
 ## 5. Known runtime unknowns to settle first (cheap experiments)
 
@@ -745,13 +745,13 @@ Snapmaker-Ultra Hub: 2 slicer windows open (1 hidden)   [disabled]
 
 ### Test plan for this phase
 
-Helpers live in the session scratchpad (`…/548a2e04-…/scratchpad/`): `run_hub_app.py <file> [--new]` starts `C:\Dev\SnapmakerOrca\build\Snapmaker_Orca\snapmaker-orca.exe` detached with `SNORCA_PHONE_ACCESS=testtoken12345`; `wait_for_hub.py [N] [--untitled]` polls `http://127.0.0.1:13640/hub/info` + `/r/<token>/api/instances` until N instances are listed; `test_layout.py`, `test_presets.py`, `test_settings.py` (in `…/67c5db31-…/scratchpad/`) exercise the routes through `http://10.0.0.131:13640/r/<token>/…`. Build with `build_app.bat`, deploy with `cmake --install C:\Dev\SnapmakerOrca\build --config Release` (this is what copies `hub.html` into the build tree).
+Helpers live in the session scratchpad (`…/548a2e04-…/scratchpad/`): `run_hub_app.py <file> [--new]` starts `C:\Dev\SnapmakerOrca\build\Snapmaker_Orca\snapmaker-orca.exe` detached with `SNORCA_PHONE_ACCESS=testtoken12345`; `wait_for_hub.py [N] [--untitled]` polls `http://127.0.0.1:13640/hub/info` + `/r/<token>/api/instances` until N instances are listed; `test_layout.py`, `test_presets.py`, `test_settings.py` (in `…/67c5db31-…/scratchpad/`) exercise the routes through `http://10.0.0.20:13640/r/<token>/…`. Build with `build_app.bat`, deploy with `cmake --install C:\Dev\SnapmakerOrca\build --config Release` (this is what copies `hub.html` into the build tree).
 
 1. **Build + deploy.** `build_app.bat`, then `cmake --install … --config Release`. Confirm `resources/web/orca/hub.html` in the build tree matches the source (`cmp`, as `deploy_and_test2.sh` does).
 2. **Clean slate.** `curl -s -X POST http://127.0.0.1:13640/hub/quit`, then `Get-Process snapmaker-orca | Stop-Process -Force`.
 3. **Visible instance is unchanged.** `python run_hub_app.py <3mf>` → splash appears, a window appears, a taskbar button appears; `python wait_for_hub.py 1` succeeds; `GET /hub/instances` shows `"hidden": false`. This proves the move of `RemoteAccess::start()` out of `StreamPanel` did not regress registration — and crucially, **without ever opening the Stream tab** (which is where it used to happen).
 4. **Hidden launch.** Start a second instance with `SNORCA_HIDDEN=1 SNORCA_NEW_INSTANCE=1` (add the two env vars to `run_hub_app.py`, or set them in the shell before calling the exe). Check: **no splash, no window, no taskbar button**, the process is alive in Task Manager, and `python wait_for_hub.py 2` still succeeds. `GET http://127.0.0.1:13640/hub/instances` must list it with `"hidden": true` and a non-empty `"title"` (the title comes from the instance file, so this also proves `note_project()` rewrites it).
-5. **Non-rendering routes against the hidden instance.** With `pid` = the hidden instance's id, against `http://10.0.0.131:13640/r/testtoken12345/i/<pid>/api`:
+5. **Non-rendering routes against the hidden instance.** With `pid` = the hidden instance's id, against `http://10.0.0.20:13640/r/testtoken12345/i/<pid>/api`:
    `GET /info` (has `hidden:true`), `GET /presets`, `GET /settings/process`, `GET /plates`, `GET /plates/0/layout`, `POST /objects/transform` (move / rotate / restore). `test_layout.py`, `test_presets.py` and `test_settings.py` do exactly this once pointed at that pid. Expected: all 200, same payloads as from the visible instance.
    Rendering routes are expected to fail here in Phase 1: `GET /plates/0/thumbnail.png`, `/plates/0/preview.png`, `POST /slice` — record what they return (probably 503/500), that is Phase 2's input.
 6. **Show from the tray.** Tray icon ▸ Slicer windows ▸ `2 · <title> (hidden)` ▸ **Show window**. The window must appear and come to the front; `GET /hub/instances` flips to `"hidden": false`; the taskbar button appears.
@@ -760,7 +760,7 @@ Helpers live in the session scratchpad (`…/548a2e04-…/scratchpad/`): `run_hu
 9. **Close-to-hide.** Show the hidden instance, then click the window's ✕. Expect: window gone, **process still alive**, `"hidden": true`, and `GET /i/<pid>/api/info` still answers. Repeat with a dirty project — **no save prompt** must appear (the close is vetoed before `close_with_confirm`).
 10. **Explicit quit.** Tray ▸ Slicer windows ▸ that instance ▸ **Quit this window** (and/or `POST /hub/instances/<pid>/quit`). Expect: HTTP 200 first, then the process exits, `<datadir>/hub/instances/<pid>.json` disappears, and the instance drops off `/hub/instances` within a few seconds. With a dirty unnamed project, a `Untitled_<stamp>.3mf` must appear under `<datadir>/hub/saves` (never a file dialog). Also check `POST /api/quit?discard=1` exits with no save.
 11. **File ▸ Quit on a shown hub-managed window** ends the process (does not hide).
-12. **Phone-initiated open spawns hidden.** From the LAN page `http://10.0.0.131:13640/r/testtoken12345/`, upload a model with "New". Expect: no window appears on the PC, a new instance shows up in `/hub/instances` with `"hidden": true` and the uploaded project's title. `POST /r/<t>/api/instances/open?visible=1` must still open a window.
+12. **Phone-initiated open spawns hidden.** From the LAN page `http://10.0.0.20:13640/r/testtoken12345/`, upload a model with "New". Expect: no window appears on the PC, a new instance shows up in `/hub/instances` with `"hidden": true` and the uploaded project's title. `POST /r/<t>/api/instances/open?visible=1` must still open a window.
 13. **Tray "Open a new slicer window"** still opens a *visible* one; **"Open a new hidden slicer"** and `POST /hub/new?hidden=1` open hidden ones.
 14. **Nothing left behind.** Quit every instance, then the hub (`POST /hub/quit`); `<datadir>/hub/instances/` must be empty and no `snapmaker-orca.exe` left.
 
@@ -1229,7 +1229,7 @@ Scratchpad helpers (already present in this session's scratchpad directory):
 `/api/instances` until N instances are listed), `test_preview.py [plate]` (preview info + PNG
 frames at several views/layers, slices first if needed), `test_preview2.py [plate]` (zoom/pan
 frames + the `/preview/status` route). Every instance route is reachable through the hub as
-`http://10.0.0.131:13640/r/<token>/i/<pid>/api/...` — the two test scripts already resolve
+`http://10.0.0.20:13640/r/<token>/i/<pid>/api/...` — the two test scripts already resolve
 `<token>` from `/hub/info` and `<pid>` from `/api/instances`, so they work unchanged against a
 hidden instance.
 
@@ -2108,4 +2108,4 @@ and confirm all five reach the hook. This validates that the vendored
 
 ## Appendix — test helpers
 
-Scratchpad helpers referenced by the phase test plans (copy them to a short path before running anything through cmd.exe): `run_hub_app.py <file> [--new] [--hidden]` (add `SNORCA_HIDDEN=1` when `--hidden`), `wait_for_hub.py [N]`, `test_layout.py`, `test_presets.py`, `test_settings.py`, `test_hub.py {list|import|load|new|reject}`, `test_preview.py [plate]`, `test_preview2.py [plate]`; to be written: `test_hidden.py` (Phase 1 gate), `test_attention.py` (Phase 3). Hub: `http://127.0.0.1:13640/hub/info`; phone page: `http://10.0.0.131:13640/r/<token>/`; instance API through the hub: `http://10.0.0.131:13640/r/<token>/i/<pid>/api/...`.
+Scratchpad helpers referenced by the phase test plans (copy them to a short path before running anything through cmd.exe): `run_hub_app.py <file> [--new] [--hidden]` (add `SNORCA_HIDDEN=1` when `--hidden`), `wait_for_hub.py [N]`, `test_layout.py`, `test_presets.py`, `test_settings.py`, `test_hub.py {list|import|load|new|reject}`, `test_preview.py [plate]`, `test_preview2.py [plate]`; to be written: `test_hidden.py` (Phase 1 gate), `test_attention.py` (Phase 3). Hub: `http://127.0.0.1:13640/hub/info`; phone page: `http://10.0.0.20:13640/r/<token>/`; instance API through the hub: `http://10.0.0.20:13640/r/<token>/i/<pid>/api/...`.

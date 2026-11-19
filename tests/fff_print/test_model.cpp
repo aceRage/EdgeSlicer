@@ -1,10 +1,12 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <boost/nowide/cstdio.hpp>
 #include <boost/filesystem.hpp>
@@ -182,4 +184,217 @@ TEST_CASE("get_extruders excludes Precise Seam helper volumes", "[Model][Precise
     plate_ids.erase(std::unique(plate_ids.begin(), plate_ids.end()), plate_ids.end());
     CHECK(std::find(plate_ids.begin(), plate_ids.end(), 3) == plate_ids.end());
     CHECK(std::find(plate_ids.begin(), plate_ids.end(), 4) == plate_ids.end());
+}
+
+TEST_CASE("An instance added from another's scale, rotation and mirror matches it", "[Model]")
+{
+    // Add instance and Fill bed copy an instance this way.
+    const int case_idx = GENERATE(0, 1);
+    Transform3d trafo = Transform3d::Identity();
+    if (case_idx == 0)
+        trafo.linear() = Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitZ()).toRotationMatrix() * Vec3d(-1., 1., 1.).asDiagonal();
+    else
+        trafo.linear() << 4.4408921e-16,   0.819152044,    0.573576436,
+                          1.0,            -4.4408921e-16, -1.11022302e-16,
+                         -5.55111512e-17, -0.573576436,    0.819152044;
+    CAPTURE(case_idx);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 20, 30));
+    ModelInstance *original = object->add_instance();
+    original->set_transformation(Geometry::Transformation(trafo));
+    const ModelInstance *copy = object->add_instance(original->get_offset(), original->get_scaling_factor(),
+                                                     original->get_rotation(), original->get_mirror());
+    CHECK(copy->get_matrix().linear().isApprox(original->get_matrix().linear(), 1e-9));
+}
+
+// ModelVolume::split dropped the pieces whose convex hull came out empty, but looked at every part of the
+// object, so splitting one part deleted any other part with an empty hull: a flat sheet, or a part of one
+// triangle. Only the pieces just made are looked at now.
+TEST_CASE("Splitting one part leaves a flat part of the same object in place", "[Model][Regression]")
+{
+    // A flat 10 x 10 mm sheet: its points all lie in one plane, so its 3D convex hull is empty.
+    indexed_triangle_set sheet;
+    sheet.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(10.f, 0.f, 0.f), Vec3f(10.f, 10.f, 0.f), Vec3f(0.f, 10.f, 0.f) };
+    sheet.indices  = { Vec3i32(0, 1, 2), Vec3i32(0, 2, 3) };
+    // Two 4 mm cubes 10 mm apart, as one mesh.
+    indexed_triangle_set cubes = its_make_cube(4., 4., 4.);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(cubes, other);
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *flat   = object->add_volume(TriangleMesh(sheet), ModelVolumeType::PARAMETER_MODIFIER);
+    flat->name          = "sheet";
+    ModelVolume *part   = object->add_volume(TriangleMesh(cubes));
+    part->name          = "cubes";
+    object->add_instance();
+
+    const std::shared_ptr<const TriangleMesh> &flat_hull = flat->get_convex_hull_shared_ptr();
+    REQUIRE((flat_hull == nullptr || flat_hull->its.indices.empty()));
+    REQUIRE(object->volumes.size() == 2);
+
+    CHECK(part->split(1) == 2);
+
+    std::vector<std::string> names;
+    for (const ModelVolume *volume : object->volumes)
+        names.push_back(volume->name);
+    CAPTURE(names);
+    REQUIRE(object->volumes.size() == 3);
+    CHECK(object->volumes[0] == flat);
+    CHECK(object->volumes[0]->name == "sheet");
+    CHECK(object->volumes[1]->name == "cubes_1");
+    CHECK(object->volumes[2]->name == "cubes_2");
+}
+
+// Splitting a text part reset its text configuration but left its emboss shape on every piece, and a part with an
+// emboss shape and no text configuration is an SVG part (is_svg()): each piece of a split text offered the SVG tool.
+// No piece of a split text or SVG part is the shape any more.
+TEST_CASE("Splitting a text or SVG part leaves plain parts", "[Model][Regression]")
+{
+    // Two 4 mm cubes 10 mm apart, as one mesh: the pieces of a two-letter text.
+    indexed_triangle_set its   = its_make_cube(4., 4., 4.);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(its, other);
+    const bool text = GENERATE(true, false);
+
+    SECTION(text ? "a text part, split as a part" : "an SVG part, split as a part")
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->add_volume(TriangleMesh(its)); // another part, so the object is not the split part alone
+        ModelVolume *part = object->add_volume(TriangleMesh(its));
+        object->add_instance();
+        if (text)
+            part->text_configuration = TextConfiguration{};
+        part->emboss_shape = EmbossShape{};
+        REQUIRE(part->is_text() == text);
+        REQUIRE(part->is_svg() == !text);
+
+        REQUIRE(part->split(1) == 2);
+        REQUIRE(object->volumes.size() == 3);
+        for (const ModelVolume *piece : object->volumes) {
+            CHECK_FALSE(piece->is_text());
+            CHECK_FALSE(piece->is_svg());
+        }
+    }
+    SECTION(text ? "a text object, split to objects" : "an SVG object, split to objects")
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        ModelVolume *part   = object->add_volume(TriangleMesh(its));
+        object->add_instance();
+        if (text)
+            part->text_configuration = TextConfiguration{};
+        part->emboss_shape = EmbossShape{};
+
+        ModelObjectPtrs pieces;
+        object->split(&pieces);
+        REQUIRE(pieces.size() == 2);
+        for (const ModelObject *piece : pieces)
+            for (const ModelVolume *volume : piece->volumes) {
+                CHECK_FALSE(volume->is_text());
+                CHECK_FALSE(volume->is_svg());
+            }
+    }
+}
+
+// A text part of an object of several parts becomes an object of its own whole; it was left a plain part (no text
+// configuration), and its emboss shape made it an SVG part. An SVG part moved whole keeps its shape.
+TEST_CASE("Splitting an object of several parts to objects leaves no text part as an SVG part", "[Model][Regression]")
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *text   = object->add_volume(make_cube(4., 4., 4.));
+    TriangleMesh second = make_cube(4., 4., 4.);
+    second.translate(10.f, 0.f, 0.f);
+    ModelVolume *svg = object->add_volume(std::move(second));
+    object->add_instance();
+    text->text_configuration = TextConfiguration{};
+    text->emboss_shape       = EmbossShape{};
+    svg->emboss_shape        = EmbossShape{};
+
+    ModelObjectPtrs pieces;
+    object->split(&pieces);
+    REQUIRE(pieces.size() == 2);
+    REQUIRE(pieces[0]->volumes.size() == 1);
+    REQUIRE(pieces[1]->volumes.size() == 1);
+    CHECK_FALSE(pieces[0]->volumes.front()->is_text());
+    CHECK_FALSE(pieces[0]->volumes.front()->is_svg());
+    CHECK(pieces[1]->volumes.front()->is_svg());
+}
+
+// Orca #16274 (OD2): raw_indexed_triangle_set() used to leave the triangles of every part after the first
+// pointing at the first part's vertices; the per-body octrees split this mesh into connected components.
+TEST_CASE("An object's raw mesh keeps the triangles of each part on its own vertices", "[Model]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh second = make_cube(10, 10, 10);
+    second.translate(30, 0, 0);
+    object->add_volume(std::move(second), ModelVolumeType::MODEL_PART, false);
+
+    // Two separate cubes stay two closed components, one around each cube.
+    const std::vector<indexed_triangle_set> parts = its_split(object->raw_indexed_triangle_set());
+    REQUIRE(parts.size() == 2);
+    std::vector<double> min_x;
+    for (const indexed_triangle_set &part : parts) {
+        CHECK(part.indices.size() == 12);
+        min_x.push_back(bounding_box(part).min.x());
+    }
+    std::sort(min_x.begin(), min_x.end());
+    CHECK_THAT(min_x.front(), Catch::Matchers::WithinAbs(0., 1e-4));
+    CHECK_THAT(min_x.back(), Catch::Matchers::WithinAbs(30., 1e-4));
+}
+
+// Splitting a part into its pieces left each piece where the part's own rotation and scale would not have put it:
+// center_geometry_after_creation() moved the piece's mesh to its middle in the part's frame and the part by the same
+// shift in the object's, unturned and unscaled. Each piece now stays where it was in the part.
+TEST_CASE("Splitting a turned and scaled part leaves its pieces where they were", "[Model][Regression]")
+{
+    // Two 4 mm cubes 10 mm apart along X, as one mesh.
+    indexed_triangle_set its = its_make_cube(4., 4., 4.);
+    indexed_triangle_set other = its_make_cube(4., 4., 4.);
+    its_translate(other, Vec3f(10.f, 0.f, 0.f));
+    its_merge(its, other);
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part   = object->add_volume(TriangleMesh(its));
+    object->add_instance();
+    // The part's own transformation: turned 90 degrees about Z and 30 about X, scaled 2 x 1 x 1.5, moved.
+    part->set_rotation(Vec3d(PI / 6., 0., PI / 2.));
+    part->set_scaling_factor(Vec3d(2., 1., 1.5));
+    part->set_offset(Vec3d(5., -3., 7.));
+
+    // Where the two cubes are in the object, before the split.
+    auto world_box = [](const ModelVolume &volume) { return volume.mesh().transformed_bounding_box(volume.get_matrix()); };
+    const BoundingBoxf3 before = world_box(*part);
+    REQUIRE(part->mesh().its.vertices.size() == 16);
+    std::vector<BoundingBoxf3> cubes_before;
+    for (const TriangleMesh &cube : part->mesh().split())
+        cubes_before.push_back(cube.transformed_bounding_box(part->get_matrix()));
+    REQUIRE(cubes_before.size() == 2);
+
+    REQUIRE(part->split(1) == 2);
+    REQUIRE(object->volumes.size() == 2);
+    BoundingBoxf3 after;
+    for (const ModelVolume *piece : object->volumes) {
+        const BoundingBoxf3 box = world_box(*piece);
+        after.merge(box);
+        // Each piece is one of the two cubes, where it was.
+        const bool matches = std::any_of(cubes_before.begin(), cubes_before.end(), [&box](const BoundingBoxf3 &cube) {
+            return (cube.min - box.min).norm() < 1e-4 && (cube.max - box.max).norm() < 1e-4;
+        });
+        INFO(piece->name << ": " << box.min.transpose() << " to " << box.max.transpose());
+        CHECK(matches);
+    }
+    INFO("before " << before.min.transpose() << " to " << before.max.transpose() << ", after " << after.min.transpose()
+                   << " to " << after.max.transpose());
+    CHECK((after.min - before.min).norm() < 1e-4);
+    CHECK((after.max - before.max).norm() < 1e-4);
 }

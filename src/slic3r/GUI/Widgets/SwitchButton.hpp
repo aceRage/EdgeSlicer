@@ -24,6 +24,10 @@ public:
 
 	void SetValue(bool value) override;
 
+#ifdef __WXMSW__
+    bool MSWCommand(WXUINT param, WXWORD id) override;
+#endif
+
 	void Rescale();
 
 private:

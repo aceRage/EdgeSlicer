@@ -363,6 +363,8 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     m_button_ams_setting_press = ScalableBitmap(this, "ams_setting_press", 24);
 
     m_button_ams_setting = new wxStaticBitmap(m_button_area, wxID_ANY, m_button_ams_setting_normal.bmp(), wxDefaultPosition, wxSize(FromDIP(24), FromDIP(24)));
+    m_button_ams_setting->SetMinSize(wxSize(FromDIP(24), FromDIP(24)));
+    m_button_ams_setting->SetMaxSize(wxSize(FromDIP(24), FromDIP(24)));
     m_button_ams_setting->SetBackgroundColour(m_amswin->GetBackgroundColour());
     m_button_ams_setting->SetToolTip(_L("AMS settings"));
     m_sizer_button_area->Insert(0, m_button_ams_setting, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
@@ -660,7 +662,10 @@ void AMSControl::UpdateDual(MachineObject *obj)
         u.ref.ams_id      = kv.first;
         u.ref.type        = ams->type;
         u.ref.extruder_id = ams->nozzle;
-        u.ref.slot_count  = ams->type == AMSModel::N3S_AMS ? 1 : 4; // AMS HT has one slot, the others four
+        // AMS HT has one slot, a rack AMS (the H3C's AMS 3H) as many as it reports (nine), the others four.
+        u.ref.slot_count  = ams->type == AMSModel::N3S_AMS ? 1 : ams->is_rack() ? std::max<int>(1, int(info.cans.size())) : 4;
+        // Its slots are shown only: editing, Load / Unload and the RFID re-read are not supported there yet.
+        const bool actions = !obj->slot_actions_blocked(kv.first);
         for (const Caninfo &can : info.cans) {
             DualSlotView sv;
             sv.slot_id  = can.can_id;
@@ -668,14 +673,14 @@ void AMSControl::UpdateDual(MachineObject *obj)
             sv.colour   = can.material_colour;
             sv.cols     = can.material_cols;
             sv.state    = can.material_state;
-            sv.editable = true;
+            sv.editable = actions;
             u.slots.push_back(sv);
         }
         u.humidity_level   = info.ams_humidity;
         u.humidity_percent = info.humidity_raw;
         u.has_heater       = AmsDrying::unit_has_heater(ams->type);
         u.drying           = AmsDrying::shows_drying_icon(ams->dry, obj->is_support_remote_dry, ams->left_dry_time);
-        u.rfid_refresh     = true;
+        u.rfid_refresh     = actions;
         model.units.push_back(u);
     }
 

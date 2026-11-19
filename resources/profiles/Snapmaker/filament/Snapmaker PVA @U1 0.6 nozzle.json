@@ -49,13 +49,13 @@
     "2"
   ],
   "graphic_effect_plate_temp": [
-    "65"
+    "70"
   ],
   "graphic_effect_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "hot_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "nozzle_temperature": [
     "230"
@@ -73,10 +73,10 @@
     "7"
   ],
   "textured_plate_temp": [
-    "65"
+    "70"
   ],
   "textured_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "filament_cooling_final_speed": [
     "3.4"
@@ -119,5 +119,6 @@
   ],
   "filament_flow_support": [
     "standard"
-  ]
+  ],
+  "hot_plate_temp": ["70"]
 }

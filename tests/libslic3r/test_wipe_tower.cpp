@@ -1,16 +1,39 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <numeric>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
+
+#include "../fff_print/test_data.hpp"
+
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
+namespace fs = boost::filesystem;
 
 // A Bambu P1S project that reproduced the off-plate brim: two PLAs priming 30 and 45 mm3 in
 // separate adhesiveness categories on a 35 mm tower, 0.21 mm layers, 0.4 nozzle (0.5 mm lines),
@@ -65,8 +88,51 @@ TEST_CASE("Rib footprint extends the ribs, not the body, below the stability min
     CHECK_THAT(WipeTower::rib_footprint_side(0.f, 30.f, 8.f, 0.f, 5.f), WithinAbs(0.f, 1e-6f));
 }
 
+// calc_block_infill_gap(): on a short rectangle tower a block with ramming lays its purge rows at the ramming pitch once
+// that pitch, stretched to the stability minimum, reaches twice the ramming width (an H2D with two PLAs, 60 mm wide,
+// 40 mm tall: the generator prints 13 mm). The footprint estimate follows it.
+TEST_CASE("Footprint estimate: purge rows at the ramming pitch on a short tower with ramming", "[WipeTower][TowerDepthTable]") {
+    const float ncpw   = WipeTower::nozzle_change_perimeter_width(0.4f);
+    const float pw     = 0.5f;
+    const float nc_gap = ncpw + 0.5f * pw; // 150 % infill gap
+    const std::vector<WipeTower::PurgeEstimate> purges{ { 45.f, 100, 4.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    const float area      = 0.2f * (pw - 0.2f * float(1. - PI / 4.));
+    const float rows      = std::ceil(45.f / area / (60.f - 2.f * pw));
+    const float nc_length = 4.f * float(PI) * 1.75f * 1.75f / 4.f / (0.2f * (ncpw - 0.2f * float(1. - PI / 4.)));
+    const float rams      = std::ceil(nc_length / (60.f - ncpw - pw));
+    REQUIRE(rows == 9.f);
+    // Without a height (a rib tower): purge rows at the purge gap.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f),
+               WithinAbs(pw + rows * 0.75f + rams * nc_gap, 1e-4f));
+    // A 40 mm rectangle tower: the purge rows move to the ramming pitch.
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(purges, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(pw + rows * nc_gap + rams * nc_gap, 1e-4f));
+    // Without ramming nothing aligns.
+    const std::vector<WipeTower::PurgeEstimate> plain{ { 45.f, 100, 0.f, 1.75f }, { 45.f, 100, 0.f, 1.75f } };
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f, 0.f, 40.f),
+               WithinAbs(WipeTower::estimate_tower_blocks_depth(plain, 60.f, 0.2f, 0.4f, 1.5f), 1e-6f));
+}
+
+// Bambu Studio 2.9.1 / Orca stability table for the Type 1 tower (D4); WipeTower2 keeps its own.
+TEST_CASE("The Type 1 tower uses Bambu Studio's stability depth table", "[WipeTower][TowerDepthTable]") {
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(2.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f), WithinAbs(5.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(52.5f), WithinAbs(12.5f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(100.f), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(300.f), WithinAbs(50.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(350.f), WithinAbs(60.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-5f));
+    // WipeTower2 (Type 2): unchanged, 20 mm up to 100 mm, 40 mm from 250 mm.
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(5.f, true), WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(175.f, true), WithinAbs(30.f, 1e-4f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f, true), WithinAbs(40.f, 1e-5f));
+    // The rib footprint follows the table of its generator.
+    CHECK(WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f, true) > WipeTower::rib_footprint_side(4.f, 4.f, 8.f, 0.f, 10.f) + 5.f);
+}
+
 TEST_CASE("Brim width estimate matches each generator's loop quantization", "[WipeTower]") {
-    const float spacing = 0.5f - 0.2f * float(1. - M_PI_4);
+    const float spacing = 0.5f - 0.2f * float(1. - PI / 4.);
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, true), WithinAbs(7.f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(3.f, 0.4f, 0.2f, false), WithinAbs(7.5f * spacing, 1e-4f));
     CHECK_THAT(WipeTower::estimate_brim_real_width(0.f, 0.4f, 0.2f, true), WithinAbs(0.f, 1e-6f));
@@ -165,20 +231,81 @@ TEST_CASE("The tower keep-out zone grows by the spiral z-hop envelope", "[WipeTo
     CHECK_THAT(unscaled(compacted_wipe_tower_zone(cfg, footprint).hull.bounding_box().max.x()), WithinAbs(10., 1e-6));
 
     // A spiral lift leaves the outline at low z, so it counts as tower. The circle reaches
-    // 2 * lift / (2*pi*atan(slope)) past the outline, matching GCodeWriter: 2*2/(2*pi*atan(3)) = 0.51 mm.
+    // 2 * lift / (2*pi*atan(slope)) past the outline, matching GCodeWriter, which takes the slope in
+    // radians: 2*2/(2*pi*atan(3 degrees)) = 12.17 mm.
     cfg.z_hop.values = {2.};
     const CompactedTowerZone lifted = compacted_wipe_tower_zone(cfg, footprint);
-    CHECK_THAT(unscaled(lifted.hull.bounding_box().max.x()), WithinAbs(10.51, 0.02));
-    CHECK_THAT(unscaled(lifted.hull.bounding_box().min.y()), WithinAbs(-10.51, 0.02));
+    const double reach = 2. * 2. / (2. * M_PI * std::atan(3. * M_PI / 180.));
+    CHECK_THAT(unscaled(lifted.hull.bounding_box().max.x()), WithinAbs(10. + reach, 0.05));
+    CHECK_THAT(unscaled(lifted.hull.bounding_box().min.y()), WithinAbs(-10. - reach, 0.05));
     CHECK(diff(Polygons{footprint}, Polygons{lifted.hull}).empty());
 
     // z_hop is capped at 5 mm by the option, so a taller lift cannot widen the zone further.
     cfg.z_hop.values = {10.};
     const double capped = unscaled(compacted_wipe_tower_zone(cfg, footprint).hull.bounding_box().max.x());
-    CHECK_THAT(capped, WithinAbs(10. + 2. * 5. / (2. * M_PI * std::atan(3.)), 0.02));
+    CHECK_THAT(capped, WithinAbs(10. + 2. * 5. / (2. * M_PI * std::atan(3. * M_PI / 180.)), 0.1));
 
     // The rod sweeps the whole X axis, so its band is the tower's y span plus half the rod offset.
-    CHECK_THAT(unscaled(lifted.bbox_rod.max.y()), WithinAbs(10.51 + 10., 0.02));
+    CHECK_THAT(unscaled(lifted.bbox_rod.max.y()), WithinAbs(10. + reach + 10., 0.05));
+}
+
+// travel_slope is set in degrees; GCodeWriter takes it in radians (Extruder::travel_slope()). The
+// keep-out zone read the degrees as radians, so for the 3 degree default its spiral reach came out
+// 0.10 mm for a 0.4 mm lift instead of the 2.43 mm circle the writer draws.
+TEST_CASE("The tower keep-out zone reaches as far as the writer's spiral lift", "[WipeTower][NoSparseLayers]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(false));
+    config.set_key_value("z_hop", new ConfigOptionFloats{0.4});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0.});
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0., 0.), Vec2d(300., 0.), Vec2d(300., 300.), Vec2d(0., 300.)}));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    // The spiral the writer lifts with at (150, 150): how far from its start it reaches.
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    writer.set_position(Vec3d(150., 150., 0.2));
+    writer.set_current_position_clear(true);
+    // The lift is emitted with the next travel (here 0.05 mm, so the travel itself adds nothing).
+    std::string spiral = writer.lift(LiftType::SpiralLift);
+    spiral += writer.travel_to_xyz(Vec3d(150.05, 150., 0.2));
+    double             reach = 0.;
+    std::istringstream in(spiral);
+    std::string        line;
+    const std::regex   word("([XY])(-?[0-9]*\\.?[0-9]+)");
+    double             x = 150., y = 150.;
+    while (std::getline(in, line)) {
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it)
+            ((*it)[1].str()[0] == 'X' ? x : y) = std::atof((*it)[2].str().c_str());
+        reach = std::max(reach, std::hypot(x - 150., y - 150.));
+    }
+    // 2 * 0.4 / (2 * pi * atan(3 degrees)) = 2.434 mm across the circle.
+    INFO(spiral);
+    REQUIRE(reach > 2.);
+
+    const CompactedTowerZone zone = compacted_wipe_tower_zone(print_config, centered_square(0., 0., 20.));
+    const double zone_reach = unscaled(zone.hull.bounding_box().max.x()) - 10.;
+    INFO("writer's spiral reaches " << reach << " mm, the keep-out zone " << zone_reach << " mm");
+    CHECK(zone_reach >= reach - 0.02);
+    CHECK_THAT(zone_reach, WithinAbs(2. * 0.4 / (2. * M_PI * std::atan(3. * M_PI / 180.)), 0.02));
+
+    // Where that puts an object that stays below the nozzle cone (rise 3 < nozzle_height 5): within
+    // 3.8 mm of the grown outline (the bare nozzle tier) it may not rise above the tower at all. A
+    // gap of 5 mm to the tower wall is closer than 3.8 + 2.43 and is refused; 6.5 mm is accepted.
+    PrintConfig clearance = clearance_config();
+    clearance.z_hop.values        = {0.4};
+    clearance.travel_slope.values = {3.};
+    const CompactedTowerZone u1   = compacted_wipe_tower_zone(clearance, centered_square(0., 0., 20.));
+    // A 10 mm object centred at x leaves a gap of x - 15 to the tower.
+    CHECK_THAT(compacted_wipe_tower_clearance(clearance, u1, centered_square(20., 0., 10.), 3.).allowed_rise, WithinAbs(0., 1e-9));
+    CHECK(compacted_wipe_tower_clearance(clearance, u1, centered_square(21.5, 0., 10.), 3.).allowed_rise > 0.);
 }
 
 TEST_CASE("An object beside a compacted tower is limited by the nearest part of the toolhead", "[WipeTower][NoSparseLayers]") {
@@ -262,3 +389,1257 @@ TEST_CASE("Footprint padding covers the brim and the extrusion half width on eac
     CHECK_THAT(compacted_tower_footprint_padding(cfg, -5.), WithinAbs(2. * 0.4, 1e-9));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Snap #934: stagger wipe-tower toolchange starts (Edge-safe indices).
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Wipe tower entry stagger distributes start offsets", "[WipeTower][Stagger]")
+{
+    SECTION("disabled stagger keeps the legacy entry point")
+    {
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(false, 10, 3, 0.5f), WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("enabled stagger varies by layer and toolchange")
+    {
+        const float line_spacing = 0.5f;
+
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 0, 0, line_spacing), WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 1, 0, line_spacing), WithinAbs(7.f * line_spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 0, 1, line_spacing), WithinAbs(5.f * line_spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 17, 0, line_spacing), WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("enabled stagger spreads starts across a long cycle")
+    {
+        std::set<size_t> slots;
+        for (size_t layer_idx = 0; layer_idx < 17; ++layer_idx)
+            slots.insert(WipeTower2::toolchange_entry_stagger_slot(true, layer_idx, 0));
+
+        REQUIRE(slots.size() == 17);
+    }
+
+    SECTION("non-positive line spacing disables the offset")
+    {
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 2, 1, 0.f), WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 2, 1, -0.5f), WithinAbs(0.f, 1e-6f));
+    }
+}
+
+TEST_CASE("Edge-safe stagger offset is zero on first layer, local-Z and interface", "[WipeTower][Stagger]")
+{
+    const float spacing = 0.5f;
+    const float line_w  = 0.42f;
+    const float depth   = 20.f;
+    const float ram     = 2.f;
+    const size_t first  = 0;
+
+    SECTION("disabled, first layer, local-Z and interface all return 0")
+    {
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(false, 3, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 0, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, size_t(-1), false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, true, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        // Extra end-of-print layer: rams in the planned box or unloads at object-top (N1).
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, false, spacing, depth, ram, line_w, true),
+                     WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("index progression matches the slot cycle and is clamped to the box room")
+    {
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(7.f * spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 2, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(14.f * spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 1, false, spacing, depth, ram, line_w),
+                     WithinAbs(12.f * spacing, 1e-6f));
+        // room = 3 - 2 - 4*0.5 = -1 → clamped to 0
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, 3.f, 2.f, 0.5f),
+                     WithinAbs(0.f, 1e-6f));
+        // room = 4.5 - 2 - 4*0.42 = 0.82, slot 7 * 0.5 = 3.5 → clamped to 0.82
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, 4.5f, 2.f, line_w),
+                     WithinAbs(4.5f - 2.f - 4.f * line_w, 1e-5f));
+    }
+}
+
+TEST_CASE("Stagger option is a print preset key and defaults off", "[WipeTower][Stagger][Config]")
+{
+    CHECK_FALSE(PrintConfig().wipe_tower_stagger_toolchange_start.value);
+    const ConfigOptionDef *def = print_config_def.get("wipe_tower_stagger_toolchange_start");
+    REQUIRE(def != nullptr);
+    CHECK(def->type == coBool);
+    CHECK_FALSE(def->get_default_value<ConfigOptionBool>()->value);
+
+    const auto &options = Preset::print_options();
+    CHECK(std::find(options.begin(), options.end(), "wipe_tower_stagger_toolchange_start") != options.end());
+}
+
+namespace {
+
+const std::string &stagger_profiles_dir()
+{
+    static const std::string dir = (fs::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    return dir;
+}
+
+class DataDirGuard
+{
+public:
+    explicit DataDirGuard(const std::string &dir) : m_prev(data_dir()) { set_data_dir(dir); }
+    ~DataDirGuard() { set_data_dir(m_prev); }
+    DataDirGuard(const DataDirGuard &)            = delete;
+    DataDirGuard &operator=(const DataDirGuard &) = delete;
+
+private:
+    std::string m_prev;
+};
+
+void load_stagger_vendor(PresetBundle &library, PresetBundle &vendor_bundle, const std::string &vendor)
+{
+    const fs::path scratch = fs::temp_directory_path() / fs::unique_path("stagger_profiles_%%%%-%%%%");
+    fs::create_directories(scratch);
+    DataDirGuard guard(scratch.string());
+    library.load_vendor_configs_from_json(stagger_profiles_dir(), PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                          ForwardCompatibilitySubstitutionRule::EnableSilent);
+    vendor_bundle.load_vendor_configs_from_json(stagger_profiles_dir(), vendor, PresetBundle::LoadSystem,
+                                                ForwardCompatibilitySubstitutionRule::EnableSilent, &library);
+}
+
+bool process_resolves_stagger(PresetBundle &b, const char *process_name)
+{
+    const Preset *p = b.prints.find_preset(process_name, false);
+    REQUIRE(p != nullptr);
+    if (p->config.has("wipe_tower_stagger_toolchange_start"))
+        return p->config.opt_bool("wipe_tower_stagger_toolchange_start");
+    // Inherited from a parent that carries the key, or the PrintConfig default (false).
+    std::string parent = p->inherits();
+    while (!parent.empty()) {
+        const Preset *up = b.prints.find_preset(parent, false);
+        if (up == nullptr)
+            break;
+        if (up->config.has("wipe_tower_stagger_toolchange_start"))
+            return up->config.opt_bool("wipe_tower_stagger_toolchange_start");
+        parent = up->inherits();
+    }
+    return PrintConfig().wipe_tower_stagger_toolchange_start.value;
+}
+
+std::string without_timestamp(std::string gcode)
+{
+    const size_t at = gcode.find("; generated by ");
+    if (at != std::string::npos)
+        gcode.erase(at, gcode.find('\n', at) - at);
+    return gcode;
+}
+
+std::string moves_of(const std::string &gcode)
+{
+    std::istringstream in(without_timestamp(gcode));
+    std::string        out, line;
+    while (std::getline(in, line)) {
+        const size_t eq      = line.find(" = ");
+        bool         setting = line.rfind("; ", 0) == 0 && eq != std::string::npos;
+        for (size_t i = 2; setting && i < eq; ++i)
+            setting = std::isalnum((unsigned char) line[i]) || line[i] == '_';
+        if (!setting && line.find("label id") == std::string::npos)
+            out += line + "\n";
+    }
+    return out;
+}
+
+DynamicPrintConfig stagger_slice_config(bool stagger)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "layer_height",                       0.3 },
+        { "initial_layer_print_height",         0.3 },
+        { "wall_loops",                         1 },
+        { "sparse_infill_density",              "0%" },
+        { "bottom_shell_layers",                2 },
+        { "top_shell_layers",                   0 },
+        { "enable_support",                     false },
+        { "skirt_loops",                        0 },
+        { "enable_prime_tower",                 true },
+        { "prime_tower_width",                  30 },
+        { "prime_tower_brim_width",             3 },
+        { "wipe_tower_x",                       "140" },
+        { "wipe_tower_y",                       "140" },
+        { "wipe_tower_rotation_angle",          0 },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "wipe_tower_cone_angle",              0 },
+        { "wipe_tower_wall_gap",                true },
+        { "wipe_tower_stagger_toolchange_start", stagger },
+        { "purge_in_prime_tower",               "1" },
+        { "gcode_comments",                     true },
+        { "gcode_flavor",                       "marlin" },
+        { "layer_change_gcode",                 "G92 E0" },
+        { "single_extruder_multi_material",     "1" },
+        { "enable_filament_ramming",            "1" },
+        { "wipe_tower_no_sparse_layers",        "0" },
+        { "filament_multitool_ramming",         "0,0" },
+    });
+    return config;
+}
+
+std::string slice_stagger_project(const DynamicPrintConfig &config, Print &print)
+{
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = i == 0 ? "cubeA" : "cubeB";
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + (i == 0 ? -8. : 8.), 40., 0.));
+        object->ensure_on_bed();
+    }
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+const std::regex &g1_word()
+{
+    static const std::regex word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    return word;
+}
+
+struct G1Move
+{
+    double nx = 0, ny = 0, de = 0;
+    bool   has_e = false, has_x = false, has_y = false, is_g1 = false;
+};
+
+G1Move parse_g1(const std::string &line, double x, double y)
+{
+    G1Move            m;
+    m.nx                   = x;
+    m.ny                   = y;
+    const std::string code = line.substr(0, line.find(';'));
+    if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+        return m;
+    m.is_g1 = true;
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+        const char   axis = (*it)[1].str()[0];
+        const double v    = std::atof((*it)[2].str().c_str());
+        switch (axis) {
+        case 'X': m.nx = v; m.has_x = true; break;
+        case 'Y': m.ny = v; m.has_y = true; break;
+        case 'E': m.has_e = true; m.de = v; break;
+        default: break;
+        }
+    }
+    return m;
+}
+
+// Y-only travels after "; CP TOOLCHANGE WIPE" and before the first extrude: the stagger hop.
+// XY is tracked through the whole file so the delta is from the real pre-hop position.
+std::vector<double> stagger_hops(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
+            continue;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (y_only)
+                    out.push_back(m.ny - y);
+            }
+        }
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
+    }
+    return out;
+}
+
+size_t count_tag(const std::string &gcode, const char *tag)
+{
+    size_t n = 0, pos = 0;
+    while ((pos = gcode.find(tag, pos)) != std::string::npos) {
+        ++n;
+        pos += 1;
+    }
+    return n;
+}
+
+// Positive E summed per "; CP TOOLCHANGE WIPE" block (relative E).
+std::vector<double> wipe_block_E(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              acc     = 0;
+    auto                finish  = [&]() {
+        if (in_wipe) {
+            out.push_back(acc);
+            acc     = 0;
+            in_wipe = false;
+        }
+    };
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            finish();
+            in_wipe = true;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos))) {
+            finish();
+            continue;
+        }
+        if (!in_wipe)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            if ((*it)[1].str()[0] == 'E') {
+                const double e = std::atof((*it)[2].str().c_str());
+                if (e > 0)
+                    acc += e;
+            }
+        }
+    }
+    finish();
+    return out;
+}
+
+double wipe_one_line_E(const std::string &gcode)
+{
+    double              best = 0;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos))) {
+            in_wipe = false;
+            continue;
+        }
+        if (!in_wipe)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            if ((*it)[1].str()[0] == 'E')
+                best = std::max(best, std::atof((*it)[2].str().c_str()));
+        }
+    }
+    return best > 1e-6 ? best : 1.0;
+}
+
+// After a hop of H, the first non-extruding travel whose Y drop matches H is the wrap-around.
+std::vector<double> wipe_wrap_returns(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe  = false;
+    bool                extruded = false;
+    bool                seen_wrap = false;
+    double              hop = 0, x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe   = true;
+            extruded  = false;
+            seen_wrap = false;
+            hop       = 0;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+            in_wipe = false;
+        const G1Move m = parse_g1(line, x, y);
+        if (m.is_g1) {
+            if (in_wipe) {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (!extruded && y_only && (m.ny - y) > 1e-4)
+                    hop = m.ny - y;
+                if (extruded && !seen_wrap && !m.has_e && hop > 1e-4 && m.has_y) {
+                    const double drop = y - m.ny;
+                    if (drop > hop - 0.35 && drop < hop + 0.35) {
+                        out.push_back(m.ny - y);
+                        seen_wrap = true;
+                    }
+                }
+                if (m.has_e && std::abs(m.de) > 1e-6)
+                    extruded = true;
+            }
+            if (m.has_x) x = m.nx;
+            if (m.has_y) y = m.ny;
+        }
+    }
+    return out;
+}
+
+// Axis-aligned travel after WIPE and before the first extrude (rotation-safe).
+std::vector<double> wipe_entry_axis_hops(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
+            continue;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool x_only = m.has_x && std::abs(m.nx - x) > 1e-4 && (!m.has_y || std::abs(m.ny - y) < 1e-4);
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (x_only)
+                    out.push_back(m.nx - x);
+                else if (y_only)
+                    out.push_back(m.ny - y);
+            }
+        }
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
+    }
+    return out;
+}
+
+void check_tower_extrusions(const std::string &gcode, const Print &print, double x0, double y0)
+{
+    const auto  &wtd = print.wipe_tower_data();
+    const double b   = wtd.brim_width + 2.;
+    const double xmax = x0 + wtd.width + b;
+    const double ymax = y0 + wtd.depth + b;
+    std::istringstream in(gcode);
+    std::string        line;
+    bool               in_tower = false;
+    double             x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        if (!in_tower)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 ||
+              code.rfind("G3 ", 0) == 0))
+            continue;
+        bool has_e = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': x = v; break;
+            case 'Y': y = v; break;
+            case 'E': has_e = true; break;
+            default: break;
+            }
+        }
+        if (has_e) {
+            INFO("tower extrusion at " << x << "," << y);
+            CHECK(x > x0 - b);
+            CHECK(y > y0 - b);
+            CHECK(x < xmax);
+            CHECK(y < ymax);
+        }
+    }
+}
+
+void check_wipe_volume(const std::string &g_off, const std::string &g_on)
+{
+    const auto   e_off    = wipe_block_E(g_off);
+    const auto   e_on     = wipe_block_E(g_on);
+    const double one_line = wipe_one_line_E(g_off);
+    REQUIRE(e_off.size() == e_on.size());
+    REQUIRE(e_off.size() >= 4);
+    REQUIRE_FALSE(stagger_hops(g_on).empty());
+    size_t cap_i = 0;
+    const auto hops = stagger_hops(g_on);
+    for (size_t i = 1; i < hops.size(); ++i)
+        if (std::abs(hops[i]) > std::abs(hops[cap_i]))
+            cap_i = i;
+    INFO("cap hop index " << cap_i << " hop=" << hops[cap_i] << " one_line=" << one_line);
+    CHECK(std::abs(hops[cap_i]) > 2.0);
+    for (size_t i = 0; i < e_off.size(); ++i) {
+        INFO("wipe block " << i << " off=" << e_off[i] << " on=" << e_on[i]);
+        CHECK(e_on[i] + 1e-6 >= e_off[i] - one_line);
+    }
+}
+
+} // namespace
+
+TEST_CASE("U1 system process profiles turn stagger on; non-U1 stay off", "[WipeTower][Stagger][Profiles]")
+{
+    PresetBundle library;
+    PresetBundle snap;
+    load_stagger_vendor(library, snap, "Snapmaker");
+    CHECK(process_resolves_stagger(snap, "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"));
+    CHECK(process_resolves_stagger(snap, "0.16mm Standard @Snapmaker U1 (0.4 nozzle)"));
+    CHECK_FALSE(process_resolves_stagger(snap, "0.20 Standard @Snapmaker J1 (0.4 nozzle)"));
+    CHECK_FALSE(process_resolves_stagger(snap, "0.20 Standard @Snapmaker Artisan (0.4 nozzle)"));
+    CHECK_FALSE(DynamicPrintConfig::full_print_config().opt_bool("wipe_tower_stagger_toolchange_start"));
+}
+
+TEST_CASE("Stagger off is a no-op on non-U1 G-code; stagger on moves the wipe start", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+    CHECK(stagger_hops(g_off).empty());
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+    CHECK(moves_of(g_off) != moves_of(g_on));
+    const auto hops = stagger_hops(g_on);
+    REQUIRE(hops.size() >= 3);
+    std::set<long> hop_um;
+    for (double d : hops)
+        hop_um.insert(std::lround(d * 1000.));
+    CHECK(hop_um.size() >= 3);
+
+    // Finalize / restore-Z markers must not change with stagger.
+    CHECK(count_tag(g_off, "[restore_layer_z_before_toolchange]") ==
+          count_tag(g_on, "[restore_layer_z_before_toolchange]"));
+    CHECK(count_tag(g_off, "; CP TOOLCHANGE UNLOAD") == count_tag(g_on, "; CP TOOLCHANGE UNLOAD"));
+    CHECK(count_tag(g_off, "Travel back up to the topmost object layer.") ==
+          count_tag(g_on, "Travel back up to the topmost object layer."));
+
+    // Final purge is unload-only. An empty TCR (U1 / skip) must not be used as a stagger source;
+    // a real SEMM final purge must not pick up a Y hop.
+    for (Print *p : {&print_off, &print_on}) {
+        if (!p->wipe_tower_data().final_purge)
+            continue;
+        if (p->wipe_tower_data().final_purge->gcode.empty())
+            CHECK_FALSE(p->wipe_tower_data().final_purge_drop);
+        else
+            CHECK(stagger_hops(p->wipe_tower_data().final_purge->gcode).empty());
+    }
+
+    // Tower extrusions stay on the configured tower (140,140), not on the cubes at ~40,40.
+    check_tower_extrusions(g_on, print_on, 140., 140.);
+    check_tower_extrusions(g_off, print_off, 140., 140.);
+}
+
+TEST_CASE("Stagger wrap-around keeps wipe volume including the cap slot", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+
+    check_wipe_volume(g_off, g_on);
+    REQUIRE_FALSE(wipe_wrap_returns(g_on).empty());
+    CHECK(wipe_wrap_returns(g_off).empty());
+}
+
+TEST_CASE("Stagger keeps tower depth and wall-gap alignment", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+
+    CHECK_THAT(print_on.wipe_tower_data().depth, WithinAbs(print_off.wipe_tower_data().depth, 0.05f));
+    CHECK_THAT(print_on.wipe_tower_data().width, WithinAbs(print_off.wipe_tower_data().width, 0.05f));
+    CHECK(count_tag(g_off, "; CP TOOLCHANGE WIPE") == count_tag(g_on, "; CP TOOLCHANGE WIPE"));
+
+    const auto hops = stagger_hops(g_on);
+    REQUIRE(hops.size() >= 3);
+    // Reversed tower layers flip world Y, so the hop sign follows the layer.
+    for (double h : hops) {
+        CHECK(std::abs(h) > 0.05);
+        CHECK(std::abs(h) < print_on.wipe_tower_data().depth);
+    }
+    // Slot cycle: hops share a line-spacing quantum (GCD of micrometre hops).
+    long hop_gcd = 0;
+    for (double h : hops) {
+        const long um = std::lround(std::abs(h) * 1000.);
+        hop_gcd       = hop_gcd == 0 ? um : std::gcd(hop_gcd, um);
+    }
+    REQUIRE(hop_gcd >= 50);
+    for (double h : hops)
+        CHECK(std::lround(std::abs(h) * 1000.) % hop_gcd == 0);
+}
+
+TEST_CASE("Stagger wrap-around works on a rotated tower", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    cfg_off.set_deserialize_strict({ { "wipe_tower_rotation_angle", 90 } });
+    const std::string g_off = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    cfg_on.set_deserialize_strict({ { "wipe_tower_rotation_angle", 90 } });
+    const std::string g_on = slice_stagger_project(cfg_on, print_on);
+
+    const auto hops_off = wipe_entry_axis_hops(g_off);
+    const auto hops_on  = wipe_entry_axis_hops(g_on);
+    REQUIRE(hops_on.size() > hops_off.size());
+    REQUIRE(hops_on.size() >= 3);
+    const auto   e_off    = wipe_block_E(g_off);
+    const auto   e_on     = wipe_block_E(g_on);
+    const double one_line = wipe_one_line_E(g_off);
+    REQUIRE(e_off.size() == e_on.size());
+    REQUIRE(e_off.size() >= 3);
+    for (size_t i = 0; i < e_off.size(); ++i) {
+        INFO("rotated wipe block " << i << " off=" << e_off[i] << " on=" << e_on[i]);
+        CHECK(e_on[i] + 1e-6 >= e_off[i] - one_line);
+    }
+    CHECK_THAT(print_on.wipe_tower_data().depth, WithinAbs(print_off.wipe_tower_data().depth, 0.05f));
+}
+
+TEST_CASE("Stagger off is a no-op against the #184 path, including near-edge SEMM", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_a;
+    DynamicPrintConfig cfg_a = stagger_slice_config(false);
+    const std::string  g_a   = slice_stagger_project(cfg_a, print_a);
+
+    Print              print_b;
+    DynamicPrintConfig cfg_b = stagger_slice_config(false);
+    const std::string  g_b   = slice_stagger_project(cfg_b, print_b);
+
+    REQUIRE(moves_of(g_a) == moves_of(g_b));
+    CHECK(stagger_hops(g_a).empty());
+    CHECK(wipe_wrap_returns(g_a).empty());
+    CHECK(wipe_entry_axis_hops(g_a).empty());
+
+    // Near-edge MK4-like SEMM layout: tower against the far X of a 250x210 bed.
+    // Stagger-off must keep the unclamped ironing path (clamps are gated on stagger-on).
+    Print              print_edge;
+    DynamicPrintConfig cfg_edge = stagger_slice_config(false);
+    cfg_edge.option<ConfigOptionPoints>("printable_area")->values = {
+        Vec2d(0., 0.), Vec2d(250., 0.), Vec2d(250., 210.), Vec2d(0., 210.)
+    };
+    cfg_edge.set_deserialize_strict({
+        { "wipe_tower_x",          "215" },
+        { "wipe_tower_y",          "10" },
+        { "prime_tower_width",     30 },
+        { "prime_tower_brim_width", 3 },
+    });
+    const std::string g_edge = slice_stagger_project(cfg_edge, print_edge);
+    CHECK(stagger_hops(g_edge).empty());
+    CHECK(wipe_wrap_returns(g_edge).empty());
+    CHECK(count_tag(g_edge, "; CP TOOLCHANGE WIPE") >= 3);
+    check_tower_extrusions(g_edge, print_edge, 215., 10.);
+}
+
+
+// Orca #12491: toolchange_Wipe() advances the first-layer purge rows by the extra flow alone, and every
+// later layer by the extra spacing. The depth reserved for a first-layer wipe has to use the same factor.
+namespace {
+
+// Depth of a tower planned from the given (z, old tool, new tool, wipe volume) steps at a wipe_tower_extra_spacing.
+// Ramming is off: its depth scales with the spacing on every layer, which is not what is under test.
+float planned_tower_depth(double extra_spacing, const std::vector<std::tuple<float, unsigned, unsigned, float>> &steps)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 3.));
+    object->config.set("extruder", 1);
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = stagger_slice_config(false);
+    config.set_deserialize_strict({ { "wipe_tower_extra_spacing", extra_spacing }, { "wipe_tower_extra_flow", 100 },
+                                    { "enable_filament_ramming", "0" } });
+    Print print;
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+
+    const std::vector<std::vector<float>> flush{ { 0.f, 150.f }, { 150.f, 0.f } };
+    WipeTower2 tower(print.config(), print.default_region_config(), 0, Vec3d::Zero(), flush, 0);
+    tower.set_extruder(0, print.config());
+    tower.set_extruder(1, print.config());
+    for (const auto &[z, from, to, volume] : steps)
+        tower.plan_toolchange(z, 0.3f, from, to, volume);
+    std::vector<std::vector<WipeTower::ToolChangeResult>> result, local_z_result;
+    tower.generate(result, local_z_result);
+    return tower.get_depth();
+}
+
+} // namespace
+
+TEST_CASE("A first-layer wipe reserves the depth it consumes, whatever the extra spacing", "[WipeTower][FirstLayerSpacing]")
+{
+    const std::vector<std::tuple<float, unsigned, unsigned, float>> first_layer_only{ { 0.3f, 0, 1, 150.f } };
+    const float at_100 = planned_tower_depth(100., first_layer_only);
+    const float at_150 = planned_tower_depth(150., first_layer_only);
+    REQUIRE(at_100 > 5.f);
+    CHECK_THAT(at_150, WithinAbs(at_100, 1e-3f));
+}
+
+TEST_CASE("Layers above the first still reserve the extra spacing", "[WipeTower][FirstLayerSpacing]")
+{
+    const std::vector<std::tuple<float, unsigned, unsigned, float>> two_layers{ { 0.3f, 0, 1, 150.f }, { 0.6f, 1, 0, 150.f } };
+    const float at_100 = planned_tower_depth(100., two_layers);
+    const float at_150 = planned_tower_depth(150., two_layers);
+    REQUIRE(at_100 > 5.f);
+    CHECK(at_150 > at_100 + 3.f);
+}
+
+TEST_CASE("The prime tower rotation angle is a print setting, not a project setting", "[WipeTower][Config]")
+{
+    // Orca #15227: a project copy of the angle is applied over the print preset's value, so editing the
+    // setting changed nothing. The position stays in the project config.
+    PresetBundle bundle;
+    CHECK_FALSE(bundle.project_config.has("wipe_tower_rotation_angle"));
+    CHECK(bundle.project_config.has("wipe_tower_x"));
+    CHECK(bundle.project_config.has("wipe_tower_y"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Prime tower rotation (Process field + Rotate tool): config, footprint and generated geometry.
+
+TEST_CASE("The prime tower rotation angle round-trips through the config text form", "[WipeTower][WipeTowerRotation][Config]")
+{
+    DynamicPrintConfig src = DynamicPrintConfig::full_print_config();
+    src.set_deserialize_strict({ { "wipe_tower_rotation_angle", "-37.25" } });
+    const std::string text = src.opt_serialize("wipe_tower_rotation_angle");
+    DynamicPrintConfig dst = DynamicPrintConfig::full_print_config();
+    dst.set_deserialize_strict({ { "wipe_tower_rotation_angle", text } });
+    CHECK(dst.opt_float("wipe_tower_rotation_angle") == Approx(-37.25));
+    // The Process field accepts a full turn either way.
+    const ConfigOptionDef *def = print_config_def.get("wipe_tower_rotation_angle");
+    REQUIRE(def != nullptr);
+    CHECK(def->min == Approx(-360.));
+    CHECK(def->max == Approx(360.));
+}
+
+TEST_CASE("Only WipeTower2 towers rotate", "[WipeTower][WipeTowerRotation]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_deserialize_strict({ { "wipe_tower_rotation_angle", 45 } });
+    cfg.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    CHECK(wipe_tower_rotation_deg(cfg) == Approx(45.));
+    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab X1 Carbon"));
+    CHECK(wipe_tower_rotation_deg(cfg) == 0.);
+}
+
+TEST_CASE("The rotated tower extents turn about the anchor corner", "[WipeTower][WipeTowerRotation]")
+{
+    const double w = 40., d = 20., m = 2.;
+    SECTION("0 degrees is the plain box")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 0.);
+        CHECK(box.min.x() == -m);
+        CHECK(box.min.y() == -m);
+        CHECK(box.max.x() == w + m);
+        CHECK(box.max.y() == d + m);
+    }
+    SECTION("90 degrees swings the width onto +Y and the depth onto -X")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 90.);
+        CHECK_THAT(box.min.x(), WithinAbs(-(d + m), 1e-9));
+        CHECK_THAT(box.max.x(), WithinAbs(m, 1e-9));
+        CHECK_THAT(box.min.y(), WithinAbs(-m, 1e-9));
+        CHECK_THAT(box.max.y(), WithinAbs(w + m, 1e-9));
+    }
+    SECTION("45 degrees spans the diagonals")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 45.);
+        const double       s   = std::sqrt(0.5);
+        CHECK_THAT(box.max.x(), WithinAbs(s * ((w + m) - (-m)), 1e-9));    // corner (w+m, -m)
+        CHECK_THAT(box.min.x(), WithinAbs(s * ((-m) - (d + m)), 1e-9));    // corner (-m, d+m)
+        CHECK_THAT(box.max.y(), WithinAbs(s * ((w + m) + (d + m)), 1e-9)); // corner (w+m, d+m)
+        CHECK_THAT(box.min.y(), WithinAbs(s * ((-m) + (-m)), 1e-9));       // corner (-m, -m)
+    }
+}
+
+TEST_CASE("The placed footprint Print::validate checks follows the rotation", "[WipeTower][WipeTowerRotation]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_deserialize_strict({ { "wipe_tower_wall_type", "rectangle" }, { "wipe_tower_rotation_angle", 90 } });
+    WipeTowerFootprint fp;
+    fp.width      = 40.;
+    fp.depth      = 20.;
+    fp.height     = 10.;
+    fp.brim_width = 2.;
+    const BoundingBox  placed = get_extents(placed_wipe_tower_footprint(cfg, fp, Vec2d(100., 100.)));
+    const BoundingBoxf ext    = wipe_tower_rotated_extents(fp.width, fp.depth, fp.brim_width, 90.);
+    CHECK_THAT(unscale<double>(placed.min.x()), WithinAbs(100. + ext.min.x(), 0.05));
+    CHECK_THAT(unscale<double>(placed.max.x()), WithinAbs(100. + ext.max.x(), 0.05));
+    CHECK_THAT(unscale<double>(placed.min.y()), WithinAbs(100. + ext.min.y(), 0.05));
+    CHECK_THAT(unscale<double>(placed.max.y()), WithinAbs(100. + ext.max.y(), 0.05));
+
+    // A Bambu Lab printer's tower stays unrotated whatever the setting says.
+    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab X1 Carbon"));
+    const BoundingBox bbl = get_extents(placed_wipe_tower_footprint(cfg, fp, Vec2d(100., 100.)));
+    CHECK_THAT(unscale<double>(bbl.min.x()), WithinAbs(98., 0.05));
+    CHECK_THAT(unscale<double>(bbl.max.x()), WithinAbs(142., 0.05));
+}
+
+namespace {
+
+// Every extruding move between WIPE_TOWER_START and WIPE_TOWER_END.
+std::vector<Vec2d> tower_extrusion_points(const std::string &gcode)
+{
+    std::vector<Vec2d> out;
+    std::istringstream in(gcode);
+    std::string        line;
+    bool               in_tower = false;
+    double             x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        // Track the position everywhere, so an extrusion that starts a block where the move
+        // into the tower happened outside it is placed right.
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        bool has_e = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            if (axis == 'X') x = v;
+            else if (axis == 'Y') y = v;
+            else if (axis == 'E' && v > 0.) has_e = true;
+        }
+        if (in_tower && has_e)
+            out.emplace_back(x, y);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A rotated WipeTower2 tower prints inside its rotated footprint", "[WipeTower][WipeTowerRotation][GCode]")
+{
+    const double angle = GENERATE(0., 45., 90.);
+    CAPTURE(angle);
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "wipe_tower_rotation_angle", angle } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+    CHECK(print.config().wipe_tower_rotation_angle.value == Approx(angle));
+
+    const auto              &wtd   = print.wipe_tower_data();
+    const double             slack = wtd.brim_width + 2.; // as check_tower_extrusions()
+    const Vec2d              anchor(140., 140.);
+    const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));
+    const std::vector<Vec2d> pts = tower_extrusion_points(gcode);
+    REQUIRE(pts.size() > 20);
+    BoundingBoxf local;
+    for (const Vec2d &p : pts)
+        local.merge(Vec2d(unturn * (p - anchor)));
+    // Turned back about the anchor, every tower extrusion lies in the unrotated box, which it fills.
+    CHECK(local.min.x() > -slack);
+    CHECK(local.min.y() > -slack);
+    CHECK(local.max.x() < wtd.width + slack);
+    CHECK(local.max.y() < wtd.depth + slack);
+    CHECK(local.size().x() > wtd.width - 2.);
+
+    // The first-layer corners (skirt, arrange and the post-slice bed check use them) turn too.
+    BoundingBoxf corners;
+    for (const Point &c : print.first_layer_wipe_tower_corners())
+        corners.merge(Vec2d(unscale<double>(c.x()), unscale<double>(c.y())));
+    const BoundingBoxf ext = wipe_tower_rotated_extents(print.config().prime_tower_width.value, wtd.depth, wtd.brim_width, angle);
+    CHECK_THAT(corners.min.x(), WithinAbs(anchor.x() + ext.min.x(), 0.1));
+    CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
+    CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
+    CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
+}
+
+// Orca #15035: a WipeTower2 rib tower is shifted by its rib offset, so the ribs, which reach past
+// the body box, start at the tower position instead of hanging off its left and front edges, and it
+// is placed and checked by the box around its first-layer wall (the square the pre-slice estimate
+// reserves), like the Type1 rib tower.
+TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower position", "[WipeTower][RibOffset][GCode]")
+{
+    const double angle = GENERATE(0., 90.);
+    CAPTURE(angle);
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "wipe_tower_wall_type", "rib" },
+                                 { "wipe_tower_rib_width", 8 },
+                                 { "wipe_tower_extra_rib_length", 0 },
+                                 { "wipe_tower_fillet_wall", true },
+                                 { "wipe_tower_rotation_angle", angle } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+
+    const auto  &wtd  = print.wipe_tower_data();
+    const double brim = wtd.brim_width;
+    // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
+    // to it, so the footprint is at least that deep.
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f, true) - 0.01);
+
+    const Vec2d              anchor(140., 140.);
+    const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));
+    const std::vector<Vec2d> pts = tower_extrusion_points(gcode);
+    REQUIRE(pts.size() > 20);
+    BoundingBoxf local;
+    for (const Vec2d &p : pts)
+        local.merge(Vec2d(unturn * (p - anchor)));
+    // The first layer's brim runs around the rib wall, whose box starts at the tower position:
+    // without the shift the ribs reached about 2.8 mm (half the 8 mm rib, diagonally) further out.
+    const double slack = 0.35; // a line's half width, plus the rounding of the G-code
+    CHECK(local.min.x() > -brim - slack);
+    CHECK(local.min.y() > -brim - slack);
+    CHECK(local.min.x() < -brim + slack);
+    CHECK(local.min.y() < -brim + slack);
+    CHECK(local.max.x() < wtd.width + brim + slack);
+    CHECK(local.max.y() < wtd.depth + brim + slack);
+    CHECK(local.max.x() > wtd.width + brim - slack);
+
+    // The post-slice footprint (bed check, timelapse keep-out, skirt) is that ribbed outline.
+    REQUIRE(wtd.wipe_tower_mesh_data.has_value());
+    const BoundingBox bottom = get_extents(wtd.wipe_tower_mesh_data->bottom);
+    CHECK_THAT(unscaled(bottom.min.x()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.min.y()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.x()), WithinAbs(wtd.width + brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.y()), WithinAbs(wtd.depth + brim, 0.05));
+    BoundingBoxf corners;
+    for (const Point &c : print.first_layer_wipe_tower_corners())
+        corners.merge(Vec2d(unscale<double>(c.x()), unscale<double>(c.y())));
+    const BoundingBoxf ext = wipe_tower_rotated_extents(wtd.width, wtd.depth, brim, angle);
+    CHECK_THAT(corners.min.x(), WithinAbs(anchor.x() + ext.min.x(), 0.1));
+    CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
+    CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
+    CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
+}
+
+TEST_CASE("A rectangle WipeTower2 tower is not shifted", "[WipeTower][RibOffset][GCode]")
+{
+    Print              print;
+    const std::string  gcode = slice_stagger_project(stagger_slice_config(false), print);
+    const auto        &wtd   = print.wipe_tower_data();
+    BoundingBoxf       local;
+    for (const Vec2d &p : tower_extrusion_points(gcode))
+        local.merge(Vec2d(p - Vec2d(140., 140.)));
+    CHECK(local.min.x() > -wtd.brim_width - 0.35);
+    CHECK(local.min.x() < -wtd.brim_width + 0.35);
+    CHECK(wtd.width == Approx(30.)); // the body, prime_tower_width
+}
+
+// Orca #11831: prime_tower_brim_width -1 ("auto", shipped by the FlashForge Creator 5 and some Qidi
+// processes) gives a WipeTower2 tower the brim the plate preview and the clearance checks reserve
+// for it, sized from the tower height. It used to print no brim at all.
+TEST_CASE("A WipeTower2 tower with the auto brim prints a brim", "[WipeTower][AutoBrim][GCode]")
+{
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", -1 } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+    const auto       &wtd   = print.wipe_tower_data();
+
+    CHECK(gcode.find("; WIPE_TOWER_BRIM_START") != std::string::npos);
+    // A 6 mm tall tower: 6 / 100 * 8 = 0.48 mm of auto brim, laid as one loop of about 0.44 mm.
+    const float auto_brim = WipeTower::get_auto_brim_by_height(float(wtd.height));
+    CHECK(auto_brim > 0.4f);
+    CHECK(auto_brim < 0.6f);
+    CHECK(wtd.brim_width > 0.3);
+    CHECK(wtd.brim_width < 0.6);
+
+    // An explicit 0 still means no brim.
+    Print              print_none;
+    DynamicPrintConfig cfg_none = stagger_slice_config(false);
+    cfg_none.set_deserialize_strict({ { "prime_tower_brim_width", 0 } });
+    const std::string gcode_none = slice_stagger_project(cfg_none, print_none);
+    CHECK(gcode_none.find("; WIPE_TOWER_BRIM_START") == std::string::npos);
+    CHECK(print_none.wipe_tower_data().brim_width == Approx(0.));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Orca #15841 "Combine sparse layers": folding a run of toolchange-free layers into one thicker
+// tower layer.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Sparse layers are combined only when every layer is still the tower's to place", "[WipeTower][CombineSparseLayers]") {
+    PrintConfig cfg;
+    cfg.timelapse_type.value              = TimelapseType::tlTraditional;
+    cfg.wipe_tower_no_sparse_layers.value = false;
+
+    cfg.wipe_tower_sparse_layers_combination.value = false;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+    cfg.wipe_tower_sparse_layers_combination.value = true;
+    CHECK(wipe_tower_sparse_layers_combined(cfg));
+
+    // Dropping the sparse layers outright leaves nothing to combine.
+    cfg.wipe_tower_no_sparse_layers.value = true;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+    CHECK(wipe_tower_sparse_layers_skipped(cfg));
+    cfg.wipe_tower_no_sparse_layers.value = false;
+
+    // Smooth timelapse parks the nozzle on the tower every layer, so no layer may be folded away.
+    // (Edge has no wrapping detection option, upstream's other case.)
+    cfg.timelapse_type.value = TimelapseType::tlSmooth;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+}
+
+TEST_CASE("Combine sparse layers is a print preset key and defaults off", "[WipeTower][CombineSparseLayers][Config]") {
+    CHECK_FALSE(PrintConfig().wipe_tower_sparse_layers_combination.value);
+    const std::vector<std::string> &keys = Preset::print_options();
+    CHECK(std::find(keys.begin(), keys.end(), "wipe_tower_sparse_layers_combination") != keys.end());
+}
+
+TEST_CASE("A layer folded into a later one is marked on the results the emitter reads", "[WipeTower][CombineSparseLayers]") {
+    WipeTower::ToolChangeResult folded = make_tcr(1, 1, 0.2f);
+    folded.combined_away               = true;
+    CHECK(wipe_tower_layer_is_combined_away({folded}));
+    CHECK_FALSE(wipe_tower_layer_is_combined_away({make_tcr(1, 1, 0.2f)}));
+    CHECK_FALSE(wipe_tower_layer_is_combined_away({}));
+}
+
+TEST_CASE("A run of sparse layers prints once, on its last layer, at the height it covers", "[WipeTower][CombineSparseLayers]") {
+    // Eight 0.1 mm layers on a 0.3 mm cap: a toolchange on the first and the last, sparse between.
+    std::vector<float>       heights(8, 0.1f);
+    const std::vector<char>  sparse{0, 1, 1, 1, 1, 1, 1, 0};
+    const std::vector<float> caps(8, 0.3f);
+
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, sparse, caps, 0);
+    REQUIRE(combined.size() == heights.size());
+    // Three layers fill the cap exactly: the run flushes on layers 3 and 6, the two below each go.
+    CHECK(combined == std::vector<char>{0, 1, 1, 0, 1, 1, 0, 0});
+    CHECK_THAT(heights[3], WithinAbs(0.3f, 1e-5f));
+    CHECK_THAT(heights[6], WithinAbs(0.3f, 1e-5f));
+    // Layers that print keep the object covered: nothing is lost and nothing is printed twice.
+    float printed = 0.f;
+    for (size_t i = 0; i < heights.size(); ++i)
+        if (! combined[i])
+            printed += heights[i];
+    CHECK_THAT(printed, WithinAbs(0.8f, 1e-5f));
+    // A toolchange has to purge at its own z, so those layers are left exactly as planned.
+    CHECK_THAT(heights[0], WithinAbs(0.1f, 1e-5f));
+    CHECK_THAT(heights[7], WithinAbs(0.1f, 1e-5f));
+}
+
+TEST_CASE("The maximum layer height of the nozzle that prints the run caps the merge", "[WipeTower][CombineSparseLayers]") {
+    // The cap that counts belongs to the layer that prints the run. Five 0.1 mm layers, sparse above
+    // the first, layer 3's nozzle taking only 0.15.
+    std::vector<float> heights(5, 0.1f);
+    std::vector<float> caps(5, 0.3f);
+    caps[3]                          = 0.15f;
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, {0, 1, 1, 1, 1}, caps, 0);
+    // Layer 2 cannot hand its 0.2 mm on to layer 3, so it prints there and a fresh run starts above.
+    CHECK(combined == std::vector<char>{0, 1, 0, 1, 0});
+    CHECK_THAT(heights[2], WithinAbs(0.2f, 1e-5f));
+    CHECK_THAT(heights[4], WithinAbs(0.2f, 1e-5f));
+
+    // A single layer already past the cap is printed as planned rather than shrunk.
+    std::vector<float>      tall{0.2f, 0.4f, 0.4f};
+    const std::vector<char> tall_combined = combine_sparse_wipe_tower_layers(tall, {0, 1, 1}, {0.3f, 0.3f, 0.3f}, 0);
+    CHECK(tall_combined == std::vector<char>{0, 0, 0});
+    CHECK_THAT(tall[1], WithinAbs(0.4f, 1e-5f));
+}
+
+TEST_CASE("The tower's first layer is never folded away", "[WipeTower][CombineSparseLayers]") {
+    // It carries the brim and has to sit on the bed, however little it purges.
+    std::vector<float>      heights(4, 0.1f);
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, {1, 1, 1, 1}, std::vector<float>(4, 0.5f), 0);
+    CHECK(combined.front() == 0);
+    CHECK_THAT(heights.front(), WithinAbs(0.1f, 1e-5f));
+    // Everything above it merges into the top layer, which the cap still fits.
+    CHECK(combined == std::vector<char>{0, 1, 1, 0});
+    CHECK_THAT(heights.back(), WithinAbs(0.3f, 1e-5f));
+    // Edge: no first layer marked (size_t(-1)) means nothing is combined.
+    std::vector<float> unmarked(4, 0.1f);
+    CHECK(combine_sparse_wipe_tower_layers(unmarked, {1, 1, 1, 1}, std::vector<float>(4, 0.5f), size_t(-1)) == std::vector<char>(4, 0));
+}
+
+TEST_CASE("Edge: the combination cap follows the filament's nozzle", "[WipeTower][CombineSparseLayers]") {
+    PrintConfig cfg;
+    cfg.nozzle_diameter.values  = {0.4, 0.6};
+    cfg.max_layer_height.values = {0., 0.5};
+    cfg.filament_diameter.values = {1.75, 1.75};
+    // Two filaments on two nozzles (a toolchanger): filament i prints with nozzle i. 0 = 3/4 nozzle.
+    CHECK_THAT(WipeTower::filament_max_layer_height(cfg, 0), WithinAbs(0.3f, 1e-5f));
+    CHECK_THAT(WipeTower::filament_max_layer_height(cfg, 1), WithinAbs(0.5f, 1e-5f));
+}
+
+namespace {
+
+// One 10 mm cube walled in filament 1 with its solid shells in filament 2: the tower changes tools on
+// the two bottom and three top shell layers only, so every layer between is a toolchange-free run
+// "Combine sparse layers" folds. WipeTower2 (not a Bambu Lab printer), single nozzle.
+DynamicPrintConfig sparse_run_config(double layer_height, const char *max_layer_height, bool combine)
+{
+    DynamicPrintConfig config = stagger_slice_config(false);
+    config.set_deserialize_strict({ { "layer_height",                         layer_height },
+                                    { "initial_layer_print_height",           layer_height },
+                                    { "min_layer_height",                     "0.05,0.05" },
+                                    { "max_layer_height",                     std::string(max_layer_height) + "," + max_layer_height },
+                                    { "bottom_shell_layers",                  2 },
+                                    { "top_shell_layers",                     3 },
+                                    { "wipe_tower_sparse_layers_combination", combine } });
+    return config;
+}
+
+struct SparseRunResult
+{
+    size_t      planned = 0, sparse = 0, folded = 0;
+    float       tallest_printed = 0.f, printed_height = 0.f;
+    std::string gcode;
+};
+
+SparseRunResult slice_sparse_run(const DynamicPrintConfig &config)
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->config.set("extruder", 1);
+    object->config.set("solid_infill_filament", 2);
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+
+    Print print;
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    SparseRunResult r;
+    r.gcode = Test::gcode(print);
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes) {
+        if (layer.empty())
+            continue;
+        ++r.planned;
+        if (wipe_tower_layer_is_sparse(layer))
+            ++r.sparse;
+        if (wipe_tower_layer_is_combined_away(layer)) {
+            ++r.folded;
+        } else {
+            r.tallest_printed = std::max(r.tallest_printed, layer.front().layer_height);
+            r.printed_height += layer.front().layer_height;
+        }
+    }
+    return r;
+}
+
+// How often the G-code declares `height` in the tag the processor reads. The dialect is a global the
+// exporter sets from the printer, so this is only correct after a slice.
+size_t count_height_tags(const std::string &gcode, const char *height)
+{
+    const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + height + "\n";
+    size_t            n   = 0;
+    for (size_t p = gcode.find(tag); p != std::string::npos; p = gcode.find(tag, p + 1))
+        ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Combining sparse layers folds a run into whole layers the nozzle can lay down", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // 0.1 mm layers under a 0.32 mm cap: three fit (0.3), a fourth does not, so a run prints once
+    // every three layers at 0.3 mm.
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.1, "0.32", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.1, "0.32", true));
+
+    REQUIRE(plain.planned == combined.planned); // the plan still has one layer per object layer
+    REQUIRE(plain.sparse > 10);
+    CHECK(plain.folded == 0);
+    CHECK_THAT(plain.tallest_printed, WithinAbs(0.1f, 1e-4f));
+
+    CHECK(combined.folded > 0);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.3f, 1e-4f));
+    // Two of every three sparse layers fold away, leaving the toolchange layers untouched.
+    CHECK(combined.folded <= plain.sparse);
+    CHECK(combined.folded >= plain.sparse / 2);
+    // What folds away comes back as height on the layer that prints the run: no gap, nothing twice.
+    CHECK_THAT(combined.printed_height, WithinAbs(plain.printed_height, 1e-3f));
+    // Fewer tower layers reach the G-code.
+    CHECK(combined.gcode.size() < plain.gcode.size());
+}
+
+TEST_CASE("A run too thin to reach the nozzle's layer height is left alone", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // Only whole layers merge, so two 0.2 mm layers (0.4) do not fit a 0.32 mm maximum and the tower
+    // prints as if the option were off: the G-code is the same apart from the setting itself.
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.2, "0.32", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.2, "0.32", true));
+
+    REQUIRE(plain.sparse > 10);
+    CHECK(combined.folded == 0);
+    CHECK(combined.planned == plain.planned);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.2f, 1e-4f));
+    CHECK(moves_of(combined.gcode) == moves_of(plain.gcode));
+}
+
+TEST_CASE("A merged tower layer declares its own height to the G-code processor", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // 0.2 mm layers under a 0.42 mm maximum merge in pairs; every layer that prints a merged run has
+    // to say so. (The plain slice already declares 0.4 once outside the run, e.g. the final purge.)
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.2, "0.42", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.2, "0.42", true));
+
+    REQUIRE(combined.folded > 0);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.4f, 1e-4f));
+    CHECK(count_height_tags(combined.gcode, "0.4") >= count_height_tags(plain.gcode, "0.4") + combined.folded);
+}
+
+// OD16 review L1: only a height tag ahead of the first extrusion covers a tower block. The Type1 writer
+// switches to bridge flow mid-block on a narrowing tower and tags that, which must not count.
+TEST_CASE("A tower block declares its height only with a tag before its first extrusion", "[WipeTower][CombineSparseLayers]")
+{
+    const std::string tag = ";HEIGHT:";
+    // The WipeTower2 writer's header: tag first.
+    CHECK(wipe_tower_gcode_declares_height_first(";HEIGHT:0.3\n;TYPE:Prime tower\nG1 X10 Y10 E0.5\n", tag));
+    // Travels, retractions and comments before the tag do not end the search.
+    CHECK(wipe_tower_gcode_declares_height_first("G1 X5 Y5 F7200\nG1 E-0.8 F2100\n; CP TOOLCHANGE START\n;HEIGHT:0.3\nG1 X10 E0.4\n", tag));
+    // A tag only after an extrusion (the bridge-flow switch) does not count.
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\nG1 X10 Y5 E0.42\n;HEIGHT:0.200000\nG1 X10 Y10 E0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G3 X1 Y1 I1 J0 E0.2\n;HEIGHT:0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("", tag));
+}
+
+// OD16 review L2: the brim chamfer counts printed layers, so a folded-away layer does not use up a step.
+TEST_CASE("The brim chamfer steps once per printed tower layer", "[WipeTower][CombineSparseLayers]")
+{
+    struct Layer { bool combined_away; };
+    // First layer 0; layers 2, 3 and 5 folded away.
+    const std::vector<Layer> plan{ {false}, {false}, {true}, {true}, {false}, {true}, {false} };
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 0) == 0);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 1) == 1);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 4) == 2);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 6) == 3);
+    // Below the first layer the distance stays negative, as before.
+    CHECK(wipe_tower_printed_layer_distance(plan, 4, 1) == -3);
+    // Nothing folded: the plain index difference.
+    const std::vector<Layer> plain(7, Layer{ false });
+    CHECK(wipe_tower_printed_layer_distance(plain, 1, 6) == 5);
+}

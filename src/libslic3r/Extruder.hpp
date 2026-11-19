@@ -31,7 +31,8 @@ public:
 
     double extrude(double dE);
     double retract(double length, double restart_extra);
-    double unretract();
+    // extra: added to a non-zero unretract (Bambu Studio's extra_retract), counted as extruded.
+    double unretract(double extra = 0.);
     double E() const { return m_share_extruder ? m_share_E : m_E; }
     void   reset_E() { m_E = 0.; m_share_E = 0.; }
     // e_per_mm is extrusion_per_mm = geometric volume * (filament flow ratio / cross-sectional area)  [Doesn't account for print_flow_ratio, or modifiers like bridge flow ratio etc.]
@@ -64,6 +65,8 @@ public:
     double filament_cost() const;
     double filament_flow_ratio() const;
     double retract_before_wipe() const;
+    // Orca:
+    double retract_after_wipe() const;
     double retraction_length() const;
     double retract_lift() const;
     int    retract_speed() const;

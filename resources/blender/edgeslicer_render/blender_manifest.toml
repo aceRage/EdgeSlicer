@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "edgeslicer_render"
+version = "1.1.2"
+name = "EdgeSlicer Render"
+tagline = "Render EdgeSlicer Showcase scenes in Cycles"
+maintainer = "EdgeSlicer"
+type = "add-on"
+website = "https://github.com/aceRage/EdgeSlicer"
+tags = ["Import-Export", "Render"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Read EdgeSlicer packages, write renders beside them"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc"]

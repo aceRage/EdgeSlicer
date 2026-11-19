@@ -42,7 +42,7 @@ bool FlashAir::test(wxString &msg) const
 	bool res = false;
 	auto url = make_url("command.cgi", "op", "118");
 
-	BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get upload enabled at: %2%") % name % url;
+	BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get upload enabled at: %2%") % name % Http::url_for_log(url);
 
 	auto http = Http::get(std::move(url));
 	apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
@@ -104,8 +104,8 @@ bool FlashAir::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
 	BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% at %3% / %4%, filename: %5%")
 		% name
 		% upload_data.source_path
-		% urlPrepare
-		% urlUpload
+		% Http::url_for_log(urlPrepare)
+		% Http::url_for_log(urlUpload)
 		% upload_filename.string();
 
 	// set filetime for upload and make card writeprotect to prevent filesystem damage

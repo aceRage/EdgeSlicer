@@ -163,3 +163,40 @@ TEST_CASE("Edit session arguments", "[BlenderLauncher]")
     CHECK(edit_session_args({ "blender" }, session) ==
           std::vector<std::string>{ "blender", "--python", session.script, "--", "--edgeslicer-in", session.input, "--edgeslicer-out", session.output });
 }
+
+TEST_CASE("Showcase: the Blender version from --version and from the install folder", "[BlenderLauncher][Showcase]")
+{
+    int major = 0, minor = 0;
+    CHECK(parse_version_output("Blender 4.2.3 LTS\n\tbuild date: 2024-10-15\n", major, minor));
+    CHECK(major == 4);
+    CHECK(minor == 2);
+    CHECK(parse_version_output("Read prefs: ...\r\nBlender 5.10.0 Alpha\r\n", major, minor));
+    CHECK(major == 5);
+    CHECK(minor == 10);
+    CHECK_FALSE(parse_version_output("Blender Launcher\nsomething else\n", major, minor));
+    CHECK_FALSE(parse_version_output("", major, minor));
+
+    CHECK(version_from_install_path("C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe", major, minor));
+    CHECK(major == 4);
+    CHECK(minor == 2);
+    CHECK_FALSE(version_from_install_path("C:\\Program Files\\Steam\\steamapps\\common\\Blender\\blender.exe", major, minor));
+    CHECK_FALSE(version_from_install_path("/Applications/Blender.app/Contents/MacOS/Blender", major, minor));
+
+    CHECK(showcase_version_supported(4, 2));
+    CHECK(showcase_version_supported(4, 5));
+    CHECK(showcase_version_supported(5, 0));
+    CHECK_FALSE(showcase_version_supported(4, 1));
+    CHECK_FALSE(showcase_version_supported(3, 6));
+}
+
+TEST_CASE("Showcase: Open in Blender and the add-on install arguments", "[BlenderLauncher][Showcase]")
+{
+    const std::string script  = "C:\\EdgeSlicer\\resources\\blender\\edgeslicer_launch.py";
+    const std::string package = "C:\\Users\\me\\AppData\\Local\\Temp\\edgeslicer_blender\\cube_plate1";
+    CHECK(showcase_session_args({ "C:\\Blender\\blender.exe" }, script, package) ==
+          std::vector<std::string>{ "C:\\Blender\\blender.exe", "--python", script, "--", "--package", package });
+    CHECK(showcase_session_args({ "flatpak", "run", "org.blender.Blender" }, script, package).size() == 8);
+    // Blender's own extension install, into the user's default repository and enabled; nothing else.
+    CHECK(install_addon_args({ "blender" }, "/tmp/edgeslicer_render.zip") ==
+          std::vector<std::string>{ "blender", "--command", "extension", "install-file", "-r", "user_default", "-e", "/tmp/edgeslicer_render.zip" });
+}

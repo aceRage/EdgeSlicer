@@ -1,20 +1,456 @@
 
 #include "CutUtils.hpp"
+#include "Config.hpp"
+#include "ImageFill.hpp"
 #include "Geometry.hpp"
 #include "libslic3r.h"
 #include "Model.hpp"
 #include "FlexiJoint.hpp"
+#include "PushFit.hpp"
+#include "TacJoint.hpp"
+#include "TacJointBoolean.hpp"
 #include "CurvedCut.hpp"
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 #include "ObjectID.hpp"
+#include "AABBMesh.hpp"
 
 #include <boost/log/trivial.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <string>
+
+// Marks the user-facing messages Cut throws for gettext; the gizmo translates them with _L().
+#ifndef L
+#define L(s) (s)
+#endif
 
 namespace Slic3r {
 
 using namespace Geometry;
+
+// ---------------------------------------------------------------------------- connector fit
+
+CutSurfaceProbe CutSurfaceProbe::plane(double thickness, CutThicknessOffset offset)
+{
+    CutSurfaceProbe p;
+    p.m_kind = Kind::Plane;
+    if (thickness > 0.0)
+        curved_cut_thickness_faces(thickness, offset, p.m_face_lo, p.m_face_hi);
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::curved(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
+{
+    CutSurfaceProbe p = plane(thickness, offset);
+    p.m_kind  = Kind::Curved;
+    p.m_sheet = sheet;
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::drawn(const DrawCutStroke& stroke, const DrawCutParams& params, const indexed_triangle_set& mesh)
+{
+    CutSurfaceProbe p;
+    p.m_kind   = Kind::Drawn;
+    p.m_closed = stroke.is_closed();
+    if (!stroke.valid() || mesh.empty())
+        return p;
+    BoundingBoxf3 bbox;
+    for (const Vec3f& v : mesh.vertices)
+        bbox.merge(v.cast<double>());
+    // The same solids draw_cut_split() builds: the mid one (offset 0) is the surface the
+    // connector stands on, the two offset ones are the halves' own faces when there is a kerf.
+    auto mid = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, 0.0, &mesh));
+    if (mid->empty())
+        return p;
+    p.m_cutter_mid  = mid;
+    p.m_cutter_tree = std::make_shared<AABBMesh>(*mid);
+    if (params.thickness > 0.0) {
+        curved_cut_thickness_faces(params.thickness, params.thickness_offset, p.m_face_lo, p.m_face_hi);
+        auto lo = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, p.m_face_lo, &mesh));
+        auto hi = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, p.m_face_hi, &mesh));
+        if (!lo->empty() && !hi->empty()) {
+            p.m_cutter_lo = lo;
+            p.m_cutter_hi = hi;
+        }
+    }
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::drawn_from_cutter(indexed_triangle_set cutter, bool closed)
+{
+    CutSurfaceProbe p;
+    p.m_kind   = Kind::Drawn;
+    p.m_closed = closed;
+    if (cutter.empty())
+        return p;
+    auto mid        = std::make_shared<indexed_triangle_set>(std::move(cutter));
+    p.m_cutter_mid  = mid;
+    p.m_cutter_tree = std::make_shared<AABBMesh>(*mid);
+    return p;
+}
+
+bool CutSurfaceProbe::valid() const
+{
+    return m_kind != Kind::Drawn || (m_cutter_mid && m_cutter_tree);
+}
+
+bool CutSurfaceProbe::is_upper_mid(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() > 0.0;
+    case Kind::Curved: return p.z() > m_sheet.evaluate_local(p.x(), p.y());
+    case Kind::Drawn:  return m_cutter_mid && draw_cut_classify_upper(*m_cutter_mid, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::is_upper(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() > m_face_hi;
+    case Kind::Curved: return p.z() - m_sheet.evaluate_local(p.x(), p.y()) > m_face_hi;
+    case Kind::Drawn:
+        // draw_cut_split(): an open stroke's upper half is outside the HI solid, a closed
+        // stroke's (the plug) is inside the LO one.
+        if (!m_cutter_lo || !m_cutter_hi)
+            return is_upper_mid(p);
+        return draw_cut_classify_upper(m_closed ? *m_cutter_lo : *m_cutter_hi, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::is_lower(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() < m_face_lo;
+    case Kind::Curved: return p.z() - m_sheet.evaluate_local(p.x(), p.y()) < m_face_lo;
+    case Kind::Drawn:
+        if (!m_cutter_mid)
+            return false;
+        if (!m_cutter_lo || !m_cutter_hi)
+            return !is_upper_mid(p);
+        return !draw_cut_classify_upper(m_closed ? *m_cutter_hi : *m_cutter_lo, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::surface_along(const Vec3d& p, const Vec3d& dir, double reach, double& t) const
+{
+    t = 0.0;
+    if (!(reach > 0.0) || !p.allFinite() || !dir.allFinite())
+        return false;
+    switch (m_kind) {
+    case Kind::Plane:
+        if (std::abs(dir.z()) < 1e-12)
+            return false;
+        t = -p.z() / dir.z();
+        return std::abs(t) <= reach;
+    case Kind::Curved: {
+        // g(t) is the height of the point over the sheet. Walk outwards from t = 0 in both
+        // directions and bisect the first bracket found, which is the nearest crossing.
+        auto g = [&](double s) {
+            const Vec3d q = p + s * dir;
+            return q.z() - m_sheet.evaluate_local(q.x(), q.y());
+        };
+        const double g0 = g(0.0);
+        if (g0 == 0.0)
+            return true;
+        constexpr int steps = 96;
+        const double  step  = reach / double(steps);
+        double        best  = std::numeric_limits<double>::max();
+        for (int sign : { 1, -1 }) {
+            double a = 0.0, ga = g0;
+            for (int k = 1; k <= steps; ++k) {
+                const double b  = sign * step * double(k);
+                const double gb = g(b);
+                if ((ga < 0.0) != (gb < 0.0)) {
+                    double lo = a, hi = b, glo = ga;
+                    for (int it = 0; it < 60; ++it) {
+                        const double m  = 0.5 * (lo + hi);
+                        const double gm = g(m);
+                        if ((gm < 0.0) == (glo < 0.0)) { lo = m; glo = gm; }
+                        else hi = m;
+                    }
+                    const double root = 0.5 * (lo + hi);
+                    if (std::abs(root) < std::abs(best))
+                        best = root;
+                    break;
+                }
+                a = b; ga = gb;
+            }
+        }
+        if (best == std::numeric_limits<double>::max())
+            return false;
+        t = best;
+        return true;
+    }
+    case Kind::Drawn: {
+        if (!m_cutter_tree)
+            return false;
+        // Every crossing of the whole segment, from its far end: the cutter solid has closure
+        // faces far away, the nearest crossing is the strip under the connector.
+        const Vec3d src  = p - reach * dir;
+        double      best = std::numeric_limits<double>::max();
+        for (const AABBMesh::hit_result& h : m_cutter_tree->query_ray_hits(src, dir)) {
+            if (!h.is_hit())
+                continue;
+            const double s = h.distance() - reach;
+            if (std::abs(s) <= reach && std::abs(s) < std::abs(best))
+                best = s;
+        }
+        if (best == std::numeric_limits<double>::max())
+            return false;
+        t = best;
+        return true;
+    }
+    }
+    return false;
+}
+
+CutConnectorFit cut_connector_fit(const CutSurfaceProbe& probe, const Transform3d& frame, double footprint_radius, double axial_reach)
+{
+    CutConnectorFit fit;
+    fit.deviation = std::numeric_limits<double>::infinity();
+    if (!probe.valid() || !frame.matrix().allFinite())
+        return fit;
+    const Vec3d  origin = frame.translation();
+    const Matrix3d rot  = frame.linear();
+    Vec3d        axis   = rot.col(2);
+    if (axis.norm() < 1e-9)
+        return fit;
+    axis.normalize();
+
+    const double radius = std::max(0.0, footprint_radius);
+    // Far enough to find the surface under a footprint tilted well past what is allowed, so a
+    // bad fit is measured (and reported) rather than missed.
+    const double reach = std::max(5.0, 3.0 * radius + probe.thickness()) + std::max(0.0, axial_reach);
+
+    double t0 = 0.0;
+    if (!probe.surface_along(origin, axis, reach, t0))
+        return fit;
+    const Vec3d centre = origin + t0 * axis;
+
+    // Which way is up: one step each way along the axis from the point ON the surface.
+    constexpr double side_step = 0.3;
+    const bool up_pos = probe.is_upper_mid(centre + side_step * axis);
+    const bool up_neg = probe.is_upper_mid(centre - side_step * axis);
+    if (up_pos == up_neg)
+        return fit;
+    fit.on_surface    = true;
+    fit.upper_along_z = up_pos;
+    fit.centre_offset = t0;
+    const Vec3d up    = up_pos ? axis : Vec3d(-axis);
+
+    // The footprint: its centre and two rings, every point in the connector's own plane.
+    double deviation = 0.0;
+    if (radius > 0.0) {
+        constexpr int sectors = 24;
+        for (double ring : { 0.5, 1.0 })
+            for (int k = 0; k < sectors; ++k) {
+                const double a = 2.0 * PI * double(k) / double(sectors);
+                const Vec3d  q = origin + rot * Vec3d(ring * radius * std::cos(a), ring * radius * std::sin(a), 0.0);
+                double       t = 0.0;
+                if (!probe.surface_along(q, axis, reach, t))
+                    return fit; // part of the footprint is off the surface: deviation stays infinite
+                deviation = std::max(deviation, std::abs(t - t0));
+            }
+    }
+    fit.deviation = deviation;
+
+    // The halves' faces at the centre, along `up`. Without a kerf both are the surface.
+    double hi_c = 0.0, lo_c = 0.0;
+    if (probe.thickness() > 0.0) {
+        const double span = 2.0 * probe.thickness() + 1.0;
+        auto boundary = [&](const Vec3d& dir, auto inside) {
+            // From the surface outwards along `dir`: where the half's material starts.
+            double a = 0.0, b = span;
+            if (inside(centre + a * dir))
+                return 0.0;
+            if (!inside(centre + b * dir))
+                return span;
+            for (int it = 0; it < 40; ++it) {
+                const double m = 0.5 * (a + b);
+                if (inside(centre + m * dir)) b = m; else a = m;
+            }
+            return 0.5 * (a + b);
+        };
+        hi_c = boundary(up, [&](const Vec3d& q) { return probe.is_upper(q); });
+        lo_c = -boundary(Vec3d(-up), [&](const Vec3d& q) { return probe.is_lower(q); });
+    }
+    // The origin sits -t0 along `up` from the centre whichever way the frame is turned (Cut turns
+    // it over about the centre), so the faces, measured from the origin, are these.
+    fit.face_lo = lo_c + t0;
+    fit.face_hi = hi_c + t0;
+    return fit;
+}
+
+static double its_xy_radius(const indexed_triangle_set& its)
+{
+    double r2 = 0.0;
+    for (const Vec3f& v : its.vertices)
+        r2 = std::max(r2, double(v.x()) * double(v.x()) + double(v.y()) * double(v.y()));
+    return std::sqrt(r2);
+}
+
+static double pushfit_footprint_radius(const PushFitParams& p)
+{
+    return std::max(its_xy_radius(pushfit_hole_mesh(p, PushFitSide::Upper)), its_xy_radius(pushfit_hole_mesh(p, PushFitSide::Lower)));
+}
+
+static double tac_joint_footprint_radius(const TacJointParams& p)
+{
+    try {
+        return its_xy_radius(tac_joint_cutter_mesh(p));
+    } catch (const std::invalid_argument&) {
+        return 0.0; // invalid parameters are refused by tac_joint_validate() anyway
+    }
+}
+
+double cut_connector_footprint_radius(const CutConnector& connector)
+{
+    switch (connector.attribs.type) {
+    case CutConnectorType::FlexiJoint: return 0.0;
+    case CutConnectorType::PushFit:    return pushfit_footprint_radius(connector.pushfit);
+    case CutConnectorType::TacJoint:   return tac_joint_footprint_radius(connector.tac_joint);
+    default:                           return double(connector.radius) + double(std::max(0.f, connector.radius_tolerance));
+    }
+}
+
+CutSolidTest::CutSolidTest(indexed_triangle_set solid)
+{
+    if (solid.empty())
+        return;
+    auto its = std::make_shared<indexed_triangle_set>(std::move(solid));
+    m_its    = its;
+    m_tree   = std::make_shared<AABBMesh>(*its);
+}
+
+bool CutSolidTest::contains(const Vec3d& p) const
+{
+    if (!m_tree || !p.allFinite())
+        return false;
+    // Parity along a direction no axis-aligned or cut-aligned face lies in, counted from the
+    // point outwards: odd means inside.
+    static const Vec3d dir = Vec3d(0.5772156649, 0.7071067812, 0.4142135624).normalized();
+    size_t ahead = 0;
+    for (const AABBMesh::hit_result& h : m_tree->query_ray_hits(p, dir))
+        if (h.is_hit() && h.distance() > 0.0)
+            ++ahead;
+    return (ahead & 1) != 0;
+}
+
+indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, const CutSolidTest& object, double max_edge)
+{
+    indexed_triangle_set out;
+    if (surface.empty() || object.empty())
+        return out;
+    max_edge          = std::max(0.05, max_edge);
+    const double max2 = max_edge * max_edge;
+
+    // Longest-edge bisection: a long thin strip triangle (a whole ruling of a drawn cut) splits
+    // along its length only, so it costs tens of triangles rather than a full grid.
+    using Tri = std::array<Vec3d, 3>;
+    std::vector<Tri> stack;
+    auto keep = [&](const Tri& t) {
+        if (!object.contains((t[0] + t[1] + t[2]) / 3.0))
+            return;
+        const int base = int(out.vertices.size());
+        for (const Vec3d& v : t)
+            out.vertices.emplace_back(v.cast<float>());
+        out.indices.emplace_back(base, base + 1, base + 2);
+    };
+    for (const Vec3i32& f : surface.indices) {
+        stack.push_back(Tri{ surface.vertices[f[0]].cast<double>(), surface.vertices[f[1]].cast<double>(),
+                             surface.vertices[f[2]].cast<double>() });
+        while (!stack.empty()) {
+            const Tri t = stack.back();
+            stack.pop_back();
+            int    longest = 0;
+            double len2    = -1.0;
+            for (int e = 0; e < 3; ++e) {
+                const double l = (t[(e + 1) % 3] - t[e]).squaredNorm();
+                if (l > len2) {
+                    len2    = l;
+                    longest = e;
+                }
+            }
+            // The stack bound only guards a degenerate input; a real triangle never gets near it.
+            if (len2 <= max2 || stack.size() > 4096) {
+                keep(t);
+                continue;
+            }
+            const int   a = longest, b = (longest + 1) % 3, c = (longest + 2) % 3;
+            const Vec3d m = 0.5 * (t[a] + t[b]);
+            stack.push_back(Tri{ t[a], m, t[c] });
+            stack.push_back(Tri{ m, t[b], t[c] });
+        }
+    }
+    return out;
+}
+
+indexed_triangle_set curved_cut_face_of(const indexed_triangle_set& half, const CurvedCutSheet& sheet, double face_offset, double tol)
+{
+    indexed_triangle_set out;
+    tol = std::max(1e-4, tol);
+    auto on_face = [&](const Vec3f& v) {
+        return std::abs(double(v.z()) - sheet.evaluate_local(double(v.x()), double(v.y())) - face_offset) <= tol;
+    };
+    std::vector<int> remap(half.vertices.size(), -1);
+    for (const Vec3i32& f : half.indices) {
+        const Vec3f& a = half.vertices[f[0]];
+        const Vec3f& b = half.vertices[f[1]];
+        const Vec3f& c = half.vertices[f[2]];
+        if (!on_face(a) || !on_face(b) || !on_face(c))
+            continue;
+        // Along the sheet, not a wall of the part that happens to touch it: the face's normal is
+        // within ~25 degrees of the sheet's there (either sign - the halves face opposite ways).
+        Vec3d n = (c - a).cast<double>().cross((b - a).cast<double>());
+        if (n.norm() < 1e-12)
+            continue;
+        n.normalize();
+        const Vec3f  centre = (a + b + c) / 3.f;
+        const Vec3d  sn     = curved_cut_sheet_normal(sheet, double(centre.x()), double(centre.y()));
+        if (std::abs(n.dot(sn)) < 0.9)
+            continue;
+        Vec3i32 g;
+        for (int k = 0; k < 3; ++k) {
+            int& r = remap[size_t(f[k])];
+            if (r < 0) {
+                r = int(out.vertices.size());
+                out.vertices.push_back(half.vertices[f[k]]);
+            }
+            g[k] = r;
+        }
+        out.indices.push_back(g);
+    }
+    return out;
+}
+
+// The same radius from a connector VOLUME, as Cut sees it: the plain kinds carry their size in
+// the volume's scale, which is measured here in the connector's own (unscaled) frame.
+static double connector_volume_footprint_radius(const ModelVolume& volume)
+{
+    const ModelVolume::CutInfo& info = volume.cut_info;
+    if (info.connector_type == CutConnectorType::PushFit)
+        return pushfit_footprint_radius(info.pushfit);
+    if (info.connector_type == CutConnectorType::TacJoint)
+        return tac_joint_footprint_radius(info.tac_joint);
+    const Transform3d m   = volume.get_matrix();
+    const Matrix3d    rot = Transformation(m).get_matrix_no_scaling_factor().linear();
+    const Matrix3d    lin = rot.transpose() * m.linear();
+    double r2 = 0.0;
+    for (const Vec3f& v : volume.mesh().its.vertices) {
+        const Vec3d q = lin * v.cast<double>();
+        r2 = std::max(r2, q.x() * q.x() + q.y() * q.y());
+    }
+    return std::sqrt(r2) + double(std::max(0.f, info.radius_tolerance));
+}
 
 static void apply_tolerance(ModelVolume* vol)
 {
@@ -24,31 +460,45 @@ static void apply_tolerance(ModelVolume* vol)
     if (!cut_info.is_processed)
         return;
 
+    // The connector mesh is a unit shape, so the scaling factor is its size.
     Vec3d sf = vol->get_scaling_factor();
 
     // make a "hole" wider
     sf[X] += double(cut_info.radius_tolerance);
     sf[Y] += double(cut_info.radius_tolerance);
 
-    // make a "hole" dipper
+    // make a "hole" deeper
     sf[Z] += double(cut_info.height_tolerance);
 
+    // OrcaSlicer #16020 (fixes Orca #14299) + #16893: a Dowel straddles the plane at z = 0 and stays
+    // there, so the extra depth splits evenly between its two holes. A Plug or a Snap sits on ONE
+    // side of the cut: its hole grows by the tolerance away from the cut face and by the overlap
+    // through it (so the face is open, not skinned), and its center moves by half the difference.
+    if (cut_info.connector_type == CutConnectorType::Plug || cut_info.connector_type == CutConnectorType::Snap) {
+        sf[Z] += CONNECTOR_HOLE_OVERLAP;
+        Vec3d rot_norm = rotation_transform(vol->get_rotation()) * Vec3d::UnitZ();
+        if (rot_norm.norm() != 0.0)
+            rot_norm.normalize();
+
+        const double z_offset = 0.5 * (static_cast<double>(cut_info.height_tolerance) - CONNECTOR_HOLE_OVERLAP);
+        vol->set_offset(vol->get_offset() + rot_norm * z_offset);
+    }
+
     vol->set_scaling_factor(sf);
-
-    // correct offset in respect to the new depth
-    Vec3d rot_norm = rotation_transform(vol->get_rotation()) * Vec3d::UnitZ();
-    if (rot_norm.norm() != 0.0)
-        rot_norm.normalize();
-
-    double z_offset = 0.5 * static_cast<double>(cut_info.height_tolerance);
-    if (cut_info.connector_type == CutConnectorType::Plug || 
-        cut_info.connector_type == CutConnectorType::Snap)
-        z_offset -= 0.05; // add small Z offset to better preview
-
-    vol->set_offset(vol->get_offset() + rot_norm * z_offset);
 }
 
-static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART)
+// ImageMap phase 5c: what process_volume_cut() and its curved / drawn siblings do to a volume's
+// mesh before slicing it (into the cut's own frame), so add_cut_volume() can tell the volume's
+// image fill where its picture went.
+static Transform3d cut_pre_transform(const Transform3d& cut_matrix, const Transform3d& instance_matrix, const ModelVolume* volume)
+{
+    const Transformation cut_transformation = Transformation(cut_matrix);
+    const Transform3d invert_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1 * cut_transformation.get_offset());
+    return invert_cut_matrix * instance_matrix * volume->get_matrix();
+}
+
+static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART,
+                           const Transform3d* pre_transform = nullptr)
 {
     if (mesh.empty())
         return;
@@ -64,6 +514,12 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     assert(vol->config.id() != src_volume->config.id());
     vol->set_material(src_volume->material_id(), *src_volume->material());
     vol->cut_info = src_volume->cut_info;
+    // ImageMap phase 5c: the half's mesh is the source mesh carried into the cut's frame
+    // (pre_transform), back out of it (cut_matrix), and re-centred by add_volume() - which moved it
+    // by -offset. An image fill on the source keeps sampling the picture where it was.
+    if (pre_transform != nullptr)
+        image_fill_rebase_volume(*vol, src_volume->mesh().its,
+                                 translation_transform(-1 * vol->get_offset()) * cut_matrix * *pre_transform);
 }
 
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
@@ -76,7 +532,8 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
 // the no-kerf output is not "equivalent to" today's - it IS today's.
 static void process_volume_cut( ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                 ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh,
-                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
+                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred,
+                                float cut_z = 0.f)
 {
     const auto volume_matrix = volume->get_matrix();
 
@@ -96,19 +553,186 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
         cut_mesh(mesh.its, float(face_hi), &upper_its, nullptr);
     }
     else
-        cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);
+        cut_mesh(mesh.its, cut_z, &upper_its, &lower_its);
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))
         lower_mesh = TriangleMesh(lower_its);
 }
 
+// PUSH-FIT PIN. Nothing is scaled or plane-cut: each half gets its own hole volume generated in
+// mm in the connector frame (pushfit_hole_mesh, measured from that half's own cut face), and the
+// pin object gets the pin built in its print pose. The generic apply_tolerance() never touches a
+// pin. `face_lo` / `face_hi` are the kerf faces along the connector axis (0 without a kerf).
+//
+// `relief` >= 0 is a curved or drawn cut: the cut surface strays up to that far (mm, along the
+// axis) from the connector's own plane over the hole's footprint, so a half can keep a thin
+// rim of material across the pin's path just outside its own face. Each half then also gets a
+// short cylinder, the hole's mouth width, from its face out through that rim. A planar cut
+// passes -1 and gets exactly the holes it always got.
+static void process_pushfit_cut(ModelVolume* volume, ModelObjectCutAttributes attributes, ModelObject* upper,
+                                ModelObject* lower, std::vector<CutSeparatePart>& separate, double face_lo, double face_hi,
+                                double relief = -1.0)
+{
+    const PushFitParams& p       = volume->cut_info.pushfit;
+    const double         kerf_lo = std::max(0.0, -face_lo);
+    const double         kerf_hi = std::max(0.0, face_hi);
+    // The connector frame in the halves' mesh frame. The volume carries no scale for a pin, but
+    // strip it anyway so a scaled preview mesh could never stretch the holes.
+    const Transform3d frame = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
+
+    if (attributes.has(ModelObjectCutAttribute::CreateDowels)) {
+        ModelObject* pin{ nullptr };
+        volume->get_object()->clone_for_cut(&pin);
+        PushFitPinOptions opt;
+        opt.kerf_lo = kerf_lo;
+        opt.kerf_hi = kerf_hi;
+        opt.frame   = PushFitMeshFrame::PrintPose;
+        const PushFitPinResult res = pushfit_pin_mesh(p, opt);
+        ModelVolume* vol = pin->add_volume(TriangleMesh(res.mesh), ModelVolumeType::MODEL_PART);
+        vol->name = volume->name;
+        vol->config.assign_config(volume->config);
+        vol->cut_info = volume->cut_info;
+        // The pin object's frame IS the pose frame (add_volume() re-centres the mesh and puts
+        // the shift into the volume's offset, so mesh + offset lands back where it was):
+        // pose frame -> connector frame -> the halves' frame.
+        CutSeparatePart part;
+        part.object            = pin;
+        part.part_to_cut_frame = frame * res.connector_to_mesh.inverse();
+        part.is_pin            = true;
+        part.pin_slot_failed   = res.slot_requested && !res.slot_made;
+        separate.push_back(part);
+    }
+
+    auto add_hole = [&](ModelObject* half, PushFitSide side, const char* suffix) {
+        if (half == nullptr)
+            return;
+        TriangleMesh hole(pushfit_hole_mesh(p, side, side == PushFitSide::Upper ? kerf_hi : kerf_lo));
+        add_cut_volume(hole, half, volume, frame, suffix, ModelVolumeType::NEGATIVE_VOLUME);
+        if (relief < 0.0)
+            return;
+        // The mouth relief: from just inside this half's own hole, back across its face by the
+        // surface's deviation, at the width of the hole's mouth flare.
+        constexpr double overlap = 0.1;
+        const bool   up     = side == PushFitSide::Upper;
+        const double radius = 0.5 * double(p.diameter) + double(up ? p.clearance_upper : p.clearance_lower) +
+                              std::max(0.0, double(p.mouth_chamfer));
+        const double z0     = up ? kerf_hi - relief - overlap : -kerf_lo - overlap;
+        const double height = relief + 2.0 * overlap;
+        TriangleMesh mouth_mesh(its_make_cylinder(radius, height, 2.0 * PI / 64.0));
+        mouth_mesh.translate(0.f, 0.f, float(z0));
+        add_cut_volume(mouth_mesh, half, volume, frame, std::string(suffix) + "_mouth", ModelVolumeType::NEGATIVE_VOLUME);
+    };
+    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+        add_hole(upper, PushFitSide::Upper, "_A");
+    if (attributes.has(ModelObjectCutAttribute::KeepLower))
+        // With KeepAsParts there is no lower object: both holes go into the one object.
+        add_hole(lower ? lower : (attributes.has(ModelObjectCutAttribute::KeepAsParts) ? upper : nullptr),
+                 PushFitSide::Lower, "_B");
+}
+
+static void process_tac_joint_cut(ModelVolume*                  volume,
+                                  ModelObjectCutAttributes      attributes,
+                                  ModelObject*                  upper,
+                                  ModelObject*                  lower,
+                                  std::vector<CutSeparatePart>& separate,
+                                  double                        face_lo,
+                                  double                        face_hi,
+                                  bool                          full_sockets = false)
+{
+    const TacJointParams& params = volume->cut_info.tac_joint;
+    const Transform3d     frame  = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
+    if (params.attachment != TacJointAttachment::Separate) {
+        const bool   top  = params.attachment == TacJointAttachment::Upper;
+        ModelObject* half = top ? upper : lower;
+        const bool   keep = attributes.has(top ? ModelObjectCutAttribute::KeepUpper : ModelObjectCutAttribute::KeepLower);
+        if (keep && half) {
+            TriangleMesh pin_mesh(tac_joint_connector_mesh(params));
+            add_cut_volume(pin_mesh, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::MODEL_PART);
+        }
+    } else if (attributes.has(ModelObjectCutAttribute::CreateDowels)) {
+        TriangleMesh pin_mesh(tac_joint_connector_mesh(params));
+        // Lay the long axis on the bed and put the broad reference face down.
+        Transform3d print_pose = rotation_transform(Vec3d(0.5 * PI, 0., 0.));
+        const auto  print_box  = pin_mesh.transformed_bounding_box(print_pose);
+        print_pose             = translation_transform(Vec3d(0., 0., -print_box.min.z())) * print_pose;
+        pin_mesh.transform(print_pose);
+        ModelObject* pin = nullptr;
+        volume->get_object()->clone_for_cut(&pin);
+        ModelVolume* vol = pin->add_volume(std::move(pin_mesh), ModelVolumeType::MODEL_PART);
+        vol->name        = volume->name;
+        vol->config.assign_config(volume->config);
+        vol->cut_info = volume->cut_info;
+        CutSeparatePart part;
+        part.object            = pin;
+        part.part_to_cut_frame = frame * print_pose.inverse();
+        part.is_pin            = true;
+        separate.push_back(part);
+    }
+
+    const auto cutter = tac_joint_cutter_mesh(params);
+    // Extend each socket just through its own face so boolean slicing cannot leave a cap
+    // coincident with the cut face. Its outer depth and reference fit stay unchanged.
+    constexpr float mouth_overlap = 0.02f;
+    auto            add_socket    = [&](ModelObject* half, bool top) {
+        if (!half || params.attachment == (top ? TacJointAttachment::Upper : TacJointAttachment::Lower))
+            return;
+        if (full_sockets) {
+            // A curved or drawn cut: the cut face is not the connector's own plane, so a socket
+            // clipped at that plane would leave a sliver of each half inside the connector. The
+            // full cutter is the space the connector occupies; removing it from either half is
+            // correct whatever shape the surface has inside the footprint.
+            TriangleMesh hole(cutter);
+            add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
+            return;
+        }
+        // cut_mesh() can triangulate the reference profile's cap with overlapping
+        // triangles. Those sockets look closed but fail the Boolean self-intersection
+        // check. Intersect the original solid with a box instead of rebuilding its cap.
+        const TriangleMesh source(cutter);
+        const auto         bounds = source.bounding_box();
+        Vec3d              lo     = bounds.min - Vec3d::Ones();
+        Vec3d              hi     = bounds.max + Vec3d::Ones();
+        if (top)
+            lo.z() = face_hi - mouth_overlap;
+        else
+            hi.z() = face_lo + mouth_overlap;
+        const Vec3d  size = hi - lo;
+        TriangleMesh clip(its_make_cube(size.x(), size.y(), size.z()));
+        clip.translate(lo.cast<float>());
+        std::vector<TriangleMesh> pieces;
+        if (!MeshBoolean::mfd::make_boolean(source, clip, pieces, "INTERSECTION") || pieces.size() != 1 || pieces.front().empty())
+            throw std::invalid_argument(L("Unable to create a valid TAC Joint socket."));
+        TriangleMesh hole(std::move(pieces.front()));
+        add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
+    };
+    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+        add_socket(upper, true);
+    if (attributes.has(ModelObjectCutAttribute::KeepLower))
+        add_socket(lower ? lower : (attributes.has(ModelObjectCutAttribute::KeepAsParts) ? upper : nullptr), false);
+}
+
 static void process_connector_cut(  ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                     ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
-                                    std::vector<ModelObject*>& dowels)
+                                    std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0,
+                                    double non_planar_relief = -1.0)
 {
+    // `non_planar_relief` >= 0 marks a curved or drawn cut (see prepare_non_planar_connectors()):
+    // it is how far the cut surface strays from the connector's own plane over its footprint.
+    // A planar cut passes -1 and takes exactly the branches it always took.
+    const bool non_planar = non_planar_relief >= 0.0;
     assert(volume->cut_info.is_connector);
     volume->cut_info.set_processed();
+
+    if (volume->cut_info.connector_type == CutConnectorType::TacJoint) {
+        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi, non_planar);
+        return;
+    }
+
+    if (volume->cut_info.connector_type == CutConnectorType::PushFit) {
+        process_pushfit_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi, non_planar_relief);
+        return;
+    }
 
     const auto volume_matrix = volume->get_matrix();
 
@@ -154,19 +778,40 @@ static void process_connector_cut(  ModelVolume* volume, const Transform3d& inst
             vol->set_rotation(Vec3d::Zero());
             vol->set_offset(Z, 0.0);
 
-            dowels.push_back(dowel);
+            CutSeparatePart part;
+            part.object            = dowel;
+            part.part_to_cut_frame = volume_matrix * vol->get_matrix().inverse();
+            dowels.push_back(part);
         }
 
         // Cut the dowel
         apply_tolerance(volume);
 
-        // Perform cut
-        TriangleMesh upper_mesh, lower_mesh;
-        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, upper_mesh, lower_mesh);
+        if (non_planar) {
+            // A curved or drawn cut: halving the dowel at the flat plane (below) would put the
+            // split where the cut is not. Each half gets the WHOLE dowel as its hole instead; the
+            // part of it outside that half's material removes nothing.
+            auto add_whole = [&](ModelObject* half, const char* suffix) {
+                if (half == nullptr)
+                    return;
+                TriangleMesh whole(volume->mesh());
+                add_cut_volume(whole, half, volume, volume->get_matrix(), suffix, volume->type());
+            };
+            if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+                add_whole(upper, "_A");
+            if (attributes.has(ModelObjectCutAttribute::KeepLower))
+                add_whole(lower, "_B");
+            return;
+        }
 
-        // add small Z offset to better preview
-        upper_mesh.translate((-0.05 * Vec3d::UnitZ()).cast<float>());
-        lower_mesh.translate((0.05 * Vec3d::UnitZ()).cast<float>());
+        // Orca #16893: cut each hole just past the plane, so it breaks through its cut face (and
+        // leaves the face open) without getting shorter, as translating each half would.
+        const float  overlap = static_cast<float>(CONNECTOR_HOLE_OVERLAP);
+        TriangleMesh upper_mesh, lower_mesh, discarded;
+        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, upper_mesh, discarded, 0.0,
+                           CutThicknessOffset::Centred, -overlap);
+        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, discarded, lower_mesh, 0.0,
+                           CutThicknessOffset::Centred, overlap);
 
         // Add cut parts to the related objects
         add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", volume->type());
@@ -201,6 +846,7 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
                             ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
                             double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
@@ -208,31 +854,45 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
     // Add required cut parts to the objects
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 static void reset_instance_transformation(ModelObject* object, size_t src_instance_idx, 
                                           const Transform3d& cut_matrix = Transform3d::Identity(),
                                           bool place_on_cut = false, bool flip = false)
 {
-    // Reset instance transformation except offset and Z-rotation
+    // Reset instance transformation except offset and Z-rotation.
+    // The halves' meshes already carry the cut instance's rotation, scale and mirroring. Any other
+    // instance keeps only what it had on top of the cut one, or its copy would show that one's
+    // rotation twice and lose its own scale.
+    const Transformation src_trafo = src_instance_idx < object->instances.size() ?
+                                         object->instances[src_instance_idx]->get_transformation() : Transformation();
+    const Transform3d    src_linear = src_trafo.get_matrix_no_offset();
+    const Transform3d    src_inv    = std::abs(src_linear.matrix().determinant()) > 1e-12 ? src_linear.inverse() : Transform3d::Identity();
+    const double         src_rot_z  = src_trafo.get_rotation().z();
 
     for (size_t i = 0; i < object->instances.size(); ++i) {
         auto& obj_instance = object->instances[i];
         const double rot_z = obj_instance->get_rotation().z();
-        
+
+        if (!flip && !place_on_cut && i != src_instance_idx) {
+            obj_instance->set_transformation(Transformation(translation_transform(obj_instance->get_offset()) *
+                                                            obj_instance->get_transformation().get_matrix_no_offset() * src_inv));
+            continue;
+        }
+
         Transformation inst_trafo = Transformation(obj_instance->get_transformation().get_matrix_no_scaling_factor());
         // add respect to mirroring
         if (obj_instance->is_left_handed())
@@ -241,11 +901,7 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
         obj_instance->set_transformation(inst_trafo);
 
         Vec3d rotation = Vec3d::Zero();
-        if (!flip && !place_on_cut) {
-            if ( i != src_instance_idx)
-            rotation[Z] = rot_z;
-        }
-        else {
+        if (flip || place_on_cut) {
             Transform3d rotation_matrix = Transform3d::Identity();
             if (flip)
                 rotation_matrix = rotation_transform(PI * Vec3d::UnitX());
@@ -254,7 +910,7 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
                 rotation_matrix = rotation_matrix * Transformation(cut_matrix).get_rotation_matrix().inverse();
 
             if (i != src_instance_idx)
-                rotation_matrix = rotation_transform(rot_z * Vec3d::UnitZ()) * rotation_matrix;
+                rotation_matrix = rotation_transform((rot_z - src_rot_z) * Vec3d::UnitZ()) * rotation_matrix;
 
             rotation = Transformation(rotation_matrix).get_rotation();
         }
@@ -263,21 +919,116 @@ static void reset_instance_transformation(ModelObject* object, size_t src_instan
     }
 }
 
+// The upper half of a flat horizontal cut goes onto the bed by its own lowest point, so its height
+// ranges move down by as much as that point is above the old object's bottom; a range wholly below
+// it no longer has anything to apply to. Only this plain case: the half is neither flipped nor laid
+// on its cut, and the source does not sink below the bed.
+static void shift_upper_layer_ranges(ModelObject* upper, size_t instance, const Transform3d& cut_matrix, const BoundingBoxf3& src_bb)
+{
+    if (upper->layer_config_ranges.empty() || upper->volumes.empty() || instance >= upper->instances.size() || !src_bb.defined ||
+        src_bb.min.z() < -EPSILON)
+        return;
+    if ((Transformation(cut_matrix).get_rotation_matrix() * Vec3d::UnitZ() - Vec3d::UnitZ()).norm() > EPSILON)
+        return;
+    const BoundingBoxf3 upper_bb = upper->instance_bounding_box(instance);
+    if (!upper_bb.defined)
+        return;
+    const double shift = upper_bb.min.z() - src_bb.min.z();
+    if (shift <= EPSILON)
+        return;
+    t_layer_config_ranges shifted;
+    for (auto& [range, config] : upper->layer_config_ranges)
+        if (range.second > shift + EPSILON)
+            shifted[{ std::max(0., range.first - shift), range.second - shift }] = std::move(config);
+    upper->layer_config_ranges = std::move(shifted);
+}
+
 
 Cut::Cut(const ModelObject* object, int instance, const Transform3d& cut_matrix,
          ModelObjectCutAttributes attributes/*= ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepAsParts*/)
     : m_instance(instance), m_cut_matrix(cut_matrix), m_attributes(attributes)
 {
     m_model = Model();
-    if (object)
+    if (object) {
         m_model.add_object(*object);
+        // C1: taken from the SOURCE object, not from the copy above - copying an instance
+        // drops its "assembled pose initialised" flag.
+        for (size_t i = 0; i < object->instances.size(); ++i) {
+            const ModelInstance* inst = object->instances[i];
+            m_src_assembly.push_back(inst->is_assemble_initialized() ? inst->get_assemble_transformation().get_matrix()
+                                                                     : inst->get_transformation().get_matrix());
+            m_src_bboxes.push_back(object->instance_bounding_box(i));
+        }
+        if (instance >= 0 && size_t(instance) < object->instances.size()) {
+            const Transform3d m0 = object->instances[instance]->get_transformation().get_matrix_no_offset();
+            if (std::abs(m0.matrix().determinant()) > 1e-12)
+                m_src_frame_inv = m0.inverse();
+        }
+    }
+}
+
+void Cut::set_assembled_pose(ModelObject* object, const Transform3d& part_to_cut_frame) const
+{
+    if (object == nullptr)
+        return;
+    // A point of the part, in its object frame, is at part_to_cut_frame * x in the frame the halves
+    // were built in (the source object's frame with the cut instance's rotation and scale), at
+    // m_src_frame_inv * that in the source object's own frame, and the source instance's assembled
+    // pose puts that where it was assembled.
+    const Transform3d to_src = m_src_frame_inv * part_to_cut_frame;
+    for (size_t i = 0; i < object->instances.size() && i < m_src_assembly.size(); ++i)
+        object->instances[i]->set_assemble_from_transform(m_src_assembly[i] * to_src);
+}
+
+void Cut::add_separate_parts(std::vector<CutSeparatePart>& parts, ModelObjectPtrs& objects)
+{
+    // THE PIN ROW (design 2.5): pins lie in their print pose in a row along +X, 5 mm beyond the
+    // source instance's bounding box, `pin width + 3 mm` apart; a new row every 8 pins. Fixed and
+    // deterministic, no arrange job. Dowels keep their old placement.
+    constexpr double ROW_GAP     = 5.0;
+    constexpr double PIN_SPACING = 3.0;
+    constexpr int    PER_ROW     = 8;
+    int pin_index = 0;
+    for (CutSeparatePart& part : parts) {
+        ModelObject* o = part.object;
+        if (o == nullptr || o->volumes.empty())
+            continue;
+        if (part.is_pin) {
+            const int n = pin_index++;
+            o->name += "-Pin-" + std::to_string(n + 1);
+            if (part.pin_slot_failed)
+                ++m_pin_slot_failures;
+            const BoundingBoxf3 pin_bb = o->raw_mesh_bounding_box();
+            const Vec3d         size   = pin_bb.defined ? pin_bb.size() : Vec3d(5., 5., 5.);
+            const Vec3d         c      = pin_bb.defined ? pin_bb.center() : Vec3d::Zero();
+            const double        zmin   = pin_bb.defined ? pin_bb.min.z() : 0.;
+            const int           col    = n % PER_ROW;
+            const int           row    = n / PER_ROW;
+            for (size_t i = 0; i < o->instances.size(); ++i) {
+                const BoundingBoxf3 src = i < m_src_bboxes.size() ? m_src_bboxes[i] : BoundingBoxf3();
+                const double x0 = src.defined ? src.max.x() + ROW_GAP : 0.;
+                const double y0 = src.defined ? src.min.y() : 0.;
+                const double x  = x0 + double(col) * (size.x() + PIN_SPACING) + 0.5 * size.x();
+                const double y  = y0 + double(row) * (size.y() + PIN_SPACING) + 0.5 * size.y();
+                // Centre the pin on (x, y), foot on the bed.
+                o->instances[i]->set_transformation(Transformation(translation_transform(Vec3d(x - c.x(), y - c.y(), -zmin))));
+            }
+        } else {
+            reset_instance_transformation(o, m_instance);
+            o->name += "-Dowel-" + o->volumes[0]->name;
+        }
+        m_part_to_cut_frame[o] = part.part_to_cut_frame;
+        objects.push_back(o);
+    }
 }
 
 void Cut::post_process(ModelObject* object, ModelObjectPtrs& cut_object_ptrs, bool keep, bool place_on_cut, bool flip)
 {
     if (!object) return;
 
-    if (keep && !object->volumes.empty()) {
+    // A side with no part to print (a plane just above or below the parts, with a modifier
+    // reaching across it) is not a result: delete_extra_modifiers() would leave it empty.
+    if (keep && std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume* v) { return v->is_model_part(); })) {
         reset_instance_transformation(object, m_instance, m_cut_matrix, place_on_cut, flip);
         cut_object_ptrs.push_back(object);
     }
@@ -299,13 +1050,183 @@ void Cut::post_process(ModelObject* upper, ModelObject* lower, ModelObjectPtrs& 
 }
 
 
-void Cut::finalize(const ModelObjectPtrs& objects)
+Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
 {
-    //clear model from temporarry objects
-    m_model.clear_objects();
+    SavedPaintings saved;
+    if (object == nullptr || !m_attributes.has(ModelObjectCutAttribute::KeepPaint) ||
+        m_instance < 0 || size_t(m_instance) >= object->instances.size())
+        return saved;
+    // The same frame process_volume_cut() and its curved / drawn / flexi siblings carry a part into
+    // before add_cut_volume() takes the result back out of the cut frame: the halves' meshes (plus
+    // their init shift) sit in exactly this frame, which is what restore_painting() maps from.
+    const Transform3d instance_matrix = object->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    for (const ModelVolume* volume : object->volumes) {
+        std::optional<TriangleSelector::SavedPainting> sp = volume->save_painting();
+        if (!sp)
+            continue;
+        sp->mesh.transform(instance_matrix * volume->get_matrix(), true);
+        sp->field_to_saved = instance_matrix * volume->get_matrix();
+        saved.emplace_back(std::move(sp));
+    }
+    return saved;
+}
 
-    // add to model result objects
+// Bake only TAC operands, retaining each original body's settings and frame. In
+// particular, unioning the whole object would rejoin touching KeepAsParts halves.
+static Transform3d apply_tac_joint_meshes(ModelObject& object)
+{
+    std::vector<ModelVolume*>       bodies;
+    std::vector<const ModelVolume*> joints;
+    for (ModelVolume* volume : object.volumes) {
+        if (volume->is_model_part() && !volume->is_cut_connector())
+            bodies.push_back(volume);
+        else if (volume->cut_info.is_tac_joint() && (volume->is_model_part() || volume->is_negative_volume()))
+            joints.push_back(volume);
+    }
+    // A separate printable pin has no body to modify.
+    if (bodies.empty() || joints.empty())
+        return Transform3d::Identity();
+
+    Model operands;
+    for (const ModelVolume* body : bodies)
+        operands.add_object()->add_volume(*body);
+    for (const ModelVolume* joint : joints) {
+        if (joint->is_negative_volume()) {
+            for (ModelObject* part : operands.objects)
+                part->add_volume(*joint);
+        } else {
+            // A pin may span several parts. Assign it once, to the part with the
+            // largest actual overlap, rather than duplicating it or using only boxes.
+            TriangleMesh pin(joint->mesh());
+            pin.transform(joint->get_matrix(), true);
+            double best_overlap = 0.;
+            size_t owner        = bodies.size();
+            for (size_t i = 0; i < bodies.size(); ++i) {
+                TriangleMesh body(bodies[i]->mesh());
+                body.transform(bodies[i]->get_matrix(), true);
+                if (!body.bounding_box().intersects(pin.bounding_box()))
+                    continue;
+                std::vector<TriangleMesh> overlap;
+                if (!MeshBoolean::mfd::make_boolean(body, pin, overlap, "INTERSECTION"))
+                    throw std::runtime_error(L("Unable to find a body for an attached TAC Joint."));
+                double volume = 0.;
+                for (const TriangleMesh& piece : overlap)
+                    volume += std::abs(its_mass_properties(piece.its).volume);
+                if (volume > best_overlap) {
+                    best_overlap = volume;
+                    owner        = i;
+                }
+            }
+            if (owner == bodies.size())
+                throw std::runtime_error(L("The attached TAC Joint does not intersect its owning body."));
+            operands.objects[owner]->add_volume(*joint);
+        }
+    }
+
+    // Compute every result before changing volumes, so a failed Boolean cannot
+    // leave a mixture of applied and unapplied sockets in this object.
+    std::vector<TriangleMesh> meshes;
+    std::vector<Transform3d>  frames;
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        TriangleMesh mesh = bake_tac_joint_object(*operands.objects[i]);
+        if (mesh.empty() || its_num_open_edges(mesh.its) != 0)
+            throw std::runtime_error(L("Unable to apply TAC joints to a closed body mesh."));
+        mesh.transform(bodies[i]->get_matrix().inverse(), true);
+        // An attached pin can change the body's centre. Keep local meshes
+        // centred so a 3MF import will not introduce another frame change.
+        const Vec3d centre = mesh.bounding_box().center();
+        mesh.translate(-centre.cast<float>());
+        // restore_painting() and editable cuts use this local-to-source shift.
+        mesh.set_init_shift(bodies[i]->mesh().get_init_shift() + centre);
+        frames.push_back(bodies[i]->get_matrix() * translation_transform(centre));
+        meshes.push_back(std::move(mesh));
+    }
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        bodies[i]->reset_extra_facets();
+        bodies[i]->set_mesh(std::move(meshes[i]));
+        bodies[i]->set_transformation(frames[i]);
+        bodies[i]->calculate_convex_hull();
+    }
+    // delete_volume() folds the final body's volume transform into its print
+    // instances. Its object frame changes too, so carry that change into the
+    // assembled pose instead of stacking the centred halves at the cut plane.
+    const Transform3d to_previous_frame = object.volumes.size() == joints.size() + 1 ? bodies.front()->get_matrix() :
+                                                                                       Transform3d::Identity();
+    for (size_t i = object.volumes.size(); i-- > 0;)
+        if (std::find(joints.begin(), joints.end(), object.volumes[i]) != joints.end())
+            object.delete_volume(i);
+    object.invalidate_bounding_box();
+    return to_previous_frame;
+}
+
+void Cut::finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings)
+{
+    // Own the results before any throwing Boolean work. A refusal is destroyed
+    // with this Cut, while the caller's source model is still untouched.
+    m_model.clear_objects();
     m_model.objects = objects;
+    if (m_attributes.has(ModelObjectCutAttribute::ApplyTacJoints)) {
+        try {
+            for (ModelObject* object : objects)
+                if (object != nullptr) {
+                    const Transform3d to_previous_frame = apply_tac_joint_meshes(*object);
+                    const auto        it                = m_part_to_cut_frame.find(object);
+                    const Transform3d to_cut_frame      = it != m_part_to_cut_frame.end() ? it->second : m_halves_to_cut_frame;
+                    m_part_to_cut_frame[object]         = to_cut_frame * to_previous_frame;
+                }
+        } catch (const std::runtime_error& e) {
+            throw std::invalid_argument(e.what());
+        }
+    }
+    // C1: every result knows where it sits when assembled - the halves (and "keep as parts") in
+    // the halves' frame, dowels and pins through their own map.
+    for (ModelObject* object : objects) {
+        if (object == nullptr)
+            continue;
+        const auto it = m_part_to_cut_frame.find(object);
+        set_assembled_pose(object, it != m_part_to_cut_frame.end() ? it->second : m_halves_to_cut_frame);
+    }
+
+    // OrcaSlicer #13472: paint the halves from the parts they were cut out of. Every saved part is
+    // remapped onto every model part of every result (keep_existing_paint, so they add up); the
+    // remap only takes faces that overlap a painted source face with the same orientation, so a
+    // cut face, a kerf band or a joint body stays unpainted. Connector solids are skipped.
+    for (const auto& saved_painting : saved_paintings) {
+        if (!saved_painting)
+            continue;
+        for (ModelObject* object : objects) {
+            if (object == nullptr)
+                continue;
+            for (ModelVolume* volume : object->volumes)
+                if (volume->is_model_part() && !volume->is_cut_connector() && !volume->mesh().empty())
+                    volume->restore_painting(saved_painting, true);
+        }
+    }
+
+    // Airbrush P3 (A4): the halves carry the colour field of the part they were cut from - it is
+    // position-keyed - and bake it again on top of the paint remapped above (restore_painting()
+    // remapped only the paint UNDER the airbrush). A half the field does not reach keeps none; a
+    // half copied from an airbrushed part without KeepPaint drops the copy with the paint.
+    for (ModelObject* object : objects) {
+        if (object == nullptr)
+            continue;
+        for (ModelVolume* volume : object->volumes) {
+            if (!volume->is_model_part() || volume->is_cut_connector() || volume->mesh().empty()) {
+                volume->airbrush_field.reset();
+                continue;
+            }
+            volume->airbrush_field.reset();
+            for (const auto& saved_painting : saved_paintings) {
+                if (!saved_painting || !saved_painting->airbrush_field)
+                    continue;
+                const TriangleSelector::TriangleSplittingData base = volume->mmu_segmentation_facets.get_data();
+                if (Airbrush::airbrush_carry_field(*volume, *saved_painting->airbrush_field, saved_painting->mesh.its, saved_painting->mmu,
+                                                   volume->airbrush_saved_to_mesh(*saved_painting), &base))
+                    break;   // one field per part: the first source part that reaches it
+            }
+        }
+    }
+
 }
 
 
@@ -317,6 +1238,125 @@ static bool is_unprocessed_flexi_volume(const ModelVolume* v)
            is_flexi_connector_type(v->cut_info.connector_type);
 }
 
+CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>& halves, const Transform3d& instance_linear,
+                                          ModelVolume& uncut)
+{
+    CutPaintCarry out;
+    if (uncut.mesh().empty())
+        return out;
+
+    // Every painted model part of every half, its mesh taken into the object frame. A half's own
+    // recipe copy keeps the volume matrices it had right after the cut (a project load moves a
+    // one-volume object's volume offset into the instance); otherwise the current ones are used.
+    const Transform3d to_object = instance_linear.inverse();
+    auto part_matrices = [](const ModelObject* half) {
+        std::vector<Transform3d> m;
+        for (const ModelVolume* v : half->volumes)
+            if (v->is_model_part() && !v->is_cut_connector())
+                m.push_back(v->get_matrix());
+        if (half->cut_recipe && half->cut_recipe->half_part_matrices.size() == m.size())
+            m = half->cut_recipe->half_part_matrices;
+        return m;
+    };
+    std::vector<TriangleSelector::SavedPainting> saved;
+    for (const ModelObject* half : halves) {
+        if (half == nullptr)
+            continue;
+        const std::vector<Transform3d> frames = part_matrices(half);
+        size_t                         part   = 0;
+        for (const ModelVolume* v : half->volumes) {
+            if (!v->is_model_part() || v->is_cut_connector())
+                continue;
+            const Transform3d frame = frames[part++];
+            std::optional<TriangleSelector::SavedPainting> sp = v->save_painting();
+            if (!sp)
+                continue;
+            sp->mesh.transform(to_object * frame, true);
+            saved.emplace_back(std::move(*sp));
+        }
+    }
+    out.had_paint = !saved.empty();
+    if (!out.had_paint)
+        return out;
+
+    // The uncut mesh in the object frame, for the check.
+    TriangleMesh uncut_object(uncut.mesh());
+    uncut_object.transform(uncut.get_matrix(), true);
+    const AABBMesh surface(uncut_object.its);
+    const double   tol = std::max(0.05, 1e-4 * uncut_object.bounding_box().size().norm());
+
+    // THE CHECK. In the right frame every point of a half is on the uncut part's surface or inside
+    // it (a cut only takes material away; a flexi joint's bodies, a dovetail and a kerf all stay
+    // within the original). In a wrong one - a scale or a rotation missing - a large share of them
+    // falls outside. Whole-mesh vertices rather than painted ones, so paint the user put on a CUT
+    // face after the cut (which is inside the uncut part, and simply has nowhere to go) does not
+    // make the frame look wrong.
+    size_t tested = 0, outside = 0;
+    for (const ModelObject* half : halves) {
+        if (half == nullptr)
+            continue;
+        const std::vector<Transform3d> frames = part_matrices(half);
+        size_t                         part   = 0;
+        for (const ModelVolume* v : half->volumes) {
+            if (!v->is_model_part() || v->is_cut_connector())
+                continue;
+            const Transform3d          t   = to_object * frames[part++];
+            const std::vector<Vec3f>&  pts = v->mesh().its.vertices;
+            const size_t               stride = std::max<size_t>(1, pts.size() / 2000);
+            for (size_t k = 0; k < pts.size(); k += stride) {
+                const Vec3d p = t * pts[k].cast<double>();
+                int         face = -1;
+                Vec3d       closest;
+                const double d2 = surface.squared_distance(p, face, closest);
+                ++tested;
+                if (d2 <= tol * tol || face < 0)
+                    continue;
+                const Vec3d n = its_face_normal(uncut_object.its, face).cast<double>();
+                if ((p - closest).dot(n) > 0.)
+                    ++outside;
+            }
+        }
+    }
+    if (tested == 0 || double(outside) > 0.05 * double(tested)) {
+        BOOST_LOG_TRIVIAL(warning) << "Edit cut: the halves do not fit the uncut part (" << outside << " of " << tested
+                                   << " points outside), so their painting is not carried";
+        return out;
+    }
+
+    // The remap. The target transform takes the uncut mesh into the frame the sources are in.
+    const Transform3d target = uncut.get_matrix();
+    auto remap = [&](const TriangleSelector::SavedPainting& sp, const TriangleSelector::TriangleSplittingData& src, FacetsAnnotation& dst) {
+        if (src.bitstream.empty())
+            return;
+        TriangleSelector::TriangleSplittingData result = TriangleSelector::remap_painting(
+            sp.mesh.its, src, uncut.mesh().its, target,
+            std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{ std::cref(dst.get_data()) });
+        if (!result.bitstream.empty())
+            dst.set_data(std::move(result));
+    };
+    for (const TriangleSelector::SavedPainting& sp : saved) {
+        remap(sp, sp.supported, uncut.supported_facets);
+        remap(sp, sp.seam, uncut.seam_facets);
+        remap(sp, sp.mmu, uncut.mmu_segmentation_facets);
+        remap(sp, sp.fuzzy, uncut.fuzzy_skin_facets);
+    }
+    out.carried = true;
+    return out;
+}
+
+void cut_recipe_record_half_frame(ModelObject& half)
+{
+    if (!half.cut_recipe)
+        return;
+    half.cut_recipe->half_part_matrices.clear();
+    for (const ModelVolume* v : half.volumes)
+        if (v->is_model_part() && !v->is_cut_connector())
+            // Applied single-body cuts have folded their volume translation
+            // into the print instance. The mesh still records its source shift.
+            half.cut_recipe->half_part_matrices.push_back(
+                half.cut_recipe->apply_tac_joints ? translation_transform(v->mesh().get_init_shift()) : v->get_matrix());
+}
+
 bool has_flexi_joint(const ModelObject* mo)
 {
     if (!mo)
@@ -325,6 +1365,24 @@ bool has_flexi_joint(const ModelObject* mo)
         if (is_unprocessed_flexi_volume(v))
             return true;
     return false;
+}
+
+std::string flexi_connectors_error(size_t flexi_joints, size_t other_connectors)
+{
+    if (flexi_joints == 0 || (flexi_joints == 1 && other_connectors == 0))
+        return {};
+    return L("Only one Flexi joint can be made in a cut, with no other connectors. Remove the others to cut.");
+}
+
+std::string flexi_connectors_error(const CutConnectors& connectors)
+{
+    size_t flexi = 0, other = 0;
+    for (const CutConnector& c : connectors)
+        if (is_flexi_connector_type(c.attribs.type))
+            ++ flexi;
+        else if (!is_tac_joint_connector_type(c.attribs.type))
+            ++ other;
+    return flexi_connectors_error(flexi, other);
 }
 
 ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
@@ -352,27 +1410,105 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
     return vol;
 }
 
-// Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses.
+ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
+{
+    using namespace Geometry;
+    // Not re-centred: the pin straddles its connector frame's origin, which is the point on the
+    // cut surface, and that is what the transform below places.
+    ModelVolume* vol = mo->add_volume(TriangleMesh(pushfit_preview_body(connector.pushfit)),
+                                      ModelVolumeType::NEGATIVE_VOLUME, false);
+    vol->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                            rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
+    vol->cut_info = ModelVolume::CutInfo(CutConnectorType::PushFit, 0.f, 0.f);
+    vol->cut_info.pushfit = connector.pushfit;
+    vol->name = name;
+    return vol;
+}
+
+ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
+{
+    const auto validation = tac_joint_validate(connector.tac_joint);
+    if (!validation.valid)
+        throw std::invalid_argument(validation.message);
+    ModelVolume* vol = mo->add_volume(TriangleMesh(tac_joint_connector_mesh(connector.tac_joint)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    vol->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                            rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
+    vol->cut_info           = ModelVolume::CutInfo(CutConnectorType::TacJoint, 0.f, 0.f);
+    vol->cut_info.tac_joint = connector.tac_joint;
+    vol->name               = name;
+    return vol;
+}
+
+// Split to Fit P2: moved here from GLGizmoCut3D::get_connector_mesh() (the Plug / Dowel / Snap part)
+// and GLGizmoCut3D::apply_cut_connectors(), unchanged, so the planner and the tests bake connectors
+// without the GUI. The gizmo calls both.
+indexed_triangle_set cut_connector_unit_mesh(const CutConnectorAttributes& attributes, float snap_space_proportion,
+                                             float snap_bulge_proportion)
+{
+    int sectorCount{ 1 };
+    switch (CutConnectorShape(attributes.shape)) {
+    case CutConnectorShape::Triangle: sectorCount = 3; break;
+    case CutConnectorShape::Square:   sectorCount = 4; break;
+    case CutConnectorShape::Circle:   sectorCount = 360; break;
+    case CutConnectorShape::Hexagon:  sectorCount = 6; break;
+    default: break;
+    }
+
+    if (attributes.type == CutConnectorType::Snap)
+        return its_make_snap(1.0, 1.0, snap_space_proportion, snap_bulge_proportion);
+    if (attributes.style == CutConnectorStyle::Prism)
+        return its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
+    if (attributes.type == CutConnectorType::Plug)
+        return its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
+    return its_make_frustum_dowel(1.0, 1.0, sectorCount);
+}
+
+void bake_cut_connectors(ModelObject* mo, const std::string& connector_name, float snap_space_proportion, float snap_bulge_proportion)
+{
+    if (mo == nullptr || mo->cut_connectors.empty())
+        return;
+
+    using namespace Geometry;
+
+    size_t connector_id = mo->cut_id.connectors_cnt();
+    for (const CutConnector& connector : mo->cut_connectors) {
+        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::PushFit) {
+            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::TacJoint) {
+            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
+            continue;
+        }
+        // Placed as the gizmo draws it (centred on its height only): see add_cut_connector_volume().
+        ModelVolume* new_volume = add_cut_connector_volume(
+            *mo, cut_connector_unit_mesh(connector.attribs, snap_space_proportion, snap_bulge_proportion), connector);
+
+        new_volume->cut_info = { connector.attribs.type, connector.radius_tolerance, connector.height_tolerance };
+        new_volume->name     = connector_name + "-" + std::to_string(++connector_id);
+    }
+    mo->cut_id.increase_connectors_cnt(mo->cut_connectors.size());
+
+    // delete all connectors
+    mo->cut_connectors.clear();
+}
+
+static bool has_tac_joint(const ModelObject* object)
+{
+    return std::any_of(object->volumes.begin(), object->volumes.end(),
+                       [](const ModelVolume* volume) { return volume->cut_info.is_tac_joint() && !volume->cut_info.is_processed; });
+}
+
+// Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses. The chain
+// itself lives in MeshBoolean so the push-fit pin's slit shares it.
 static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::string& op)
 {
-    std::vector<TriangleMesh> dst;
-    bool ok = MeshBoolean::mfd::make_boolean(a, b, dst, op);
-    if (!ok) {
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: Manifold boolean " << op << " failed, falling back to mcut";
-        dst.clear();
-        try {
-            MeshBoolean::mcut::make_boolean(a, b, dst, op);
-        } catch (const std::exception& ex) {
-            BOOST_LOG_TRIVIAL(error) << "Flexi joint: mcut boolean " << op << " failed: " << ex.what();
-            return false;
-        }
-    }
-    if (dst.empty())
-        return false;
-    TriangleMesh out = dst.front();
-    for (size_t i = 1; i < dst.size(); ++ i)
-        out.merge(dst[i]);
-    if (out.empty())
+    TriangleMesh out;
+    if (!MeshBoolean::make_boolean_chain(a, b, op, out, "Flexi joint"))
         return false;
     a = std::move(out);
     return true;
@@ -380,11 +1516,30 @@ static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::str
 
 const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument(L("TAC Joint cannot be combined with a Flexi joint in the same cut."));
     using namespace Geometry;
 
     ModelObject* mo = m_model.objects.front();
 
+    // One Flexi joint per cut and nothing beside it: the cut below makes one joint and has no
+    // place for any other connector. Refused before anything is changed, as the gizmo refuses it
+    // before the click.
+    {
+        size_t flexi = 0, other = 0;
+        for (const ModelVolume* v : mo->volumes)
+            if (is_unprocessed_flexi_volume(v))
+                ++ flexi;
+            else if (v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_tac_joint())
+                ++ other;
+        const std::string error = flexi_connectors_error(flexi, other);
+        if (!error.empty())
+            throw std::invalid_argument(error);
+    }
+
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
+
+    const SavedPaintings saved_paintings = save_paintings(mo);
 
     // The two halves must stay parts of ONE object or the joint is not print-in-place:
     // this cut type forces keep-as-parts, keep-upper and keep-lower on regardless of the
@@ -396,23 +1551,18 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // Phase 1: exactly one joint per cut. Extra joints are ignored with a warning.
+    // Exactly one joint per cut, checked above.
     FlexiJointParams params;
     Transform3d      joint_matrix = Transform3d::Identity();
     ModelVolume*     first_solid  = nullptr;
-    int              joints       = 0;
     for (ModelVolume* v : mo->volumes) {
         if (is_unprocessed_flexi_volume(v)) {
-            if (++ joints == 1) {
-                params       = v->cut_info.flexi;
-                joint_matrix = inverse_cut_matrix * v->get_matrix();
-            }
+            params       = v->cut_info.flexi;
+            joint_matrix = inverse_cut_matrix * v->get_matrix();
             v->cut_info.set_processed();
         } else if (v->is_model_part() && !v->mesh().empty() && first_solid == nullptr)
             first_solid = v;
     }
-    if (joints > 1)
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
 
     // PHASE 3: the kerf ADDS to the joint's own gap, in the params, BEFORE anything
     // is generated. flexi_effective_gap() sets where the two flat faces go, and
@@ -467,7 +1617,13 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     TriangleMesh lower_mesh(std::move(lower_its));
     TriangleMesh upper_mesh(std::move(upper_its));
 
-    bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
+    // A joint needs material on both sides of it. `out` is handed to m_model before a refusal so
+    // it is freed with the rest.
+    if (lower_mesh.empty() || upper_mesh.empty()) {
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: the cut leaves nothing on one side of it."));
+    }
+    bool boolean_ok = true;
 
     // Union each segment's own joint body into it, then subtract the OTHER side's body
     // inflated by the clearance. For the revolved kinds the lower relief list is empty and
@@ -498,8 +1654,14 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
             if (!flexi_boolean(upper_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
         }
 
-    if (!boolean_ok)
-        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut falls back to two plain halves";
+    // A failed boolean refuses the cut. Going on would give halves with the joint partly made (a
+    // body joined to one half with no room cut for it in the other) or not made at all, and the
+    // person would not know.
+    if (!boolean_ok) {
+        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut is refused";
+        m_model.objects.push_back(out);
+        throw std::invalid_argument(L("The Flexi joint could not be made: joining it to the halves failed. Try another size or position."));
+    }
 
     add_cut_volume(upper_mesh, out, first_solid, m_cut_matrix, "_A");
     if (!lower_mesh.empty()) {
@@ -522,8 +1684,122 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
     return m_model.objects;
+}
+
+// ---------------------------------------------------------------------------- connectors, curved / drawn
+
+// What process_connector_cut() needs for one connector on a curved or drawn cut: the halves'
+// faces along its axis (from its origin) and how far the surface strays under its footprint.
+struct NonPlanarConnector
+{
+    double face_lo{ 0.0 };
+    double face_hi{ 0.0 };
+    double relief{ 0.0 };
+};
+using NonPlanarConnectors = std::map<const ModelVolume*, NonPlanarConnector>;
+
+static bool is_unprocessed_rigid_connector(const ModelVolume* v)
+{
+    return !v->is_model_part() && v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_flexi_joint();
+}
+
+static void validate_tac_attachment(const TacJointParams& params, ModelObjectCutAttributes attributes)
+{
+    // A negative volume affects every positive part in its object, so the opposite
+    // socket would also eat the attached pin when both halves share an object.
+    if (params.attachment != TacJointAttachment::Separate && attributes.has(ModelObjectCutAttribute::KeepAsParts))
+        throw std::invalid_argument(L("An attached TAC Joint requires A and B to be separate objects. Disable Keep as parts."));
+}
+
+// Checks every unprocessed connector of `mo` (flexi joints take their own path) against the cut
+// surface, BEFORE anything is cloned, so a refusal leaves no partial cut behind:
+//   - off the surface, or standing where the surface strays more than
+//     CutConnectorMaxSurfaceDeviation from its own plane over its footprint: refused;
+//   - +Z pointing into the LOWER half: turned over about the point where its axis meets the
+//     surface, so its plug / hole / pin halves land in the halves they are meant for;
+//   - a TAC Joint: its fit and engagement validated at the faces it really gets.
+// `inverse_cut_matrix` takes the connector volumes (and the halves) into the cut plane's frame.
+static NonPlanarConnectors prepare_non_planar_connectors(ModelObject*             mo,
+                                                         const CutSurfaceProbe&   probe,
+                                                         const Transform3d&       inverse_cut_matrix,
+                                                         const CutSolidTest&      object,
+                                                         ModelObjectCutAttributes attributes)
+{
+    NonPlanarConnectors out;
+    for (ModelVolume* volume : mo->volumes) {
+        if (!is_unprocessed_rigid_connector(volume))
+            continue;
+        const Transform3d matrix = volume->get_matrix();
+        if (!matrix.matrix().allFinite())
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        const Transform3d     unscaled = Transformation(matrix).get_matrix_no_scaling_factor();
+        // How far the origin can sit off the surface along the axis: the body's own half length.
+        const Matrix3d to_own = unscaled.linear().transpose() * matrix.linear();
+        double         axial  = 0.0;
+        for (const Vec3f& v : volume->mesh().its.vertices)
+            axial = std::max(axial, std::abs((to_own * v.cast<double>()).z()));
+        const CutConnectorFit fit = cut_connector_fit(probe, inverse_cut_matrix * unscaled, connector_volume_footprint_radius(*volume), axial);
+        if (!fit.on_surface)
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        // Where its axis meets the cut has to be INSIDE the part: a sheet or a drawn strip reaches
+        // well past the object, and a connector out there would only make holes in nothing.
+        {
+            const Transform3d in_plane = inverse_cut_matrix * unscaled;
+            Vec3d             axis     = in_plane.linear().col(2);
+            axis.normalize();
+            if (!object.empty() && !object.contains(in_plane.translation() + fit.centre_offset * axis))
+                throw std::invalid_argument(L("A connector is outside the part's cross-section on the cut surface. "
+                                              "Place it where the cut goes through the part."));
+        }
+        if (!fit.fits()) {
+            BOOST_LOG_TRIVIAL(warning) << "Cut: connector " << volume->name << " refused, the cut surface strays " << fit.deviation
+                                       << " mm from its plane over its footprint (limit " << CutConnectorMaxSurfaceDeviation << " mm)";
+            throw std::invalid_argument(L("A connector stands where the cut surface curves too much under it. Move it to a flatter "
+                                          "spot, use a smaller connector, or flatten the surface there."));
+        }
+        if (volume->cut_info.is_tac_joint()) {
+            validate_tac_attachment(volume->cut_info.tac_joint, attributes);
+            const auto validation = tac_joint_validate(volume->cut_info.tac_joint, fit.face_lo, fit.face_hi);
+            if (!validation.valid)
+                throw std::invalid_argument(validation.message);
+        }
+        if (!fit.upper_along_z) {
+            // Turned over about the surface point: the origin moves to its mirror image there and
+            // the frame turns half a turn about its own X, so +Z points into the upper half.
+            Vec3d axis = unscaled.linear().col(2);
+            axis.normalize();
+            const Vec3d origin = matrix.translation();
+            const Vec3d centre = origin + fit.centre_offset * axis;
+            Transform3d flipped = Transform3d::Identity();
+            flipped.linear()    = matrix.linear();
+            flipped             = translation_transform(2.0 * centre - origin) * flipped * rotation_transform(PI * Vec3d::UnitX());
+            volume->set_transformation(flipped);
+        }
+        out[volume] = NonPlanarConnector{ fit.face_lo, fit.face_hi, fit.deviation };
+    }
+    return out;
+}
+
+// The object's model parts, merged, in the cut plane's frame (the frame the sheet, the stroke and
+// the probe live in).
+static indexed_triangle_set object_in_plane(const ModelObject* mo, int instance, const Transform3d& to_plane)
+{
+    indexed_triangle_set solid;
+    const Transform3d inst_lin = mo->instances[instance]->get_transformation().get_matrix_no_offset();
+    for (const ModelVolume* v : mo->volumes)
+        if (v->is_model_part() && !v->mesh().empty()) {
+            TriangleMesh m(v->mesh());
+            m.transform(to_plane * inst_lin * v->get_matrix(), true);
+            its_merge(solid, m.its);
+        }
+    return solid;
+}
+
+static bool has_unprocessed_rigid_connector(const ModelObject* mo)
+{
+    return std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume* v) { return is_unprocessed_rigid_connector(v); });
 }
 
 // ---------------------------------------------------------------------------- curved cut
@@ -562,23 +1838,24 @@ static void process_solid_part_curved_cut(ModelVolume* volume, const Transform3d
                                           ModelObject* upper, ModelObject* lower, double thickness = 0.0,
                                           CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_curved_cut(volume, instance_matrix, cut_matrix, attributes, sheet, upper_mesh, lower_mesh, thickness, offset);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
@@ -611,6 +1888,22 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - start";
 
+    // Connectors (all but the flexi kinds, handled above): checked against the sheet, turned the
+    // right way up and given the faces they really get - before anything is cloned, so a refused
+    // connector leaves the cut untouched and retryable.
+    NonPlanarConnectors connector_faces;
+    if (has_unprocessed_rigid_connector(mo)) {
+        if (!std::isfinite(thickness))
+            throw std::invalid_argument(L("The cut thickness must be a finite number."));
+        const Transformation cut_trafo = Transformation(m_cut_matrix);
+        const Transform3d    to_plane  = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
+        connector_faces = prepare_non_planar_connectors(mo, CutSurfaceProbe::curved(sheet, std::max(0.0, thickness), offset), to_plane,
+                                                        CutSolidTest(object_in_plane(mo, m_instance, to_plane)), m_attributes);
+    }
+
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
+
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
         mo->clone_for_cut(&upper);
@@ -619,7 +1912,7 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     if (m_attributes.has(ModelObjectCutAttribute::KeepLower) && !m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
         mo->clone_for_cut(&lower);
 
-    std::vector<ModelObject*> dowels;
+    std::vector<CutSeparatePart> dowels;
 
     const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
     const Transformation cut_transformation = Transformation(m_cut_matrix);
@@ -633,19 +1926,22 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     // solids and their pockets are built by exactly the same helper the flat cut
     // uses, and the tilt rides in through the volume's transform.
     //
-    // The one place the sheet does matter is the DOWEL, which is cut in half so
-    // that each half goes to its own object. process_connector_cut() slices it
-    // with the flat cut_mesh(), which is the RIGHT thing here: the dowel's own
-    // frame is already the sheet's frame, so "flat, in the dowel's frame" IS
-    // "tangent to the sheet at the dowel". See process_connector_curved_cut().
+    // 2026-10-31: what the sheet does change is measured per connector by
+    // prepare_non_planar_connectors() above - the halves' faces along the connector's own axis,
+    // and how far the sheet strays from its plane over its footprint - and handed to
+    // process_connector_cut(), which then gives the Dowel and the TAC Joint whole sockets and
+    // the Pin a mouth relief instead of halving them at a plane the cut is not on.
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
-            else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
+            else {
+                const auto it = connector_faces.find(volume);
+                const NonPlanarConnector f = it != connector_faces.end() ? it->second : NonPlanarConnector{};
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, f.face_lo, f.face_hi, f.relief);
+            }
         }
         else if (!volume->mesh().empty())
             process_solid_part_curved_cut(volume, instance_matrix, m_cut_matrix, m_attributes, sheet, upper, lower, thickness, offset);
@@ -687,18 +1983,14 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         // frame, so it comes out standing along the surface normal at its (u,v),
         // and reset_instance_transformation() puts it flat on the bed for
         // printing exactly the way the flat path does.
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty()) {
-            for (auto dowel : dowels) {
-                reset_instance_transformation(dowel, m_instance);
-                dowel->name += "-Dowel-" + dowel->volumes[0]->name;
-                cut_object_ptrs.push_back(dowel);
-            }
-        }
     }
+    // As on the flat path (PR 801), the separate parts come out with "keep as parts" too.
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
@@ -738,23 +2030,24 @@ static void process_solid_part_draw_cut(ModelVolume* volume, const Transform3d& 
                                         ModelObjectCutAttributes attributes, const DrawCutStroke& stroke,
                                         const DrawCutParams& params, ModelObject* upper, ModelObject* lower)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_draw_cut(volume, instance_matrix, cut_matrix, attributes, stroke, params, upper_mesh, lower_mesh);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params)
@@ -789,6 +2082,26 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - start";
 
+    // Connectors (all but the flexi kinds, handled above): checked against the drawn strip,
+    // turned the right way up and given the faces they really get - before anything is cloned,
+    // so a refused connector leaves the cut untouched and retryable. The strip is built against
+    // the whole object in the plane frame, as draw_cut_split() builds it against each part.
+    NonPlanarConnectors connector_faces;
+    if (has_unprocessed_rigid_connector(mo)) {
+        if (!std::isfinite(params.thickness))
+            throw std::invalid_argument(L("The cut thickness must be a finite number."));
+        const Transformation cut_trafo  = Transformation(m_cut_matrix);
+        const Transform3d    to_plane   = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
+        indexed_triangle_set solid      = object_in_plane(mo, m_instance, to_plane);
+        const CutSurfaceProbe probe     = CutSurfaceProbe::drawn(stroke, params, solid);
+        if (!probe.valid())
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane, CutSolidTest(std::move(solid)), m_attributes);
+    }
+
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
+
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
         mo->clone_for_cut(&upper);
@@ -797,24 +2110,26 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
     if (m_attributes.has(ModelObjectCutAttribute::KeepLower) && !m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
         mo->clone_for_cut(&lower);
 
-    std::vector<ModelObject*> dowels;
+    std::vector<CutSeparatePart> dowels;
 
     const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // PHASE 1 SHIPS CONNECTOR-FREE on the drawn surface (the gizmo's panel does not
-    // offer them), but the loop keeps the curved path's shape so a connector volume
-    // that reached here some other way is still processed rather than dropped -
-    // which is also what phase 2 will need once the drawn surface grows a frame.
+    // Connectors on the drawn surface (phase 2 in the gizmo; 2026-10-31 here): each one takes
+    // the faces and the relief prepare_non_planar_connectors() measured on the strip, exactly as
+    // on a curved cut.
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
-            else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
+            else {
+                const auto it = connector_faces.find(volume);
+                const NonPlanarConnector f = it != connector_faces.end() ? it->second : NonPlanarConnector{};
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, f.face_lo, f.face_hi, f.relief);
+            }
         }
         else if (!volume->mesh().empty())
             process_solid_part_draw_cut(volume, instance_matrix, m_cut_matrix, m_attributes, stroke, params, upper, lower);
@@ -850,25 +2165,39 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
         post_process(upper, lower, cut_object_ptrs);
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
-
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty()) {
-            for (auto dowel : dowels) {
-                reset_instance_transformation(dowel, m_instance);
-                dowel->name += "-Dowel-" + dowel->volumes[0]->name;
-                cut_object_ptrs.push_back(dowel);
-            }
-        }
     }
+    // As on the flat and curved paths, the separate parts come out with "keep as parts" too.
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
 
 const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOffset offset)
 {
+    // Validate before cloning halves: a rejected fit must not leave partial cut objects.
+    double tac_face_lo = 0., tac_face_hi = 0.;
+    if (thickness > 0.)
+        curved_cut_thickness_faces(thickness, offset, tac_face_lo, tac_face_hi);
+    if (!m_model.objects.empty()) {
+        for (const auto* volume : m_model.objects.front()->volumes) {
+            if (!volume->cut_info.is_tac_joint() || volume->cut_info.is_processed)
+                continue;
+            validate_tac_attachment(volume->cut_info.tac_joint, m_attributes);
+            const auto validation = tac_joint_validate(volume->cut_info.tac_joint, tac_face_lo, tac_face_hi);
+            if (!validation.valid)
+                throw std::invalid_argument(validation.message);
+            const Transform3d local = m_cut_matrix.inverse() * volume->get_matrix();
+            const Vec3d       axis  = local.linear() * Vec3d::UnitZ();
+            if (!local.matrix().allFinite() || !std::isfinite(thickness) || (axis - Vec3d::UnitZ()).norm() > 1e-4 ||
+                std::abs(local.translation().z()) > 1e-3)
+                throw std::invalid_argument(L("TAC Joint must stand on the planar cut surface."));
+        }
+    }
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
@@ -887,6 +2216,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - start";
 
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
+
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
@@ -896,7 +2228,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
     if (m_attributes.has(ModelObjectCutAttribute::KeepLower) && !m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
         mo->clone_for_cut(&lower);
 
-    std::vector<ModelObject*> dowels;
+    std::vector<CutSeparatePart> dowels;
 
     // Because transformations are going to be applied to meshes directly,
     // we reset transformation of all instances and volumes,
@@ -907,6 +2239,12 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
     const Transformation    cut_transformation = Transformation(m_cut_matrix);
     const Transform3d       inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
+    // The kerf faces along the cut normal, for the push-fit pin (its holes are measured from
+    // each half's own face and the pin spans the kerf).
+    double kerf_face_lo = 0.0, kerf_face_hi = 0.0;
+    if (thickness > 0.0)
+        curved_cut_thickness_faces(thickness, offset, kerf_face_lo, kerf_face_hi);
+
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
@@ -914,7 +2252,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
             else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, kerf_face_lo, kerf_face_hi);
         }
         else if (!volume->mesh().empty())
             process_solid_part_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, std::max(0.0, thickness), offset);
@@ -954,18 +2292,16 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
 
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty()) {
-            for (auto dowel : dowels) {
-                reset_instance_transformation(dowel, m_instance);
-                dowel->name += "-Dowel-" + dowel->volumes[0]->name;
-                cut_object_ptrs.push_back(dowel);
-            }
-        }
+        if (upper && !m_attributes.has(ModelObjectCutAttribute::PlaceOnCutUpper) && !m_attributes.has(ModelObjectCutAttribute::FlipUpper) &&
+            size_t(m_instance) < m_src_bboxes.size())
+            shift_upper_layer_ranges(upper, m_instance, m_cut_matrix, m_src_bboxes[m_instance]);
     }
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
@@ -990,37 +2326,109 @@ static void distribute_modifiers_from_object(ModelObject* from_obj, const int in
         }
 }
 
+// The identity that decides how a solid part is sliced and colored: filament, material and the
+// per-part process overrides. An explicit "extruder" is folded into extruder_id() so restating the
+// object's filament does not split the part.
+static std::string part_group_key(const ModelVolume& mv)
+{
+    // The material id and the serialized values are length-prefixed, so a value containing ';' or '='
+    // cannot make two different parts share a key.
+    std::string key = std::to_string(std::max(1, mv.extruder_id())) + "|";
+    key += std::to_string(mv.material_id().size()) + ":" + mv.material_id() + "|";
+    t_config_option_keys opt_keys = mv.config.keys();
+    std::sort(opt_keys.begin(), opt_keys.end());
+    for (const std::string& opt_key : opt_keys) {
+        if (opt_key == "extruder")
+            continue;
+        const std::string value = mv.config.opt_serialize(opt_key);
+        key += opt_key + "=" + std::to_string(value.size()) + ":" + value + ";";
+    }
+    return key;
+}
+
 static void merge_solid_parts_inside_object(ModelObjectPtrs& objects)
 {
+    struct Group
+    {
+        std::string        key;
+        TriangleMesh       mesh;
+        const ModelVolume* representative = nullptr;
+    };
+
     for (ModelObject* mo : objects) {
-        TriangleMesh mesh;
-        // Merge all SolidPart but not Connectors
-        for (const ModelVolume* mv : mo->volumes) {
-            if (mv->is_model_part() && !mv->is_cut_connector()) {
-                TriangleMesh m = mv->mesh();
-                m.transform(mv->get_matrix());
-                mesh.merge(m);
+        // Merge all SolidPart but not Connectors, keeping parts with a different slicing identity apart.
+        std::vector<ModelVolume*> originals;
+        std::vector<Group>        groups;
+        for (ModelVolume* mv : mo->volumes) {
+            if (!mv->is_model_part() || mv->is_cut_connector())
+                continue;
+            originals.push_back(mv);
+            const std::string key = part_group_key(*mv);
+            auto group = std::find_if(groups.begin(), groups.end(), [&key](const Group& g) { return g.key == key; });
+            if (group == groups.end()) {
+                groups.push_back({key, TriangleMesh(), mv});
+                group = groups.end() - 1;
             }
+            TriangleMesh m = mv->mesh();
+            m.transform(mv->get_matrix());
+            group->mesh.merge(m);
         }
-        if (!mesh.empty()) {
-            ModelVolume* new_volume = mo->add_volume(mesh);
-            new_volume->name = mo->name;
-            // Delete all merged SolidPart but not Connectors
-            for (int i = int(mo->volumes.size()) - 2; i >= 0; --i) {
-                const ModelVolume* mv = mo->volumes[i];
-                if (mv->is_model_part() && !mv->is_cut_connector())
-                    mo->delete_volume(i);
+
+        bool created = false;
+        for (size_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
+            const Group& group = groups[group_idx];
+            if (group.mesh.empty())
+                continue;
+
+            ModelVolume* new_volume = mo->add_volume(group.mesh);
+            if (!created) {
+                new_volume->name = mo->name;
+            } else {
+                std::string name = mo->name + "_T" + std::to_string(group.representative->extruder_id());
+                const auto name_taken = [mo](const std::string& n) {
+                    return std::any_of(mo->volumes.begin(), mo->volumes.end(), [&n](const ModelVolume* v) { return v->name == n; });
+                };
+                if (name_taken(name))
+                    name += "_" + std::to_string(group_idx);
+                new_volume->name = name;
             }
-            // Ensuring that volumes start with solid parts for proper slicing
-            mo->sort_volumes(true);
+            // Don't copy the config's ID.
+            new_volume->config.assign_config(group.representative->config);
+            // Only the material id is carried; the cut model has no material table for its settings.
+            new_volume->set_material_id(group.representative->material_id());
+            created = true;
         }
+
+        if (!created)
+            continue;
+
+        // Delete the merged SolidPart but not Connectors, matched by pointer.
+        for (size_t i = mo->volumes.size(); i > 0; --i) {
+            const ModelVolume* mv = mo->volumes[i - 1];
+            if (std::find(originals.begin(), originals.end(), mv) != originals.end())
+                mo->delete_volume(i - 1);
+        }
+        // Ensuring that volumes start with solid parts for proper slicing
+        mo->sort_volumes(true);
     }
 }
 
 
-const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowels_count)
+const ModelObjectPtrs& Cut::perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count)
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument(L("TAC Joint does not support individual part selection."));
     ModelObject* cut_mo = m_model.objects.front();
+
+    // C1: PartSelection's pieces keep the object's own frame (the instance is not baked into them,
+    // unlike the plane path's halves), so their map to the halves' frame is the instance's
+    // offset-free matrix.
+    if (m_instance >= 0 && size_t(m_instance) < cut_mo->instances.size())
+        m_halves_to_cut_frame = cut_mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+
+    // The parts here are PartSelection's split pieces, which carry no painting: take it from the
+    // object as it was before the split (OrcaSlicer #13472).
+    const SavedPaintings saved_paintings = save_paintings(src_object);
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -1062,7 +2470,7 @@ const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowe
         merge_solid_parts_inside_object(cut_object_ptrs);
 
         // replace initial objects in model with cut object 
-        finalize(cut_object_ptrs);
+        finalize(cut_object_ptrs, saved_paintings);
     }
     else if (volumes.size() > cut_parts_cnt) {
         // Means that object is cut with connectors
@@ -1075,6 +2483,7 @@ const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowe
 
         // Perform cut just to get connectors
         Cut cut(cut_mo, m_instance, m_cut_matrix, m_attributes);
+        cut.inherit_source(*this);
         const ModelObjectPtrs& cut_connectors_obj = cut.perform_with_plane();
         assert(dowels_count > 0 ? cut_connectors_obj.size() >= 3 : cut_connectors_obj.size() == 2);
 
@@ -1093,21 +2502,35 @@ const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowe
         merge_solid_parts_inside_object(cut_object_ptrs);
 
         // replace initial objects in model with cut object
-        finalize(cut_object_ptrs);
+        finalize(cut_object_ptrs, saved_paintings);
 
         // Add Dowel-connectors as separate objects to model
         if (cut_connectors_obj.size() >= 3)
-            for (size_t id = 2; id < cut_connectors_obj.size(); id++)
-                m_model.add_object(*cut_connectors_obj[id]);
+            for (size_t id = 2; id < cut_connectors_obj.size(); id++) {
+                ModelObject* copy = m_model.add_object(*cut_connectors_obj[id]);
+                // Copying drops the instances' "assembled pose set" flag: carry the pose over.
+                for (size_t i = 0; i < copy->instances.size() && i < cut_connectors_obj[id]->instances.size(); ++i)
+                    copy->instances[i]->set_assemble_transformation(cut_connectors_obj[id]->instances[i]->get_assemble_transformation());
+            }
+        m_pin_slot_failures += cut.pin_slot_failures();
     }
 
     return m_model.objects;
 }
 
 
-const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts/* = false*/)
+const ModelObjectPtrs& Cut::perform_with_groove(const Groove&       groove,
+                                                const Transform3d&  rotation_m,
+                                                int                 groove_count,
+                                                const float         groove_gap,
+                                                const float         plane_radius,
+                                                bool                keep_as_parts /* = false*/)
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument(L("TAC Joint does not support groove cuts."));
     ModelObject* cut_mo = m_model.objects.front();
+    // The gizmo caps the count (20); a recipe or a caller asking for none still gets one dovetail.
+    groove_count = std::max(1, groove_count);
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -1119,6 +2542,11 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         upper->name = upper->name + "_A";
         lower->name = lower->name + "_B";
     }
+
+    // OrcaSlicer #13472. The nested plane cuts below run without KeepPaint and drop it; the
+    // painting is taken here, from the object before any of them, and put back in finalize().
+    const SavedPaintings saved_paintings = save_paintings(cut_mo);
+
     const double groove_half_depth = 0.5 * double(groove.depth);
 
     Model tmp_model_for_cut = Model();
@@ -1152,7 +2580,7 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         reset_instance_transformation(object, m_instance);
     };
 
-    // cut by upper plane
+    // cut by upper plane (+Z)
 
     const Transform3d cut_matrix_upper = translation_transform(rotation_m * (groove_half_depth * Vec3d::UnitZ())) * m_cut_matrix;
     {
@@ -1160,7 +2588,7 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         add_volumes_from_cut(upper, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
     }
 
-    // cut by lower plane
+    // cut by lower plane (-Z)
 
     const Transform3d cut_matrix_lower = translation_transform(rotation_m * (-groove_half_depth * Vec3d::UnitZ())) * m_cut_matrix;
     {
@@ -1168,44 +2596,96 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         add_volumes_from_cut(lower, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
     }
 
-    // cut middle part with 2 angles and add parts to related upper/lower objects
+    // Compute same slot outer width used in preview plane
+    const float  groove_width     = calculate_groove_width(groove, plane_radius);
 
-    const double h_side_shift = 0.5 * double(groove.width + groove.depth / tan(groove.flaps_angle));
+    ModelObject* groove_object{nullptr};
 
-    // cut by angle1 plane
-    {
-        const Transform3d cut_matrix_angle1 = translation_transform(rotation_m * (-h_side_shift * Vec3d::UnitX())) * m_cut_matrix * rotation_transform(Vec3d(0, -groove.flaps_angle, -groove.angle));
+    // multiple cuts
+    for (int i = 0; i < groove_count; i++) {
+        bool is_first_groove = i == 0; 
+        bool is_last_groove = i == groove_count - 1; 
 
-        cut(tmp_object, cut_matrix_angle1, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
-        add_volumes_from_cut(lower, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+        // Calculate the x-axis offset for this dovetail
+        float groove_offset_factor_start = -.5 * ((groove_count - 1));
+        float groove_offset_factor       = groove_offset_factor_start + i;
+
+        float offset_x = groove_offset_factor * (groove_gap + groove_width);
+
+
+        tmp_object->clone_for_cut(&groove_object);
+        for (ModelVolume* volume : tmp_object->volumes) {
+            ModelVolume* new_vol = groove_object->add_volume(*volume);
+            new_vol->reset_from_upper();
+        }
+
+        // isolate area of current groove
+        if (!is_first_groove) {
+            float left_cut_position = (-groove_gap / 2.f) - (groove_width / 2.f) + offset_x;
+
+            const Transform3d cut_matrix_left = translation_transform(rotation_m * (left_cut_position * Vec3d::UnitX())) *
+                                                m_cut_matrix * rotation_transform(Vec3d(0, M_PI / 2.0, 0));
+
+            cut(groove_object, cut_matrix_left, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+        }
+        if (!is_last_groove) {
+            float right_cut_position = (groove_gap / 2.f) + (groove_width / 2.f) + offset_x;
+
+            const Transform3d cut_matrix_right = translation_transform(rotation_m * (right_cut_position * Vec3d::UnitX())) *
+                                                 m_cut_matrix * rotation_transform(Vec3d(0, M_PI / 2.0, 0));
+            cut(groove_object, cut_matrix_right, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
+        }
+
+        const Transform3d groove_translation = translation_transform(rotation_m * (offset_x * Vec3d::UnitX()));
+        // cut middle part with 2 angles and add parts to related upper/lower objects
+        const double h_side_shift = 0.5 * double(groove.width + groove.depth / tan(groove.flaps_angle));
+
+        // cut by angle1 plane
+        {
+            const Transform3d cut_matrix_angle1 = groove_translation * translation_transform(rotation_m * (-h_side_shift * Vec3d::UnitX())) *
+                                                  m_cut_matrix * rotation_transform(Vec3d(0, -groove.flaps_angle, -groove.angle));
+
+            cut(groove_object, cut_matrix_angle1, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
+            add_volumes_from_cut(lower, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+        }
+
+        // cut by angle2 plane
+        {
+            const Transform3d cut_matrix_angle2 = groove_translation * translation_transform(rotation_m * (h_side_shift * Vec3d::UnitX())) *
+                                                  m_cut_matrix * rotation_transform(Vec3d(0, groove.flaps_angle, groove.angle));
+
+            cut(groove_object, cut_matrix_angle2, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
+            add_volumes_from_cut(lower, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+        }
+
+        // apply tolerance to the middle part
+        {
+            const double h_groove_shift_tolerance = groove_half_depth - (double)groove.depth_tolerance;
+
+            const Transform3d cut_matrix_lower_tolerance = groove_translation * translation_transform(rotation_m * (-h_groove_shift_tolerance * Vec3d::UnitZ())) *
+                                                           m_cut_matrix;
+            cut(groove_object, cut_matrix_lower_tolerance, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+
+            const double h_side_shift_tolerance = h_side_shift - 0.5 * double(groove.width_tolerance);
+
+            const Transform3d cut_matrix_angle1_tolerance = groove_translation * translation_transform(rotation_m * (-h_side_shift_tolerance * Vec3d::UnitX())) *
+                                                            m_cut_matrix * rotation_transform(Vec3d(0, -groove.flaps_angle, -groove.angle));
+            cut(groove_object, cut_matrix_angle1_tolerance, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
+
+            const Transform3d cut_matrix_angle2_tolerance = groove_translation * translation_transform(rotation_m * (h_side_shift_tolerance * Vec3d::UnitX())) *
+                                                            m_cut_matrix * rotation_transform(Vec3d(0, groove.flaps_angle, groove.angle));
+            cut(groove_object, cut_matrix_angle2_tolerance, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
+        }
+
+        add_volumes_from_cut(upper, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
+
+        groove_object->clear_volumes();
+        // EDGE: clone_for_cut() allocates a new object for every dovetail and upstream never freed
+        // it. Hand it to m_model, whose objects finalize() deletes - the same way post_process()
+        // disposes of a half that is not kept.
+        m_model.objects.push_back(groove_object);
+        groove_object = nullptr;
     }
-
-    // cut by angle2 plane
-    {
-        const Transform3d cut_matrix_angle2 = translation_transform(rotation_m * (h_side_shift * Vec3d::UnitX())) * m_cut_matrix * rotation_transform(Vec3d(0, groove.flaps_angle, groove.angle));
-
-        cut(tmp_object, cut_matrix_angle2, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
-        add_volumes_from_cut(lower, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
-    }
-
-    // apply tolerance to the middle part
-    {
-        const double h_groove_shift_tolerance = groove_half_depth - (double)groove.depth_tolerance;
-
-        const Transform3d cut_matrix_lower_tolerance = translation_transform(rotation_m * (-h_groove_shift_tolerance * Vec3d::UnitZ())) * m_cut_matrix;
-        cut(tmp_object, cut_matrix_lower_tolerance, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
-
-        const double h_side_shift_tolerance = h_side_shift - 0.5 * double(groove.width_tolerance);
-
-        const Transform3d cut_matrix_angle1_tolerance = translation_transform(rotation_m * (-h_side_shift_tolerance * Vec3d::UnitX())) * m_cut_matrix * rotation_transform(Vec3d(0, -groove.flaps_angle, -groove.angle));
-        cut(tmp_object, cut_matrix_angle1_tolerance, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
-
-        const Transform3d cut_matrix_angle2_tolerance = translation_transform(rotation_m * (h_side_shift_tolerance * Vec3d::UnitX())) * m_cut_matrix * rotation_transform(Vec3d(0, groove.flaps_angle, groove.angle));
-        cut(tmp_object, cut_matrix_angle2_tolerance, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);
-    }
-
-    // this part can be added to the upper object now
-    add_volumes_from_cut(upper, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);
 
     ModelObjectPtrs cut_object_ptrs;
 
@@ -1245,9 +2725,92 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         merge_solid_parts_inside_object(cut_object_ptrs);
     }
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
+}
+
+float Cut::calculate_groove_width(const Cut::Groove& groove, const float plane_radius)
+{
+    // Compute same slot outer width used in preview plane
+    const double flap_width             = is_approx(groove.flaps_angle, 0.f) ? groove.depth : groove.depth / sin(groove.flaps_angle);
+    const double total_flap_width       = 2.0 * flap_width * cos(groove.flaps_angle);
+    const double slot_neck_half_width   = 0.5f * (groove.width);
+    const double slot_mouth_half_width  = 0.5 * (groove.width + total_flap_width);
+    const double plane_half_height      = 0.5f* (1.5f * (1.5f *plane_radius));
+    const double flap_taper_offset      = plane_half_height * tan(groove.angle);
+    const double slot_outer_x_max       = std::max(slot_mouth_half_width + flap_taper_offset, slot_neck_half_width + flap_taper_offset);
+
+    return float(2.0 * slot_outer_x_max);
+}
+
+
+// ---------------------------------------------------------------------------
+// Decisions of the Cut gizmo, kept here so they can be tested without the GUI.
+// ---------------------------------------------------------------------------
+
+ModelVolume* add_cut_connector_volume(ModelObject& mo, indexed_triangle_set unit_mesh, const CutConnector& connector)
+{
+    // Centre the height only. Letting add_volume() centre the mesh on its bounding box moved a
+    // triangle a quarter of its radius off the point placed, the box being off its axis.
+    if (!unit_mesh.vertices.empty())
+        its_translate(unit_mesh, Vec3f(0.f, 0.f, -float(bounding_box(unit_mesh).center().z())));
+    ModelVolume* volume = mo.add_volume(TriangleMesh(std::move(unit_mesh)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    // Transform the new modifier to be aligned inside the instance
+    volume->set_transformation(Geometry::translation_transform(connector.pos) * connector.rotation_m *
+                               Geometry::rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
+                               Geometry::scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
+    return volume;
+}
+
+std::vector<Vec3f> cut_connector_outline(const CutConnector& connector)
+{
+    const CutConnectorShape shape        = CutConnectorShape(connector.attribs.shape);
+    const int               sector_count = shape == CutConnectorShape::Triangle ? 3 :
+                                           shape == CutConnectorShape::Square   ? 4 :
+                                           shape == CutConnectorShape::Circle   ? 60 : // supposably, 60 points are enough for conflict detection
+                                           shape == CutConnectorShape::Hexagon  ? 6 : 1;
+    std::vector<Vec3f> vertices;
+    vertices.reserve(sector_count + 1);
+    // Turned by the connector's Rotation, as render_connectors() draws it.
+    const Eigen::Rotation2Df turn(-connector.z_angle);
+    const float              fa  = 2 * PI / sector_count;
+    const Vec2f              vec = Eigen::Vector2f(0, connector.radius);
+    for (int i = 0; i < sector_count; ++i) {
+        const Vec2f p = turn * (Eigen::Rotation2Df(fa * i) * vec);
+        vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
+    }
+    return vertices;
+}
+
+float cut_groove_default_depth(const BoundingBoxf3& bb)
+{
+    return std::max(1.f, float((bb.size().x() + bb.size().y() + bb.size().z()) / 60.));
+}
+
+std::vector<size_t> edit_cut_objects(const ModelObjectPtrs& objects, size_t selected)
+{
+    if (selected >= objects.size())
+        return {};
+    std::vector<size_t> out;
+    const ModelObject* src = objects[selected];
+    if (src->is_cut()) {
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (objects[i] == src || (objects[i]->is_cut() && objects[i]->cut_id.id() == src->cut_id.id()))
+                out.push_back(i);
+        return out;
+    }
+    // A plain cut: its halves are linked by nothing but the recipe they both carry.
+    std::vector<size_t> others;
+    if (src->has_cut_recipe())
+        for (size_t i = 0; i < objects.size(); ++i)
+            if (i != selected && !objects[i]->is_cut() && objects[i]->has_cut_recipe() && *objects[i]->cut_recipe == *src->cut_recipe)
+                others.push_back(i);
+    out.push_back(selected);
+    if (others.size() == 1)
+        out.push_back(others.front());
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 } // namespace Slic3r

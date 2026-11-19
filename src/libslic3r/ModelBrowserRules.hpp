@@ -7,7 +7,7 @@
 // on its own (tests/libslic3r/test_model_browser_rules.cpp). The panel only carries the verdicts out.
 //
 // The browser is a separate, isolated WebView2 environment with no script bridge to the app. These
-// rules are the second line: it never loads a page on this computer or the local network (our page
+// rules are the second line: it never loads a page on this computer or a private network (our page
 // server and the phone hub live there), never runs another program for a link, and a model file it
 // downloads goes through the same safe download path and import as an "Open in" link.
 
@@ -42,6 +42,22 @@ const Site *site_for_url(const std::string &url);
 // (Tailscale names that resolve into the tailnet, where the phone hub may be served). A trailing
 // dot ("localhost.") is ignored. An empty host is blocked.
 bool is_blocked_host(const std::string &host);
+
+// ---- sub-resource blocking by content rules (macOS) ------------------------------------------------
+
+// WKWebView has no per-request hook like WebView2's WebResourceRequested, so on macOS the loads
+// is_blocked_host() refuses - sub-resources, fetch/XHR, WebSockets, frames and documents alike - are
+// blocked by a WKContentRuleList compiled from content_rule_list_json(). Its url-filters are regular
+// expressions in the subset WebKit's content blockers accept (no "|", no "{n}", no "\d"; "^" and "$"
+// only at the ends) and match URLs as WebKit canonicalizes them before matching: lower-case host,
+// IPv4 in dotted decimal (127.1, 0x7f.1 and 2130706433 become 127.0.0.1), an IPv6 host in brackets,
+// and a "/" after the authority of every http(s) / ws(s) URL. They block:
+//   file: URLs; any IPv6 literal; any host made of digits and dots; any single-label host; and
+//   localhost, local, lan, home.arpa, internal, intranet, localdomain, ts.net and their subdomains -
+// with or without a user name, a port or trailing dots. Unit tested against is_blocked_host().
+std::vector<std::string> content_rule_url_filters();
+// [{"trigger":{"url-filter":<filter>},"action":{"type":"block"}}, ...] for content_rule_url_filters().
+std::string content_rule_list_json();
 
 // ---- navigation ----------------------------------------------------------------------------------
 
@@ -134,7 +150,8 @@ struct DownloadDecision
     std::string    reason;
 };
 
-// Programs, scripts, shortcuts and installers (".exe", ".msi", ".bat", ".ps1", ".js", ".lnk", ...).
+// Programs, scripts, shortcuts and installers (".exe", ".msi", ".bat", ".ps1", ".js", ".lnk", ..., and the
+// macOS ones: ".app", ".dmg", ".pkg", ".command", ".scpt", ".workflow", ".webloc", ...).
 bool is_executable_file_name(const std::string &file_name);
 
 // A download the page started.

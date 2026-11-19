@@ -107,6 +107,10 @@ Transport http_transport()
         // None of the slicer's global client headers (the X-BBL-* set, which carries a device id):
         // the service is told this hub's id and nothing else about the PC.
         h.clear_headers();
+        // The service answers at the address it was given and does not redirect. A POST body here
+        // is signed (X-Hub-Sig) and the headers carry the hub's key, so following a redirect would
+        // replay both to wherever it pointed. url_allowed() has already made it https.
+        h.follow_redirects(false);
         h.timeout_connect(T_CONNECT).timeout_max(T_MAX);
         for (const auto& kv : c.headers) h.header(kv.first, kv.second);
         if (c.method != "GET") h.set_post_body(c.body);
@@ -135,6 +139,19 @@ std::string body_for_send(const PushRequest& req, long long ts, const std::strin
     // APNs only; the service picks api.push.apple.com or the sandbox host from it, per device,
     // exactly as ApnsProvider::host_for does.
     if (req.platform == "apns") j["env"] = req.env == "sandbox" ? "sandbox" : "production";
+    if (req.push_type == "liveactivity") {
+        // An ActivityKit push: the aps object as "la", no ciphertext, no collapse or thread id. The
+        // service adds the topic suffix and the push type and checks the object's shape.
+        j["push_type"] = "liveactivity";
+        j["token"]     = req.device_token;
+        j["bundle"]    = req.bundle;
+        try { j["la"] = json::parse(req.la_aps); } catch (...) { j["la"] = json::object(); }
+        j["priority"]  = req.priority >= 10 ? 10 : 5;
+        j["ttl"]       = std::max(0, std::min(86400, req.ttl_seconds));
+        return j.dump();
+    }
+    // An Android progress update is built like an alert; only its quota class differs.
+    if (req.push_type == "progress") j["push_type"] = "progress";
     j["token"]    = req.device_token;
     j["bundle"]   = req.bundle;
     j["e"]        = req.ciphertext_b64u;
@@ -145,6 +162,10 @@ std::string body_for_send(const PushRequest& req, long long ts, const std::strin
     // Additive and only when the device asked for it: the push service ignores fields it does not
     // know, so this is inert until it builds `aps.interruption-level` from it (research note H8).
     if (req.platform == "apns" && !req.interruption_level.empty()) j["level"] = req.interruption_level;
+    // Additive, APNs only: the service adds `aps.content-available: 1` beside the alert, exactly as
+    // ApnsProvider does (PushRequest::content_available). An older service ignores it, and the
+    // alert is delivered as before - only the background wake is missing.
+    if (req.platform == "apns" && req.content_available) j["wake"] = true;
     return j.dump();
 }
 

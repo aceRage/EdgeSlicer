@@ -13,6 +13,8 @@
 #endif // _WIN32
 
 #include <wx/toplevel.h>
+#include <wx/dialog.h>
+#include <wx/window.h>
 #include <wx/sizer.h>
 #include <wx/checkbox.h>
 #include <wx/dcclient.h>
@@ -503,6 +505,16 @@ bool generate_image(const std::string &filename, wxImage &image, wxSize img_size
 }
 
 std::deque<wxDialog*> dialogStack;
+
+bool any_modal_dialog_showing()
+{
+    for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext()) {
+        wxDialog* dlg = dynamic_cast<wxDialog*>(node->GetData());
+        if (dlg != nullptr && dlg->IsModal())
+            return true;
+    }
+    return false;
+}
 
 void fit_in_display(wxTopLevelWindow& window, wxSize desired_size)
 {

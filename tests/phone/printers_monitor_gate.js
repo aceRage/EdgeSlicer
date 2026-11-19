@@ -68,19 +68,20 @@ const ROWS = [
       ext_spools: [{ ams_id: '254', side: '', exists: true, type: 'TPU', color: '#FFFFFF' }] },
     { id: '01P00A222222222', kind: 'bambu', name: 'P1S <img src=x onerror="window.__xss=1">', model: 'C12', online: true, connected: true,
       status: 'FAILED', print_status: 'FAILED', printing: false, percent: 10, task: 'Bracket', can_pause: false, can_resume: false, can_stop: true,
-      print_error: { code: '0300400C', message: 'The build plate is not placed.', actions: [] }, hms: { count: 1, message: 'Plate missing' },
+      print_error: { code: '03008003', message: 'The build plate is not placed.', actions: [] }, hms: { count: 1, message: 'Plate missing' },
       controls: { heaters: [{ id: 'bed', label: 'Bed', temp: 24, target: 0 }], fans: [] }, ams: [], ext_spools: [] },
     { id: 'sm:U1-0042', kind: 'snapmaker', name: 'U1 Lab', model: 'Snapmaker U1', url: 'http://192.168.1.20', ip: '192.168.1.20', via: 'lan',
       online: true, printing: false, status: 'paused', print_status: 'paused', percent: 77, left_time_s: 600, layer: 80, total_layers: 100,
       task: 'gear.gcode', bed_temp: 60, bed_target: 60, nozzles: [{ temp: 200, target: 200 }, { temp: 25, target: 0 }, { temp: 25, target: 0 }, { temp: 25, target: 0 }],
       toolheads: [{ index: 0, type: 'PLA', color: '#3366FF', loaded: true }, { index: 1, type: 'PLA', color: '#FFFFFF', loaded: true },
                   { index: 2, type: '', color: '', loaded: false }, { index: 3, type: 'TPU', sub_type: 'NONE', color: '#000000', loaded: true }],
-      can_pause: false, can_resume: true, can_stop: true, print_error: null },
+      can_pause: false, can_resume: true, can_stop: true, print_error: null, remove: { mode: 'remove' } },
     { id: 'ph:voron', kind: 'printhost', name: 'Voron 2.4', model: 'Voron', url: 'http://voron.local', ip: 'voron.local', online: true,
       status: 'standby', print_status: 'standby', printing: false, bed_temp: 22, bed_target: 0,
-      nozzles: [{ temp: 23, target: 0 }], can_pause: false, can_resume: false, can_stop: false, print_error: null },
+      nozzles: [{ temp: 23, target: 0 }], can_pause: false, can_resume: false, can_stop: false, print_error: null, remove: { mode: 'remove' } },
     { id: '01P00A333333333', kind: 'bambu', name: 'A1 Mini', model: 'N1', online: false, connected: false, status: '', printing: false,
-      can_pause: false, can_resume: false, can_stop: false, print_error: null },
+      can_pause: false, can_resume: false, can_stop: false, print_error: null,
+      remove: { mode: 'explain', reason: 'This printer is bound to your Bambu Lab account, which is where the list comes from.' } },
 ];
 const GROUPS = [{ id: 'all', name: 'All printers', all: true, printers: [] },
                 { id: 'multi-device', name: 'Multi-device', all: false, printers: ['01P00A111111111', 'sm:U1-0042'] }];
@@ -94,10 +95,15 @@ const SHIM = `(function(){ var PNG1 = '${PNG1}';
     function later(f) { setTimeout(f, 30); }
     window.wx = { postMessage: function(m) {
         window.__sent.push(m);
-        if (m === 'printers_get') later(function() {
-            if (window.__fail) window.__printers({ ok: false, error: window.__fail, printers: [], at: Date.now() });
-            else window.__printers({ ok: true, printers: JSON.parse(JSON.stringify(window.__rows)), at: Date.now() });
-        });
+        if (m === 'printers_get') {
+            // __slowRead: answer late with the rows as they were when the read was ASKED for, as
+            // the slicer does when a removal lands while api_printers is still probing.
+            var snap = JSON.stringify(window.__rows);
+            setTimeout(function() {
+                if (window.__fail) window.__printers({ ok: false, error: window.__fail, printers: [], at: Date.now() });
+                else window.__printers({ ok: true, printers: JSON.parse(window.__slowRead ? snap : JSON.stringify(window.__rows)), at: Date.now() });
+            }, window.__slowRead || 30);
+        }
         else if (m === 'printers_groups_get') later(function() { window.__printerGroups(window.__groups); });
         else if (m.indexOf('printers_thumb:') === 0) {
             window.__thumbAsks = (window.__thumbAsks || 0) + 1;
@@ -106,6 +112,14 @@ const SHIM = `(function(){ var PNG1 = '${PNG1}';
         else if (m.indexOf('printers_control:') === 0) {
             var parts = m.split(':'), id = parts.slice(3).join(':'), job = nextJob++;
             later(function() { window.__printerControl({ id: id, action: parts[1], ok: true, job: job, dry_run: false }); });
+        } else if (m.indexOf('printers_remove:') === 0) {
+            var rid = m.slice(16);
+            window.__rows = window.__rows.filter(function(r) { return r.id !== rid; });
+            later(function() { window.__printerRemove({ id: rid, ok: true, done: ['snapmaker_lan', 'tombstone', 'hub_printers'] }); });
+        } else if (m.indexOf('printers_rename:') === 0) {
+            var rq = JSON.parse(m.slice(16));
+            window.__rows.forEach(function(r) { if (r.id === rq.id) { r.reported_name = r.reported_name || r.name; r.name = rq.name || r.reported_name; if (rq.name) r.custom_name = rq.name; else delete r.custom_name; } });
+            later(function() { window.__printerRename({ id: rq.id, ok: true, name: rq.name }); });
         } else if (m.indexOf('printers_job:') === 0) {
             var n = +m.slice(13);
             window.__jobPolls = (window.__jobPolls || 0) + 1;
@@ -280,11 +294,57 @@ async function main() {
         await evalJs(`document.getElementById('refresh').click(); 1`);
         await sleep(200);
         check('it stays dismissed across reads while the code is the same', !(await errShown()));
-        check('the dismissal is kept for the session', /0300400C/.test(await evalJs(`sessionStorage.getItem('edgeslicer_printers_dismissed') || ''`)));
+        check('the dismissal is kept for the session', /03008003/.test(await evalJs(`sessionStorage.getItem('edgeslicer_printers_dismissed') || ''`)));
         await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'Another error.', actions: [] }; document.getElementById('refresh').click(); 1`);
         await sleep(200);
         check('a different error code shows again', await errShown());
-        await evalJs(`window.__rows[1].print_error = { code: '0300400C', message: 'The build plate is not placed.', actions: [] }; 1`);
+        await evalJs(`window.__rows[1].print_error = { code: '03008003', message: 'The build plate is not placed.', actions: [] }; 1`);
+
+        // ---- a print cancelled by hand reads Cancelled, a real failure still reads Error ---------
+        // Bambu reports the stop as FAILED + print_error 0300400C "The task was canceled." (the
+        // code as hex in any spelling, or as the decimal number). Nothing else changes.
+        const cardState = async () => JSON.parse(await evalJs(`(function(c){ return JSON.stringify({ pill: c.querySelector('.ppill').textContent,
+            err: !!c.querySelector('.perrt'), label: c.getAttribute('aria-label') }); })(document.querySelector('.pcard[data-printer-id="01P00A222222222"]'))`));
+        for (const code of ['0300400C', '0300_400C', '0x0300400c', '0500400E', 50348044]) {
+            await evalJs(`window.__rows[1].print_error = { code: ${JSON.stringify(code)}, message: 'The task was canceled.', actions: [] };
+                window.__rows[1].hms = { count: 0 }; document.getElementById('refresh').click(); 1`);
+            await sleep(200);
+            const cs = await cardState();
+            check('FAILED + cancel code ' + JSON.stringify(code) + ' reads Cancelled with no error box', cs.pill === 'Cancelled' && !cs.err && /Cancelled/.test(cs.label), JSON.stringify(cs));
+        }
+        await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'A real error.', actions: [] }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const real = await cardState();
+        check('FAILED + another code still reads Error with its message', real.pill === 'Error' && real.err, JSON.stringify(real));
+
+        // ---- the hub's `ended` field: Cancelled outlives the printer's print_error ----------------
+        // The printer drops 0300400C a while after the stop (dismissed on its screen, or cleared by
+        // the firmware) and is left saying FAILED; the hub remembers the stop as ended: "cancelled".
+        await evalJs(`window.__rows[1].print_error = null; window.__rows[1].ended = 'cancelled';
+            window.__rows[1].hms = { count: 0 }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedNoCode = await cardState();
+        check('FAILED + ended=cancelled with the code gone reads Cancelled with no error box', endedNoCode.pill === 'Cancelled' && !endedNoCode.err && /Cancelled/.test(endedNoCode.label), JSON.stringify(endedNoCode));
+        await evalJs(`window.__rows[1].hms = { count: 1, message: 'Plate missing' }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedHms = await cardState();
+        check('a leftover HMS item does not turn a remembered cancel into an error box', endedHms.pill === 'Cancelled' && !endedHms.err, JSON.stringify(endedHms));
+        await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'A real error.', actions: [] }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedReal = await cardState();
+        check('ended=cancelled does not hide a different, real print_error', endedReal.pill === 'Error' && endedReal.err, JSON.stringify(endedReal));
+        await evalJs(`window.__rows[1].print_error = null; window.__rows[1].hms = { count: 0 }; delete window.__rows[1].ended; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const noEnded = await cardState();
+        check('FAILED with no code and no ended still reads Error (an older hub, or a real failure)', noEnded.pill === 'Error', JSON.stringify(noEnded));
+        await evalJs(`window.__rows[1].ended = 'cancelled'; window.__rows[1].status = window.__rows[1].print_status = 'RUNNING'; window.__rows[1].printing = true; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedRunning = await cardState();
+        check('a printer running again never reads Cancelled, whatever ended says', endedRunning.pill === 'Printing', JSON.stringify(endedRunning));
+        await evalJs(`delete window.__rows[1].ended; window.__rows[1].status = window.__rows[1].print_status = 'FAILED'; window.__rows[1].printing = false; 1`);
+        await evalJs(`window.__rows[1].print_error = { code: '03008003', message: 'The build plate is not placed.', actions: [] };
+            window.__rows[1].hms = { count: 1, message: 'Plate missing' }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
 
         // ---- Open Device page: hidden, but the page still shows a refusal -------------------------
         await evalJs(`window.__printerOpen({ id: '01P00A111111111', ok: false, error: 'Select a Bambu Lab printer preset' }); 1`);
@@ -346,6 +406,65 @@ async function main() {
             console.log('# ' + theme + ' contrast: ' + Object.keys(worst).map(k => k + ' ' + worst[k].r.toFixed(2)).join(', '));
             check(theme + ': every text / background pair is >= 4.5:1', low.length === 0, low.map(k => k + ' ' + worst[k].r.toFixed(2) + ' ' + worst[k].fg + ' on ' + worst[k].bg).join('; '));
         }
+        // ---- 10. Rename and Remove printer ------------------------------------------------------
+        await evalJs(`window.__edgeTheme('dark'); window.__sent = []; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const btns = JSON.parse(await evalJs(`JSON.stringify({ rename: document.querySelectorAll('#grid [data-fk^="rename:"]').length,
+            remove: document.querySelectorAll('#grid [data-fk^="remove:"]').length,
+            label: (document.querySelector('[data-fk="remove:sm:U1-0042"]') || {}).getAttribute ? document.querySelector('[data-fk="remove:sm:U1-0042"]').getAttribute('aria-label') : '' })`));
+        check('every card has Rename and Remove', btns.rename === 5 && btns.remove === 5 && btns.label === 'Remove U1 Lab', JSON.stringify(btns));
+        // Rename: a dialog with the name field focused, Enter saves, the card and later reads show it.
+        await evalJs(`window.__sent = []; document.querySelector('[data-fk="rename:sm:U1-0042"]').click(); 1`);
+        await sleep(100);
+        let rd = JSON.parse(await evalJs(`JSON.stringify({ open: document.getElementById('scrim').classList.contains('open'), focus: document.activeElement.id,
+            value: document.getElementById('dlgname').value, field: !document.getElementById('dlgnamerow').hidden })`));
+        check('Rename opens a dialog with the current name in a focused field', rd.open && rd.focus === 'dlgname' && rd.value === 'U1 Lab' && rd.field, JSON.stringify(rd));
+        await evalJs(`document.getElementById('dlgname').value = 'Left U1'; 1`);
+        await key('Enter');
+        await sleep(300);
+        rd = JSON.parse(await evalJs(`JSON.stringify({ sent: window.__sent, name: ${card('sm:U1-0042')}.querySelector('.pname').textContent,
+            was: [].map.call(${card('sm:U1-0042')}.querySelectorAll('.pmodel'), n => n.textContent).join('|') })`));
+        check('Enter saves: printers_rename with the id and the name', rd.sent.some(m => m === 'printers_rename:' + JSON.stringify({ id: 'sm:U1-0042', name: 'Left U1' })), JSON.stringify(rd.sent));
+        check('the card shows the new name and what the printer calls itself', rd.name === 'Left U1' && /Reports itself as U1 Lab/.test(rd.was), JSON.stringify(rd));
+        await evalJs(`document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        check('the name stays after the next read', (await evalJs(`${card('sm:U1-0042')}.querySelector('.pname').textContent`)) === 'Left U1');
+        // A printer the slicer cannot remove: only the explanation, one OK, nothing sent.
+        await evalJs(`window.__sent = []; document.querySelector('[data-fk="remove:01P00A333333333"]').click(); 1`);
+        await sleep(100);
+        const ex = JSON.parse(await evalJs(`JSON.stringify({ open: document.getElementById('scrim').classList.contains('open'), go: !document.getElementById('dlgstop').hidden,
+            text: document.getElementById('dlgtext').textContent, keep: document.getElementById('dlgkeep').textContent })`));
+        check('Remove on a cloud-bound Bambu card explains, with only OK', ex.open && !ex.go && /Bambu Lab account/.test(ex.text) && ex.keep === 'OK', JSON.stringify(ex));
+        await evalJs(`document.getElementById('dlgkeep').click(); 1`);
+        check('... and sends nothing', (await evalJs('window.__sent.filter(m => m !== "printers_get").length')) === 0);
+        // Remove: asked first (safe answer focused, Escape sends nothing), then the card is gone for good.
+        await evalJs(`document.querySelector('[data-fk="remove:sm:U1-0042"]').focus(); 1`);
+        await key('Enter');
+        await sleep(100);
+        let rm = JSON.parse(await evalJs(`JSON.stringify({ open: document.getElementById('scrim').classList.contains('open'), focus: document.activeElement.id,
+            title: document.getElementById('dlgtitle').textContent, go: document.getElementById('dlgstop').textContent, text: document.getElementById('dlgtext').textContent })`));
+        check('Remove asks first, the safe answer focused', rm.open && rm.focus === 'dlgkeep' && rm.title === 'Remove this printer' && rm.go === 'Remove printer' && /Left U1/.test(rm.text), JSON.stringify(rm));
+        await key('Escape');
+        await sleep(100);
+        check('Escape keeps it and sends nothing', (await evalJs('window.__sent.filter(m => m !== "printers_get").length')) === 0 && (await evalJs(`!!${card('sm:U1-0042')}`)));
+        await evalJs(`document.querySelector('[data-fk="remove:sm:U1-0042"]').click(); document.getElementById('dlgstop').click(); 1`);
+        await sleep(300);
+        rm = JSON.parse(await evalJs(`JSON.stringify({ sent: window.__sent, card: !!${card('sm:U1-0042')}, ann: document.getElementById('announce').textContent })`));
+        check('Remove printer sends printers_remove:<id> and the card goes', rm.sent.includes('printers_remove:sm:U1-0042') && !rm.card && /Printer removed/.test(rm.ann), JSON.stringify(rm));
+        await evalJs(`document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        check('it stays gone on the next read', !(await evalJs(`!!${card('sm:U1-0042')}`)) && (await evalJs(`document.querySelectorAll('#grid .pcard').length`)) === 4);
+        // ---- 11. Remove is one step: a read in flight does not bring the card back --------------
+        await evalJs(`window.__slowRead = 500; window.__sent = []; document.getElementById('refresh').click(); 1`);
+        await sleep(50); // the read is asked for and still being answered...
+        await evalJs(`document.querySelector('[data-fk="remove:ph:voron"]').click(); document.getElementById('dlgstop').click(); 1`);
+        await sleep(900); // ...its answer (still listing the printer) has landed
+        check('a read asked before the removal does not bring the card back', !(await evalJs(`!!${card('ph:voron')}`)));
+        await evalJs(`window.__slowRead = 0; document.getElementById('refresh').click(); 1`);
+        await sleep(300);
+        check('the next read leaves it out too, with one remove sent in all',
+              !(await evalJs(`!!${card('ph:voron')}`)) && (await evalJs(`window.__sent.filter(m => m.indexOf('printers_remove:') === 0).length`)) === 1,
+              await evalJs('JSON.stringify(window.__sent)'));
         check('no uncaught exception over the run', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
     } finally {
         br.kill();

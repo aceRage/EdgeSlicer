@@ -103,7 +103,8 @@ public:
     void sync_first_layer_print_seq(int selection, const std::vector<int>& seq = std::vector<int>());
     void sync_other_layers_print_seq(int selection, const std::vector<LayerPrintSequence>& seq);
     void sync_spiral_mode(bool spiral_mode, bool as_global);
-    wxString to_bed_type_name(BedType bed_type);
+    // Static: the phone's bed type list (RemoteAccess, PR G) names the plates the same way.
+    static wxString to_bed_type_name(BedType bed_type);
     wxString to_print_sequence_name(PrintSequence print_seq);
     void on_dpi_changed(const wxRect& suggested_rect) override;
 
@@ -114,11 +115,15 @@ public:
         return choice;
     };
 
+    // The selected BedType (btDefault = same as global). Edge: the list can be the U1's three plates,
+    // so the row index is mapped through m_bed_type_values.
     int get_bed_type_choice() {
         int choice = 0;
         if (m_bed_type_choice != nullptr)
             choice =  m_bed_type_choice->GetSelection();
-        return choice;
+        if (choice < 0 || size_t(choice) >= m_bed_type_values.size())
+            return int(btDefault);
+        return int(m_bed_type_values[size_t(choice)]);
     };
 
     wxString get_plate_name() const;
@@ -167,6 +172,7 @@ protected:
 
 protected:
     ComboBox* m_bed_type_choice { nullptr };
+    std::vector<BedType> m_bed_type_values; // bed type of each m_bed_type_choice row
     ComboBox* m_print_seq_choice { nullptr };
     ComboBox* m_first_layer_print_seq_choice { nullptr };
     ComboBox* m_spiral_mode_choice { nullptr };

@@ -21,10 +21,7 @@ Plan plan(const Inputs& in)
     }
     p.run            = true;
     p.printer_config = true;
-    p.plugin_check   = in.network_plugin && !in.ultranet_plugin;
     p.reason         = in.bambu_login ? "Bambu login" : (in.bambu_device ? "Bambu printer in the device list" : "Bambu printer preset");
-    if (!p.plugin_check)
-        p.reason += in.ultranet_plugin ? ", plug-in check skipped (UltraNet)" : ", plug-in check skipped (no plug-in)";
     return p;
 }
 

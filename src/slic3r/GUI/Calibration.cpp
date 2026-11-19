@@ -6,6 +6,7 @@
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "Widgets/RoundedRectangle.hpp"
@@ -281,6 +282,17 @@ void CalibrationDialog::update_cali(MachineObject *obj)
     else if(!obj->is_calibration_running()){
         m_calibration_btn->Enable();
     }
+
+    // A secured printer (Developer Mode off) rejects the unsigned calibration command, so the button
+    // would do nothing: say why instead, and leave it off.
+    const wxString secured_text = wxString::FromUTF8(bambu_secured_mode_message().c_str());
+    if (obj->is_secured_mode() && !obj->is_calibration_running() && !obj->is_calibration_done()) {
+        m_calibration_btn->Disable();
+        m_calibration_btn->SetLabel(_L("Developer Mode is off"));
+        m_calibration_btn->SetToolTip(secured_text);
+    } else {
+        m_calibration_btn->SetToolTip(wxEmptyString);
+    }
 }
 
 bool CalibrationDialog::is_stage_list_info_changed(MachineObject *obj)
@@ -305,6 +317,10 @@ void CalibrationDialog::on_start_calibration(wxMouseEvent &event)
             Close();
         } else {
             BOOST_LOG_TRIVIAL(info) << "on_start_calibration";
+            if (m_obj->is_secured_mode()) { // normally the button is off already; this is the pointer-down race
+                m_obj->show_secured_mode_message(false);
+                return;
+            }
             m_obj->command_start_calibration(
                 m_checkbox_list["vibration"]->GetValue(),
                 m_checkbox_list["bed_leveling"]->GetValue(),

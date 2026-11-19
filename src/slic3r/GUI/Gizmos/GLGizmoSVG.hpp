@@ -69,6 +69,12 @@ public:
     bool create_volume(std::string_view svg_file, ModelVolumeType volume_type = ModelVolumeType::MODEL_PART);
 
     /// <summary>
+    /// Plain "SVG" of a file as a new object in the center of the screen, never onto the selected
+    /// object (File > Import)
+    /// </summary>
+    bool create_object(std::string_view svg_file);
+
+    /// <summary>
     /// Ask user for QR code / barcode and create its parts (dark, light, logo) as SVG volumes
     /// </summary>
     /// <param name="volume_type">Object part / Negative volume / Modifier, INVALID means new object</param>
@@ -95,6 +101,20 @@ public:
     bool create_image(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &image_path = {});
 
     /// <summary>
+    /// "SVG (Split)": create one SVG volume per painted shape of the file (fill or stroke), the way
+    /// Bambu Studio imports an SVG. Shapes painted later win: every part loses the area covered by the
+    /// shapes after it, so the parts do not overlap. Before the parts are created the user chooses a
+    /// filament per colour (nearest project filament preselected; Cancel = default filament).
+    /// The plain create_volume() keeps embossing the union of all shapes as one volume.
+    /// </summary>
+    /// <param name="volume_type">Object part, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volumes, when not set it is near the selection</param>
+    /// <param name="svg_path">SVG file (dropped file), empty = ask for the file.
+    /// A dropped SVG which is not over an object creates a new object.</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &svg_path = {});
+
+    /// <summary>
     /// Check whether volume is object containing only emboss volume
     /// </summary>
     /// <param name="volume">Pointer to volume</param>
@@ -107,6 +127,15 @@ public:
     /// <param name="volume">Pointer to volume</param>
     /// <returns>True when constain emboss data otherwise False</returns>
     static bool is_svg(const ModelVolume &volume);
+
+    /// <summary>
+    /// Make the mesh of an embossed volume (SVG, or text placed straight) again after its type was
+    /// changed outside of the tool (object list "Change type"): a part is raised out of the surface,
+    /// a modifier or negative volume is sunk into it, so the old mesh would sit on the wrong side.
+    /// </summary>
+    /// <param name="volume">Volume whose type was just changed</param>
+    /// <returns>True when the update job was started</returns>
+    static bool remake_after_type_change(const ModelVolume &volume);
 
 protected:
     bool on_init() override;

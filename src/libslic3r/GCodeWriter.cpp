@@ -3,12 +3,17 @@
 #include "Exception.hpp"
 #include "format.hpp"
 #include "LocalesUtils.hpp"
+#include "ClipperUtils.hpp"
+#include "ExtruderAreas.hpp"
+#include "Geometry/ArcWelder.hpp"
+#include "Line.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <assert.h>
 #include <boost/log/trivial.hpp>
 #include <GCode/GCodeProcessor.hpp>
@@ -95,6 +100,98 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     };
     m_max_jerk_z = print_config.machine_max_jerk_z.values.front();
     m_max_jerk_e = print_config.machine_max_jerk_e.values.front();
+    // Snapmaker #993: cap generated Z travel by the machine's Z speed limit, whatever the flavour and
+    // whether or not the limits are emitted (the firmware applies its own limit either way).
+    m_max_speed_z = print_config.machine_max_speed_z.values.empty() ? 0. : print_config.machine_max_speed_z.values.front();
+    m_resolution = print_config.resolution.value;
+    // Orca: capture the printable area(s) so a spiral lift can be skipped when its
+    // circle would leave the boundary and collide with the print limits. Full polygons
+    // are stored (not a bounding box) so the check stays correct for non-rectangular
+    // beds, and per-extruder areas are kept so printers with different boundaries per
+    // extruder use the right limit for whichever extruder is active.
+    auto to_scaled_polygon = [](const Pointfs &pts) {
+        Polygon poly;
+        poly.points.reserve(pts.size());
+        for (const Vec2d &p : pts)
+            poly.points.emplace_back(coord_t(scale_(p.x())), coord_t(scale_(p.y())));
+        poly.make_counter_clockwise();
+        return poly;
+    };
+
+    m_bed_printable_area.points.clear();
+    m_extruder_printable_areas.clear();
+
+    if (print_config.printable_area.values.size() >= 3)
+        m_bed_printable_area = to_scaled_polygon(print_config.printable_area.values);
+
+    // Edge: older saved projects carry both nozzles' areas as one group of eight points; split them
+    // back into two areas as the reach check and the plate overlay do (ExtruderAreas).
+    const std::vector<Pointfs> extruder_areas = split_merged_extruder_areas(print_config.extruder_printable_area.values);
+    if (!extruder_areas.empty()) {
+        m_extruder_printable_areas.resize(extruder_areas.size());
+        for (size_t i = 0; i < extruder_areas.size(); ++i) {
+            if (extruder_areas[i].size() < 3) {
+                // No dedicated area for this extruder: it can reach the whole bed.
+                m_extruder_printable_areas[i] = m_bed_printable_area;
+                continue;
+            }
+            Polygon extruder_poly = to_scaled_polygon(extruder_areas[i]);
+            if (m_bed_printable_area.points.size() < 3) {
+                m_extruder_printable_areas[i] = std::move(extruder_poly);
+                continue;
+            }
+            // The reachable area is the extruder area clipped to the bed. Bed shapes are
+            // convex in practice, so keep the largest resulting contour.
+            Polygons clipped = intersection(extruder_poly, m_bed_printable_area);
+            const Polygon *largest = nullptr;
+            double          best_area = 0.;
+            for (const Polygon &p : clipped) {
+                double a = std::abs(p.area());
+                if (a > best_area) { best_area = a; largest = &p; }
+            }
+            m_extruder_printable_areas[i] = largest ? *largest : std::move(extruder_poly);
+        }
+    }
+}
+
+const Polygon *GCodeWriter::active_printable_area() const
+{
+    if (const Extruder *e = this->extruder()) {
+        // Edge: our Extruder is a filament slot and has no extruder_id(); the extruder a filament
+        // prints from is filament_map (1-based), as in GCode::logical_extruder_for_filament() and
+        // find_reach_violations(). Printers without extruder_printable_area use the bed below.
+        const std::vector<int> &filament_map = this->config.filament_map.values;
+        const size_t            filament_id  = e->id();
+        if (filament_id < filament_map.size() && filament_map[filament_id] >= 1) {
+            const size_t id = size_t(filament_map[filament_id] - 1);
+            if (id < m_extruder_printable_areas.size() && m_extruder_printable_areas[id].points.size() >= 3)
+                return &m_extruder_printable_areas[id];
+        }
+    }
+    if (m_bed_printable_area.points.size() >= 3)
+        return &m_bed_printable_area;
+    return nullptr;
+}
+
+bool GCodeWriter::spiral_lift_fits_printable_area(const Vec2d &center, double radius) const
+{
+    const Polygon *area = this->active_printable_area();
+    if (area == nullptr)
+        return true; // Boundary unknown: don't restrict (preserve previous behavior).
+
+    const Point  c        = Point::new_scale(center.x(), center.y());
+    const double r_scaled = scale_(radius);
+    const double r2       = r_scaled * r_scaled;
+
+    // The spiral traces a full circle of `radius` around `center`, so the center must lie
+    // inside the printable area and every edge must be at least `radius` away from it.
+    if (!area->contains(c))
+        return false;
+    const Points &pts = area->points;
+    for (size_t i = 0, n = pts.size(); i < n; ++i)
+        if (Line::distance_to_squared(c, pts[i], pts[(i + 1) % n]) < r2)
+            return false;
+    return true;
 }
 
 void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
@@ -196,6 +293,9 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, in
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
     if (!this->multiple_extruders || m_single_extruder_multi_material)
         tool = -1;
+    // Per-nozzle process P4: the T a filament's temperature names is the tool the G-code names for it.
+    if (tool >= 0)
+        tool = int(this->output_tool(unsigned(tool)));
     return set_temperature(temperature, this->config.gcode_flavor, wait, tool);
 }
 
@@ -281,9 +381,8 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
         gcode += value;
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
         if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
             if (GCodeWriter::full_gcode_comment)
                 gcode += " ; adjust ACCEL_TO_DECEL";
         }
@@ -296,6 +395,19 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
     gcode += "\n";
 
     return gcode;
+}
+
+void GCodeWriter::append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor)
+{
+    // Edge: a 3MF or CLI config can carry a factor outside the option's 1-100% range. Nothing for 0 or less
+    // (a negative ACCEL_TO_DECEL, or a cruise ratio of 1 or more, would be rejected by Klipper); above 100% is 100%.
+    if (!(accel_to_decel_factor > 0.))
+        return;
+    accel_to_decel_factor = std::min(accel_to_decel_factor, 100.);
+    gcode += " ACCEL_TO_DECEL=";
+    gcode += float_to_string_decimal_point(acceleration * accel_to_decel_factor / 100);
+    gcode += " MINIMUM_CRUISE_RATIO=";
+    gcode += float_to_string_decimal_point(1. - accel_to_decel_factor / 100);
 }
 
 std::string GCodeWriter::set_jerk_xy(double jerk)
@@ -314,6 +426,20 @@ std::string GCodeWriter::set_jerk_xy(double jerk)
             jerk = m_max_jerk_y;
         
         gcode << "SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=" << jerk;
+    } else if (FLAVOR_IS(gcfRepetier)) {
+        // Repetier uses M207 for temporary Jerk and combines X/Y into a single 'X' parameter.
+        double jerk_xy = jerk;
+
+        // Clamp against the X machine limit
+        if (m_max_jerk_x > 0 && jerk_xy > m_max_jerk_x)
+            jerk_xy = m_max_jerk_x;
+
+        // Clamp against the Y machine limit as well to be safe
+        if (m_max_jerk_y > 0 && jerk_xy > m_max_jerk_y)
+            jerk_xy = m_max_jerk_y;
+
+        // Output the lowest safe limit using ONLY the X parameter
+        gcode << "M207 X" << jerk_xy;
     } else {
         double jerk_x = jerk;
         double jerk_y = jerk;
@@ -364,11 +490,9 @@ std::string GCodeWriter::set_accel_and_jerk(unsigned int acceleration, double je
         gcode += " ACCEL=";
         gcode += std::to_string(acceleration);
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
-        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
-        }
+        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id))
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
         m_last_acceleration = acceleration;
     }
     if (set_jerk) {
@@ -417,56 +541,98 @@ std::string GCodeWriter::set_pressure_advance(double pa) const
             gcode << "SET_PRESSURE_ADVANCE ADVANCE=" << std::setprecision(4) << pa << "; Override pressure advance value\n";
         else if(FLAVOR_IS(gcfRepRapFirmware))
             gcode << ("M572 D0 S") << std::setprecision(4) << pa << "; Override pressure advance value\n";
+        else if (FLAVOR_IS(gcfRepetier))
+            // Repetier M233: X is quadratic (K), Y is linear (L).
+            // Applying the value to both parameters simultaneously.
+            gcode << "M233 X" << std::setprecision(4) << pa << " Y" << std::setprecision(4) << pa << " ; Override pressure advance value\n";
         else
             gcode << "M900 K" <<std::setprecision(4)<< pa << "; Override pressure advance value\n";
     }
     return gcode.str();
 }
 
-std::string GCodeWriter::set_input_shaping(char axis, float damp, float freq) const
+// Orca: input shaping support
+std::string GCodeWriter::set_input_shaping(char axis, float damp, float freq, std::string type) const
 {
-    if (freq < 0.0f || damp < 0.f || damp > 1.0f || (axis != 'X' && axis != 'Y' && axis != 'Z' && axis != 'A'))// A = all axis
-    {
-    throw std::runtime_error("Invalid input shaping parameters: freq=" + std::to_string(freq) + ", damp=" + std::to_string(damp));
+    bool disable = type == "Disable";
+    if (disable){
+        freq = 0.0f;
+        damp = 0.0f;
+        axis = 'A';
+        type = "Default";
+    } else if (freq < 0.0f || damp < 0.f || damp > 1.0f || (axis != 'X' && axis != 'Y' && axis != 'Z' && axis != 'A')) { // A = all axis
+        throw std::runtime_error("Invalid input shaping parameters: axis=" + std::string(1, axis) + ", freq=" + std::to_string(freq) + ", damp=" + std::to_string(damp));
     }
     std::ostringstream gcode;
-    if (FLAVOR_IS(gcfKlipper)) {
-        gcode << "SET_INPUT_SHAPER";
+    std::ostringstream params;
+    switch (this->config.gcode_flavor.value) {
+    case gcfKlipper: {
+        if (!type.empty() && type != "Default") {
+            params << " SHAPER_TYPE=" << type;
+        }
         if (axis != 'A')
         {
             if (freq > 0.0f) {
-                gcode << " SHAPER_FREQ_" << axis << "=" << std::fixed << std::setprecision(2) << freq;
-            }
-            if (damp > 0.0f){
-                gcode  << " DAMPING_RATIO_" << axis << "=" << damp;
-            } 
-        } else {
-            if (freq > 0.0f) {
-                gcode << " SHAPER_FREQ_X=" << std::fixed << std::setprecision(2) << freq << " SHAPER_FREQ_Y=" << std::fixed << std::setprecision(2) << freq;
+                params << " SHAPER_FREQ_" << axis << "=" << std::fixed << std::setprecision(2) << freq;
             }
             if (damp > 0.0f) {
-                gcode << " DAMPING_RATIO_X=" << std::fixed << std::setprecision(3) << damp << " DAMPING_RATIO_Y=" << std::fixed << std::setprecision(3) << damp;
+                params << " DAMPING_RATIO_" << axis << "=" << std::fixed << std::setprecision(3) << damp;
+            }
+        } else {
+            if (freq > 0.0f || disable) {
+                params << " SHAPER_FREQ_X=" << std::fixed << std::setprecision(2) << freq << " SHAPER_FREQ_Y=" << std::fixed << std::setprecision(2) << freq;
+            }
+            if (damp > 0.0f || disable) {
+                params << " DAMPING_RATIO_X=" << std::fixed << std::setprecision(3) << damp << " DAMPING_RATIO_Y=" << std::fixed << std::setprecision(3) << damp;
             }
         }
-    } else {
-        gcode << "M593";
-        if (axis != 'A')
-        {
-            gcode << " " << axis;
+        if (!params.str().empty()) {
+            gcode << "SET_INPUT_SHAPER" << params.str();
         }
-        if (freq > 0.0f)
-        {
-            gcode << " F" << std::fixed << std::setprecision(2) << freq;
-        }
-        if (damp > 0.0f)
-        {
-            gcode << " D" << std::fixed << std::setprecision(3) << damp;
-        }
+        break;
     }
-    if (GCodeWriter::full_gcode_comment){
-        gcode << " ; Override input shaping";
+    case gcfRepRapFirmware: {
+        if (!type.empty() && type != "Default" && type != "DAA") {
+            params << " P\"" << type << "\"";
+        }
+        if (freq > 0.0f || disable) {
+            params << " F" << std::fixed << std::setprecision(2) << freq;
+        }
+        if (damp > 0.0f || disable) {
+            params << " S" << std::fixed << std::setprecision(3) << damp;
+        }
+        if (!params.str().empty()) {
+            gcode << "M593" << params.str();
+        }
+        break;
     }
-    gcode << "\n";
+    case gcfMarlinFirmware: {
+        if (axis != 'A') {
+            params << " " << axis;
+        }
+        if (freq > 0.0f || disable) {
+            params << " F" << std::fixed << std::setprecision(2) << freq;
+        }
+        if (damp > 0.0f || disable) {
+            params << " D" << std::fixed << std::setprecision(3) << damp;
+        }
+        if (!params.str().empty()) {
+            gcode << "M593" << params.str();
+        }
+        break;
+    }
+    case gcfMarlinLegacy: {
+        throw std::runtime_error("Input shaping is not supported by Marlin < 2.1.2.\nCheck your firmware version and update your G-code flavor to 'Marlin 2'");
+    }
+    default:
+        throw std::runtime_error("Input shaping is only supported by Klipper, RepRapFirmware and Marlin 2");
+    }
+    if (!gcode.str().empty()) {
+        if (GCodeWriter::full_gcode_comment) {
+            gcode << " ; Override input shaping";
+        }
+        gcode << "\n";
+    }
     return gcode.str();
 }
 
@@ -494,6 +660,24 @@ std::string GCodeWriter::reset_e(bool force)
     } else {
         return "";
     }
+}
+
+std::string GCodeWriter::enable_power_loss_recovery(PowerLossRecoveryMode mode) const
+{
+    if (mode == PowerLossRecoveryMode::PrinterConfiguration)
+        return std::string();
+    const bool enable = mode == PowerLossRecoveryMode::Enable;
+    if (m_is_bbl_printers)
+        // Edge: the comment lines Bambu Studio has always written, so a Bambu Lab slice with the
+        // option on (the BBL profile default) is unchanged by the option's arrival.
+        return enable ? "; open powerlost recovery\nM1003 S1\n" : "; close powerlost recovery\nM1003 S0\n";
+    if (FLAVOR_IS(gcfMarlinFirmware)) {
+        std::string gcode = enable ? "M413 S1" : "M413 S0";
+        if (GCodeWriter::full_gcode_comment)
+            gcode += " ; set Power-loss Recovery";
+        return gcode + "\n";
+    }
+    return std::string();
 }
 
 std::string GCodeWriter::update_progress(unsigned int num, unsigned int tot, bool allow_100) const
@@ -544,7 +728,7 @@ std::string GCodeWriter::toolchange(unsigned int extruder_id)
     // if we are running a single-extruder setup, just set the extruder and return nothing
     std::ostringstream gcode;
     if (this->multiple_extruders || (this->config.filament_diameter.values.size() > 1 && !is_bbl_printers())) {
-        gcode << this->toolchange_prefix() << extruder_id;
+        gcode << this->toolchange_prefix() << this->output_tool(extruder_id);
         //BBS
         if (GCodeWriter::full_gcode_comment)
             gcode << " ; change extruder";
@@ -609,6 +793,64 @@ double GCodeWriter::active_travel_speed(bool first_layer_aware) const
     return speed;
 }
 
+// Snapmaker #993: machine_max_speed_z caps generated Z travel (pure Z moves, lifts and unlifts, the Z
+// component of XYZ travel and of the spiral lift).
+double GCodeWriter::z_travel_speed_uncapped() const
+{
+    double speed = this->config.travel_speed_z.value;
+    if (speed == 0.)
+        speed = this->active_travel_speed(true);
+    return speed;
+}
+
+double GCodeWriter::z_travel_speed() const
+{
+    return this->cap_speed_for_z(this->z_travel_speed_uncapped(), 1., 1.);
+}
+
+double GCodeWriter::cap_speed_for_z(double speed, double dz, double length) const
+{
+    if (!(m_max_speed_z > 0.) || dz == 0. || !(length > 0.))
+        return speed;
+    const double max_speed = m_max_speed_z * length / std::abs(dz);
+    // Round the feedrate down so output formatting cannot push the Z component over the limit.
+    const double feedrate_scale = 60. * GCodeFormatter::pow_10[GCodeFormatter::XYZF_EXPORT_DIGITS];
+    return std::min(speed, std::floor(max_speed * feedrate_scale) / feedrate_scale);
+}
+
+double GCodeWriter::xyz_travel_speed(const Vec3d &from, const Vec3d &to, double speed) const
+{
+    Vec3d delta;
+    for (int axis = 0; axis < 3; ++axis)
+        delta(axis) = GCodeFormatter::quantize_xyzf(to(axis)) - GCodeFormatter::quantize_xyzf(from(axis));
+    return this->cap_speed_for_z(speed, delta.z(), delta.norm());
+}
+
+// Snapmaker #993 (Edge): after an XY-then-Z travel from an unknown position (after a tool change or
+// custom G-code) the next lines are often the wipe tower's or custom G-code, which may move without an
+// F word of their own and so inherit the last feedrate. Leave the feedrate they inherited before the
+// cap active, rather than the capped Z one. Nothing is written when the cap did not lower the speed.
+std::string GCodeWriter::restore_uncapped_z_feedrate() const
+{
+    const double uncapped = this->z_travel_speed_uncapped();
+    if (!(this->z_travel_speed() < uncapped))
+        return std::string();
+    GCodeG1Formatter w;
+    this->seed_formatter_guard(w);
+    w.emit_f(uncapped * 60.0);
+    return w.string();
+}
+
+void GCodeWriter::defer_z_move(double z)
+{
+    // Consecutive deferrals without a Z move in between keep the Z the head is really at.
+    if (!m_has_deferred_z || m_pos.z() != m_deferred_to_z)
+        m_deferred_from_z = m_pos.z();
+    m_has_deferred_z = true;
+    m_deferred_to_z  = z;
+    m_pos.z()        = z;
+}
+
 std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &comment)
 {
     m_pos(0) = point(0);
@@ -641,7 +883,12 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         used for unlift. */
         // BBS
     Vec3d dest_point = point;
-    auto travel_speed = this->active_travel_speed(true);
+    // Snapmaker #993: a travel that only changes Z is a Z travel (travel_speed_z, capped by machine_max_speed_z).
+    const bool only_z = to_2d(dest_point) == to_2d(m_pos);
+    auto travel_speed = only_z ? this->z_travel_speed() : this->active_travel_speed(true);
+    // Snapmaker #993 (Edge): where the head physically is in Z. It differs from m_pos.z() between a layer
+    // change and its travel; the Z speed cap measures from here, the lift geometry still from m_pos.
+    const double head_z = this->physical_z();
     //BBS: a z_hop need to be handle when travel
     if (std::abs(m_to_lift) > EPSILON) {
         assert(std::abs(m_lifted) < EPSILON);
@@ -661,6 +908,8 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         Vec3d target = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
         Vec3d delta = target - source;
         Vec2d delta_no_z = { delta(0), delta(1) };
+        // Snapmaker #993: the head, for the Z speed cap of each emitted segment.
+        Vec3d head = { source.x(), source.y(), head_z };
         //BBS: don'need slope travel because we don't know where is the source position the first time
         //BBS: Also don't need to do slope move or spiral lift if x-y distance is absolute zero
         if (delta(2) > 0 && delta_no_z.norm() != 0.0f)    {
@@ -670,7 +919,16 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 double radius = delta(2) / (2 * PI * atan(this->extruder()->travel_slope()));
                 Vec2d ij_offset = radius * delta_no_z.normalized();
                 ij_offset = { -ij_offset(1), ij_offset(0) };
-                slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                // Orca: only perform the spiral lift if its full circle stays inside the
+                // printable area of the active extruder, otherwise fall back to a normal
+                // lift to avoid colliding with the print boundary. `source` is already in
+                // bed coordinates (plate offset removed), matching the printable area.
+                const Vec2d spiral_center = { source.x() + ij_offset.x(), source.y() + ij_offset.y() };
+                if (this->spiral_lift_fits_printable_area(spiral_center, radius))
+                    slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                else
+                    slop_move = _travel_to_z(target.z(), "normal lift Z");
+                head.z() = target.z();
             }
             //BBS: LazyLift
             else if (m_to_lift_type == LiftType::LazyLift &&
@@ -684,13 +942,15 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 GCodeG1Formatter w0;
                 w0.emit_xyz(slope_top_point);
                 this->seed_formatter_guard(w0);
-                w0.emit_f(travel_speed * 60.0);
+                w0.emit_f(this->xyz_travel_speed(head, slope_top_point, travel_speed) * 60.0);
                 //BBS
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
                 slop_move = w0.string();
+                head = slope_top_point;
             }
             else if (m_to_lift_type == LiftType::NormalLift) {
                 slop_move = _travel_to_z(target.z(), "normal lift Z");
+                head.z() = target.z();
             }
         }
 
@@ -700,7 +960,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
             if (this->is_current_position_clear()) {
                 w0.emit_xyz(target);
                 this->seed_formatter_guard(w0);
-                w0.emit_f(travel_speed * 60.0);
+                w0.emit_f(this->xyz_travel_speed(head, target, travel_speed) * 60.0);
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
                 xy_z_move = w0.string();
             }
@@ -709,10 +969,11 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 this->seed_formatter_guard(w0);
                 w0.emit_f(travel_speed * 60.0);
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
-                xy_z_move = w0.string() + _travel_to_z(target.z(), comment);
+                xy_z_move = w0.string() + _travel_to_z(target.z(), comment) + this->restore_uncapped_z_feedrate();
             }
         }
         m_pos = dest_point;
+        m_has_deferred_z = false;
         this->set_current_position_clear(true);
         return slop_move + xy_z_move;
     }
@@ -727,34 +988,46 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         this->set_current_position_clear(true);
         return this->travel_to_xy(to_2d(point));
     }
-    else {
-        /*  In all the other cases, we perform an actual XYZ move and cancel
-            the lift. */
-        m_lifted = 0;
-    }
+    // A lifted nozzle that has to end lower travels at the lifted height and descends at the
+    // target, so it never sinks while crossing the print. (OrcaSlicer #16933)
+    // Ordinary retract-on-layer-change never reaches this: lift() only sets m_to_lift, and the
+    // pending-lift branch above already hops and travels at hop height. This split is for an
+    // already-applied hop (m_lifted) that force_z or a below-layer target would otherwise
+    // cancel into one combined XYZ move.
+    const bool descend_after_xy = m_lifted > EPSILON && point(2) < m_pos(2) - EPSILON && this->is_current_position_clear() &&
+        (to_2d(point) - to_2d(m_pos)).norm() > EPSILON;
+    /*  In all the other cases, we move to the target Z and cancel the lift: in a single XYZ move,
+        or XY first and then Z after a filament change or when coming down from a lift. */
+    m_lifted = 0;
     
     //BBS: take plate offset into consider
     Vec3d point_on_plate = { dest_point(0) - m_x_offset, dest_point(1) - m_y_offset, dest_point(2) };
     std::string out_string;
     GCodeG1Formatter w;
-    if (!this->is_current_position_clear())
+    if (!this->is_current_position_clear() || descend_after_xy)
     {
-        //force to move xy first then z after filament change
+        //force to move xy first then z after filament change, or when coming down from a lift
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
         this->seed_formatter_guard(w);
         w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
-        out_string = w.string() + _travel_to_z(point_on_plate.z(), comment);
+        // The Z move happens at the target, so it is emitted and timed from there.
+        m_pos = Vec3d(dest_point.x(), dest_point.y(), m_pos(2));
+        out_string = w.string() + _travel_to_z(point_on_plate.z(), comment) + this->restore_uncapped_z_feedrate();
     } else {
         GCodeG1Formatter w;
         w.emit_xyz(point_on_plate);
         this->seed_formatter_guard(w);
-        w.emit_f(this->active_travel_speed() * 60.0);
+        // Snapmaker #993: cap the Z component, measured from where the head physically is.
+        const Vec3d  head  = { m_pos(0) - m_x_offset, m_pos(1) - m_y_offset, head_z };
+        const double speed = only_z ? this->z_travel_speed() : this->active_travel_speed();
+        w.emit_f(this->xyz_travel_speed(head, point_on_plate, speed) * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string();
     }
 
     m_pos = dest_point;
+    m_has_deferred_z = false;
     this->set_current_position_clear(true);
     return out_string;
 }
@@ -781,15 +1054,13 @@ std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool 
 std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
 {
     m_pos(2) = z;
+    m_has_deferred_z = false;
 
-    double speed = this->config.travel_speed_z.value;
-    if (speed == 0.)
-        speed = this->active_travel_speed(true);
-    
     GCodeG1Formatter w;
     w.emit_z(z);
     this->seed_formatter_guard(w);
-    w.emit_f(speed * 60.0);
+    // Snapmaker #993: capped by machine_max_speed_z.
+    w.emit_f(this->z_travel_speed() * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return w.string();
@@ -797,21 +1068,102 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
 
 std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment)
 {
-    m_pos(2) = z;
+    std::string output;
+    // Snapmaker #993 (Edge adaptation): the spiral keeps its speed (travel_speed_z, else the travel speed)
+    // and is slowed only as far as its Z component needs to stay within machine_max_speed_z. Upstream
+    // slows the whole spiral to the Z limit, which would make every spiral lift many times slower than
+    // the firmware itself would run it. After a layer change the head still sits at the previous
+    // layer's Z (physical_z()), which is where the first segment or the arc really starts.
+    const double speed  = this->z_travel_speed_uncapped();
+    const double head_z = this->physical_z();
 
-    double speed = this->config.travel_speed_z.value;
-    if (speed == 0.)
-        speed = this->active_travel_speed(true);
-    
-    std::string output = "G17\n";
-    GCodeG2G3Formatter w(true);
-    w.emit_z(z);
-    w.emit_ij(ij_offset);
-    w.emit_string(" P1 ");
-    this->seed_formatter_guard(w);
-    w.emit_f(speed * 60.0);
-    w.emit_comment(GCodeWriter::full_gcode_comment, comment);
-    return output + w.string();
+    // Orca: if arc fitting is disabled, approximate the arc with small linear segments. Bambu Studio 2.9.1 writes the
+    // spiral lift as one G3 on its printers whatever enable_arc_fitting says (the H3C/A2L/P2S presets turn it off), and
+    // the segmented spiral cost about 24 short Z-climbing moves per lift (owner decision 2026-11-05, #854).
+    if (!this->config.enable_arc_fitting && !m_is_bbl_printers) {
+        const double z_start = m_pos(2); // starting Z height
+
+        const double px = m_pos(0) - m_x_offset;        // take plate offset into consideration
+        const double py = m_pos(1) - m_y_offset;        // take plate offset into consideration
+        const double cx = px + ij_offset(0);            // center x
+        const double cy = py + ij_offset(1);            // center y
+        const double radius = ij_offset.norm();         // radius
+
+        // Number of linear segments approximating the circle, chosen so that a chord never deviates
+        // from the true arc by more than the slicing resolution. A resolution of 0 means "no
+        // simplification", which has no finite segment count, so it takes the upper bound.
+        constexpr size_t min_segments = 8;              // keep a small spiral visibly round
+        constexpr size_t max_segments = 128;            // bound the emitted G-code
+        const int segments = int(m_resolution > 0. ?
+            std::clamp(Geometry::ArcWelder::arc_discretization_steps(radius, 2. * M_PI, m_resolution), min_segments, max_segments) :
+            max_segments);
+
+        const double a0 = std::atan2(py - cy, px - cx); // start angle
+
+        // approximate the arc with small linear segments (the last point is the start point, for exactness)
+        std::vector<Vec3d> points;
+        points.reserve(size_t(segments));
+        for (int i = 1; i < segments; ++i) {
+            const double t = double(i) / segments;      // parametric position along arc
+            const double a = a0 + 2. * M_PI * t;        // CCW arc param, full circle
+            points.emplace_back(cx + radius * std::cos(a), // point on circle
+                                cy + radius * std::sin(a),
+                                z_start + (z - z_start) * t); // interpolated Z height
+        }
+        points.emplace_back(px, py, z);                 // final point to ensure exactness
+
+        // Snapmaker #993: the slowest feedrate any segment needs for its Z component. The first segment
+        // starts where the head is; after a layer change it also climbs the layer height, so it alone
+        // may need a lower feedrate, which is then restored on the second segment.
+        double first_speed = speed;
+        double rest_speed  = speed;
+        Vec3d  prev(px, py, head_z);
+        for (size_t i = 0; i < points.size(); ++i) {
+            double &segment_speed = i == 0 ? first_speed : rest_speed;
+            segment_speed         = std::min(segment_speed, this->xyz_travel_speed(prev, points[i], speed));
+            prev                  = points[i];
+        }
+        const bool   split_first  = head_z != z_start && first_speed < rest_speed;
+        const double header_speed = split_first ? first_speed : std::min(first_speed, rest_speed);
+
+        output.reserve(points.size() * 40);             // ~40 characters per emitted G1 line
+
+        GCodeG1Formatter w;                             // set feedrate
+        this->seed_formatter_guard(w);                  // Edge: feedrate guard, as for every other F word
+        w.emit_f(header_speed * 60.0);
+        w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+        output += w.string();
+
+        for (size_t i = 0; i < points.size(); ++i) {
+            GCodeG1Formatter wp;
+            wp.emit_xyz(points[i]);
+            if (split_first && i == 1) {
+                this->seed_formatter_guard(wp);
+                wp.emit_f(rest_speed * 60.0);
+            }
+            output += wp.string();
+        }
+    } else { // Orca: if arc fitting is enabled emit a G2/G3 command for the spiral lift
+        output = std::string("G17") + (full_gcode_comment ? " ; XY plane for arc\n" : "\n");
+
+        GCodeG2G3Formatter w(true);
+        w.emit_z(z);
+        w.emit_ij(ij_offset);
+        w.emit_string(" P1 ");
+        this->seed_formatter_guard(w);
+        // Snapmaker #993: one full turn of radius |IJ| from the head's Z to z, Z component capped.
+        const double dz         = GCodeFormatter::quantize_xyzf(z) - GCodeFormatter::quantize_xyzf(head_z);
+        const double radius     = std::hypot(GCodeFormatter::quantize_xyzf(ij_offset.x()), GCodeFormatter::quantize_xyzf(ij_offset.y()));
+        const double arc_length = std::hypot(2. * M_PI * radius, dz);
+        w.emit_f(this->cap_speed_for_z(speed, dz, arc_length) * 60.0);
+        w.emit_comment(GCodeWriter::full_gcode_comment, comment);
+
+        output += w.string();
+    }
+
+    m_pos(2) = z;
+    m_has_deferred_z = false;
+    return output;
 }
 
 bool GCodeWriter::will_move_z(double z) const
@@ -899,6 +1251,7 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std
 void GCodeWriter::extrude_to_xyz(std::string &out, const Vec3d &point, double dE, const std::string &comment, bool force_no_extrusion)
 {
     m_pos = point;
+    m_has_deferred_z = false;
     m_lifted = 0;
     if (!force_no_extrusion)
         m_extruder->extrude(dE);
@@ -968,14 +1321,14 @@ std::string GCodeWriter::_retract(double length, double restart_extra, const std
     return gcode;
 }
 
-std::string GCodeWriter::unretract()
+std::string GCodeWriter::unretract(double extra)
 {
     std::string gcode;
     
     if (FLAVOR_IS(gcfMakerWare))
         gcode = "M101 ; extruder on\n";
     
-    if (double dE = m_extruder->unretract(); !is_zero(dE)) {
+    if (double dE = m_extruder->unretract(extra); !is_zero(dE)) {
         if (this->config.use_firmware_retraction) {
             gcode += FLAVOR_IS(gcfMachinekit) ? "G23 ; unretract\n" : "G11 ; unretract\n";
             gcode += this->reset_e();
@@ -1034,9 +1387,75 @@ std::string GCodeWriter::unlift()
     return gcode;
 }
 
-std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int speed)
+bool GCodeWriter::can_reach(const Vec2d &bed_point) const
+{
+    const Polygon *area = this->active_printable_area();
+    return area == nullptr || area->contains(Point::new_scale(bed_point.x(), bed_point.y()));
+}
+
+std::pair<std::string, std::string> GCodeWriter::park_and_return(const Vec2d &park, double clearance, double max_z) const
+{
+    if (m_extruder == nullptr || !this->is_current_position_clear())
+        return {};
+    const bool   comments = GCodeWriter::full_gcode_comment;
+    const Vec2d  here(m_pos.x() - m_x_offset, m_pos.y() - m_y_offset);
+    const double head_z    = this->physical_z();
+    const double nominal_z = m_pos.z() - m_lifted;
+    double       park_z    = std::max(head_z, nominal_z + clearance);
+    if (max_z > 0.)
+        park_z = std::min(park_z, std::max(head_z, max_z));
+
+    std::string there, back;
+    auto line = [this, comments](std::string &out, std::optional<Vec2d> xy, std::optional<double> z, std::optional<double> e,
+                                 double F, const char *comment) {
+        GCodeG1Formatter w;
+        if (xy)
+            w.emit_xy(*xy);
+        if (z)
+            w.emit_z(*z);
+        if (e)
+            w.emit_e(*e);
+        this->seed_formatter_guard(w);
+        w.emit_f(F);
+        w.emit_comment(comments, comment);
+        w.append_to(out);
+    };
+
+    // Retract, unless the filament already is; `back` gives back exactly what `there` took.
+    if (this->config.use_firmware_retraction) {
+        if (m_extruder->retracted() < EPSILON) {
+            there += FLAVOR_IS(gcfMachinekit) ? "G22 ; retract\n" : "G10 ; retract\n";
+            back   = FLAVOR_IS(gcfMachinekit) ? "G23 ; unretract\n" : "G11 ; unretract\n";
+        }
+    } else if (const double length = std::max(0., m_extruder->retraction_length() - m_extruder->retracted()); length > EPSILON) {
+        const bool relative = this->config.use_relative_e_distances.value;
+        line(there, std::nullopt, std::nullopt, relative ? -length : m_extruder->E() - length, m_extruder->retract_speed() * 60.,
+             "retract for pause");
+        line(back, std::nullopt, std::nullopt, relative ? length : m_extruder->E(), m_extruder->deretract_speed() * 60.,
+             "unretract after pause");
+    }
+    std::string unretract = std::move(back);
+    back.clear();
+
+    const bool lift = park_z > head_z + EPSILON;
+    if (lift)
+        line(there, std::nullopt, park_z, std::nullopt, this->z_travel_speed() * 60., "lift for pause");
+    const double travel_F = this->active_travel_speed() * 60.;
+    line(there, park, std::nullopt, std::nullopt, travel_F, "park for pause");
+    line(back, here, std::nullopt, std::nullopt, travel_F, "back from pause");
+    if (lift)
+        line(back, std::nullopt, head_z, std::nullopt, this->z_travel_speed() * 60., "lower after pause");
+    back += unretract;
+    return { std::move(there), std::move(back) };
+}
+
+std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int speed, unsigned int part_cooling_fan_min_pwm)
 {
     std::ostringstream gcode;
+    // ORCA: clamp non-zero fan commands up to the configured PWM floor so fans that can't spool at low duty
+    // cycles still start reliably. Zero (fan off) is preserved exactly so disable-fan commands are never altered.
+    if (speed > 0 && part_cooling_fan_min_pwm > 0 && speed < part_cooling_fan_min_pwm)
+        speed = part_cooling_fan_min_pwm;
     if (speed == 0) {
         switch (gcode_flavor) {
         case gcfTeacup:
@@ -1071,7 +1490,9 @@ std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int sp
 std::string GCodeWriter::set_fan(unsigned int speed) const
 {
     //BBS
-    return GCodeWriter::set_fan(this->config.gcode_flavor, speed);
+    // ORCA: pick up the per-printer PWM floor from the active config.
+    return GCodeWriter::set_fan(this->config.gcode_flavor, speed,
+                                static_cast<unsigned int>(std::max(0, this->config.part_cooling_fan_min_pwm.value)));
 }
 
 //BBS: set additional fan speed for BBS machine only

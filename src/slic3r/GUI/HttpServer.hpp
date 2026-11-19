@@ -17,6 +17,11 @@
 #include <vector>
 
 #define LOCALHOST_PORT      13618
+// EdgeSlicer: the port the Bambu sign-in (OAuth / third-party) callback listener asks for
+// (GUI_App::start_http_server). Deliberately not Bambu Studio's LOCALHOST_PORT, so a Bambu
+// Studio or OrcaSlicer running alongside cannot take our callback. The sign-in page is told the
+// port that was actually bound (get_localhost_url), so a fallback port still works.
+#define BBL_LOGIN_CALLBACK_PORT 13650
 #define PAGE_HTTP_PORT      13619
 #define LOCALHOST_URL       "http://127.0.0.1:"
 // Ultra: the base URL advertised to bambulab.com/sign-in via get_localhost_url. Bambu
@@ -140,14 +145,35 @@ public:
         void write_response(std::stringstream& ssOut) override;
     };
 
-    // Ultra: a well-formed third-party login callback that could not be completed. A 200
-    // page, never a 404 - a 404 in the system browser is exactly what users report as
-    // "signing in with Google 404s".
-    class ResponseLoginFailed : public Response
+    // EdgeSlicer: the page the system browser shows at the end of a Bambu Lab sign-in that
+    // came back through the loopback callback (Google / Apple / ticket). We answer the callback
+    // with this page ourselves instead of redirecting to Bambu's studio-callback page: that page
+    // hands off to Bambu Studio's own URL scheme, which EdgeSlicer does not register, so Safari
+    // ended a successful sign-in on "the address is invalid" (and other browsers on a stray
+    // "open this app?" prompt). Always a 200, never a 404: a 404 in the system browser is what
+    // users report as "signing in with Google 404s". No script, no external resources.
+    class ResponseLoginResult : public Response
+    {
+        bool        m_success;
+        std::string m_error;
+
+    public:
+        explicit ResponseLoginResult(bool success, const std::string& error = std::string())
+            : m_success(success), m_error(error)
+        {}
+        ~ResponseLoginResult() override = default;
+        void write_response(std::stringstream& ssOut) override;
+        // The HTML of the page. `error` is a short code of ours (e.g. ticket_exchange_failed);
+        // anything but letters, digits, '_' and '-' is dropped from it. Public for the tests.
+        static std::string page_html(bool success, const std::string& error);
+    };
+
+    // A well-formed third-party login callback that could not be completed (no error code).
+    class ResponseLoginFailed : public ResponseLoginResult
     {
     public:
+        ResponseLoginFailed() : ResponseLoginResult(false) {}
         ~ResponseLoginFailed() override = default;
-        void write_response(std::stringstream& ssOut) override;
     };
 
     class ResponseRedirect : public Response
@@ -214,7 +240,6 @@ public:
     bool is_restart_requested() const;      // 检查是否有重启请求
     void start_restart_check();  // 启动重启检查
     void stop_restart_check();   // 停止重启检查
-    void simulate_crash();       // 模拟服务器崩溃，用于测试重启机制
     void set_request_handler(const std::function<std::shared_ptr<Response>(const std::string&)>& m_request_handler);
     void setPort(boost::asio::ip::port_type new_port) { 
         if (!start_http_server) {  // 只有在服务器未启动时才允许修改端口
@@ -245,6 +270,10 @@ public:
 
     static std::string map_url_to_file_path(const std::string& url);
 
+    // The installed image (a file name under resources/images) behind one of the icon URLs the
+    // Stream tab page asks for next to itself, or nullptr for any other path. Closed list.
+    static const char* app_icon_file_for_page(const std::string& url_path);
+
     static std::shared_ptr<Response> bbl_auth_handle_request(const std::string& url);
 
     static std::shared_ptr<Response> web_server_handle_request(const std::string& url);
@@ -262,6 +291,7 @@ private:
         boost::asio::io_service           io_service;
         boost::asio::ip::tcp::acceptor    acceptor;
         std::set<std::shared_ptr<session>> sessions;
+        std::atomic<bool>                  stopping{false};
 
         // 只声明构造函数，不在头文件中定义
         IOServer(HttpServer& server);
@@ -272,6 +302,8 @@ private:
         bool bind_loopback(boost::asio::ip::port_type port, std::string* error);
 
         void do_accept();
+        // Sets stopping and closes the acceptor on the io thread, then stops io_service.
+        void request_stop();
         void start(std::shared_ptr<session> session);
         void stop(std::shared_ptr<session> session);
         void stop_all();
@@ -289,6 +321,8 @@ private:
     // health-check thread that is itself blocked in is_healthy() waiting for
     // m_server_mtx, so it must only be called after the lock is released.
     void start_locked();
+    // request_stop(), join the io thread, stop_all(), reset server_. Caller holds m_server_mtx.
+    void stop_io_locked();
 
     std::unique_ptr<IOServer> server_{nullptr};
 

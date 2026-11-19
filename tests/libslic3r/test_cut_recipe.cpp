@@ -39,6 +39,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -152,6 +153,10 @@ static CutRecipe recipe_make(CutRecipeKind kind)
     r.thickness        = 0.8;
     r.thickness_offset = CutThicknessOffset::Above;
 
+    // Version 5 (OD11 PR D): the cut instance's linear transform, rotated and scaled.
+    r.instance_linear = Transform3d(Eigen::AngleAxisd(0.7, Vec3d::UnitZ())) * Eigen::Scaling(1.25, 1.25, 1.25);
+    r.instance_linear_set = true;
+
     r.keep_upper         = true;
     r.keep_lower         = true;
     r.keep_as_parts      = false;
@@ -189,6 +194,10 @@ static CutRecipe recipe_make(CutRecipeKind kind)
         r.groove.angle_init       = 0.1f;
         r.groove.depth_tolerance  = 0.15f;
         r.groove.width_tolerance  = 0.2f;
+        // Version 5: three dovetails, so the round trip has a count, a gap and a radius to lose.
+        r.groove.count            = 3;
+        r.groove.gap              = 7.5f;
+        r.groove.plane_radius     = 33.25f;
     }
 
     // One connector of each kind the panel can place, so the connector list is
@@ -463,6 +472,8 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
     const Case cases[] = {
         { CutRecipeKind::Plane,  "plane"  },
         { CutRecipeKind::Curved, "curved" },
+        // OD11: two dovetails, so a recipe that lost its count or gap re-cuts differently.
+        { CutRecipeKind::Groove, "groove" },
     };
 
     for (const Case &c : cases) {
@@ -481,6 +492,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
         in.place_on_cut_lower = false;
         in.rotate_upper       = false;
         in.rotate_lower       = false;
+        if (c.kind == CutRecipeKind::Groove) {
+            // A dovetail the panel could make, two of them fitting the 40 mm cube.
+            in.groove.depth        = 5.f;
+            in.groove.width        = 10.f;
+            in.groove.flaps_angle  = float(Geometry::deg2rad(60.));
+            in.groove.angle        = 0.f;
+            in.groove.count        = 2;
+            in.groove.gap          = 4.f;
+            in.groove.plane_radius = 30.f;
+        }
         in.mesh_hash          = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(in.mesh));
 
         // THE ORIGINAL CUT, performed from the recipe as the gizmo would.
@@ -499,7 +520,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
             ModelObjectPtrs res;
             if (r.kind == CutRecipeKind::Curved)
                 res = cut.perform_with_curved_sheet(r.curved_sheet(), r.thickness, r.thickness_offset);
-            else
+            else if (r.kind == CutRecipeKind::Groove) {
+                Cut::Groove g;
+                g.depth           = r.groove.depth;
+                g.width           = r.groove.width;
+                g.flaps_angle     = r.groove.flaps_angle;
+                g.angle           = r.groove.angle;
+                g.depth_tolerance = r.groove.depth_tolerance;
+                g.width_tolerance = r.groove.width_tolerance;
+                res = cut.perform_with_groove(g, r.rotation_m, r.groove.count, r.groove.gap, r.groove.plane_radius);
+            } else
                 res = cut.perform_with_plane(r.thickness, r.thickness_offset);
 
             std::vector<std::pair<double, BoundingBoxf3>> out;
@@ -843,12 +873,19 @@ TEST_CASE("Cut recipe: an old recipe's extension angle is unset, not zero", "[Cu
     REQUIRE(r != unset);
 }
 
-TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads", "[CutRecipe]")
+TEST_CASE("Cut recipe: current and older supported versions remain editable", "[CutRecipe]")
 {
-    REQUIRE(CutRecipeVersion == 4);
+    // Version 5 (OD11, multiple dovetails) added groove fields only; version 6 (the push-fit
+    // Pin) added the connector's pushfit block only.
+    REQUIRE(cut_recipe_version_supported(CutRecipeVersion));
     REQUIRE(cut_recipe_version_supported(3));
     REQUIRE(cut_recipe_version_supported(4));
-    REQUIRE_FALSE(cut_recipe_version_supported(5));
+    REQUIRE(cut_recipe_version_supported(5));
+    REQUIRE(cut_recipe_version_supported(6));
+    REQUIRE(cut_recipe_version_supported(7));
+    REQUIRE(cut_recipe_version_supported(8));
+    REQUIRE(cut_recipe_version_supported(9));
+    REQUIRE_FALSE(cut_recipe_version_supported(CutRecipeVersion + 1));
 
     // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
     // numbers: version 4 changed no meanings, only added a field, so the angle, the
@@ -859,7 +896,7 @@ TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads",
     r.draw_depth       = 4.5;
     r.draw_through_all = true;
     r.migrate_draw_v2();
-    REQUIRE(r.version == 4);
+    REQUIRE(r.version == CutRecipeVersion);
     REQUIRE(r.draw_angle_deg == Approx(35.0));
     REQUIRE(r.draw_depth == Approx(4.5));
     REQUIRE(r.draw_through_all);
@@ -1597,4 +1634,161 @@ TEST_CASE("Cut plane: an off-centre plane still reaches both faces", "[CutRecipe
     REQUIRE(r.first  == Approx(-35.5));
     REQUIRE(r.second == Approx(5.5));
     REQUIRE(r.second - r.first == Approx(41.0));
+}
+
+// ---------------------------------------------------------------------------
+// "EDIT CUT" ON A TURNED, SCALED OBJECT.
+//
+// The recipe keeps the uncut mesh in the OBJECT frame (the volumes' matrices
+// applied, not the instance's) and the plane in the cut instance's frame less its
+// offset (Cut's own cut matrix: world centre - instance offset, world rotation).
+// The two only agree when the stand-in "Edit cut" puts the mesh back with carries
+// the cut instance's turn and size. A cut resets the halves' instances to their
+// offset (plus the place-on-cut turn), so placing the stand-in with a half's
+// instance matrix showed it unturned and unscaled under a turned plane, and the
+// re-cut went through the wrong place.
+// ---------------------------------------------------------------------------
+TEST_CASE("Edit cut: the stand-in of a turned, scaled object re-cuts to the same halves", "[CutRecipe][Regression]")
+{
+    // A box, so the turn matters: 40 x 20 x 10, centred on the object origin.
+    indexed_triangle_set box = its_make_cube(40., 20., 10.);
+    its_translate(box, Vec3f(-20.f, -10.f, -5.f));
+
+    const Vec3d offset(100., 80., 15.);
+    Geometry::Transformation inst_trafo;
+    inst_trafo.set_offset(offset);
+    inst_trafo.set_rotation(Vec3d(0.5 * PI, 0., PI / 6.));
+    inst_trafo.set_scaling_factor(Vec3d(1.5, 1.5, 1.5));
+
+    // A horizontal world plane 4 mm above the instance origin, the way the gizmo keeps it.
+    const Vec3d       plane_world  = offset + Vec3d(0., 0., 4.);
+    const Transform3d rotation_m   = Transform3d::Identity();
+    const ModelObjectCutAttributes attrs = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                           ModelObjectCutAttribute::InvalidateCutInfo;
+
+    auto halves_volumes = [](const ModelObjectPtrs &res) {
+        std::vector<double> v;
+        for (const ModelObject *o : res)
+            v.push_back(recipe_object_volume(o));
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+
+    // THE ORIGINAL CUT, and the recipe the gizmo writes for it (build_recipe_from_gizmo()).
+    Model        model;
+    ModelObject *mo = model.add_object();
+    mo->name        = "box";
+    mo->add_volume(TriangleMesh(box), ModelVolumeType::MODEL_PART, false)->name = "part";
+    mo->add_instance()->set_transformation(inst_trafo);
+
+    CutRecipe recipe;
+    recipe.kind                = CutRecipeKind::Plane;
+    recipe.mesh                = TriangleMesh(box);
+    recipe.plane_center        = plane_world - offset;
+    recipe.rotation_m          = rotation_m;
+    recipe.instance_linear     = inst_trafo.get_matrix_no_offset();
+    recipe.instance_linear_set = true;
+
+    Cut cut(mo, 0, Geometry::translation_transform(recipe.plane_center) * recipe.rotation_m, attrs);
+    const ModelObjectPtrs res = cut.perform_with_plane();
+    REQUIRE(res.size() == 2);
+    const std::vector<double> before = halves_volumes(res);
+    // Not a cut through the middle, so a plane in the wrong place cannot pass by symmetry.
+    REQUIRE(before[0] > 1000.);
+    REQUIRE(before[1] - before[0] > 1000.);
+    // What a cut leaves the halves' instances with: the offset, no turn, no scale.
+    const Transform3d half_matrix = res.front()->instances.front()->get_matrix();
+    REQUIRE(half_matrix.linear().isApprox(Matrix3d::Identity()));
+
+    // THE RE-EDIT: the stand-in, placed where the half is, cut by the recipe's plane at its offset.
+    const Transform3d stand_in_matrix = cut_recipe_stand_in_matrix(recipe, half_matrix);
+    Model        model2;
+    ModelObject *stand_in = model2.add_object();
+    stand_in->name        = "box";
+    stand_in->add_volume(TriangleMesh(recipe.mesh), ModelVolumeType::MODEL_PART, false)->name = "part";
+    stand_in->add_instance()->set_transformation(Geometry::Transformation(stand_in_matrix));
+
+    // The stand-in looks like the object did: the same turn and size.
+    const BoundingBoxf3 bb_before = mo->instance_bounding_box(0);
+    const BoundingBoxf3 bb_after  = stand_in->instance_bounding_box(0);
+    CHECK(bb_after.size().isApprox(bb_before.size(), 1e-6));
+    // At the half's place.
+    CHECK(stand_in_matrix.translation().isApprox(half_matrix.translation()));
+
+    Cut recut(stand_in, 0, Geometry::translation_transform(recipe.plane_center) * recipe.rotation_m, attrs);
+    const ModelObjectPtrs res2 = recut.perform_with_plane();
+    REQUIRE(res2.size() == 2);
+    const std::vector<double> after = halves_volumes(res2);
+    CHECK(after[0] == Approx(before[0]).epsilon(1e-4));
+    CHECK(after[1] == Approx(before[1]).epsilon(1e-4));
+
+    // A recipe that never recorded the instance (version <= 4) keeps the half's matrix.
+    CutRecipe old = recipe;
+    old.instance_linear_set = false;
+    CHECK(cut_recipe_stand_in_matrix(old, half_matrix).isApprox(half_matrix));
+}
+
+// ---------------------------------------------------------------------------
+// "EDIT CUT" FINDS BOTH HALVES OF A PLAIN CUT.
+//
+// Edit cut takes out every object of the cut it is opened on and puts the uncut
+// stand-in in their place. It found them by cut_id, but a plain cut (no
+// connectors, no dovetail) is made with InvalidateCutInfo: its halves carry no
+// cut_id. Only the chosen half was taken out, the panel said the other one was
+// missing, and the re-cut made that half a second time.
+// ---------------------------------------------------------------------------
+TEST_CASE("Edit cut: the objects of a plain cut are both halves", "[CutRecipe][Regression]")
+{
+    // The halves of a plain cut of a 40 mm cube, each carrying the recipe, as perform_cut() leaves them.
+    auto plain_cut = [](Model &model, const Vec3d &where) {
+        ModelObject *mo = model.add_object();
+        mo->name        = "cube";
+        mo->add_volume(TriangleMesh(recipe_centred_cube()), ModelVolumeType::MODEL_PART, false)->name = "part";
+        mo->add_instance()->set_offset(where);
+        CutRecipe recipe = recipe_make(CutRecipeKind::Plane);
+        recipe.connectors.clear();
+        recipe.keep_as_parts = false;
+        recipe.mesh          = TriangleMesh(recipe_centred_cube());
+        recipe.mesh_hash     = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(recipe.mesh));
+        const ModelObjectCutAttributes attrs = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                               ModelObjectCutAttribute::InvalidateCutInfo;
+        // The Cut owns the halves it returns, so it lives until they are copied into the model.
+        Cut cut(mo, 0, Geometry::translation_transform(recipe.plane_center) * recipe.rotation_m, attrs);
+        const ModelObjectPtrs res = cut.perform_with_plane(0., CutThicknessOffset::Centred);
+        REQUIRE(res.size() == 2);
+        for (ModelObject *half : res) {
+            REQUIRE_FALSE(half->is_cut()); // what makes the cut_id lookup miss them
+            half->cut_recipe = recipe;
+            model.add_object(*half);
+        }
+        model.delete_object(mo);
+    };
+
+    Model model;
+    // Something else on the plate first, so the indices are not just 0 and 1.
+    model.add_object()->add_volume(TriangleMesh(recipe_centred_cube(10.)));
+    model.objects.back()->add_instance();
+    plain_cut(model, Vec3d(50., 50., 20.));
+    REQUIRE(model.objects.size() == 3);
+
+    CHECK(edit_cut_objects(model.objects, 1) == std::vector<size_t>{ 1, 2 });
+    CHECK(edit_cut_objects(model.objects, 2) == std::vector<size_t>{ 1, 2 });
+
+    // A second, identical plain cut (the same object cut the same way, e.g. by Copy cut): the
+    // recipes cannot tell the two pairs apart, so Edit cut takes only the chosen half rather than
+    // a half of the other cut. The panel then says the other half is missing, as before.
+    plain_cut(model, Vec3d(120., 50., 20.));
+    REQUIRE(model.objects.size() == 5);
+    CHECK(edit_cut_objects(model.objects, 1) == std::vector<size_t>{ 1 });
+
+    // A cut that keeps its cut_id (connectors, dovetail) is still found by it.
+    Model        linked;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *o = linked.add_object();
+        o->add_volume(TriangleMesh(recipe_centred_cube()));
+        o->add_instance();
+    }
+    linked.objects[0]->cut_id.init();
+    linked.objects[1]->cut_id.copy(linked.objects[0]->cut_id);
+    CHECK(edit_cut_objects(linked.objects, 0) == std::vector<size_t>{ 0, 1 });
 }

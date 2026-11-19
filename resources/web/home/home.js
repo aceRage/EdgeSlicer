@@ -14,6 +14,12 @@
 //   library_progress {scanning, files}     a scan is running
 //   library_thumbs {images: {id: dataUri}} Library covers, asked for as cards scroll in
 //   library_plates {id, plates: [{index, name, image}]}  a 3MF's plates, for its detail view
+// The Vaults section is the user's own storage: for now the Library's folders (local or a mounted NAS
+// share) as one card, the user's WebDAV / Azure Blob / S3 vaults (HomeVaults.cpp) and their files, and an
+// Add vault chooser (tests/design_vaults_home_tab.md). Vendors stay vendors:
+//   vaults {vaults: [...], files: [{key, vault, name, folder, size, mtime, type}], builtins, downloads_default}
+//                                          HomeVaults.cpp send_state(): specs without secrets, opaque keys
+//   vault_notice {text, error} / vault_saved {id} / vault_invalid {error} / vault_dir {path}
 //   vendors {connectors: [...], items: [...]}  HomeVendors.cpp send_state(): connector specs (never
 //                                          a secret), and items keyed by opaque keys
 //   vendor_thumbs {images: {key: dataUri}} vendor thumbnails (PNG, JPEG, GIF or WebP)
@@ -33,7 +39,7 @@
     asked: new Set(),
     printer: '',
     search: '',
-    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest' },
+    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest', vaults: 'newest' },
     lib: null,          // the last 'library' message
     libThumbs: {},
     libAsked: new Set(),
@@ -49,13 +55,18 @@
     venFilter: { connector: new Set(), tag: new Set(), license: new Set() },
     venShown: [],
     venRendered: 0,
+    vlt: null,          // the last 'vaults' message
+    vltFilter: { vault: new Set(), type: new Set() },
+    vltShown: [],
+    vltRendered: 0,
   };
-  const SECTIONS = ['recent', 'library', 'history', 'vendors'];
+  const SECTIONS = ['recent', 'library', 'history', 'vendors', 'vaults'];
   const SORTS = {
     recent: ['newest', 'oldest', 'name'],
     library: ['newest', 'oldest', 'added', 'name', 'size'],
     history: ['newest', 'oldest', 'name'],
     vendors: ['newest', 'oldest', 'name'],
+    vaults: ['newest', 'oldest', 'name'],
   };
   const SORT_LABELS = { newest: ['sort_newest', 'Newest first'], oldest: ['sort_oldest', 'Oldest first'],
     added: ['sort_added', 'Recently added'], name: ['sort_name', 'Name'], size: ['sort_size', 'Largest first'] };
@@ -136,6 +147,7 @@
     for (const e of entries) {
       if (e === '-') { menu.appendChild(el('hr')); continue; }
       const b = el('button', e.danger ? 'danger' : '', e.label);
+      if (e.title) b.title = e.title;
       b.type = 'button';
       b.setAttribute('role', 'menuitem');
       b.addEventListener('click', (ev) => { ev.stopPropagation(); closeMenu(); e.run(); });
@@ -379,6 +391,7 @@
     if (state.section === 'history') renderHistory();
     else if (state.section === 'library') renderLibrary();
     else if (state.section === 'vendors') renderVendors();
+    else if (state.section === 'vaults') renderVaults();
     else renderRecent();
   }
 
@@ -402,7 +415,7 @@
       b.setAttribute('aria-current', on ? 'page' : 'false');
     }
     for (const id of SECTIONS) $(id).hidden = section !== id;
-    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors' }[section]);
+    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors', vaults: 'Vaults' }[section]);
     fillSort(section);
     $('refresh').classList.toggle('spin', section === 'library' && !!state.lib && state.lib.scanning);
     closeMenu();
@@ -418,6 +431,46 @@
     for (const [name, value] of Object.entries(theme)) {
       if (/^--[a-z-]+$/.test(name) && typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value))
         root.style.setProperty(name, value);
+    }
+    accentForText(theme);
+  }
+
+  // WCAG AA (4.5:1) for accent-coloured text. A theme's accent is meant for borders and fills, so
+  // unless the theme names them, --accent-strong (under --accent-fg) and --accent-text (on
+  // --accent-soft and --bg) are the accent shaded towards black or white just far enough.
+  function accentForText(theme) {
+    const root = document.documentElement, css = getComputedStyle(root);
+    const rgb = name => {
+      const m = /^#([0-9a-f]{6})$/i.exec(css.getPropertyValue(name).trim());
+      return m ? [0, 2, 4].map(i => parseInt(m[1].substr(i, 2), 16)) : null;
+    };
+    const lum = c => {
+      const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+    };
+    const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const hex = c => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+    // The least mix of accent towards black or white that clears 4.5:1 against every background.
+    const shade = (accent, backs) => {
+      let best = null;
+      for (const to of [[0, 0, 0], [255, 255, 255]]) {
+        for (let t = 0; t <= 1.0001; t += 0.02) {
+          const c = accent.map((v, i) => v + (to[i] - v) * t);
+          if (backs.every(b => ratio(c, b) >= 4.5)) { if (!best || t < best.t) best = { t, c }; break; }
+        }
+      }
+      return best ? hex(best.c) : null;
+    };
+    const accent = rgb('--accent');
+    if (!accent || !('--accent' in theme || '--accent-fg' in theme || '--accent-soft' in theme || '--bg' in theme)) return;
+    const fg = rgb('--accent-fg'), soft = rgb('--accent-soft'), bg = rgb('--bg');
+    if (!('--accent-strong' in theme) && fg) {
+      const c = shade(accent, [fg]);
+      if (c) root.style.setProperty('--accent-strong', c);
+    }
+    if (!('--accent-text' in theme) && soft && bg) {
+      const c = shade(accent, [soft, bg]);
+      if (c) root.style.setProperty('--accent-text', c);
     }
   }
 
@@ -465,6 +518,7 @@
       renderLibrary(keepScroll);
       if (!lib.scanning) stopSpin();
     }
+    if (state.section === 'vaults') renderVaults(); // its folders card
     if (!$('folders').hidden) renderFolders();
   }
 
@@ -831,10 +885,11 @@
     more.setAttribute('aria-label', 'More');
     more.appendChild(svg(ICON_MORE));
     const menu = [
-      { label: t('full_sync', 'Fetch everything again'), run: () => post('vendor_sync', { id: c.id, full: true }) },
+      { label: t('full_sync', 'Full Refresh'), title: t('full_sync_tip', 'Re-read every model (after changing settings)'), run: () => post('vendor_sync', { id: c.id, full: true }) },
       { label: t('test', 'Test connection'), run: () => post('vendor_test', { id: c.id }) },
       { label: t('edit', 'Edit'), run: () => openEditor(c) },
       { label: t('export', 'Export'), run: () => post('vendor_export_spec', { id: c.id }) },
+      { label: t('copy_json', 'Copy JSON'), run: () => post('vendor_copy_spec', { id: c.id }) },
     ];
     if ((c.slots || []).some((s) => s.set)) menu.push({ label: t('forget', 'Forget credentials'), run: () => post('vendor_forget', { id: c.id }) });
     menu.push('-');
@@ -844,7 +899,7 @@
     box.appendChild(top);
 
     const lines = [];
-    if (c.syncing) lines.push(t('syncing', 'Refreshing...'));
+    if (c.syncing) lines.push(t('syncing', 'Fetching...'));
     else if (c.synced_at) lines.push(c.count + ' ' + t('models', 'models') + ' · ' + t('synced', 'Fetched') + ' ' + fmtDate(c.synced_at));
     else lines.push(t('never_synced', 'Not fetched yet'));
     for (const l of lines) box.appendChild(el('div', 'line', l));
@@ -854,10 +909,13 @@
     if (c.downloads_limited) box.appendChild(el('div', 'line', t('limited_downloads', 'Downloads count against a limit')));
     const missing = (c.slots || []).filter((s) => !s.set);
     if (missing.length) box.appendChild(el('div', 'line warn', t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set')));
+    if (c.full_next) box.appendChild(el('div', 'line warn', t('settings_changed', 'Settings changed: the next Fetch Changes reads every model again.')));
+    if (c.template_warning) { const w = el('div', 'line warn', c.template_warning); w.style.whiteSpace = 'normal'; box.appendChild(w); }
     if (c.last_error) { const e = el('div', 'line err', c.last_error); box.appendChild(e); }
 
     const row = el('div', 'row');
-    const sync = el('button', 'btn primary', c.syncing ? t('syncing', 'Refreshing...') : t('sync', 'Refresh list'));
+    const sync = el('button', 'btn primary', c.syncing ? t('syncing', 'Fetching...') : t('sync', 'Fetch Changes'));
+    sync.title = t('sync_tip', 'New and changed models since the last fetch');
     sync.type = 'button';
     sync.disabled = !!c.syncing;
     sync.addEventListener('click', () => post('vendor_sync', { id: c.id }));
@@ -922,8 +980,14 @@
       menu.push({ label: t('copy_link', 'Copy link'), run: () => post('vendor_copy', { key: i.key }) });
     }
     const subs = (i.subs || []).filter((s) => s.can_download);
-    if (i.can_download) menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key }) });
-    else if (subs.length === 1) menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id }) });
+    // Download & Open asks where to save, like Download, then opens the saved file in the slicer.
+    if (i.can_download) {
+      menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key }) });
+      menu.push({ label: t('download_open', 'Download & Open'), download: true, run: () => post('vendor_download', { key: i.key, open: true }) });
+    } else if (subs.length === 1) {
+      menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id }) });
+      menu.push({ label: t('download_open', 'Download & Open'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id, open: true }) });
+    }
     return menu;
   }
 
@@ -958,6 +1022,203 @@
     state.venRendered = end;
   }
 
+  // ---- CSV export: the options behind the gear ----
+  // Remembered per viewer: the last choice, and the choice made while exporting one connector alone.
+  const CSV_MAX_KEY = 'ven-csv-max';
+  function loadCsvMax() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CSV_MAX_KEY) || '{}');
+      const obj = (x) => (x && typeof x === 'object' ? x : {});
+      return { last: v && v.last !== undefined ? v.last : null, byId: obj(v && v.byId),
+               rowsLast: v && v.rowsLast ? v.rowsLast : null, rowsById: obj(v && v.rowsById) };
+    } catch (e) { return { last: null, byId: {}, rowsLast: null, rowsById: {} }; }
+  }
+  function saveCsvChoice(st) {
+    try { localStorage.setItem(CSV_MAX_KEY, JSON.stringify(st)); } catch (e) { /* private window: not remembered */ }
+  }
+  function csvScope() {
+    const ids = [];
+    for (const i of state.venShown) if (ids.indexOf(i.connector) < 0) ids.push(i.connector);
+    return ids.map((id) => {
+      const c = connectorOf(id);
+      const csv = c && c.spec && c.spec.csv;
+      return { id: id, limit: csv ? CsvMax.clean(csv.max_records) : 0, rows: csv ? CsvMax.cleanRows(csv.rows) : '' };
+    });
+  }
+  // What the next "Export CSV" click uses (see csvmax.js for where the starting values come from).
+  let csvOpts = { rows: 'model', max: 0 };
+  function rememberCsvOpts(o) {
+    const st = loadCsvMax();
+    st.last = o.max;
+    st.rowsLast = o.rows;
+    const scope = csvScope();
+    if (scope.length === 1) { st.byId[scope[0].id] = o.max; st.rowsById[scope[0].id] = o.rows; }
+    saveCsvChoice(st);
+  }
+  function csvSummary() {
+    return CsvMax.summarize(csvOpts.rows, csvOpts.max, {
+      model: t('csv_sum_model', 'Per model'), file: t('csv_sum_file', 'Per file'),
+      all: t('csv_sum_all', 'all in one file'), per: t('csv_sum_per', 'per file') });
+  }
+  // The current settings stay visible without opening the dialog: in the buttons' tooltips.
+  function updateCsvButtons() {
+    const sum = csvSummary(), name = t('csv_options', 'Export options');
+    $('ven-csv').title = t('export_csv', 'Export CSV') + ': ' + sum;
+    $('ven-csv-gear').title = name + ': ' + sum;
+    $('ven-csv-gear').setAttribute('aria-label', name);
+  }
+  function resetCsvOpts() {
+    const stored = loadCsvMax(), scope = csvScope();
+    csvOpts = { rows: CsvMax.defaultRows(scope, stored), max: CsvMax.defaultMax(scope, stored) };
+    updateCsvButtons();
+  }
+
+  // The Export options dialog is a list of sections. To add another group of settings (an export
+  // template, column mappings...), push one more entry onto EXPORT_SECTIONS:
+  //   { id, title(), build(box, focusables) -> { validate() -> '' or an error text, commit() } }
+  // build() fills `box` with the section's controls; OK calls every handle's validate(), and only when
+  // all pass, every commit(). Nothing else in the dialog needs to change.
+  const EXPORT_SECTIONS = [];
+  let exportHandles = [];
+  let exportOptsReturn = null;
+
+  EXPORT_SECTIONS.push({
+    id: 'csv',
+    title: () => t('csv_section', 'CSV'),
+    build(box) {
+      let rows = csvOpts.rows, max = csvOpts.max;
+      const group = el('div', 'opt-field');
+      group.setAttribute('role', 'radiogroup');
+      const gl = el('span', 'opt-label', t('csv_rows', 'Rows'));
+      gl.id = 'opt-csv-rows-label';
+      group.setAttribute('aria-labelledby', gl.id);
+      group.appendChild(gl);
+      const radios = [];
+      for (const [value, key, fallback] of [['model', 'csv_rows_model', 'One row per model'], ['file', 'csv_rows_file', 'One row per file']]) {
+        const lab = el('label', 'opt-radio');
+        const r = el('input');
+        r.type = 'radio';
+        r.name = 'opt-csv-rows';
+        r.value = value;
+        r.checked = rows === value;
+        r.addEventListener('change', () => { if (r.checked) rows = value; });
+        lab.appendChild(r);
+        lab.appendChild(el('span', '', t(key, fallback)));
+        group.appendChild(lab);
+        radios.push(r);
+      }
+      group.appendChild(el('p', 'opt-hint', t('csv_rows_tip', 'One row per model: file names and sizes are folded into file_count, file_names and total_size_bytes. One row per file: a row for each file of a model.')));
+      box.appendChild(group);
+
+      const mf = el('div', 'opt-field');
+      const ml = el('label', 'opt-label', t('csv_max', 'Max records per file'));
+      ml.htmlFor = 'opt-csv-max';
+      mf.appendChild(ml);
+      const row = el('div', 'opt-row');
+      const sel = el('select');
+      sel.id = 'opt-csv-max';
+      for (const n of CsvMax.PRESETS) {
+        const o = el('option', '', n ? String(n) : t('all', 'All'));
+        o.value = String(n);
+        sel.appendChild(o);
+      }
+      const oc = el('option', '', t('csv_custom', 'Custom...'));
+      oc.value = 'custom';
+      sel.appendChild(oc);
+      const custom = el('input');
+      custom.type = 'number';
+      custom.min = '1';
+      custom.max = String(CsvMax.CAP);
+      custom.step = '1';
+      custom.id = 'opt-csv-custom';
+      custom.setAttribute('aria-label', t('csv_max', 'Max records per file'));
+      if (CsvMax.PRESETS.indexOf(max) >= 0) sel.value = String(max);
+      else { sel.value = 'custom'; custom.value = String(max); }
+      custom.hidden = sel.value !== 'custom';
+      const err = el('p', 'opt-error');
+      err.setAttribute('role', 'alert');
+      err.hidden = true;
+      sel.addEventListener('change', () => {
+        custom.hidden = sel.value !== 'custom';
+        err.hidden = true;
+        if (sel.value === 'custom') custom.focus();
+      });
+      custom.addEventListener('input', () => { err.hidden = true; });
+      row.appendChild(sel);
+      row.appendChild(custom);
+      mf.appendChild(row);
+      mf.appendChild(err);
+      mf.appendChild(el('p', 'opt-hint', t('csv_max_tip', 'More records than this are written as numbered files (name_1.csv, name_2.csv...)')));
+      box.appendChild(mf);
+
+      const value = () => (sel.value === 'custom' ? CsvMax.clean(custom.value) : Number(sel.value) || 0);
+      return {
+        validate() {
+          if (sel.value === 'custom' && !value()) {
+            err.textContent = t('csv_bad_max', 'Enter a whole number of 1 or more.');
+            err.hidden = false;
+            custom.focus();
+            return err.textContent;
+          }
+          return '';
+        },
+        commit() {
+          csvOpts = { rows: rows, max: value() };
+          rememberCsvOpts(csvOpts);
+          updateCsvButtons();
+        },
+      };
+    },
+  });
+
+  function openExportOpts() {
+    const body = $('ven-export-opts-body');
+    body.textContent = '';
+    exportHandles = [];
+    for (const sec of EXPORT_SECTIONS) {
+      const fs = el('fieldset', 'opt-section');
+      fs.dataset.section = sec.id;
+      fs.appendChild(el('legend', '', sec.title()));
+      exportHandles.push(sec.build(fs));
+      body.appendChild(fs);
+    }
+    exportOptsReturn = document.activeElement;
+    $('ven-export-opts').hidden = false;
+    const first = $('ven-export-opts').querySelector('input:checked') || $('ven-export-opts').querySelector('select, input, button');
+    if (first) first.focus();
+  }
+  function closeExportOpts() {
+    $('ven-export-opts').hidden = true;
+    exportHandles = [];
+    const back = exportOptsReturn && document.body.contains(exportOptsReturn) ? exportOptsReturn : $('ven-csv-gear');
+    exportOptsReturn = null;
+    back.focus();
+  }
+  function commitExportOpts() {
+    for (const h of exportHandles) if (h.validate()) return;
+    for (const h of exportHandles) h.commit();
+    closeExportOpts();
+  }
+  // Tab stays inside the dialog; Enter is OK (a button keeps its own meaning); Esc cancels.
+  function exportOptsKey(e) {
+    const dlg = $('ven-export-opts');
+    if (dlg.hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeExportOpts(); return; }
+    if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); commitExportOpts(); return; }
+    if (e.key !== 'Tab') return;
+    const items = Array.from(dlg.querySelectorAll('input, select, button')).filter((x) => !x.disabled && x.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (!dlg.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+
+  // The settings start over from the remembered/default values only when the set of connectors
+  // listed changes, so a choice the user just made is not reset by a re-render (a sync, a search).
+  let csvShownScope = null;
+  function csvScopeKey() { return csvScope().map((c) => c.id + ':' + c.limit + ':' + c.rows).join('|'); }
+
   function renderVendors(keepScroll) {
     const section = $('vendors');
     const scroll = keepScroll ? section.scrollTop : 0;
@@ -976,6 +1237,8 @@
     $('ven-csv').disabled = !ven.items.length;
     state.venShown = sortBy(ven.items.filter((i) => venMatchesExcept(i, '')), state.sort.vendors,
       (i) => i.name || '', (i) => isoSeconds(i.updated));
+    if (csvShownScope === null || csvScopeKey() !== csvShownScope) resetCsvOpts();
+    csvShownScope = csvScopeKey();
     if ('IntersectionObserver' in window) {
       venThumbObserver = new IntersectionObserver((entries) => {
         for (const e of entries) if (e.isIntersecting) { askVenThumb(e.target.dataset.id); venThumbObserver.unobserve(e.target); }
@@ -991,8 +1254,403 @@
     else while (state.venRendered < state.venShown.length) renderMoreVendors();
     empty.hidden = state.venShown.length > 0;
     emptyText.textContent = !ven.connectors.length ? t('vendors_empty', 'Connect a vendor\'s API to browse the models you have access to.')
-      : !ven.items.length ? t('vendor_no_items', 'Nothing fetched yet. Set the credentials, then Refresh list.')
+      : !ven.items.length ? t('vendor_no_items', 'Nothing fetched yet. Set the credentials, then Fetch Changes.')
         : t('no_match', 'Nothing matches your search.');
+  }
+
+  // ---- Vaults ----
+  // A source's card: a vault, or the Library's folders (and, if Vendors and Vaults are ever merged, a
+  // vendor connector: it has the same look, .conn). opts: {title, cls, kind, badge, lines: [{text,
+  // cls, title}], buttons: [{label, primary, title, disabled, run}], menu: [entries for openMenu]}.
+  function sourceCard(opts) {
+    const box = el('div', 'conn' + (opts.cls ? ' ' + opts.cls : ''));
+    box.setAttribute('role', 'listitem');
+    const top = el('div', 'top');
+    const title = el('div', 'title', opts.title);
+    title.title = opts.title;
+    top.appendChild(title);
+    if (opts.badge) top.appendChild(el('span', 'badge', opts.badge));
+    if (opts.menu && opts.menu.length) {
+      const more = el('button', 'more');
+      more.type = 'button';
+      more.setAttribute('aria-label', t('more_actions', 'More actions') + ': ' + opts.title);
+      more.appendChild(svg(ICON_MORE));
+      more.addEventListener('click', (e) => { e.stopPropagation(); if (menuFor === more) closeMenu(); else openMenu(more, opts.menu); });
+      top.appendChild(more);
+    }
+    box.appendChild(top);
+    if (opts.kind) box.appendChild(el('div', 'kind', opts.kind));
+    for (const l of opts.lines || []) {
+      if (!l || !l.text) continue;
+      const d = el('div', 'line' + (l.cls ? ' ' + l.cls : ''), l.text);
+      d.title = l.title || l.text;
+      box.appendChild(d);
+    }
+    if (opts.buttons && opts.buttons.length) {
+      const row = el('div', 'row');
+      for (const b of opts.buttons) {
+        const btn = el('button', 'btn' + (b.primary ? ' primary' : ''), b.label);
+        btn.type = 'button';
+        if (b.title) btn.title = b.title;
+        btn.disabled = !!b.disabled;
+        btn.addEventListener('click', b.run);
+        row.appendChild(btn);
+      }
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  // The Library's folders, local or a mounted NAS share, as one vault card: they are managed in the Library.
+  function foldersCard(lib) {
+    const lines = [{ text: lib.folders.length + ' ' + t('folders_count', 'folders') + ' · ' + lib.items.length + ' ' + t('files', 'files') }];
+    for (const f of lib.folders) if (f.scanned && !f.online)
+      lines.push({ text: leaf(f.path) + ': ' + t('offline', 'Not reachable, showing the files from the last scan'), cls: 'warn', title: f.path });
+    return sourceCard({
+      title: t('vault_folders', 'Folders and network shares'), cls: 'folders', kind: t('library', 'Library'), lines: lines,
+      buttons: [{ label: t('show_in_library', 'Show in Library'), primary: true, run: () => showSection('library', true) },
+                { label: t('manage_folders', 'Manage folders'), run: openFolders }],
+    });
+  }
+
+  // ---- vault cards and files ----
+  function vaultOf(id) { return state.vlt ? state.vlt.vaults.find((v) => v.id === id) : null; }
+  function vaultKindLabel(v) {
+    if (v.builtin === 'synology') return t('kind_synology', 'Synology NAS');
+    return t('kind_' + v.kind, { webdav: 'WebDAV', azure_blob: 'Azure Blob', s3: 'S3-compatible' }[v.kind] || v.kind);
+  }
+
+  function vaultCard(v) {
+    const lines = [];
+    lines.push({ text: v.address + (v.bucket ? ' · ' + v.bucket : '') + (v.prefix ? ' · ' + v.prefix : '') });
+    if (v.syncing) lines.push({ text: t('fetching', 'Fetching...') });
+    else if (v.synced_at) lines.push({ text: v.count + ' ' + t('files', 'files') + ' · ' + t('fetched', 'Fetched') + ' ' + fmtDate(v.synced_at) });
+    else lines.push({ text: t('not_fetched', 'Not fetched yet') });
+    if (v.partial) lines.push({ text: t('listing_partial', 'The listing stopped early: not every file is shown.'), cls: 'warn' });
+    const missing = (v.slots || []).filter((s) => !s.set);
+    if (missing.length) lines.push({ text: t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set'), cls: 'warn' });
+    else if ((v.slots || []).length)
+      lines.push({ text: t('credentials', 'Credentials') + ': ' + (v.secure ? t('saved_secure', 'saved in your system\'s credential store') : t('saved_session', 'kept until EdgeSlicer closes')) });
+    if (v.http) lines.push(v.http_ok ? { text: t('vault_http_ok', 'Unencrypted (http) on your local network; warning turned off'), cls: 'warn' }
+      : { text: t('vault_http', 'Unencrypted (http) on your local network'), cls: 'warn' });
+    if (v.sas_expires) {
+      const soon = v.sas_expires - Date.now() / 1000 < 7 * 86400;
+      lines.push({ text: t('sas_expires', 'SAS link expires') + ' ' + fmtDate(v.sas_expires), cls: soon ? 'warn' : '' });
+    }
+    lines.push({ text: t('downloads_to', 'Downloads to') + ' ' + leaf(v.downloads), title: v.downloads });
+    if (v.last_error) lines.push({ text: v.last_error, cls: 'err' });
+    const buttons = [{ label: v.syncing ? t('fetching', 'Fetching...') : t('fetch_files', 'Fetch files'), primary: true, disabled: v.syncing,
+      run: () => post('vault_sync', { id: v.id }) }];
+    for (const s of v.slots || [])
+      buttons.push({ label: (s.set ? t('change', 'Change') : t('set', 'Set')) + ' ' + s.label, run: () => post('vault_secret', { id: v.id, slot: s.key }) });
+    const menu = [
+      { label: t('test', 'Test connection'), run: () => post('vault_test', { id: v.id }) },
+      { label: t('edit', 'Edit'), run: () => openVaultEditor(v, null) },
+      { label: t('open_downloads', 'Open downloads folder'), run: () => post('vault_open_folder', { id: v.id }) },
+    ];
+    if ((v.slots || []).some((s) => s.set)) menu.push({ label: t('forget', 'Forget credentials'), run: () => post('vault_forget', { id: v.id }) });
+    menu.push('-');
+    menu.push({ label: t('remove_vault', 'Remove vault'), danger: true, run: () => post('vault_delete', { id: v.id }) });
+    const box = sourceCard({ title: v.name, cls: 'vault', kind: vaultKindLabel(v), lines: lines, buttons: buttons, menu: menu });
+    box.dataset.vault = v.id;
+    return box;
+  }
+
+  const VAULT_TYPES = { '3mf': '3MF', stl: 'STL', step: 'STEP', stp: 'STEP', obj: 'OBJ', zip: 'ZIP' };
+  function vaultFileMatches(f, skip) {
+    const fl = state.vltFilter;
+    if (skip !== 'vault' && fl.vault.size && !fl.vault.has(f.vault)) return false;
+    if (skip !== 'type' && fl.type.size && !fl.type.has(VAULT_TYPES[f.type] || f.type)) return false;
+    const v = vaultOf(f.vault);
+    return matches([f.name, f.folder, v && v.name], state.search);
+  }
+
+  function vaultFileCard(f) {
+    const v = vaultOf(f.vault);
+    const meta = el('div', 'meta');
+    for (const x of [fmtDate(f.mtime), fmtSize(f.size)]) if (x) meta.appendChild(el('span', '', x));
+    const open = () => post('vault_download', { key: f.key, open: true });
+    const c = card({
+      name: stem(f.name) || f.name,
+      badges: [{ text: VAULT_TYPES[f.type] || f.type.toUpperCase() }],
+      lines: [[v && v.name, f.folder].filter(Boolean).join(' · ')],
+      meta: meta,
+      onOpen: open,
+      menu: [
+        { label: t('download_open', 'Download & Open'), run: open },
+        { label: t('download', 'Download'), run: () => post('vault_download', { key: f.key }) },
+      ],
+    });
+    c.dataset.id = f.key;
+    c.title = f.name;
+    return c;
+  }
+
+  function renderVaultFilters(files) {
+    const box = $('vault-filters');
+    box.textContent = '';
+    const groups = [
+      { key: 'vault', label: t('vaults', 'Vaults'), value: (f) => f.vault, name: (id) => (vaultOf(id) || { name: id }).name },
+      { key: 'type', label: t('type', 'Type'), value: (f) => VAULT_TYPES[f.type] || f.type, name: (x) => x },
+    ];
+    let any = false;
+    for (const g of groups) {
+      const all = new Map();
+      for (const f of files) all.set(g.value(f), 0);
+      const sel = state.vltFilter[g.key];
+      for (const x of [...sel]) if (!all.has(x)) sel.delete(x);
+      if (all.size < 2) continue;
+      for (const f of files) if (vaultFileMatches(f, g.key)) all.set(g.value(f), all.get(g.value(f)) + 1);
+      const row = el('div', 'filter-row');
+      row.appendChild(el('span', 'label', g.label));
+      for (const [x, n] of [...all.entries()].sort((a, b) => String(g.name(a[0])).localeCompare(String(g.name(b[0]))))) {
+        const c = el('button', 'chip' + (sel.has(x) ? ' active' : ''), g.name(x));
+        c.type = 'button';
+        c.setAttribute('aria-pressed', sel.has(x) ? 'true' : 'false');
+        c.appendChild(el('span', 'count', n));
+        c.addEventListener('click', () => { if (sel.has(x)) sel.delete(x); else sel.add(x); renderVaults(); });
+        row.appendChild(c);
+      }
+      box.appendChild(row);
+      any = true;
+    }
+    if (any && Object.values(state.vltFilter).some((f) => f.size)) {
+      const row = el('div', 'filter-row');
+      row.appendChild(el('span', 'label', ''));
+      const c = el('button', 'chip clear', t('clear_filters', 'Clear filters'));
+      c.type = 'button';
+      c.addEventListener('click', () => { for (const f of Object.values(state.vltFilter)) f.clear(); renderVaults(); });
+      row.appendChild(c);
+      box.appendChild(row);
+    }
+  }
+
+  let vaultMoreObserver = null;
+  function renderMoreVaultFiles() {
+    const end = Math.min(state.vltShown.length, state.vltRendered + LIB_PAGE);
+    const frag = document.createDocumentFragment();
+    for (let k = state.vltRendered; k < end; ++k) frag.appendChild(vaultFileCard(state.vltShown[k]));
+    $('vault-grid').appendChild(frag);
+    state.vltRendered = end;
+  }
+
+  function renderVaults(keepScroll) {
+    const section = $('vaults');
+    const scroll = keepScroll ? section.scrollTop : 0;
+    const list = $('vault-list'), empty = $('vaults-empty'), grid = $('vault-grid');
+    list.textContent = '';
+    grid.textContent = '';
+    if (vaultMoreObserver) vaultMoreObserver.disconnect();
+    state.vltShown = [];
+    state.vltRendered = 0;
+    const lib = state.lib, vlt = state.vlt;
+    if (vlt) for (const v of vlt.vaults) list.appendChild(vaultCard(v));
+    if (lib && lib.folders.length) list.appendChild(foldersCard(lib));
+    const files = vlt ? vlt.files : [];
+    renderVaultFilters(files);
+    $('vault-status').textContent = vlt && vlt.vaults.length ? files.length + ' ' + t('files', 'files') : '';
+    state.vltShown = sortBy(files.filter((f) => vaultFileMatches(f, '')), state.sort.vaults, (f) => f.name || '', (f) => f.mtime || 0);
+    if ('IntersectionObserver' in window) {
+      vaultMoreObserver = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting) && state.vltRendered < state.vltShown.length) renderMoreVaultFiles();
+      }, { root: section, rootMargin: '800px' });
+    }
+    renderMoreVaultFiles();
+    while (keepScroll && state.vltRendered < state.vltShown.length && grid.scrollHeight < scroll + section.clientHeight) renderMoreVaultFiles();
+    if (keepScroll) section.scrollTop = scroll;
+    if (vaultMoreObserver) vaultMoreObserver.observe($('vault-more'));
+    else while (state.vltRendered < state.vltShown.length) renderMoreVaultFiles();
+
+    const loading = lib === null || vlt === null;
+    const noVaults = !vlt || !vlt.vaults.length;
+    empty.hidden = state.vltShown.length > 0 || (!loading && noVaults && list.childNodes.length > 0);
+    $('vaults-empty-text').textContent = loading ? t('loading', 'Loading...')
+      : noVaults ? t('vaults_empty', 'Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.')
+        : !files.length ? t('vault_files_empty', 'No model files listed yet. Set the credentials, then Fetch files.')
+          : t('no_match', 'Nothing matches your search.');
+    $('vault-empty-add').hidden = loading || !noVaults;
+  }
+
+  function receiveVaults(msg) {
+    state.vlt = {
+      vaults: Array.isArray(msg.vaults) ? msg.vaults : [],
+      files: Array.isArray(msg.files) ? msg.files : [],
+      builtins: Array.isArray(msg.builtins) ? msg.builtins : [],
+      downloadsDefault: String(msg.downloads_default || ''),
+    };
+    if (state.section === 'vaults') renderVaults(true);
+    if (!$('vault-editor').hidden) renderVaultSlots();
+  }
+
+  // ---- Add vault ----
+  function openAddVault() {
+    closeMenu();
+    const box = $('vault-builtins');
+    box.textContent = '';
+    for (const b of state.vlt ? state.vlt.builtins : []) {
+      const c = el('button', 'choice');
+      c.type = 'button';
+      c.id = 'vault-builtin-' + b.id;
+      const title = el('b', '', b.title || b.id);
+      title.appendChild(el('em', 'tag', t('builtin', 'Built-in')));
+      c.appendChild(title);
+      c.appendChild(el('span', '', b.description || ''));
+      c.addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { template: b }); });
+      box.appendChild(c);
+    }
+    $('vault-add').hidden = false;
+    const first = $('vault-add').querySelector('.choices button');
+    if (first) first.focus();
+  }
+  function closeAddVault() { $('vault-add').hidden = true; }
+
+  // ---- vault editor ----
+  // The page only edits the spec (no secret); credentials are set in native dialogs from the card.
+  const vEditor = { id: '', spec: null, template: null };
+  const AUTHS = {
+    webdav: [['basic', 'auth_basic', 'User name and password'], ['bearer', 'auth_bearer', 'Token'], ['none', 'auth_none', 'None (public)']],
+    azure_blob: [['sas', 'auth_sas', 'SAS link'], ['none', 'auth_none', 'None (public)']],
+    s3: [['sigv4', 'auth_sigv4', 'Access key'], ['none', 'auth_none', 'None (public)']],
+  };
+  const ADDR_HINTS = { webdav: 'https://nas.example.com:5006/models/', azure_blob: 'https://account.blob.core.windows.net/models',
+    s3: 'https://s3.eu-west-1.amazonaws.com' };
+
+  function openVaultEditor(v, preset) {
+    closeMenu();
+    const tpl = preset && preset.template ? preset.template : (v && v.builtin && state.vlt ? state.vlt.builtins.find((b) => b.id === v.builtin) : null);
+    vEditor.id = v ? v.id : '';
+    vEditor.template = tpl || null;
+    if (v) vEditor.spec = JSON.parse(JSON.stringify(v.spec));
+    else if (tpl) vEditor.spec = Object.assign({ name: tpl.title || '', url: '', downloads_dir: '' }, JSON.parse(JSON.stringify(tpl.spec)));
+    else {
+      const kind = (preset && preset.kind) || 'webdav';
+      vEditor.spec = { name: '', kind: kind, url: '', auth: AUTHS[kind][0][0], prefix: '', bucket: '', region: '', addressing: 'path',
+        recursive: true, max_depth: 6, downloads_dir: '' };
+    }
+    $('vault-editor-error').hidden = true;
+    $('vault-editor-title').textContent = v ? v.name : tpl ? (tpl.title || t('add_vault', 'Add vault')) : (preset && preset.title) || t('add_vault', 'Add vault');
+    renderVaultEditor();
+    $('vault-editor').hidden = false;
+    const first = $('vault-editor-body').querySelector('input');
+    if (first) first.focus();
+  }
+  function closeVaultEditor() { $('vault-editor').hidden = true; }
+
+  function vaultEditorError(text) {
+    const e = $('vault-editor-error');
+    e.textContent = text;
+    e.hidden = !text;
+  }
+
+  function renderVaultSlots() {
+    const box = document.getElementById('vault-editor-slots');
+    if (!box) return;
+    box.textContent = '';
+    const v = vaultOf(vEditor.id);
+    if (!v) { box.appendChild(el('p', 'hint', t('vault_creds_after', 'Save the vault, then set its credentials on its card. They are kept in your system\'s credential store.'))); return; }
+    if (!(v.slots || []).length) { box.appendChild(el('p', 'hint', t('none', 'None'))); return; }
+    for (const s of v.slots) {
+      const row = el('div', 'slot');
+      row.appendChild(el('span', 'what', s.label + ': ' + (s.set ? (v.secure ? t('saved_secure', 'saved in your system\'s credential store') : t('saved_session', 'kept until EdgeSlicer closes')) : t('not_set', 'not set'))));
+      const b = el('button', 'btn', s.set ? t('change', 'Change') : t('set', 'Set'));
+      b.type = 'button';
+      b.addEventListener('click', () => post('vault_secret', { id: v.id, slot: s.key }));
+      row.appendChild(b);
+      box.appendChild(row);
+    }
+  }
+
+  function renderVaultEditor() {
+    const body = $('vault-editor-body');
+    body.textContent = '';
+    const s = vEditor.spec;
+    const kind = s.kind;
+    if (vEditor.template && Array.isArray(vEditor.template.hints) && vEditor.template.hints.length) {
+      const ul = el('ul', 'hints');
+      for (const h of vEditor.template.hints) ul.appendChild(el('li', '', h));
+      body.appendChild(ul);
+    }
+    const field = (grid, label, key, opts) => {
+      opts = opts || {};
+      const l = el('label', opts.check ? 'check' : 'field');
+      if (opts.wide) l.classList.add('wide');
+      let input;
+      if (opts.options) {
+        input = el('select');
+        for (const [value, k, fallback] of opts.options) { const o = el('option', '', t(k, fallback)); o.value = value; input.appendChild(o); }
+        input.value = s[key] || opts.options[0][0];
+        input.addEventListener('change', () => { s[key] = input.value; if (opts.rerender) renderVaultEditor(); });
+      } else if (opts.check) {
+        input = el('input');
+        input.type = 'checkbox';
+        input.checked = s[key] !== false;
+        input.addEventListener('change', () => { s[key] = input.checked; });
+      } else {
+        input = el('input');
+        input.type = opts.number ? 'number' : 'text';
+        if (opts.number) { input.min = '0'; input.max = '20'; }
+        input.value = s[key] === undefined || s[key] === null ? '' : String(s[key]);
+        if (opts.hint) input.placeholder = opts.hint;
+        input.spellcheck = false;
+        input.addEventListener('input', () => { s[key] = opts.number ? Number(input.value) : input.value.trim(); });
+      }
+      input.id = 'vault-field-' + key;
+      if (opts.check) { l.appendChild(input); l.appendChild(el('span', '', label)); }
+      else { l.appendChild(el('span', '', label)); l.appendChild(input); }
+      grid.appendChild(l);
+      return input;
+    };
+    const group = (title) => {
+      const fs = el('fieldset', 'group');
+      fs.appendChild(el('legend', '', title));
+      const grid = el('div', 'form-grid');
+      fs.appendChild(grid);
+      body.appendChild(fs);
+      return { fs: fs, grid: grid };
+    };
+    const g1 = group(t('vault_settings', 'Vault'));
+    field(g1.grid, t('vault_name', 'Name'), 'name');
+    const addrLabel = { webdav: t('addr_webdav', 'Folder address (https://, or http:// on your local network)'),
+      azure_blob: t('addr_azure', 'Container address, without the SAS (?sv=...)'), s3: t('addr_s3', 'Endpoint') }[kind];
+    field(g1.grid, addrLabel, 'url', { wide: true, hint: (vEditor.template && vEditor.template.url_hint) || ADDR_HINTS[kind] });
+    if (kind === 's3') {
+      field(g1.grid, t('bucket', 'Bucket'), 'bucket');
+      field(g1.grid, t('region', 'Region (auto for Cloudflare R2)'), 'region', { hint: 'us-east-1' });
+      field(g1.grid, t('addressing', 'Addressing'), 'addressing', { options: [['path', 'addressing_path', 'Path style (endpoint/bucket)'], ['virtual', 'addressing_virtual', 'Virtual host (bucket.endpoint)']] });
+    }
+    if (kind !== 'webdav') field(g1.grid, t('prefix', 'Only files under (prefix)'), 'prefix', { hint: 'models/' });
+    field(g1.grid, t('include_subfolders', 'Include subfolders'), 'recursive', { check: true });
+    field(g1.grid, t('max_depth', 'Folder levels'), 'max_depth', { number: true });
+
+    const g2 = group(t('signin', 'Sign-in'));
+    field(g2.grid, t('signin', 'Sign-in'), 'auth', { options: AUTHS[kind], rerender: true });
+    const slots = el('div', 'slots');
+    slots.id = 'vault-editor-slots';
+    g2.fs.appendChild(slots);
+    if (kind === 's3' && s.auth !== 'none') g2.fs.appendChild(el('p', 'hint', t('s3_key_hint', 'Use a key that can only read this bucket.')));
+
+    const g3 = group(t('downloads_folder', 'Downloads folder'));
+    const dir = field(g3.grid, t('downloads_folder', 'Downloads folder'), 'downloads_dir', { wide: true, hint: state.vlt ? state.vlt.downloadsDefault : '' });
+    const row = el('div', 'choice-row');
+    const browse = el('button', 'btn', t('browse', 'Browse...'));
+    browse.type = 'button';
+    browse.addEventListener('click', () => post('vault_pick_dir', { current: s.downloads_dir || '' }));
+    row.appendChild(browse);
+    const def = el('button', 'btn', t('use_default', 'Use the default'));
+    def.type = 'button';
+    def.addEventListener('click', () => { s.downloads_dir = ''; dir.value = ''; });
+    row.appendChild(def);
+    g3.fs.appendChild(row);
+    g3.fs.appendChild(el('p', 'hint', t('default_is', 'Default:') + ' ' + (state.vlt ? state.vlt.downloadsDefault : '')));
+    renderVaultSlots();
+  }
+
+  function saveVaultEditor() {
+    vaultEditorError('');
+    const spec = JSON.parse(JSON.stringify(vEditor.spec));
+    if (vEditor.id) spec.id = vEditor.id; else delete spec.id;
+    if (vEditor.template) spec.builtin = vEditor.template.id;
+    post('vault_save', { spec: spec });
   }
 
   // ---- item detail ----
@@ -1051,6 +1709,10 @@
           b.type = 'button';
           b.addEventListener('click', () => post('vendor_download', { key: i.key, sub: s.id }));
           act.appendChild(b);
+          const bo = el('button', 'btn', t('download_open', 'Download & Open'));
+          bo.type = 'button';
+          bo.addEventListener('click', () => post('vendor_download', { key: i.key, sub: s.id, open: true }));
+          act.appendChild(bo);
         }
         tr.appendChild(act);
         body.appendChild(tr);
@@ -1096,9 +1758,9 @@
       { path: 'fields.id', label: 'Id' }, { path: 'fields.name', label: 'Name' },
       { path: 'fields.thumbnail', label: 'Thumbnail URL' },
       { path: 'fields.page_url', label: 'Page URL (field, or template like https://site/m/{slug})' },
-      { path: 'fields.designer', label: 'Designer' }, { path: 'fields.license', label: 'License' },
-      { path: 'fields.tags', label: 'Tags or category' },
-      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description' },
+      { path: 'fields.designer', label: 'Designer (field, or =text for a fixed value)' }, { path: 'fields.license', label: 'License (field, or =text for a fixed value)' },
+      { path: 'fields.tags', label: 'Tags or category (field, or =a, b for fixed tags)' },
+      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description (field, or =text for a fixed value)' },
     ] },
     { group: 'Files of an item (optional)', fields: [
       { path: 'files.path', label: 'Files at', hint: 'print_profiles' },
@@ -1108,10 +1770,15 @@
       { path: 'files.fields.colours', label: 'Colours list' }, { path: 'files.fields.colour', label: 'Colour in each', hint: 'hex' },
     ] },
     { group: 'Download (optional)', fields: [
+      { path: 'download.method', label: 'Method', options: [['GET', 'GET'], ['POST', 'POST (empty body)']] },
       { path: 'download.path', label: 'Endpoint path', hint: '/models/{id}/download?profile={sub.id}', wide: true },
-      { path: 'download.url_field', label: 'File link in its answer at', hint: 'download_url' },
+      { path: 'download.url_field', label: 'File link in its answer at (blank: the answer is the file itself)', hint: 'download_url' },
       { path: 'download.direct_field', label: 'Or: direct link field of a file' },
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
+    ] },
+    { group: 'CSV export (optional)', fields: [
+      { path: 'csv.rows', label: 'Rows', optional: true, options: [['', 'Not set (per model)'], ['model', 'One row per model'], ['file', 'One row per file']] },
+      { path: 'csv.max_records', label: 'Max records per file (blank = one file)', number: true, optional: true, hint: '200' },
     ] },
     { group: 'Quota headers (optional)', fields: [
       { path: 'quota.used', label: 'Used', hint: 'X-Api-Calls-Used' },
@@ -1124,7 +1791,7 @@
     list: { path: '/', items: '', query: {}, paging: { type: 'page', param: 'page', start: 1, size_param: 'limit', size: 100, has_more: '', total: '', cursor: '' },
       since: { param: '', field: '' } },
     fields: { id: 'id', name: 'name', thumbnail: 'thumbnail', page_url: '', designer: '', license: '', tags: '', updated: '', description: '' },
-    files: { path: '', fields: {} }, download: { path: '', url_field: '', direct_field: '', limited: false },
+    files: { path: '', fields: {} }, download: { path: '', method: 'GET', url_field: '', direct_field: '', limited: false },
     quota: { used: '', limit: '', resets: '' },
   };
   const editor = { id: '', spec: null, json: false };
@@ -1135,6 +1802,15 @@
     let cur = o;
     for (const k of ks.slice(0, -1)) { if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {}; cur = cur[k]; }
     cur[ks[ks.length - 1]] = v;
+  }
+
+  // Remove an optional key (and its object once empty), so a cleared box leaves the template as it was.
+  function clearPath(o, path) {
+    const ks = path.split('.');
+    const parents = [o];
+    for (const k of ks.slice(0, -1)) { const next = parents[parents.length - 1][k]; if (!next || typeof next !== 'object') return; parents.push(next); }
+    delete parents[parents.length - 1][ks[ks.length - 1]];
+    for (let n = parents.length - 1; n > 0; --n) { if (Object.keys(parents[n]).length) break; delete parents[n - 1][ks[n - 1]]; }
   }
 
   function openEditor(c) {
@@ -1225,7 +1901,9 @@
           input = el('select');
           for (const [value, label] of f.options) { const op = el('option', '', label); op.value = value; input.appendChild(op); }
           input.value = v || f.options[0][0];
-          input.addEventListener('change', () => setPath(editor.spec, f.path, input.value));
+          input.addEventListener('change', () => {
+            if (f.optional && input.value === '') clearPath(editor.spec, f.path); else setPath(editor.spec, f.path, input.value);
+          });
         } else if (f.check) {
           input = el('input'); input.type = 'checkbox'; input.checked = !!v;
           input.addEventListener('change', () => setPath(editor.spec, f.path, input.checked));
@@ -1245,7 +1923,10 @@
           if (f.hint) input.placeholder = f.hint;
           if (f.list) input.setAttribute('list', f.list);
           input.spellcheck = false;
-          input.addEventListener('input', () => setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim()));
+          input.addEventListener('input', () => {
+            if (f.optional && input.value.trim() === '') { clearPath(editor.spec, f.path); return; }
+            setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim());
+          });
         }
         if (f.check) { l.appendChild(input); l.appendChild(el('span', '', f.label)); }
         else { l.appendChild(el('span', '', f.label)); l.appendChild(input); }
@@ -1427,11 +2108,33 @@
         case 'vendor_thumbs':
           applyVendorThumbs(msg.images || {});
           break;
+        case 'show_section':
+          if (msg.section) showSection(String(msg.section), true);
+          break;
         case 'vendor_notice':
           toast(String(msg.text || ''), !!msg.error);
           break;
         case 'vendor_saved':
           editorDone();
+          break;
+        case 'vaults':
+          receiveVaults(msg);
+          break;
+        case 'vault_notice':
+          toast(String(msg.text || ''), !!msg.error);
+          break;
+        case 'vault_saved':
+          closeVaultEditor();
+          break;
+        case 'vault_invalid':
+          vaultEditorError(String(msg.error || ''));
+          break;
+        case 'vault_dir':
+          if (!$('vault-editor').hidden && vEditor.spec) {
+            vEditor.spec.downloads_dir = String(msg.path || '');
+            const d = document.getElementById('vault-field-downloads_dir');
+            if (d) d.value = vEditor.spec.downloads_dir;
+          }
           break;
         case 'vendor_invalid':
           editorError(String(msg.error || ''));
@@ -1453,8 +2156,9 @@
   });
   $('sort').addEventListener('change', () => { state.sort[state.section] = $('sort').value; render(); });
   $('refresh').addEventListener('click', () => {
-    // Vendors' lists are metered: Refresh only redraws them; each connector has its own Refresh list.
+    // Vendors' lists are metered: Refresh only redraws them; each connector has its own Fetch Changes.
     if (state.section === 'vendors') { post('vendor_state'); return; }
+    if (state.section === 'vaults') { post('vault_state'); post('library_scan'); return; }
     $('refresh').classList.add('spin'); post('home_refresh'); setTimeout(stopSpin, 3000);
   });
   $('new-project').addEventListener('click', () => post('project_new'));
@@ -1462,8 +2166,32 @@
   $('history-settings').addEventListener('click', () => post('history_settings'));
   $('lib-manage').addEventListener('click', openFolders);
   $('ven-add').addEventListener('click', () => openEditor(null));
-  $('ven-import').addEventListener('click', () => post('vendor_import'));
-  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
+  $('ven-import').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const btn = $('ven-import');
+    if (menuFor === btn) { closeMenu(); return; }
+    openMenu(btn, [
+      { label: t('import_file', 'From file...'), run: () => post('vendor_import', { source: 'file' }) },
+      { label: t('import_link', 'From link...'), run: () => post('vendor_import', { source: 'link' }) },
+      { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
+    ]);
+  });
+  $('vault-add-btn').addEventListener('click', openAddVault);
+  $('vault-empty-add').addEventListener('click', openAddVault);
+  $('vault-add-folder').addEventListener('click', () => { closeAddVault(); post('library_add_folder'); });
+  $('vault-add-webdav').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 'webdav', title: $('vault-add-webdav').querySelector('b').textContent }); });
+  $('vault-add-azure').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 'azure_blob', title: $('vault-add-azure').querySelector('b').textContent }); });
+  $('vault-add-s3').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 's3', title: $('vault-add-s3').querySelector('b').textContent }); });
+  $('vault-editor-cancel').addEventListener('click', closeVaultEditor);
+  $('vault-editor-save').addEventListener('click', saveVaultEditor);
+  $('vault-add-cancel').addEventListener('click', closeAddVault);
+  $('vault-add').addEventListener('click', (e) => { if (e.target === $('vault-add')) closeAddVault(); });
+  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvOpts.max, rows: csvOpts.rows }));
+  $('ven-csv-gear').addEventListener('click', openExportOpts);
+  $('ven-export-opts-ok').addEventListener('click', commitExportOpts);
+  $('ven-export-opts-cancel').addEventListener('click', closeExportOpts);
+  $('ven-export-opts').addEventListener('click', (e) => { if (e.target === $('ven-export-opts')) closeExportOpts(); });
+  document.addEventListener('keydown', exportOptsKey, true);
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });
   $('ven-editor-cancel').addEventListener('click', closeEditor);
@@ -1471,7 +2199,9 @@
   $('ven-editor-mode').addEventListener('click', toggleEditorMode);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('ven-editor').hidden) closeEditor();
+    if (!$('vault-add').hidden) closeAddVault();
+    else if (!$('vault-editor').hidden) closeVaultEditor();
+    else if (!$('ven-editor').hidden) closeEditor();
     else if (!$('ven-detail').hidden) closeDetail();
     else if (!$('lib-detail').hidden) closeLibDetail();
   });

@@ -4,6 +4,7 @@
 #include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Format/AssembleList.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/OBJ.hpp"
@@ -117,9 +118,11 @@ TEST_CASE("the model-site link checks match real URLs and nothing spoofed", "[Un
 TEST_CASE("local and IP hosts are recognised", "[Untrusted][Url]")
 {
     for (const char *h : {"127.0.0.1", "10.0.0.5", "192.168.1.20", "127.1", "2130706433", "0x7f.1", "[::1]", "localhost",
-                          "foo.localhost", "printer.local", "nas.lan", "box.home.arpa", "printer"})
+                          "foo.localhost", "printer.local", "nas.lan", "nas.home", "box.ts.net", "ts.net",
+                          "box.home.arpa", "printer"})
         CHECK(is_local_or_ip_host(h));
-    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org"})
+    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org",
+                          "nas.home.example.com", "home.com", "box.ts.network", "ts.net.example.com"})
         CHECK_FALSE(is_local_or_ip_host(h));
 }
 
@@ -327,6 +330,83 @@ TEST_CASE("model downloads that are never allowed", "[Untrusted][Download]")
                             "not a url"}) {
         INFO(url);
         CHECK(check_model_download(url, "edgeslicer").verdict == DownloadVerdict::Refuse);
+    }
+}
+
+TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Download][Redirect]")
+{
+    // The link check above only ever sees the address it was given. This is the check for where
+    // curl actually ended up (Http::restrict_redirects -> untrusted::redirect_target_refusal).
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://public-cdn.bblmw.com/models/a.3mf",
+                          // a redirect legitimately lands on another public host: the allowlist and the
+                          // file extension are not applied here
+                          "https://s3.us-west-2.amazonaws.com/x/a.3mf", "https://storage.example.org/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
+    }
+
+    const std::string downgraded = redirect_target_refusal("http://files.printables.com/a.3mf");
+    CHECK_FALSE(downgraded.empty());
+    CHECK(downgraded.find("not secure") != std::string::npos);
+    CHECK_FALSE(redirect_target_refusal("ftp://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("ftps://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("file:///C:/Windows/evil.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("not a url").empty());
+    CHECK_FALSE(redirect_target_refusal("https://user:pw@files.printables.com/a.3mf").empty());
+
+    // A public https host that redirects onto the user's own machine or LAN.
+    for (const char *u : {"https://127.0.0.1/a.3mf", "https://169.254.169.254/latest/meta-data/",
+                          "https://192.168.1.20/a.3mf", "https://10.0.0.5:8443/a.3mf", "https://[::1]/a.3mf",
+                          "https://localhost/a.3mf", "https://printer.local/a.3mf", "https://nas.lan/a.3mf",
+                          "https://nas.home/a.3mf", "https://box.ts.net/a.3mf", "https://octopi/a.3mf"}) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+}
+
+TEST_CASE("a redirect is refused however the loopback address is spelled", "[Untrusted][Download][Redirect]")
+{
+    // The address in a redirect's Location is chosen by whoever answered the request, so every
+    // spelling a resolver or a browser would accept for this machine or the LAN has to be refused
+    // too - not just the canonical "127.0.0.1". Each of these is a way to reach loopback, a
+    // link-local address, a unique-local address, or a name that only resolves on the LAN.
+    for (const char *u : {
+             "https://[::ffff:127.0.0.1]/x",   // IPv4-mapped IPv6 loopback
+             "https://[fe80::1]/x",            // IPv6 link-local
+             "https://[fc00::1]/x",            // IPv6 unique-local (fc00::/7)
+             "https://2130706433/x",           // 127.0.0.1 as one decimal integer
+             "https://0x7f000001/x",           // 127.0.0.1 in hex
+             "https://127.1/x",                // 127.0.0.1 abbreviated to two parts
+             "https://localhost./x",           // the trailing root dot
+             "https://LOCALHOST/x",            // host names are case-insensitive
+             "https://a@b@127.0.0.1/x",        // userinfo that hides the real host
+             "https://%31%32%37.0.0.1/x",      // percent-encoded digits are not a host name
+             "https:///x",                     // no host at all
+         }) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+
+    // A public IP literal is refused too, and for its own reason: the address is not this machine,
+    // but a Location that names an address instead of a host name is how a redirect gets past a
+    // check that reads names only. It must not be reported as being on a private network.
+    for (const char *u : {"https://8.8.8.8/x", "https://[2606:4700:4700::1111]/x", "https://1.1.1.1/x"}) {
+        INFO(u);
+        const std::string why = redirect_target_refusal(u);
+        CHECK(why.find("IP address") != std::string::npos);
+        CHECK(why.find("private network") == std::string::npos);
+    }
+    // A name on the LAN is still described as one. .home is the widening that matters here:
+    // a redirect onto a consumer .home host is refused as local, not as a public model site.
+    CHECK(redirect_target_refusal("https://printer.local/x").find("private network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://nas.home/x").find("private network") != std::string::npos);
+
+    // The same spellings that must still be allowed: this check is about where a transfer went,
+    // not about which sites may be downloaded from.
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://cdn.example.co.uk/a.3mf",
+                          "https://storage.example.org:8443/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
     }
 }
 
@@ -1432,6 +1512,39 @@ TEST_CASE("An untextured OBJ still loads with no UVs", "[obj][uv]")
     CHECK(loaded.mesh.facets_count() == 4);
     CHECK(loaded.info.uvs.empty());
     CHECK(loaded.info.face_colors.empty());
+}
+
+// OBJ vertex indices start at 1. Index 0 (or a relative index reaching before the first vertex)
+// used to become -1, the parser's end-of-face marker, so the face was cut there and the file read
+// with the wrong faces instead of being refused.
+TEST_CASE("An OBJ face naming vertex 0 is refused as an invalid vertex index", "[obj][Regression]")
+{
+    const std::string vertices = "v 0 0 0\nv 10 0 0\nv 0 10 0\nv 0 0 10\n";
+
+    SECTION("vertex 0 at the start of a quad") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("vertex 0 in the middle of a face of seven") {
+        // Read as two triangles, 1 2 3 and 2 4 3, before; one face of seven vertices, refused, now.
+        LoadedObj loaded = load_obj_body(vertices + "f 1 2 3 0 2 4 3\n", false);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("a relative index one before the first vertex") {
+        LoadedObj loaded = load_obj_body(vertices + "f -5 1 2 3\n", false);
+        CHECK_FALSE(loaded.ok);
+        CHECK(loaded.message.find("invalid vertex index") != std::string::npos);
+    }
+    SECTION("with a material too") {
+        LoadedObj loaded = load_obj_body(vertices + "f 0 1 2 3\n", true);
+        CHECK_FALSE(loaded.ok);
+    }
+    SECTION("valid relative indices still load") {
+        LoadedObj loaded = load_obj_body(vertices + "f -4 -2 -3\nf -4 -3 -1\nf -4 -1 -2\nf -3 -2 -1\n", false);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+    }
 }
 
 // ---- CLI assemble list ------------------------------------------------------------------------
@@ -3005,4 +3118,315 @@ TEST_CASE("a 3MF whose SVG entry declares more than the cap is refused before al
     CHECK(loaded.file_data == nullptr);
     CHECK(log.saw("was not loaded"));
     CHECK(log.saw("larger than the allowed size"));
+}
+
+// Orca #16060: a depth-2 <metadata> with no type used to store a null const char* into
+// std::string and crash. The parse now stops and load_amf returns false.
+namespace {
+
+std::string one_triangle_amf(const char *metadata_open)
+{
+    return std::string("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                       "<amf unit=\"millimeter\">\n"
+                       "  <object id=\"0\">\n"
+                       "    ") +
+           metadata_open +
+           "oops</metadata>\n"
+           "    <mesh>\n"
+           "      <vertices>\n"
+           "        <vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>\n"
+           "        <vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>\n"
+           "        <vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>\n"
+           "      </vertices>\n"
+           "      <volume>\n"
+           "        <triangle><v1>0</v1><v2>1</v2><v3>2</v3></triangle>\n"
+           "      </volume>\n"
+           "    </mesh>\n"
+           "  </object>\n"
+           "</amf>\n";
+}
+
+void write_temp_amf(const fs::path &path, const std::string &xml)
+{
+    boost::nowide::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
+    REQUIRE(out);
+    out << xml;
+    REQUIRE(out);
+}
+
+} // namespace
+
+TEST_CASE("an AMF metadata tag without a type fails to load instead of crashing", "[Untrusted][AMF]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_amf_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path bad  = dir / "no_type.amf";
+    const fs::path good = dir / "typed.amf";
+    write_temp_amf(bad, one_triangle_amf("<metadata>"));
+    write_temp_amf(good, one_triangle_amf("<metadata type=\"name\">"));
+
+    DynamicPrintConfig        cfg;
+    ConfigSubstitutionContext ctx{ForwardCompatibilitySubstitutionRule::Enable};
+    bool                      use_inches = false; // load_amf writes through this pointer
+    Model                     bad_model;
+    bool                      loaded = true;
+    REQUIRE_NOTHROW(loaded = load_amf(bad.string().c_str(), &cfg, &ctx, &bad_model, &use_inches));
+    CHECK_FALSE(loaded);
+
+    Model good_model;
+    CHECK(load_amf(good.string().c_str(), &cfg, &ctx, &good_model, &use_inches));
+    CHECK(good_model.objects.size() == 1);
+
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// Orca #15608: a preset name is appended to the preset directory, so it must not climb out of it.
+TEST_CASE("is_relative_name_within_root refuses names that leave the directory", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_rel_name_%%%%%%%%");
+    const fs::path root = dir / "root";
+    fs::create_directories(root);
+
+    CHECK(is_relative_name_within_root("My preset", root));
+    CHECK(is_relative_name_within_root("Bob's 0.2 (draft) @U1", root));
+    CHECK(is_relative_name_within_root("sub/preset", root));
+    CHECK(is_relative_name_within_root("a..b", root));
+
+    CHECK_FALSE(is_relative_name_within_root("", root));
+    CHECK_FALSE(is_relative_name_within_root("..", root));
+    CHECK_FALSE(is_relative_name_within_root("../x", root));
+    CHECK_FALSE(is_relative_name_within_root("..\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("a/../../x", root));
+    CHECK_FALSE(is_relative_name_within_root("a\\..\\..\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("/etc/x", root));
+    CHECK_FALSE(is_relative_name_within_root("\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("C:\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("C:x", root));
+    CHECK_FALSE(is_relative_name_within_root(std::string("a\0b", 3), root));
+
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Importing a preset JSON whose name climbs out of the preset directory is refused", "[Untrusted][ZipSlip][Preset]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_import_name_%%%%%%%%");
+    fs::create_directories(dir / "src");
+    const std::string saved_data_dir = data_dir();
+    set_data_dir((dir / "data").string());
+
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("default");
+
+    auto write_json = [&](const std::string &file, const std::string &name) {
+        nlohmann::json j;
+        j["name"]              = name;
+        j["version"]           = "1.0.0.0";
+        j["print_settings_id"] = name;
+        boost::nowide::ofstream out((dir / "src" / file).string(), std::ios::binary);
+        out << j.dump();
+        return (dir / "src" / file).string();
+    };
+    auto do_import = [&](const std::string &path) {
+        std::vector<std::string> files{path};
+        bundle.import_presets(files, [](const std::string &) { return 1; }, ForwardCompatibilitySubstitutionRule::Disable);
+        return files;
+    };
+    auto any_file_named = [&](const std::string &needle) {
+        for (fs::recursive_directory_iterator it(dir), end; it != end; ++it)
+            if (it->path().filename().string().find(needle) != std::string::npos && it->path().parent_path().filename() != "src")
+                return true;
+        return false;
+    };
+
+    // Control: an ordinary name imports and lands in the user print folder.
+    CHECK(do_import(write_json("ok.json", "Import control")).size() == 1);
+    CHECK(any_file_named("Import control.json"));
+
+    // Four levels up from <data>/user/default/process is the scratch dir itself, so an escape would land inside it.
+    CHECK(do_import(write_json("up1.json", "../../../../name-escape-a")).empty());
+    CHECK(do_import(write_json("up2.json", "..\\..\\..\\..\\name-escape-b")).empty());
+    CHECK_FALSE(any_file_named("name-escape"));
+
+    set_data_dir(saved_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// ---- Bambu 7930283f2: bounded 3MF / AMF importer error formatting -------------------------------
+//
+// The PrusaSlicer 3MF importer and the zipped AMF importer formatted their XML parse errors with
+// ::sprintf into 1024-byte stack buffers, with the archive entry name and the parser's message as
+// %s arguments. They now use snprintf. A malformed entry with a long name must fail to load
+// cleanly (the message is truncated, never written past the buffer).
+
+namespace {
+
+// An archive entry name close to miniz's 512-byte limit.
+std::string long_entry_name(const std::string &prefix, const std::string &suffix)
+{
+    return prefix + std::string(480 - prefix.size() - suffix.size(), 'a') + suffix;
+}
+
+// The importers report a malformed entry either by returning false or by throwing the formatted
+// message (FileIOError, as Plater shows it). Either is a clean failure; the message fits the buffer.
+// load() runs outside the Catch macros: they would catch the exception themselves.
+template<typename Load> void check_load_fails_cleanly(Load load)
+{
+    bool        loaded = true;
+    bool        threw  = false;
+    std::string message;
+    try {
+        loaded = load();
+    } catch (const std::exception &e) {
+        threw   = true;
+        message = e.what();
+    }
+    INFO(message);
+    if (threw) {
+        CHECK_FALSE(message.empty());
+        CHECK(message.size() < 1024);
+    } else {
+        CHECK_FALSE(loaded);
+    }
+}
+
+} // namespace
+
+TEST_CASE("A malformed 3MF model entry with a long name fails to load cleanly", "[3mf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.3mf";
+
+    SECTION("model XML (streamed parser)")
+    {
+        write_zip_entries(path, { { long_entry_name("3D/", ".model"), "<model unit=\"millimeter\"><resources><object" } });
+    }
+    SECTION("config XML (buffered parser)")
+    {
+        write_zip_entries(path, { { "3D/3dmodel.model", "<model unit=\"millimeter\"><resources/><build/></model>" },
+                                  { "Metadata/Slic3r_PE_model.config", "<config><object id=\"1\"" } });
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    check_load_fails_cleanly([&] { return load_3mf(path.string().c_str(), config, ctxt, &model, false); });
+}
+
+TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly", "[amf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.zip.amf";
+    write_zip_entries(path, { { long_entry_name("", ".amf"), "<?xml version=\"1.0\"?><amf unit=\"millimeter\"><object id=\"0\"><mesh" } });
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    bool                      use_inches = false;
+    check_load_fails_cleanly([&] { return load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches); });
+}
+
+// ---- Bambu 04de87fc2: OBJ UV indices near the int limits ----------------------------------------
+//
+// Upstream rejects such a file because its get_uv() bound check, (uv_idx + 1) * 2, overflowed for an
+// index near 2^30. This tree already bounds the index against the pair count before multiplying and
+// rebases negative indices by pairs (4338b78266, Orca #15948 OBJ part); it keeps loading the face and
+// falls back to (0,0), as the cases above pin. These cover the overflow-sized indices themselves.
+TEST_CASE("A vt index at the int limits loads and the UV falls back to (0,0)", "[obj][untrusted]")
+{
+    for (const char *face : { "f 1/1073741824 3/1 2/1", "f 1/1073741825 3/1 2/1", "f 1/2147483647 3/1 2/1", "f 1/-2147483647 3/1 2/1",
+                              "f 1/-3 3/1 2/1" }) {
+        INFO(face);
+        const LoadedObj loaded = load_textured_tetrahedron(face);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+        REQUIRE(loaded.info.uvs.size() == 4);
+        check_uv(loaded.info.uvs.front()[0], 0.f, 0.f);
+        check_uv(loaded.info.uvs.front()[1], 0.25f, 0.5f);
+    }
+}
+
+// ---- Bambu 0067891f2: 3MF auxiliary entries spelled with fullwidth dots and slashes ---------------
+//
+// Upstream narrows the name with encode_path() (WideCharToMultiByte with best-fit), where U+FF0E and
+// U+FF0F become '.' and '/', so "Auxiliaries/．．／evil" became "../evil" only at fopen() time.
+// This tree refuses such look-alikes in normalize_archive_entry_path() before extraction and writes
+// through the wide API (extract_entry_to_file), so the BBS reader never narrows the name. This pins
+// it end to end through the reader.
+TEST_CASE("3MF auxiliary entries spelled with fullwidth dots and slashes are not extracted", "[Untrusted][ZipSlip][3mf]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "fullwidth_aux.3mf";
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+        object->add_instance();
+        object->ensure_on_bed();
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        PlateData          plate;
+        plate.plate_index = 0;
+        const std::string path_str = path.string();
+        StoreParams       sp;
+        sp.path            = path_str.c_str();
+        sp.model           = &model;
+        sp.config          = &cfg;
+        sp.plate_data_list = { &plate };
+        sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        REQUIRE(store_bbs_3mf(sp));
+    }
+
+    // Re-pack the project with three auxiliary entries.
+    std::vector<std::pair<std::string, std::string>> entries;
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, path.string()));
+        const mz_uint n = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < n; ++i) {
+            mz_zip_archive_file_stat st;
+            REQUIRE(mz_zip_reader_file_stat(&zip, i, &st));
+            std::string data;
+            if (st.m_uncomp_size > 0) {
+                size_t size = 0;
+                void  *mem  = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+                REQUIRE(mem != nullptr);
+                data.assign(static_cast<const char *>(mem), size);
+                mz_free(mem);
+            }
+            entries.emplace_back(st.m_filename, std::move(data));
+        }
+        close_zip_reader(&zip);
+    }
+    const std::string fullwidth_up = "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F"; // U+FF0E U+FF0E U+FF0F, best-fit "../"
+    entries.emplace_back("Auxiliaries/Other Files/edge_fw_ok.txt", "ok");
+    entries.emplace_back("Auxiliaries/" + fullwidth_up + fullwidth_up + "edge_fw_escape_a.txt", "escape");
+    entries.emplace_back("Auxiliaries/Other Files/" + fullwidth_up + fullwidth_up + fullwidth_up + "edge_fw_escape_b.txt", "escape");
+    write_zip_entries(path, entries);
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    bool                      loaded     = false;
+    REQUIRE_NOTHROW(loaded = load_bbs_3mf(path.string().c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
+                                         &file_version, nullptr,
+                                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                             LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plates);
+    for (Preset *p : project_presets)
+        delete p;
+    REQUIRE(loaded);
+
+    // The ordinary attachment is extracted; neither look-alike entry is written anywhere.
+    const fs::path aux(model.get_auxiliary_file_temp_path());
+    CHECK(fs::exists(aux / "Other Files" / "edge_fw_ok.txt"));
+    for (fs::recursive_directory_iterator it(scratch.root), end; it != end; ++it)
+        CHECK(it->path().filename().wstring().find(L"edge_fw_escape") == std::wstring::npos); // wide: no narrowing
 }

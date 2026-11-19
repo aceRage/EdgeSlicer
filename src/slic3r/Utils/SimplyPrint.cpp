@@ -266,7 +266,7 @@ bool SimplyPrint::test(wxString& curl_msg) const
             return http;
         },
         [](std::string body, unsigned) {
-            BOOST_LOG_TRIVIAL(info) << boost::format("SimplyPrint: Got token info: %1%") % body;
+            BOOST_LOG_TRIVIAL(info) << boost::format("SimplyPrint: Got token info (%1% bytes)") % body.size();
             return true;
         },
         [](std::string body, std::string error, unsigned status) {

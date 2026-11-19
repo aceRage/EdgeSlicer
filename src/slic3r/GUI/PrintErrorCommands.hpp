@@ -69,7 +69,7 @@ enum Id : int {
 
 // True when this id needs a job_id to be meaningful. The resume/stop/ignore family carries
 // "job_id" so firmware can check the command is for the job it currently holds; sending one with
-// an empty job_id is the documented way to have it rejected, so the dialog disables those buttons
+// an empty job_id is the documented way to have it rejected, so the dialog hides those buttons
 // rather than firing a command that cannot work.
 bool print_error_action_needs_job_id(int action_id);
 
@@ -90,6 +90,28 @@ std::vector<int> generic_print_error_actions();
 
 // "2, 5, 11" - for the log line that records what a table asked for and what was drawn.
 std::string format_action_ids(const std::vector<int>& ids);
+
+// Which of a resolved button set the dialog actually shows (2026-11-05).
+//
+// The dialog used to show Stop / Resume Printing greyed whenever it had no job_id - which is every
+// refused new job (an A1 answering a send with 05024007 "filament loading/unloading not
+// completed": no table entry, so the generic Stop/Resume/OK, and no job, so two dead buttons).
+// A greyed button that can never be pressed only says "something is wrong with this dialog".
+// The rule now: a button whose command carries a job_id is shown, and pressable, exactly when the
+// printer named a job for this error and the command can go out on the current connection; any
+// other time it is hidden and `why` says which, for the tooltip. Buttons without a job_id are
+// never affected. If hiding leaves nothing to press, OK is added so the window can be closed.
+struct PrintErrorButtonLayout
+{
+    enum class Why { None, NoJobId, CannotSend };
+    std::vector<int> shown;  // in the input's order; REMOVE_CLOSE_BTN passes through as a flag
+    std::vector<int> hidden; // the job_id buttons left out
+    Why              why{Why::None};
+};
+// `job_id` is the job the printer reported with the error ("" when none). `can_send` is false when
+// the connection refuses print commands (a status-only Bambu Connect printer, or a secured printer
+// that rejects unsigned commands).
+PrintErrorButtonLayout layout_print_error_buttons(const std::vector<int>& buttons, const std::string& job_id, bool can_send);
 
 // ---- the remote surface: one action id, one verb, one label ----
 //

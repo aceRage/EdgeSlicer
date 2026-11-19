@@ -608,6 +608,10 @@ static SendResult push_once(const Sub& s, const std::string& payload, const std:
     }
 
     Http req = Http::post(s.endpoint);
+    // Push services do not redirect (RFC 8030 gives the endpoint as the final address), and curl
+    // re-sends a POST body on a redirect because Http sets CURLOPT_POSTREDIR. Following one would
+    // put the encrypted payload and the VAPID JWT on a second, possibly plain-http, hop.
+    req.follow_redirects(false);
     req.timeout_connect(T_CONNECT).timeout_max(T_MAX)
         .header("TTL", std::to_string(TTL_SECONDS))
         .header("Content-Encoding", "aes128gcm")

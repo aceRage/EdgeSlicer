@@ -225,6 +225,9 @@ public:
 
     Vec3f get_triangle_normal(size_t facet_idx) const;
 
+    // The mesh the facet indices returned above refer to (shared with the ModelVolume for scene raycasters).
+    const std::shared_ptr<const TriangleMesh> &get_mesh() const { return m_mesh; }
+
 private:
     std::shared_ptr<const TriangleMesh> m_mesh;
     AABBMesh m_emesh;

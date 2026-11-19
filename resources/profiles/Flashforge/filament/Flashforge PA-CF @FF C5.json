@@ -28,7 +28,6 @@
     "from": "system",
     "inherits": "Generic PA-CF @System",
     "instantiation": "true",
-    "is_custom_defined": "0",
     "name": "Flashforge PA-CF @FF C5",
     "nozzle_temperature": [
         "290"
@@ -48,5 +47,5 @@
     "textured_cool_plate_temp_initial_layer": [
         "0"
     ],
-    "version": "2.3.0.3"
+    "type": "filament"
 }

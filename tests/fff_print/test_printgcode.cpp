@@ -32,7 +32,7 @@ std::regex perimeters_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; perimeter");
 std::regex infill_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; infill");
 std::regex skirt_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; skirt");
 
-SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
+SCENARIO( "PrintGCode basic functionality", "[PrintGCode][slow]") {
     GIVEN("A default configuration and a print test object") {
         WHEN("the output is executed with no support material") {
             Slic3r::Print print;
@@ -49,8 +49,8 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
                 REQUIRE(gcode.size() > 0);
             }
             THEN("Exported text contains slic3r version") {
-                // The exported header is branded "Snapmaker Orca <Snapmaker_VERSION>"
-                // (utils.cpp header_slic3r_generated()), not the SLIC3R_VERSION macro.
+                // The exported header is "OrcaSlicer <Snapmaker_VERSION> (EdgeSlicer)"
+                // (utils.cpp header_gcode_producer()), not the SLIC3R_VERSION macro.
                 REQUIRE(gcode.find(Snapmaker_VERSION) != std::string::npos);
             }
             //THEN("Exported text contains git commit id") {
@@ -362,6 +362,77 @@ TEST_CASE("BBL time_lapse_gcode is emitted once per layer", "[PrintGCode][Timela
     SECTION("i3 machine keeps its traditional placement: still one block per layer") {
         std::string gcode = slice_bbl("i3", marker);
         REQUIRE(count(gcode, "\n;TEST_TIMELAPSE ") == count(gcode, "\n;TEST_LAYER_CHANGE "));
+    }
+}
+
+// Bambu Lab A1 (i3, traditional timelapse) with a Bambu (Type1) tower: on a layer with a tower the
+// photo is taken before the tower's tool change. Above the tower's top there is nothing for the
+// tower to print, and those layers must take their photo as a single-colour layer does. They were
+// still marked as tower layers (the gap filling that keeps tower layers within max_layer_height
+// reached past the top), so they waited for tower work that never came and had no photo at all.
+TEST_CASE("A1 timelapse photo on every layer above the tower's top", "[PrintGCode][Timelapse][WipeTower]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({
+        { "printer_structure",          "i3" },
+        { "wipe_tower_type",            "type1" },
+        { "timelapse_type",             "0" },
+        { "time_lapse_gcode",           ";TEST_TIMELAPSE layer={layer_num}" },
+        { "layer_change_gcode",         ";TEST_LAYER_CHANGE [layer_num]" },
+        { "machine_start_gcode",        "" },
+        { "machine_end_gcode",          "" },
+        { "brim_type",                  "no_brim" },
+        { "skirt_loops",                0 },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "max_layer_height",           "0.28,0.28" },
+    });
+    // A 20 mm cube in filament 1 and a 4 mm one in filament 2: the second colour ends at 4 mm.
+    Print print;
+    Model model;
+    ModelObject *tall = model.add_object();
+    tall->name        = "tall.stl";
+    tall->add_volume(mesh(TestMesh::cube_20x20x20));
+    tall->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    tall->ensure_on_bed();
+    ModelObject *low = model.add_object();
+    low->name        = "low.stl";
+    TriangleMesh low_mesh = mesh(TestMesh::cube_20x20x20);
+    low_mesh.scale(Vec3f(1.f, 1.f, 0.2f));
+    low->add_volume(low_mesh);
+    low->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    low->ensure_on_bed();
+    low->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.has_wipe_tower());
+    const std::string gcode = Test::gcode(print);
+
+    // The tower stops part way up.
+    const size_t tower_layers = print.wipe_tower_data().tool_changes.size();
+    REQUIRE(tower_layers > 0);
+    REQUIRE(tower_layers < 50);
+
+    size_t layers = 0;
+    for (size_t pos = gcode.find("\n;TEST_LAYER_CHANGE "); pos != std::string::npos; pos = gcode.find("\n;TEST_LAYER_CHANGE ", pos + 1))
+        ++layers;
+    REQUIRE(layers == 100);
+    for (size_t layer = 0; layer < layers; ++layer) {
+        CAPTURE(layer);
+        const std::string photo = "\n;TEST_TIMELAPSE layer=" + std::to_string(layer) + "\n";
+        const size_t      first = gcode.find(photo);
+        CHECK(first != std::string::npos);
+        if (first != std::string::npos)
+            CHECK(gcode.find(photo, first + 1) == std::string::npos);
     }
 }
 
@@ -985,6 +1056,152 @@ TEST_CASE("First object layer over a raft takes the first layer speeds and the s
     CHECK_THAT(feeds[1], Catch::Matchers::WithinAbs(2000., 1.5));
     CHECK_THAT(feeds[2], Catch::Matchers::WithinAbs(2800., 1.5));
     CHECK_THAT(feeds[3], Catch::Matchers::WithinAbs(3600., 1.5));
+}
+
+namespace {
+// Feed rates (mm/min) of the extruding moves, per layer Z (in microns) and per feature label.
+using FeedsByLayerFeature = std::map<std::pair<int, std::string>, std::set<int>>;
+
+FeedsByLayerFeature feeds_by_layer_and_feature(const std::string &gcode)
+{
+    FeedsByLayerFeature out;
+    std::string         feature;
+    GCodeReader         parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0)
+            out[{ int(std::lround(double(self.z()) * 1000.)), feature }].insert(int(std::lround(double(line.new_F(self)))));
+    });
+    return out;
+}
+
+const std::set<int> *feeds_for(const FeedsByLayerFeature &feeds, int z_micron, const std::string &feature)
+{
+    auto it = feeds.find({ z_micron, feature });
+    return it == feeds.end() ? nullptr : &it->second;
+}
+
+// Distinct speeds per role, all well under the volumetric cap, so every F value below is the configured speed.
+std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> first_layer_speed_items()
+{
+    static const std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> items = {
+        { "gcode_comments",              "1" },
+        { "machine_start_gcode",         "" },
+        { "enable_arc_fitting",          "0" },
+        { "z_hop",                       "0" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "slow_down_layers",            "0" },
+        { "initial_layer_speed",         "20" },   // F1200
+        { "initial_layer_infill_speed",  "40" },   // F2400
+        { "support_speed",               "60" },   // F3600
+        { "support_interface_speed",     "70" },   // F4200
+        { "outer_wall_speed",            "60" },
+        { "inner_wall_speed",            "60" },
+        { "gap_infill_speed",            "50" },
+        { "filament_max_volumetric_speed", "100" },
+        { "enable_overhang_speed",       "0" },
+        { "slow_down_for_layer_cooling", "0" },
+    };
+    return items;
+}
+} // namespace
+
+TEST_CASE("First layer support follows Initial layer speed, not Initial layer infill speed", "[PrintGCode][InitialLayerSpeed]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support",              "1" },
+        { "support_type",                "normal(auto)" },
+        { "support_on_build_plate_only", "0" },
+        { "raft_layers",                 "0" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::overhang }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    // First layer: support at Initial layer speed; the solid bottom surface keeps Initial layer infill speed.
+    const std::set<int> *first_support = feeds_for(feeds, 200, "Support");
+    REQUIRE(first_support != nullptr);
+    CHECK(*first_support == std::set<int>{ 1200 });
+    if (const std::set<int> *first_interface = feeds_for(feeds, 200, "Support interface"))
+        CHECK(*first_interface == std::set<int>{ 1200 });
+    if (const std::set<int> *bottom = feeds_for(feeds, 200, "Bottom surface"))
+        CHECK(*bottom == std::set<int>{ 2400 });
+
+    // Support further up keeps support_speed / support_interface_speed.
+    bool found_normal_support = false;
+    for (const auto &kv : feeds)
+        if (kv.first.first > 400 && kv.first.second == "Support") {
+            found_normal_support = true;
+            CHECK(kv.second.count(1200) == 0);
+            CHECK(kv.second.count(3600) == 1);
+        }
+    CHECK(found_normal_support);
+}
+
+TEST_CASE("The first raft layer follows Initial layer speed, raft layers above and the layer over the raft behave as before",
+          "[PrintGCode][InitialLayerSpeed]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support", "0" },
+        { "raft_layers",    "3" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    // Raft base on the bed: Initial layer speed.
+    const std::set<int> *base = feeds_for(feeds, 200, "Support");
+    REQUIRE(base != nullptr);
+    CHECK(*base == std::set<int>{ 1200 });
+
+    // Raft layers above the base keep the support / interface speeds (they are not first layers).
+    bool upper_raft_layers = false;
+    for (const auto &kv : feeds)
+        if (kv.first.first > 200 && kv.first.first <= 600 && (kv.first.second == "Support" || kv.first.second == "Support interface")) {
+            upper_raft_layers = true;
+            CHECK(kv.second.count(1200) == 0);
+            CHECK(kv.second.count(2400) == 0);
+        }
+    CHECK(upper_raft_layers);
+
+    // First object layer over the raft (the lowest layer with an outer wall, above the raft layers):
+    // walls at Initial layer speed, as before.
+    int first_wall_z = -1;
+    for (const auto &kv : feeds)
+        if (kv.first.second == "Outer wall" && (first_wall_z < 0 || kv.first.first < first_wall_z))
+            first_wall_z = kv.first.first;
+    REQUIRE(first_wall_z > 600);
+    CHECK(*feeds_for(feeds, first_wall_z, "Outer wall") == std::set<int>{ 1200 });
+}
+
+TEST_CASE("First layer gap fill stays on Initial layer infill speed", "[PrintGCode][InitialLayerSpeed]")
+{
+    // A 1.0 mm wide plate: two classic walls leave a gap that is filled with gap infill.
+    TriangleMesh plate = Slic3r::Test::mesh(TestMesh::cube_20x20x20);
+    plate.scale(Vec3f(0.05f, 1.f, 0.5f));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support",    "0" },
+        { "raft_layers",       "0" },
+        { "wall_generator",    "classic" },
+        { "wall_loops",        "2" },
+        { "detect_thin_wall",  "0" },
+        { "filter_out_gap_fill", "0" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ plate }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    const std::set<int> *gap = feeds_for(feeds, 200, "Gap infill");
+    REQUIRE(gap != nullptr);
+    CHECK(*gap == std::set<int>{ 2400 });
+    // Above the first layer gap fill runs at gap_infill_speed again.
+    const std::set<int> *gap_above = feeds_for(feeds, 600, "Gap infill");
+    REQUIRE(gap_above != nullptr);
+    CHECK(*gap_above == std::set<int>{ 3000 });
 }
 
 TEST_CASE("AdaptivePAProcessor base PA follows the High-Flow column", "[PrintGCode][GCode][PAVariant]")
@@ -1665,24 +1882,40 @@ TEST_CASE("G4 dwell counts towards the layer time", "[PrintGCode][CoolingBuffer]
         REQUIRE(bare.find("G4 ; Stop Pause") != std::string::npos);
         CHECK(cooling_comparable(bare, drop) == cooling_comparable(none, drop));
     }
+    SECTION("with both S and P, S is the dwell") {
+        // As in Marlin and RepRapFirmware (and GCodeProcessor::process_G4).
+        const std::string both = slice_with_toolchange("G92 E0\nG4 S2 P500");
+        const std::string s    = slice_with_toolchange("G92 E0\nG4 S2");
+        REQUIRE(both.find("G4 S2 P500") != std::string::npos);
+        CHECK(cooling_comparable(both, drop) == cooling_comparable(s, drop));
+    }
 }
 
 // Orca #15849 / Edge #113: OozePrevention::pre_toolchange turns a tool fully off
 // (M104 S0 ;cooldown) only after that tool's last extrusion anywhere in the print.
 namespace {
 
-DynamicPrintConfig two_tool_ooze_config()
+DynamicPrintConfig n_tool_ooze_config(unsigned int n)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     // Print::apply()/region_config_from_model_volume() derives num_extruders from
     // filament_diameter.size(), which set_num_filaments() resizes. set_num_extruders()
     // resizes nozzle_diameter. Both are needed or a per-object wall_filament of 2 is
     // clamped back to extruder 1.
-    config.set_num_extruders(2);
-    config.set_num_filaments(2);
+    config.set_num_extruders(n);
+    config.set_num_filaments(n);
+    auto csv = [n](const char *item) {
+        std::string out;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (i)
+                out += ',';
+            out += item;
+        }
+        return out;
+    };
     config.set_deserialize_strict({
-        {"nozzle_diameter",                "0.4,0.4"},
-        {"filament_diameter",              "1.75,1.75"},
+        {"nozzle_diameter",                csv("0.4")},
+        {"filament_diameter",              csv("1.75")},
         {"single_extruder_multi_material", "0"},
         {"ooze_prevention",                "1"},
         {"standby_temperature_delta",      "-5"},
@@ -1703,6 +1936,8 @@ DynamicPrintConfig two_tool_ooze_config()
     });
     return config;
 }
+
+DynamicPrintConfig two_tool_ooze_config() { return n_tool_ooze_config(2); }
 
 void set_object_extruder(ModelObject &object, int extruder_1based)
 {
@@ -2061,6 +2296,105 @@ TEST_CASE("OozePrevention: wipe tower on keeps the same S0 placement", "[OozePre
     CHECK(gcode.find("T0 ; change extruder", first_t0_s0) == std::string::npos);
 }
 
+TEST_CASE("OozePrevention: shared physical heater stays on until all filaments on it finish",
+          "[OozePrevention][ToolOrdering]")
+{
+    // Orca #15849 1fe5df7d4e / 733ef2b79f. Edge has no IMEX helper, so sharing is
+    // expressed with physical_extruder_map: filaments 0 and 1 share heater 0,
+    // filament 2 is independent. T0 finishes at 4 mm but T1 keeps heater 0 in use
+    // until 10 mm, so T0 must not get S0 at 4 mm. T2 is independent and short, so
+    // it still gets exactly one S0.
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = n_tool_ooze_config(3);
+    config.set_deserialize_strict({
+        {"physical_extruder_map",     "0,0,2"},
+        {"standby_temperature_delta", "-40"},
+        {"nozzle_temperature",        "240,240,240"},
+    });
+    add_scaled_cube(model, print, "short-shared-t0", Vec3f(1.f, 1.f, 0.2f), Vec3d(0., 0., 0.), 1, true);
+    add_scaled_cube(model, print, "tall-shared-t1", Vec3f(1.f, 1.f, 0.5f), Vec3d(40., 0., 0.), 2, true);
+    add_scaled_cube(model, print, "short-indep-t2", Vec3f(1.f, 1.f, 0.2f), Vec3d(80., 0., 0.), 3, true);
+
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    int t0_s0 = 0;
+    int t1_s0 = 0;
+    int t2_s0 = 0;
+    double current_z = 0.0;
+    bool premature_s0_t0 = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader & /*self*/, const GCodeReader::GCodeLine &line) {
+        if (line.has_z())
+            current_z = line.z();
+        const std::string raw = line.raw();
+        if (raw.find(";cooldown") == std::string::npos)
+            return;
+        if (raw.find("M104 S0 T0") != std::string::npos) {
+            ++t0_s0;
+            if (current_z < 9.0)
+                premature_s0_t0 = true;
+        }
+        if (raw.find("M104 S0 T1") != std::string::npos)
+            ++t1_s0;
+        if (raw.find("M104 S0 T2") != std::string::npos)
+            ++t2_s0;
+    });
+
+    CHECK_FALSE(premature_s0_t0);
+    CHECK(t0_s0 == 0);
+    CHECK(t1_s0 == 0);
+    CHECK(t2_s0 == 1);
+}
+
+TEST_CASE("OozePrevention: independent three-tool print still turns a finished tool off",
+          "[OozePrevention][ToolOrdering]")
+{
+    // Orca #15849 733ef2b79f: physical_heater_for must not over-group independent
+    // tools. The default physical_extruder_map is a single {0}; out-of-range
+    // filaments stay identity, so T0 finishing at 4 mm still gets S0 while T1/T2
+    // print to 10 mm.
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = n_tool_ooze_config(3);
+    config.set_deserialize_strict({
+        {"standby_temperature_delta", "-40"},
+        {"nozzle_temperature",        "240,240,240"},
+    });
+    add_scaled_cube(model, print, "short-t0", Vec3f(1.f, 1.f, 0.2f), Vec3d(0., 0., 0.), 1, true);
+    add_scaled_cube(model, print, "tall-t1", Vec3f(1.f, 1.f, 0.5f), Vec3d(40., 0., 0.), 2, true);
+    add_scaled_cube(model, print, "tall-t2", Vec3f(1.f, 1.f, 0.5f), Vec3d(80., 0., 0.), 3, true);
+
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    const auto hits = parse_cooldowns(gcode);
+    CHECK(tool_got_s0(hits, 0));
+    // T1 and T2 print to the top; whichever of them is switched away from on the last layer is
+    // finished too and may be turned off, so only T0 (4 mm) is pinned: it must be turned off early,
+    // not kept hot until the last layer by being grouped with the other tools.
+    double current_z = 0.0;
+    double t0_s0_z   = -1.0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader & /*self*/, const GCodeReader::GCodeLine &line) {
+        if (line.has_z())
+            current_z = line.z();
+        const std::string raw = line.raw();
+        if (t0_s0_z < 0.0 && raw.find(";cooldown") != std::string::npos && raw.find("M104 S0 T0") != std::string::npos)
+            t0_s0_z = current_z;
+    });
+    CHECK(t0_s0_z > 0.0);
+    CHECK(t0_s0_z < 9.0);
+    const size_t first_t0_s0 = first_s0_pos(hits, 0);
+    REQUIRE(first_t0_s0 != std::string::npos);
+    CHECK(gcode.find("T0 ; change extruder", first_t0_s0) == std::string::npos);
+}
+
 TEST_CASE("Custom G-code motion limits are restored before generated moves", "[PrintGCode][Orca14613]")
 {
     const std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, {
@@ -2356,4 +2690,447 @@ TEST_CASE("A per-object draft shield follows the object layers, not interlaced s
     CHECK(skirt_off_object_layers == 0);
     // Every object layer is 0.2 mm, so is every skirt layer.
     CHECK(max_skirt_height < 0.2 + 1e-3);
+}
+
+// Orca #11444: an i3 printer with no timelapse G-code takes no timelapse photo, so it must not get
+// the photo's retract either (it used to, after the walls of every layer and again at the layer
+// end). printer_structure changes nothing else in a by-layer print, so i3 and CoreXY slice alike.
+TEST_CASE("An i3 printer without timelapse G-code slices like any other", "[GCode][Timelapse]")
+{
+    auto sliced = [](const char *structure) {
+        const std::string gcode = ::Test::slice({TestMesh::cube_20x20x20}, {
+            { "printer_structure",     structure },
+            { "time_lapse_gcode",      "" },
+            { "sparse_infill_density", "20%" },
+        });
+        // the settings block names the structure itself, and the header carries the time of day
+        std::istringstream in(gcode);
+        std::string        line, out;
+        while (std::getline(in, line))
+            if (line.find("printer_structure") == std::string::npos && line.find("generated by") == std::string::npos)
+                out += line + "\n";
+        return out;
+    };
+    const std::string i3     = sliced("i3");
+    const std::string corexy = sliced("corexy");
+    REQUIRE_FALSE(i3.empty());
+    CHECK(i3 == corexy);
+}
+
+TEST_CASE("Exported layer-change travel respects the Z speed limit", "[PrintGCode][ZSpeed][Snap993]")
+{
+    // Snapmaker #993 end to end: no z-hop, so every layer change is one XYZ travel that also climbs the
+    // layer height. Its Z component, like that of every other Z travel, stays within machine_max_speed_z.
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, {
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.3},
+        {"travel_speed", 100.},
+        {"travel_speed_z", 0.},
+        {"machine_max_speed_z", 0.1},
+        {"z_hop", 0.},
+        {"wipe", true},
+        {"retract_when_changing_layer", false},
+        {"enable_arc_fitting", false},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+    });
+    const std::string output = gcode(print);
+    int         z_travels = 0;
+    GCodeReader reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(output, [&z_travels](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G1") && line.travel() && line.dist_Z(reader) != 0.) {
+            ++z_travels;
+            const double dz       = std::abs(line.dist_Z(reader));
+            const double distance = std::hypot(line.dist_XY(reader), dz);
+            CAPTURE(line.raw(), reader.z());
+            CHECK(line.new_F(reader) / 60. * dz / distance <= 0.10001);
+        }
+    });
+    CHECK(z_travels > 1);
+}
+
+// ============================================================================================
+// Snapmaker #937 / #980: first_layer_travel_acceleration / first_layer_travel_jerk. EdgeSlicer
+// defaults both to 0, which keeps the initial layer value for first-layer travels (the behaviour
+// before the options existed); a value overrides layer 1 travels only, and a percentage resolves
+// over the effective travel value.
+// ============================================================================================
+namespace {
+struct FirstLayerTravelMove
+{
+    int    layer;  // 1 = first layer, counted from the ";LAYER_CHANGE" tags (the travel to the next
+                   // layer's start belongs to that layer even though it runs before the Z move)
+    long   z;      // um, before the move
+    bool   travel;
+    int    accel;  // last M204 S
+    double jerk;   // last M205 X
+};
+
+std::vector<FirstLayerTravelMove> first_layer_travel_moves(const std::string &gcode)
+{
+    std::vector<FirstLayerTravelMove> moves;
+    int    layer = 0;
+    int    accel = 0;
+    double jerk  = 0.;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        float v = 0.f;
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++layer;
+        else if (line.cmd_is("M204") && line.has_value('S', v))
+            accel = int(v + 0.5f);
+        else if (line.cmd_is("M205") && line.has_value('X', v))
+            jerk = v;
+        else if ((line.cmd_is("G1") || line.cmd_is("G0")) && (line.has(X) || line.has(Y)))
+            moves.push_back({ layer, std::lround(double(self.z()) * 1000.), !line.extruding(self), accel, jerk });
+    });
+    return moves;
+}
+
+DynamicPrintConfig first_layer_travel_config(const char *flavor)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "gcode_flavor",                       flavor },
+        { "machine_start_gcode",                "" },
+        { "enable_arc_fitting",                 "0" },
+        { "z_hop",                              "0" },
+        { "wipe",                               "0" },
+        { "layer_height",                       "0.2" },
+        { "initial_layer_print_height",         "0.2" },
+        { "machine_max_acceleration_extruding", "20000" },
+        { "machine_max_acceleration_x",         "20000" },
+        { "machine_max_acceleration_y",         "20000" },
+        { "machine_max_jerk_x",                 "20" },
+        { "machine_max_jerk_y",                 "20" },
+        { "default_acceleration",               "2500" },
+        { "initial_layer_acceleration",         "500" },
+        { "outer_wall_acceleration",            "2000" },
+        { "inner_wall_acceleration",            "3000" },
+        { "top_surface_acceleration",           "2000" },
+        { "travel_acceleration",                "4000" },
+        { "default_jerk",                       "8" },
+        { "initial_layer_jerk",                 "6" },
+        { "outer_wall_jerk",                    "8" },
+        { "inner_wall_jerk",                    "8" },
+        { "infill_jerk",                        "8" },
+        { "top_surface_jerk",                   "8" },
+        { "travel_jerk",                        "12" },
+    });
+    return config;
+}
+
+std::string slice_first_layer_travel(DynamicPrintConfig config, const char *accel, const char *jerk)
+{
+    if (accel != nullptr)
+        config.set_deserialize_strict("first_layer_travel_acceleration", accel);
+    if (jerk != nullptr)
+        config.set_deserialize_strict("first_layer_travel_jerk", jerk);
+    // Three cubes, so every layer has travels between the objects as well as inside them.
+    std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, config);
+    // Drop the "; generated by ... at <time>" header line so two slices can be compared as text.
+    const size_t stamp = gcode.find("; generated by");
+    if (stamp != std::string::npos)
+        gcode.erase(stamp, gcode.find(char(10), stamp) - stamp);
+    return gcode;
+}
+
+// Only first-layer travels may change between the two slices, and each changed one must carry the
+// expected acceleration and jerk. Every move above the first layer keeps its acceleration and jerk.
+void require_only_first_layer_travels_change(const std::string &before, const std::string &after, int accel, double jerk)
+{
+    const std::vector<FirstLayerTravelMove> a = first_layer_travel_moves(before);
+    const std::vector<FirstLayerTravelMove> b = first_layer_travel_moves(after);
+    REQUIRE(a.size() > 100);
+    REQUIRE(b.size() == a.size());
+    size_t changed = 0, wrong = 0, upper_changed = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        REQUIRE(a[i].z == b[i].z);
+        REQUIRE(a[i].travel == b[i].travel);
+        const bool differs = a[i].accel != b[i].accel || std::abs(a[i].jerk - b[i].jerk) > 1e-6;
+        REQUIRE(a[i].layer == b[i].layer);
+        if (a[i].layer > 1) {
+            upper_changed += differs;
+            continue;
+        }
+        if (!differs)
+            continue;
+        ++changed;
+        if (!b[i].travel || b[i].accel != accel || std::abs(b[i].jerk - jerk) > 1e-6)
+            ++wrong;
+    }
+    CHECK(changed >= 4);
+    CHECK(wrong == 0);
+    CHECK(upper_changed == 0);
+}
+} // namespace
+
+TEST_CASE("First layer travel acceleration and jerk default to 0", "[PrintGCode][Snap937]")
+{
+    const auto *accel = print_config_def.get("first_layer_travel_acceleration");
+    const auto *jerk  = print_config_def.get("first_layer_travel_jerk");
+    REQUIRE(accel != nullptr);
+    REQUIRE(jerk != nullptr);
+    const auto *accel_default = accel->get_default_value<ConfigOptionFloatOrPercent>();
+    const auto *jerk_default  = jerk->get_default_value<ConfigOptionFloatOrPercent>();
+    CHECK(accel_default->value == 0.);
+    CHECK_FALSE(accel_default->percent);
+    CHECK(jerk_default->value == 0.);
+    CHECK_FALSE(jerk_default->percent);
+}
+
+TEST_CASE("First layer travels keep the initial layer acceleration and jerk at the default 0", "[PrintGCode][Snap937][Snap980]")
+{
+    const DynamicPrintConfig config  = first_layer_travel_config("marlin");
+    const std::string        unset   = slice_first_layer_travel(config, nullptr, nullptr);
+    const std::string        zero    = slice_first_layer_travel(config, "0", "0");
+    CHECK(unset == zero);
+
+    size_t first_layer_travels = 0, at_initial = 0, at_travel = 0;
+    for (const FirstLayerTravelMove &m : first_layer_travel_moves(unset)) {
+        if (m.layer != 1 || !m.travel)
+            continue;
+        ++first_layer_travels;
+        at_initial += m.accel == 500 && std::abs(m.jerk - 6.) < 1e-6;
+        at_travel  += m.accel == 4000;
+    }
+    REQUIRE(first_layer_travels >= 4);
+    CHECK(at_initial >= 4);
+    CHECK(at_travel == 0);
+}
+
+TEST_CASE("First layer travel acceleration and jerk override the first layer travels only", "[PrintGCode][Snap937][Snap980]")
+{
+    const DynamicPrintConfig config = first_layer_travel_config("marlin");
+    const std::string        base   = slice_first_layer_travel(config, nullptr, nullptr);
+    SECTION("absolute values") {
+        require_only_first_layer_travels_change(base, slice_first_layer_travel(config, "1500", "10"), 1500, 10.);
+    }
+    SECTION("percentages resolve over the travel acceleration and jerk") {
+        // 50% of 4000 and 75% of 12.
+        require_only_first_layer_travels_change(base, slice_first_layer_travel(config, "50%", "75%"), 2000, 9.);
+    }
+}
+
+TEST_CASE("First layer travel acceleration reaches Klipper's SET_VELOCITY_LIMIT", "[PrintGCode][Snap937][Snap980]")
+{
+    const DynamicPrintConfig config   = first_layer_travel_config("klipper");
+    const std::string        base     = slice_first_layer_travel(config, nullptr, nullptr);
+    const std::string        override_ = slice_first_layer_travel(config, "1500", nullptr);
+    CHECK(base.find("SET_VELOCITY_LIMIT ACCEL=1500") == std::string::npos);
+    CHECK(override_.find("SET_VELOCITY_LIMIT ACCEL=1500") != std::string::npos);
+}
+
+// H2C "Wipe tower generation failed" (zephyra_wt_fail.3mf, 2026-10-25): Cyclic tool-change ordering
+// gives every layer the same filament order, which need not start with the filament still loaded
+// from the layer below. GCode::process_layer() rotated each layer's order to start with the loaded
+// filament anyway, while the Bambu (Type1) tower plan used the order as given: the export then asked
+// for tool changes in another order, and more of them, than the tower had planned, and threw.
+// Both now follow LayerTools::nominal_extruder_order(): a Cyclic layer is printed as given.
+// Three cubes in three filaments, Cyclic ordering, 10 layers.
+namespace {
+
+DynamicPrintConfig cyclic_three_filament_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionBool>("enable_support")->value       = false;
+    config.option<ConfigOptionBool>("spiral_mode")->value          = false;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({{"brim_type", "no_brim"},
+                                   {"skirt_loops", "0"},
+                                   {"wipe_tower_wall_type", "rectangle"},
+                                   {"gcode_flavor", "marlin"},
+                                   {"layer_height", "0.2"},
+                                   {"initial_layer_print_height", "0.2"},
+                                   {"toolchange_ordering", "cyclic"}});
+    return config;
+}
+
+void add_three_filament_cubes(Model &model)
+{
+    for (int filament = 1; filament <= 3; ++filament) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(filament) + ".stl";
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(60. + 30. * filament, 60., 0.));
+        // 2 mm tall: 10 layers are plenty and keep the slice fast.
+        object->scale(Vec3d(1., 1., 0.1));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", filament);
+    }
+}
+
+size_t cyclic_wt_count(const std::string &haystack, const std::string &needle)
+{
+    size_t n = 0;
+    for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Cyclic tool-change ordering: wipe tower plan and G-code export agree", "[PrintGCode][WipeTower][ToolOrdering][Cyclic]")
+{
+    const std::string marker = "; CP TOOLCHANGE START";
+
+    SECTION("Bambu tower: every planned tool change is printed exactly once") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        print.is_BBL_printer() = true;
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        // Before the fix this threw "Wipe tower generation failed, possibly due to empty first layer."
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        size_t planned = 0;
+        for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes)
+            for (const WipeTower::ToolChangeResult &tcr : layer)
+                planned += cyclic_wt_count(tcr.gcode, marker);
+
+        // Layers 2..9 print 1,2,3 in that order after ending the layer below on 3: three tool changes
+        // each, not the two a "start with the loaded filament" rotation gives (layer 1 follows the
+        // flush-optimised first layer, so it may have two).
+        CHECK(planned >= 3 * 8 + 2);
+        CHECK(cyclic_wt_count(gcode, marker) == planned);
+    }
+
+    SECTION("WipeTower2 (non-Bambu): the fixed order is kept, three tool changes per layer") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        REQUIRE_FALSE(print.is_BBL_printer());
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        static const std::regex tool_cmd(R"(^T(\d+)\b)");
+        std::istringstream      in(gcode);
+        std::string             line;
+        std::smatch             m;
+        int                     current = -1;
+        size_t                  changes = 0;
+        while (std::getline(in, line)) {
+            if (!std::regex_search(line, m, tool_cmd))
+                continue;
+            const int tool = std::stoi(m[1].str());
+            if (current >= 0 && tool != current)
+                ++changes;
+            current = tool;
+        }
+        CHECK(changes >= 3 * 8 + 2);
+    }
+}
+
+// BambuStudio #11965: in spiral vase mode BambuStudio's travel_to() moved in XY only, so a filament change G-code
+// that lifted Z after the raft left the first object layer printing at the lifted Z. Orca's travel_to() always
+// travels with travel_to_xyz() to the layer's nominal Z (its spiral-vase XY-only branch is disabled), so this
+// is already right here; the cases below are the upstream test, adapted, to keep it that way.
+namespace {
+struct SpiralRaftGCodeResult
+{
+    double first_model_extrusion_z { -1. };
+    double highest_z_before_model  { 0. };
+    double nominal_model_layer_z   { 0. };
+    bool   model_z_is_continuous   { true };
+};
+
+SpiralRaftGCodeResult spiral_raft_gcode_result(const std::string &change_filament_gcode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "spiral_mode",                true },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops",                 1 },
+        { "top_shell_layers",           0 },
+        { "bottom_shell_layers",        1 },
+        { "sparse_infill_density",      "0%" },
+        { "raft_layers",                2 },
+        { "enable_prime_tower",         false },
+        { "support_filament",           2 },
+        { "support_interface_filament", 2 },
+        { "wall_filament",              1 },
+        { "sparse_infill_filament",     1 },
+        { "solid_infill_filament",      1 },
+        { "retraction_length",          "0" },
+        { "skirt_loops",                0 },
+        { "gcode_comments",             true },
+        { "machine_start_gcode",        "T[initial_tool]\n" },
+        { "change_filament_gcode",      change_filament_gcode }
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const std::string gcode = Test::gcode(print);
+
+    SpiralRaftGCodeResult result;
+    result.nominal_model_layer_z = print.objects().front()->layers().front()->print_z;
+    int    current_tool           = -1;
+    bool   raft_tool_seen         = false;
+    double last_model_extrusion_z = -1.;
+    GCodeReader reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd().size() > 1 && line.cmd().front() == 'T') {
+            current_tool = atoi(line.cmd().data() + 1);
+            raft_tool_seen |= current_tool == 1;
+        }
+        const bool model_extrusion = raft_tool_seen && current_tool == 0 && line.extruding(self) && line.dist_XY(self) > 0.;
+        if (result.first_model_extrusion_z < 0.) {
+            result.highest_z_before_model = std::max(result.highest_z_before_model, double(self.z()));
+            if (model_extrusion)
+                result.first_model_extrusion_z = self.z();
+        }
+        if (model_extrusion) {
+            if (last_model_extrusion_z >= 0.) {
+                const double z_step = self.z() - last_model_extrusion_z;
+                result.model_z_is_continuous &= z_step >= -EPSILON && z_step <= 0.21;
+            }
+            last_model_extrusion_z = self.z();
+        }
+    });
+    return result;
+}
+} // namespace
+
+TEST_CASE("Spiral vase restores object layer Z after a raft tool change", "[PrintGCode][SpiralVase][BBS11965]")
+{
+    SECTION("tool change ends at an elevated clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 X5 F12000\nG1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
+    }
+    SECTION("tool change does not alter Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("T[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.model_z_is_continuous);
+    }
+    SECTION("tool change leaves the XY position unknown at clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
+    }
 }

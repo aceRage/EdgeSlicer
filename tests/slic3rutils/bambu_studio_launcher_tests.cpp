@@ -238,3 +238,136 @@ TEST_CASE("linux_flatpak_args builds flatpak run com.bambulab.BambuStudio <file>
     auto args = linux_flatpak_args("/home/me/model.3mf");
     CHECK(args == std::vector<std::string>{ "flatpak", "run", "com.bambulab.BambuStudio", "/home/me/model.3mf" });
 }
+
+// ---------------------------------------------------------------------------------------------
+// macOS / Linux launch decisions (fake process calls; nothing is started)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Records every call and answers run_and_wait from a table of exit statuses by argv.
+struct FakeProcesses
+{
+    std::vector<std::pair<std::vector<std::string>, int>> exit_status; // argv -> exit status
+    std::vector<std::string>                              on_path;
+    bool                                                  start_ok = true;
+    std::vector<std::vector<std::string>>                 waited, started;
+
+    LaunchOps ops()
+    {
+        return LaunchOps{
+            [this](const std::vector<std::string> &argv) {
+                waited.push_back(argv);
+                for (const auto &e : exit_status)
+                    if (e.first == argv)
+                        return e.second;
+                return -1;
+            },
+            [this](const std::vector<std::string> &argv) {
+                started.push_back(argv);
+                return start_ok;
+            },
+            [this](const std::string &name) {
+                for (const auto &p : on_path)
+                    if (p == name)
+                        return true;
+                return false;
+            },
+        };
+    }
+};
+
+const std::string FILE_3MF = "/Users/me/Desktop/part.3mf";
+
+} // namespace
+
+TEST_CASE("macOS: open -a BambuStudio succeeding is a launch", "[BambuStudioLauncher]")
+{
+    FakeProcesses p;
+    p.exit_status = { { macos_open_by_name_args(FILE_3MF), 0 } };
+    const LaunchResult r = launch_macos(FILE_3MF, "", p.ops());
+    CHECK(r.outcome == LaunchOutcome::Launched);
+    CHECK(p.waited.size() == 1);
+}
+
+TEST_CASE("macOS: a failed open -a falls back to the bundle id", "[BambuStudioLauncher]")
+{
+    // `open -a BambuStudio` exits 1 ("Unable to find application named 'BambuStudio'") when no
+    // application has that name; the bundle-id form finds a renamed bundle.
+    FakeProcesses p;
+    p.exit_status = { { macos_open_by_name_args(FILE_3MF), 1 }, { macos_open_by_bundle_id_args(FILE_3MF), 0 } };
+    const LaunchResult r = launch_macos(FILE_3MF, "", p.ops());
+    CHECK(r.outcome == LaunchOutcome::Launched);
+    REQUIRE(p.waited.size() == 2);
+    CHECK(p.waited[1] == macos_open_by_bundle_id_args(FILE_3MF));
+}
+
+TEST_CASE("macOS: Bambu Studio not installed is reported as not found", "[BambuStudioLauncher]")
+{
+    FakeProcesses p;
+    p.exit_status = { { macos_open_by_name_args(FILE_3MF), 1 }, { macos_open_by_bundle_id_args(FILE_3MF), 1 } };
+    CHECK(launch_macos(FILE_3MF, "", p.ops()).outcome == LaunchOutcome::NotFound);
+    // `open` could not even be run: still nothing launched.
+    FakeProcesses none;
+    CHECK(launch_macos(FILE_3MF, "", none.ops()).outcome == LaunchOutcome::NotFound);
+}
+
+TEST_CASE("macOS: a custom path that open refuses is a failed launch", "[BambuStudioLauncher]")
+{
+    const std::string custom = "/Applications/Tools/BambuStudio.app";
+    FakeProcesses     ok;
+    ok.exit_status = { { { "open", "-a", custom, FILE_3MF }, 0 } };
+    LaunchResult r = launch_macos(FILE_3MF, custom, ok.ops());
+    CHECK(r.outcome == LaunchOutcome::Launched);
+    CHECK(r.exe_path == custom);
+
+    FakeProcesses refused; // e.g. the path is not an application
+    refused.exit_status = { { { "open", "-a", custom, FILE_3MF }, 1 } };
+    r = launch_macos(FILE_3MF, custom, refused.ops());
+    CHECK(r.outcome == LaunchOutcome::LaunchFailed);
+    CHECK(r.exe_path == custom);
+    CHECK(refused.waited.size() == 1); // no discovery after a custom path
+}
+
+TEST_CASE("Linux: bambu-studio on PATH is started without waiting", "[BambuStudioLauncher]")
+{
+    FakeProcesses p;
+    p.on_path = { "bambu-studio", "flatpak" };
+    const LaunchResult r = launch_linux(FILE_3MF, "", p.ops());
+    CHECK(r.outcome == LaunchOutcome::Launched);
+    CHECK(p.waited.empty());
+    REQUIRE(p.started.size() == 1);
+    CHECK(p.started[0] == linux_path_exec_args(FILE_3MF));
+}
+
+TEST_CASE("Linux: the Flatpak app is run only when flatpak info finds it", "[BambuStudioLauncher]")
+{
+    const std::vector<std::string> info = { "flatpak", "info", "com.bambulab.BambuStudio" };
+
+    FakeProcesses installed;
+    installed.on_path     = { "flatpak" };
+    installed.exit_status = { { info, 0 } };
+    LaunchResult r = launch_linux(FILE_3MF, "", installed.ops());
+    CHECK(r.outcome == LaunchOutcome::Launched);
+    REQUIRE(installed.started.size() == 1);
+    CHECK(installed.started[0] == linux_flatpak_args(FILE_3MF));
+
+    FakeProcesses missing; // flatpak present, Bambu Studio not installed through it
+    missing.on_path     = { "flatpak" };
+    missing.exit_status = { { info, 1 } };
+    r = launch_linux(FILE_3MF, "", missing.ops());
+    CHECK(r.outcome == LaunchOutcome::NotFound);
+    CHECK(missing.started.empty());
+
+    FakeProcesses nothing;
+    CHECK(launch_linux(FILE_3MF, "", nothing.ops()).outcome == LaunchOutcome::NotFound);
+}
+
+TEST_CASE("Linux: a custom executable that cannot start is a failed launch", "[BambuStudioLauncher]")
+{
+    FakeProcesses p;
+    p.start_ok = false;
+    const LaunchResult r = launch_linux(FILE_3MF, "/opt/bambu/bambu-studio", p.ops());
+    CHECK(r.outcome == LaunchOutcome::LaunchFailed);
+    CHECK(r.exe_path == "/opt/bambu/bambu-studio");
+}

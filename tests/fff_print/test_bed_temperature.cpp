@@ -67,9 +67,11 @@ TEST_CASE("Mixed print uses the highest bed temperature", "[BedTemperature]")
     REQUIRE(later_layer_bed_temp(gcode) == 60);
 }
 
-// All paths: with wall_loops = 0 the brim-introduced wall_filament extruder must be included in the
-// max, even though it is not the first printing extruder of the object.
-TEST_CASE("Brim-introduced extruder is covered when wall_loops is zero", "[BedTemperature]")
+// Orca #16770: only filaments printed on the first layer count. With wall_loops = 0 the wall_filament
+// (extruder 2) prints nothing on layer 1: the brim is laid by the tool printing the object there
+// (GCode::generate_object_brim), which is extruder 1. Before #16770 the config-derived
+// Print::extruders() still counted extruder 2 and raised the bed to its temperature.
+TEST_CASE("A wall filament that prints nothing on the first layer does not raise the bed", "[BedTemperature]")
 {
     DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -78,8 +80,8 @@ TEST_CASE("Brim-introduced extruder is covered when wall_loops is zero", "[BedTe
         { "curr_bed_type", "High Temp Plate" },
         { "hot_plate_temp", "30,60" },
         { "hot_plate_temp_initial_layer", "35,65" },
-        // No walls. Infill uses extruder 1 (0-based 0, 35C); the brim follows wall_filament
-        // (extruder 2, 0-based 1, 65C) and must raise the bed temperature.
+        // No walls. Infill uses extruder 1 (0-based 0, 35C); wall_filament is extruder 2
+        // (0-based 1, 65C), which has nothing to print on the first layer.
         { "wall_loops", 0 },
         { "brim_width", 5 },
         { "brim_type", "auto_brim" },
@@ -88,8 +90,8 @@ TEST_CASE("Brim-introduced extruder is covered when wall_loops is zero", "[BedTe
         { "solid_infill_filament", 1 }
     });
     std::string gcode = Slic3r::Test::slice({TestMesh::cube_20x20x20}, config);
-    REQUIRE(first_layer_bed_temp(gcode) == 65);
-    REQUIRE(later_layer_bed_temp(gcode) == 60);
+    REQUIRE(first_layer_bed_temp(gcode) == 35);
+    REQUIRE(later_layer_bed_temp(gcode) == 30);
 }
 
 // Placeholder: the machine_start_gcode single-value placeholder expands to the max bed temperature

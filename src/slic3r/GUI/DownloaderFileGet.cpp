@@ -209,6 +209,10 @@ void FileGet::priv::get_perform()
 		Http::get(m_url)
 			.size_limit(DOWNLOAD_SIZE_LIMIT) //more?
 		.set_range(range_string)
+		// The link was checked before the request (Downloader::start_download ->
+		// untrusted::check_model_download). Redirects are what slipped past that check: the host
+		// could send us anywhere, including plain http and this machine's own network.
+		.restrict_redirects(10)
 		.on_header_callback([&](std::string header) {
 			if(dest_path.empty()) {
 				// Ultra: the server names the file; it gets the same treatment as a name from the

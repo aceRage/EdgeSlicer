@@ -8,7 +8,7 @@ confirms risk **R2**, and revises the phase 1 estimate.
 Branch `docs/edgeslicer-app-phase0-spike`, cut from `feat/ultra-preferences` at `ef81b7c194`. **Documentation
 only - no hub code and no deps are changed on this branch.** Every probe was compiled and run against
 the *real* built dependencies at `C:\Dev\SnapmakerOrca\deps\build\OrcaSlicer_dep\usr\local`; the probe
-sources live in `C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\` and are deliberately not committed.
+sources live in `%TEMP%\snorca_hubtest\` and are deliberately not committed.
 
 Platform facts carry a URL and the date read. Facts established by running something carry the command
 and its output. Anything that could not be established either way is marked **UNVERIFIED** and must not
@@ -856,6 +856,6 @@ Read **2026-09-04** unless stated otherwise.
   `lib/vtls/openssl.c:2177`; `CMake/FindNGHTTP2.cmake`
 - OpenSSL 1.1.1w (11 Sep 2023), `include/openssl/opensslv.h`
 
-**Probe sources** (in `C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\`, deliberately uncommitted):
+**Probe sources** (in `%TEMP%\snorca_hubtest\`, deliberately uncommitted):
 `probe_curl_http2.cpp` + `probe_curl.bat`, `probe_apns_jwt.cpp` + `probe_apns_jwt.bat`,
 `verify_apns_jwt.py`, `probe_fcm_rs256.cpp` + `probe_fcm.bat`.

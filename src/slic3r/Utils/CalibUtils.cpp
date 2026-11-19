@@ -2,10 +2,12 @@
 #include "../GUI/I18N.hpp"
 #include "../GUI/GUI_App.hpp"
 #include "../GUI/FlowTypeHelper.hpp"
+#include "../GUI/BambuSendDiagnosis.hpp"
 #include "../GUI/DeviceManager.hpp"
 #include "../GUI/Jobs/ProgressIndicator.hpp"
 #include "../GUI/PartPlate.hpp"
 #include "libslic3r/CutUtils.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -14,6 +16,9 @@
 #include "slic3r/GUI/Jobs/PlaterWorker.hpp"
 #include "../GUI/MsgDialog.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
+
 
 namespace Slic3r {
 namespace GUI {
@@ -21,11 +26,24 @@ const float MIN_PA_K_VALUE = 0.0;
 const float MAX_PA_K_VALUE = 1.0;
 
 std::unique_ptr<Worker> CalibUtils::print_worker;
-wxString wxstr_temp_dir = fs::path(fs::temp_directory_path() / "calib").wstring();
-static const std::string temp_dir = wxstr_temp_dir.utf8_string();
-static const std::string temp_gcode_path = temp_dir + "/temp.gcode";
-static const std::string path            = temp_dir + "/test.3mf";
-static const std::string config_3mf_path = temp_dir + "/test_config.3mf";
+
+// ORCA: built lazily so temporary_dir() is read on first use, after set_temporary_dir() has run at
+//       startup (it isolates the temp root per user to avoid cross-user collisions).
+static const std::string& calib_temp_dir()
+{
+    static const std::string dir = [] {
+        std::string d = temporary_dir() + "/calib";
+        boost::system::error_code ec;
+        fs::create_directories(fs::path(d), ec);   // best effort; the writers report their own failures
+        return d;
+    }();
+    return dir;
+}
+static std::string calib_temp_file(const std::string& name) { return calib_temp_dir() + "/" + name; }
+
+static const std::string gcode_filename  = "temp.gcode";
+static const std::string model_filename  = "test.3mf";
+static const std::string config_filename = "test_config.3mf";
 
 static std::string MachineBedTypeString[7] = {
     "auto",
@@ -95,10 +113,14 @@ std::string get_calib_mode_name(CalibMode cali_mode, int stage)
         return "input_shaping_freq_calib_mode";
     case CalibMode::Calib_Input_shaping_damp:
         return "input_shaping_damp_calib_mode";
-    case CalibMode::Calib_Junction_Deviation:
-        return "junction_deviation_calib_mode";
+    case CalibMode::Calib_Cornering:
+        return "cornering_calib_mode";
+    case CalibMode::Calib_Ironing_Flow:
+        return "ironing_flow_calib_mode";
+    case CalibMode::Calib_Temp_Retract_Grid:
+        return calib_temp_retract_grid_mode_name;
     default:
-        assert(false);
+        // F9: reachable from send_to_print; callers map an empty name to "unknown_calib_mode".
         return "";
     }
 }
@@ -127,7 +149,8 @@ static bool is_same_nozzle_diameters(const DynamicPrintConfig &full_config, cons
         auto opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
         if (opt_nozzle_diameters != nullptr) {
             float preset_nozzle_diameter = opt_nozzle_diameters->get_at(0);
-            if (preset_nozzle_diameter != obj->m_extder_data.extders[0].current_nozzle_diameter) {
+            // Orca #13330: a diameter the printer has not reported does not block calibration.
+            if (!obj->nozzle_diameter_matches_or_unknown(MAIN_NOZZLE_ID, preset_nozzle_diameter)) {
                 wxString nozzle_in_preset  = wxString::Format(_L("nozzle in preset: %s %s"), wxString::Format("%.1f", preset_nozzle_diameter).ToStdString(), to_wstring_name(nozzle_type));
                 wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), obj->m_extder_data.extders[0].current_nozzle_diameter, to_wstring_name(NozzleTypeEumnToStr[obj->m_extder_data.extders[0].current_nozzle_type]));
 
@@ -200,6 +223,12 @@ static bool check_nozzle_diameter_and_type(const DynamicPrintConfig &full_config
     return true;
 }
 
+static std::string get_calib_mode_name_or_unknown(CalibMode cali_mode, int stage)
+{
+    std::string name = get_calib_mode_name(cali_mode, stage);
+    return name.empty() ? std::string("unknown_calib_mode") : name;
+}
+
 CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_stage)
 {
     if (name == "pa_line_calib_mode") {
@@ -230,8 +259,12 @@ CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_s
         return CalibMode::Calib_Input_shaping_freq;
     else if (name == "input_shaping_damp_calib_mode")
         return CalibMode::Calib_Input_shaping_damp;
-    else if (name == "junction_deviation_calib_mode")
-        return CalibMode::Calib_Junction_Deviation;
+    else if (name == "cornering_calib_mode" || name == "junction_deviation_calib_mode")
+        return CalibMode::Calib_Cornering;
+    else if (name == "ironing_flow_calib_mode")
+        return CalibMode::Calib_Ironing_Flow;
+    else if (name == calib_temp_retract_grid_mode_name)
+        return CalibMode::Calib_Temp_Retract_Grid;
     return CalibMode::Calib_None;
 }
 
@@ -342,8 +375,15 @@ static void read_model_from_file(const std::string& input_file, Model& model)
         &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
 
     model.add_default_instances();
-    for (auto object : model.objects)
-        object->ensure_on_bed();
+
+    // Orca #13252: centre mesh models (STL, STEP, ...) on their origin; project files keep their placement.
+    const std::string extension       = boost::filesystem::path(input_file).extension().string();
+    const bool        is_project_file = boost::iequals(extension, ".3mf") || boost::iequals(extension, ".amf");
+    for (auto object : model.objects) {
+        if (!is_project_file)
+            object->center_around_origin(false);
+        object->ensure_on_bed(is_project_file);
+    }
 }
 
 std::array<Vec3d, 4> get_cut_plane_points(const BoundingBoxf3 &bbox, const double &cut_height)
@@ -380,6 +420,9 @@ void CalibUtils::emit_get_PA_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("extrusion_cali_get_result"))
+        return;
     obj_->command_get_pa_calibration_result(nozzle_diameter);
 }
 
@@ -492,6 +535,9 @@ void CalibUtils::emit_get_flow_ratio_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("flowrate_get_result"))
+        return;
     obj_->command_get_flow_ratio_calibration_result(nozzle_diameter);
 }
 
@@ -695,6 +741,7 @@ bool CalibUtils::calib_generic_PA(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
@@ -881,6 +928,20 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
+    // Orca #14759: size the tower to the nozzle.
+    const ConfigOptionFloats* nozzle_diameter_config = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    size_t nozzle_id = static_cast<size_t>(std::max(params.extruder_id, 0));
+    double nozzle_diameter = vfa_base_nozzle_diameter;
+    if (nozzle_diameter_config && !nozzle_diameter_config->values.empty()) {
+        nozzle_id = std::min(nozzle_id, nozzle_diameter_config->values.size() - 1);
+        nozzle_diameter = nozzle_diameter_config->values[nozzle_id];
+    }
+    if (nozzle_diameter <= 0.0)
+        nozzle_diameter = vfa_base_nozzle_diameter;
+
+    // Resolved layer height: the (possibly auto-adjusted) value if provided, else nozzle/2.
+    const double layer_height = params.vfa_layer_height > 0.0 ? params.vfa_layer_height : nozzle_diameter / 2.0;
+
     filament_config.set_key_value("slow_down_layer_time", new ConfigOptionInts{0});
     size_t max_speed_variants = 1;
     if (const auto *flow_support = filament_config.option<ConfigOptionStrings>("filament_flow_support");
@@ -895,18 +956,23 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     print_config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+    print_config.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
     print_config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config.set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
     print_config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    print_config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
+    model.objects[0]->config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
     model.objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model.objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model.objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
 
-    // cut upper
+    // cut upper (on the unscaled model, using the base block height); the scaling below keeps the physical
+    // block height (vfa_layers_per_block * layer_height) in sync with the speed stepping in GCode::process_layer.
+    // Subtract EPSILON so the cut lands just below the flat block surface, not on it.
     auto obj_bb = model.objects[0]->bounding_box_exact();
-    auto height = 5 * ((params.end - params.start) / params.step + 1);
+    auto height = vfa_base_block_height * ((params.end - params.start) / params.step + 1) - EPSILON;
     if (height < obj_bb.size().z()) {
         cut_model(model, height, ModelObjectCutAttribute::KeepLower);
     }
@@ -915,13 +981,23 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
         return;
     }
 
+    // XY scales with the nozzle; Z so that each base block becomes vfa_layers_per_block layers of layer_height.
+    const double xy_scale = nozzle_diameter / vfa_base_nozzle_diameter;
+    const double z_scale  = (vfa_layers_per_block * layer_height) / vfa_base_block_height;
+    if (std::abs(xy_scale - 1.0) > EPSILON || std::abs(z_scale - 1.0) > EPSILON)
+        model.objects[0]->scale(xy_scale, xy_scale, z_scale);
+    model.objects[0]->ensure_on_bed();
+
     DynamicPrintConfig full_config;
     full_config.apply(FullPrintConfig::defaults());
     full_config.apply(print_config);
     full_config.apply(filament_config);
     full_config.apply(printer_config);
 
-    process_and_store_3mf(&model, full_config, params, error_message);
+    // Pass the resolved layer height on so the G-code speed stepping matches the geometry.
+    Calib_Params store_params     = params;
+    store_params.vfa_layer_height = layer_height;
+    process_and_store_3mf(&model, full_config, store_params, error_message);
     if (!error_message.empty())
         return;
 
@@ -940,6 +1016,7 @@ void CalibUtils::calib_retraction(const CalibInfo &calib_info, wxString &error_m
 
     DynamicPrintConfig print_config    = calib_info.print_prest->config;
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
@@ -1079,14 +1156,14 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     part_plate->update_slice_result_valid_state(true);
 
     gcode_result->reset();
-    fff_print->export_gcode(temp_gcode_path, gcode_result, nullptr);
+    fff_print->export_gcode(calib_temp_file(gcode_filename), gcode_result, nullptr);
 
     std::vector<ThumbnailData*> thumbnails;
     PlateDataPtrs plate_data_list;
     partplate_list.store_to_3mf_structure(plate_data_list, true, 0);
 
     for (auto plate_data : plate_data_list) {
-        plate_data->gcode_file      = temp_gcode_path;
+        plate_data->gcode_file      = calib_temp_file(gcode_filename);
         plate_data->is_sliced_valid = true;
         FilamentInfo& filament_info = plate_data->slice_filaments_info.front();
         filament_info.type          = full_config.opt_string("filament_type", 0);
@@ -1146,7 +1223,7 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     }
 
     StoreParams store_params;
-    store_params.path            = path.c_str();
+    store_params.path            = calib_temp_file(model_filename);
     store_params.model           = model;
     store_params.plate_data_list = plate_data_list;
     store_params.config = &new_print_config;
@@ -1162,7 +1239,7 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     bool success = Slic3r::store_bbs_3mf(store_params);
 
     store_params.strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithSliceInfo | SaveStrategy::SkipAuxiliary;
-    store_params.path = config_3mf_path.c_str();
+    store_params.path = calib_temp_file(config_filename);
     success           = Slic3r::store_bbs_3mf(store_params);
 
     release_PlateData_list(plate_data_list);
@@ -1173,7 +1250,8 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
 {
     {  // before send
         json j;
-        j["print"]["cali_mode"]       = calib_info.params.mode;
+        // F12: persist / log the mode by name, never as an int.
+        j["print"]["cali_mode"]       = get_calib_mode_name_or_unknown(calib_info.params.mode, flow_ratio_mode);
         j["print"]["start"]           = calib_info.params.start;
         j["print"]["end"]             = calib_info.params.end;
         j["print"]["step"]            = calib_info.params.step;
@@ -1251,9 +1329,9 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     PrintPrepareData job_data;
     job_data.is_from_plater = false;
     job_data.plate_idx = 0;
-    job_data._3mf_config_path = config_3mf_path;
-    job_data._3mf_path = path;
-    job_data._temp_path = temp_dir;
+    job_data._3mf_config_path = calib_temp_file(config_filename);
+    job_data._3mf_path = calib_temp_file(model_filename);
+    job_data._temp_path = calib_temp_dir();
 
     PlateListData plate_data;
     plate_data.is_valid = true;
@@ -1270,10 +1348,11 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     print_job->task_use_ams = select_ams == "[254]" ? false : true;
 
     CalibMode cali_mode       = calib_info.params.mode;
-    print_job->m_project_name = get_calib_mode_name(cali_mode, flow_ratio_mode);
+    print_job->m_project_name = get_calib_mode_name_or_unknown(cali_mode, flow_ratio_mode);
     print_job->set_calibration_task(true);
 
-    print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    print_job->sdcard_state = (int) obj_->get_sdcard_state();
+    print_job->has_sdcard   = bambu_storage_usable_for_lan(print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
     print_job->set_print_config(MachineBedTypeString[bed_type], true, false, false, false, true, 0, 0, 0);
     print_job->set_print_job_finished_event(wxGetApp().plater()->get_send_calibration_finished_event(), print_job->m_project_name);
 

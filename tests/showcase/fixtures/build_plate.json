@@ -1,0 +1,13 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: build plate", "plate_index": 0, "source": "model", "preset_base": "build_plate",
+      "background": { "type": "vertical_gradient", "color1": "#F4F5F7", "color2": "#C9CDD3" },
+      "floor": { "type": "none", "hide_plate": false, "hide_wipe_tower": false },
+      "lighting": { "env_intensity": 0.5 },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

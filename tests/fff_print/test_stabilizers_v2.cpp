@@ -301,6 +301,7 @@ struct Extrusions
     size_t loops  = 0;
     size_t paths  = 0;
     double length = 0.; // mm
+    double path_length = 0.; // mm, the open paths (sparse infill) alone
 };
 
 void count(const ExtrusionEntity *e, Extrusions &out)
@@ -314,9 +315,11 @@ void count(const ExtrusionEntity *e, Extrusions &out)
     } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(e)) {
         ++out.paths;
         out.length += unscaled(path->length());
+        out.path_length += unscaled(path->length());
     } else if (const auto *mp = dynamic_cast<const ExtrusionMultiPath *>(e)) {
         out.paths += mp->paths.size();
         out.length += unscaled(mp->length());
+        out.path_length += unscaled(mp->length());
     }
 }
 
@@ -769,6 +772,63 @@ TEST_CASE("Stabilizers v2: walls and sparse infill where the bodies are wide, so
         }
         CHECK(layers_with_infill > 50);
         CHECK(sparse.front().empty());
+    }
+}
+
+// Owner report 2026-10-14: with 2 walls and 15 % infill only the widest columns got walls and sparse
+// infill; every column narrower than about 4.5 mm printed as solid concentric loops, because a body's
+// inside had to be as wide as the sparse line spacing (2.8 mm at 15 %). Now the inside only has to be
+// STABILIZER_MIN_SPARSE_LINES lines across, whatever the density.
+TEST_CASE("Stabilizers v2: small and large columns both get the walls and the sparse infill they are set to",
+          "[Stabilizers][StabilizersV2]")
+{
+    struct Size { const char *width, *length; };
+    for (const Size size : { Size{ "4", "8" }, Size{ "8", "12" } }) {
+        INFO("column " << size.width << " x " << size.length << " mm");
+        Bench b;
+        slice_pin(b, pin_config({ { "stabilizer_column_shape", "rounded_rect" },
+                                  { "stabilizer_column_width", size.width },
+                                  { "stabilizer_column_length", size.length },
+                                  { "stabilizer_wall_loops", "2" },
+                                  { "stabilizer_infill_density", "15%" },
+                                  { "stabilizer_infill_pattern", "rectilinear" } }));
+        const PrintObject                    &po   = *b.print.objects().front();
+        const stabilizers::StabilizerSettings st   = stabilizers::settings_of(po);
+        const Flow                            flow = support_material_flow(&po);
+        const stabilizers::Plan               plan = stabilizers::plan_stabilizers(po);
+        REQUIRE(plan.pillars.size() == 3);
+        for (const stabilizers::Pillar &p : plan.pillars)
+            REQUIRE(p.column);
+        const std::vector<ExPolygons> sparse = stabilizers::sparse_infill_areas(stabilizers::slice_plan(stabilizers::outlines_of(po), st, plan, {}),
+                                                                                 st, flow.width(), flow.spacing());
+
+        // Between the foot and the lowest strut the three columns stand on their own: each layer two
+        // walls per column and sparse lines inside, nothing solid.
+        size_t layers = 0, layers_with_infill = 0;
+        double infill = 0., inside = 0.;
+        for (size_t i = 0; i < po.layers().size(); ++i) {
+            const double z = po.layers()[i]->print_z;
+            if (z < 2. || z > 9.)
+                continue;
+            ++layers;
+            const Extrusions at = extrusions_at(po, z);
+            INFO("z=" << z << ": " << at.loops << " loops, " << at.paths << " paths, " << at.path_length << " mm of infill");
+            CHECK(at.loops == 6);
+            CHECK(sparse[i].size() == 3);
+            if (at.paths > 0)
+                ++layers_with_infill;
+            infill += at.path_length;
+            inside += area_of(sparse[i]);
+        }
+        REQUIRE(layers > 20);
+        CHECK(layers_with_infill == layers);
+        // The infill's density over those layers: its lines' area over the area inside the walls.
+        // Rectilinear joins its lines along the walls, which adds a little in a narrow column; solid
+        // would be about 1.
+        const double density = infill * flow.spacing() / inside;
+        INFO("infill " << infill << " mm over " << inside << " mm2 inside the walls: density " << density);
+        CHECK(density > 0.08);
+        CHECK(density < 0.5);
     }
 }
 

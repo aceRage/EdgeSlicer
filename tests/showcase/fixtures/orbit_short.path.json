@@ -1,0 +1,11 @@
+{
+  "format": "edgeslicer-showcase-path",
+  "version": 1,
+  "name": "Golden: short orbit",
+  "description": "A few frames of a small orbit: checks a video's frames (the kept off-screen buffers) against main.",
+  "fps": 10,
+  "start": "scene",
+  "moves": [
+    { "op": "orbit", "deg": 30, "elevation": 0, "duration": 0.4, "ease": "linear" }
+  ]
+}

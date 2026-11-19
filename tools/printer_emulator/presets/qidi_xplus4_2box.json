@@ -1,0 +1,27 @@
+{
+  "id": "qidi-xplus4",
+  "personality": "qidi",
+  "name": "EMU QIDI X-Plus 4 (2 Boxes, read from save_variables)",
+  "edgeslicer_preset": "Qidi X-Plus 4 0.4 nozzle",
+  "bind": "127.0.0.13",
+  "port": 7125,
+  "lan": false,
+  "state": "standby",
+  "qidi": {
+    "box_report": "vars_only",
+    "boxes": 2,
+    "polar_cooler": true,
+    "stale_value_t": {"0": "slot5"}
+  },
+  "slots": [
+    {"type": "PLA", "sub": "PLA Matte", "vendor": "Generic", "color": "#FFFFFF", "loaded": true},
+    {"type": "PLA", "sub": "PLA", "vendor": "Generic", "color": "#000000", "loaded": true},
+    {"type": "PETG", "sub": "PETG", "vendor": "Generic", "color": "#2050C0", "loaded": true},
+    {"loaded": false},
+    {"type": "ASA", "sub": "ASA", "vendor": "Generic", "color": "#808080", "loaded": true},
+    {"type": "ABS", "sub": "ABS", "vendor": "Generic", "color": "#F08020", "loaded": true},
+    {"loaded": false},
+    {"type": "TPU", "sub": "TPU 95A", "vendor": "Generic", "color": "#1E7A3C", "loaded": true}
+  ],
+  "faults": {}
+}

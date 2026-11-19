@@ -32,6 +32,8 @@
 #include <functional>
 #include <string>
 
+#include "slic3r/Utils/SnapmakerSilentLogin.hpp"
+
 namespace Slic3r { namespace GUI {
 
 class SMUserLogin : public wxDialog
@@ -58,11 +60,12 @@ public:
     // Silent mode only: stop the watchdog and drop the callback (teardown / cancel).
     void stop_silent();
     bool is_silent() const { return m_silent; }
+    wxWebView *browser() const { return m_browser; }
 
-    // The account lookup both paths share: fills GUI_App::SMUserInfo from the
-    // /api/common/accounts/current answer (HTTP 200) and marks the user signed in. Must run on the
-    // UI thread. false (and not signed in) when the answer is not readable JSON.
-    static bool apply_account_info(const std::string &body, const std::string &token);
+    // Both paths end here once the account service accepted the token (SMSilentLogin::
+    // read_account_answer said ok): fills GUI_App::SMUserInfo and marks the user signed in. Must
+    // run on the UI thread.
+    static void apply_account_info(const SMSilentLogin::AccountAnswer &answer, const std::string &token);
 
     void load_url(wxString &url);
 
@@ -102,6 +105,8 @@ private:
     std::chrono::steady_clock::time_point m_silent_started;
     std::chrono::steady_clock::time_point m_silent_last_load;
     bool           m_silent_page_loaded { false };
+    // Not silent: the sign-in page's token has been taken (a second redirect is ignored).
+    bool           m_token_taken { false };
     void           OnSilentTimer(wxTimerEvent &event);
     void           finish_silent(const std::string &token, const std::string &outcome, const std::string &detail);
 

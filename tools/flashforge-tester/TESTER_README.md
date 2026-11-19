@@ -6,13 +6,14 @@ Thanks for helping test! This takes about 10 minutes. No technical knowledge nee
 
 1. Install **Flash Studio Desktop** from flashforge.com if you don't have it already
    (we borrow two connection files from it — we're not allowed to ship them ourselves).
-2. Copy `setup-flashforge.cmd` into the Snapmaker Orca Ultra folder
-   (the folder that contains `EdgeSlicer.exe`) and double-click it.
+2. Copy `setup-flashforge.cmd` into the EdgeSlicer folder (the folder that contains
+   `EdgeSlicer.exe`, usually `C:\Program Files\EdgeSlicer`) and double-click it.
+   Windows may ask for administrator permission, because that folder is protected.
    It should end with "Done!".
 
 ## The test
 
-1. Start Snapmaker Orca Ultra.
+1. Start EdgeSlicer.
 2. In the printer dropdown (top-left), select **Flashforge Creator 5** (any nozzle).
 3. Open the **Device** tab. Wait ~30 seconds.
    - Does your printer appear in the Device List? (It must be on the same network.)

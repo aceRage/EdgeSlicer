@@ -1,11 +1,18 @@
+#include "CurvedTops.hpp"
+#include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
+#include "ToolSlots.hpp"
+#include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
+#include "GCode/WipeTowerEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
 #include <cfloat>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 
 namespace Slic3r {
@@ -200,11 +207,14 @@ static bool layer_height_ranges_equal(const t_layer_config_ranges &lr1, const t_
     auto it2 = lr2.begin();
     for (const auto &kvp1 : lr1) {
         const auto &kvp2 = *it2 ++;
-        if (!kvp2.second.has("layer_height") || !kvp1.second.has("layer_height"))
+        // A range without a layer height prints at the object's (layer_height_profile_from_ranges()): two such ranges are equal.
+        const ConfigOption *lh1 = kvp1.second.option("layer_height");
+        const ConfigOption *lh2 = kvp2.second.option("layer_height");
+        if ((lh1 == nullptr) != (lh2 == nullptr))
             return false;
         if (std::abs(kvp1.first.first  - kvp2.first.first ) > EPSILON ||
             std::abs(kvp1.first.second - kvp2.first.second) > EPSILON ||
-            (check_layer_height && std::abs(kvp1.second.option("layer_height")->getFloat() - kvp2.second.option("layer_height")->getFloat()) > EPSILON))
+            (check_layer_height && lh1 != nullptr && std::abs(lh1->getFloat() - lh2->getFloat()) > EPSILON))
             return false;
     }
     return true;
@@ -393,10 +403,12 @@ public:
     };
 
     LayerRanges() = default;
-    LayerRanges(const t_layer_config_ranges &in) { this->assign(in); }
+    LayerRanges(const t_layer_config_ranges &in, double shrinkage_compensation_z) { this->assign(in, shrinkage_compensation_z); }
 
     // Convert input config ranges into continuous non-overlapping sorted vector of intervals and their configs.
-    void assign(const t_layer_config_ranges &in) {
+    // Orca #16491: the input ranges are uncompensated print heights, the intervals are scaled by the Z shrinkage
+    // compensation like the PrintObject trafo the regions are generated in.
+    void assign(const t_layer_config_ranges &in, double shrinkage_compensation_z) {
         m_ranges.clear();
         m_ranges.reserve(in.size());
         // Input ranges are sorted lexicographically. First range trims the other ranges.
@@ -420,6 +432,11 @@ public:
             m_ranges.back().layer_height_range.second = DBL_MAX;
         else
             m_ranges.push_back({ t_layer_height_range(m_ranges.back().layer_height_range.second, DBL_MAX) });
+        for (LayerRange &range : m_ranges) {
+            range.layer_height_range.first *= shrinkage_compensation_z;
+            if (range.layer_height_range.second != DBL_MAX)
+                range.layer_height_range.second *= shrinkage_compensation_z;
+        }
     }
 
     const DynamicPrintConfig* config(const t_layer_height_range &range) const {
@@ -787,6 +804,32 @@ static bool mm_paint_applies_to_parent_region(const PrintObjectRegions::LayerRan
     return root_model_part != nullptr && root_model_part->is_mm_painted();
 }
 
+// Painted regions are built over a volume region unless it comes from an "Override paint" modifier: there
+// the modifier's own filament wins, so apply_mm_segmentation() finds no painted target for its LayerRegion
+// and keeps it whole. One predicate for generate_print_object_regions(), painted_region_targets_match()
+// and verify_update_print_object_regions(), so the three can never disagree.
+static bool paint_targets_parent_region(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id)
+{
+    const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[size_t(parent_region_id)];
+    return parent_region.region != nullptr &&
+           (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
+           mm_paint_applies_to_parent_region(layer_range, parent_region_id) &&
+           ! parent_region.region->config().override_paint.value;
+}
+
+// A modifier's region config over the volume region parent_region_id. "Override paint" only means
+// something over colour painting: on an unpainted part it would make the modifier's region differ from its
+// parent by this flag alone and split the walls at the modifier's boundary, so it is dropped there.
+static PrintRegionConfig modifier_region_config(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id,
+                                                const ModelVolume &volume, size_t num_extruders)
+{
+    PrintRegionConfig config = region_config_from_model_volume(layer_range.volume_regions[size_t(parent_region_id)].region->config(),
+                                                               nullptr, volume, num_extruders);
+    if (config.override_paint.value && (num_extruders < 2 || ! mm_paint_applies_to_parent_region(layer_range, parent_region_id)))
+        config.override_paint.value = false;
+    return config;
+}
+
 void print_region_ref_inc(PrintRegion &r) { ++ r.m_ref_cnt; }
 void print_region_ref_reset(PrintRegion &r) { r.m_ref_cnt = 0; }
 int  print_region_ref_cnt(const PrintRegion &r) { return r.m_ref_cnt; }
@@ -812,6 +855,55 @@ static bool solid_infill_filament_is_image_row(const MixedFilamentManager &mixed
     const MixedFilament *mf = mixed_mgr.mixed_filament_from_id(id, num_physical);
     return mf != nullptr && mf->enabled && mf->distribution_mode == int(MixedFilament::ImageWeighted) &&
            ! mf->image_fill_ref.empty();
+}
+
+// Whether the sparse infill filament of a region was chosen explicitly rather than left at Default.
+// The resolved region config cannot tell: it clamps Default to filament 1. This follows the override
+// precedence of region_config_from_model_volume(): print default, object, part, material, layer range;
+// Default (0) clears an earlier choice. A modifier inherits the choice of its parent region unless it
+// sets its own.
+// Edge's print-level PrintRegionConfig default is filament 1 (Orca's sparse_infill_filament_id uses
+// 0 for Default), so a process value of 1 is not treated as an explicit pick.
+// Edge's apply_to_print_region_config() also lets an object/part/modifier filament ("extruder" != 0)
+// replace the sparse infill filament before that config's own feature keys are applied (Orca keeps an
+// explicit feature filament over the base extruder instead). So an "extruder" clears an earlier
+// explicit choice here too; otherwise a process choice would keep the object's filament, which is
+// neither the choice nor the paint.
+static bool has_explicit_sparse_infill_filament(const PrintObjectRegions::LayerRangeRegions &layer_range, int region_id,
+                                               const PrintRegionConfig &default_region_config)
+{
+    static constexpr const char *key = "sparse_infill_filament";
+    const auto sets_base_filament = [](const DynamicPrintConfig &config) {
+        const auto *extruder = config.opt<ConfigOptionInt>("extruder");
+        return extruder != nullptr && extruder->value != 0;
+    };
+    while (region_id >= 0) {
+        const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[region_id];
+        const ModelVolume &volume = *region.model_volume;
+        if (volume.is_model_part()) {
+            bool explicit_choice = default_region_config.sparse_infill_filament.value > 1;
+            const auto apply = [&explicit_choice, &sets_base_filament](const DynamicPrintConfig *config) {
+                if (config == nullptr)
+                    return;
+                if (sets_base_filament(*config))
+                    explicit_choice = false;
+                if (const auto *choice = config->opt<ConfigOptionInt>(key))
+                    explicit_choice = choice->value > 0;
+            };
+            apply(&volume.get_object()->config.get());
+            apply(&volume.config.get());
+            if (! volume.material_id().empty())
+                apply(&volume.material()->config.get());
+            apply(layer_range.config);
+            return explicit_choice;
+        }
+        if (const auto *choice = volume.config.get().opt<ConfigOptionInt>(key))
+            return choice->value > 0;
+        if (sets_base_filament(volume.config.get()))
+            return false;
+        region_id = region.parent;
+    }
+    return false;
 }
 
 // Verify whether the PrintRegions of a PrintObject are still valid, possibly after updating the region configs.
@@ -878,7 +970,7 @@ bool verify_update_print_object_regions(
                             } else if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
                                 // Such parent region does not exist. If it is needed, then we need to reslice.
                                 // Only create new region for a modifier, which actually modifies config of it's parent.
-                                if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, **it_model_volume, num_extruders);
+                                if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, **it_model_volume, num_extruders);
                                     config != parent_region.region->config())
                                     // This modifier newly overrides a region, which it did not before. We need to reslice.
                                     return false;
@@ -887,7 +979,11 @@ bool verify_update_print_object_regions(
                 }
                 PrintRegionConfig cfg = region.parent == -1 ?
                     region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders) :
-                    region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders);
+                    modifier_region_config(layer_range, region.parent, **it_model_volume, num_extruders);
+                // Override paint decides whether painted regions exist over this region at all, so a change of it
+                // cannot be patched into the region in place.
+                if (cfg.override_paint.value != region.region->config().override_paint.value)
+                    return false;
                 if (cfg != region.region->config()) {
                     // Region configuration changed.
                     if (print_region_ref_cnt(*region.region) == 0) {
@@ -908,19 +1004,25 @@ bool verify_update_print_object_regions(
     // Verify and / or update PrintRegions produced by color painting.
     for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges)
         for (const PrintObjectRegions::PaintedRegion &region : layer_range.painted_regions) {
-            if (!mm_paint_applies_to_parent_region(layer_range, region.parent))
+            if (!paint_targets_parent_region(layer_range, region.parent))
                 return false;
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
-            cfg.wall_filament.value    = region.extruder_id;
+            // Image Row Phase 5a: mirrors generate_print_object_regions() - an ImageWeighted row
+            // bound to the parent's wall_filament keeps that virtual id here too.
+            if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.wall_filament.value, num_physical_filaments))
+                cfg.wall_filament.value = region.extruder_id;
             // Image Row Phase 3: mirrors generate_print_object_regions() - an ImageWeighted row
             // bound to the parent's solid_infill_filament keeps that virtual id here.
             if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.solid_infill_filament.value, num_physical_filaments))
                 cfg.solid_infill_filament.value = region.extruder_id;
             // Paint Depth Stage 2 (Task 3 item 2): mirrors generate_print_object_regions() -
             // sparse infill only follows the painted claim when paint_sparse_infill is active.
-            if (paint_sparse_infill)
+            // Orca #17314: an explicitly chosen sparse infill filament is kept; painting then only colors the surfaces.
+            if (paint_sparse_infill && !has_explicit_sparse_infill_filament(layer_range, region.parent, default_region_config))
                 cfg.sparse_infill_filament.value = region.extruder_id;
+            // Per-nozzle process: as generate_print_object_regions() does, a painted role takes its own nozzle's width.
+            restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -942,7 +1044,7 @@ bool verify_update_print_object_regions(
         for (const PrintObjectRegions::FuzzySkinPaintedRegion &region : layer_range.fuzzy_skin_painted_regions) {
             const PrintRegion &parent_print_region = *region.parent_print_object_region(layer_range);
             PrintRegionConfig  cfg                 = parent_print_region.config();
-            cfg.fuzzy_skin.value                   = FuzzySkinType::All;
+            if (cfg.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy) cfg.fuzzy_skin.value = FuzzySkinType::All;
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -1084,6 +1186,12 @@ static PrintObjectRegions* generate_print_object_regions(
     all_regions.clear();
 
     bool reuse_old = print_object_regions_old && !print_object_regions_old->layer_ranges.empty();
+    if (reuse_old && ! std::equal(model_layer_ranges.begin(), model_layer_ranges.end(), layer_ranges_regions.begin(), layer_ranges_regions.end(),
+            [](const LayerRanges::LayerRange &range, const PrintObjectRegions::LayerRangeRegions &r) { return range.layer_height_range == r.layer_height_range; })) {
+        // Orca #16491: the ranges carry the Z shrinkage compensation, which may have changed together with the volumes.
+        out->clear();
+        reuse_old = false;
+    }
 
     if (reuse_old) {
         // Reuse old bounding boxes of some ModelVolumes and their ranges.
@@ -1150,7 +1258,7 @@ static PrintObjectRegions* generate_print_object_regions(
                             if (parent_volume.is_model_part() || parent_volume.is_modifier())
                                 if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
                                     // Only create new region for a modifier, which actually modifies config of it's parent.
-                                    if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders);
+                                    if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, volume, num_extruders);
                                         config != parent_region.region->config()) {
                                         added = true;
                                         layer_range.volume_regions.push_back({ &volume, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1205,7 +1313,7 @@ static PrintObjectRegions* generate_print_object_regions(
                     if (! parent_region.model_volume->is_model_part() || parent_region.region == nullptr)
                         continue;
                     if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
-                        if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, *modifier, num_extruders);
+                        if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, *modifier, num_extruders);
                             config != parent_region.region->config()) {
                             added = true;
                             layer_range.volume_regions.push_back({ modifier, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1224,10 +1332,20 @@ static PrintObjectRegions* generate_print_object_regions(
         for (unsigned int painted_extruder_id : painting_extruders)
             for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++ parent_region_id)
                 if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-                    (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                    mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+                    paint_targets_parent_region(layer_range, parent_region_id)) {
                     PrintRegionConfig cfg = parent_region.region->config();
-                    cfg.wall_filament.value    = painted_extruder_id;
+                    // Image Row Phase 5a: the same rule for the WALLS. A row bound to this part's
+                    // wall_filament samples the image along the outer wall at nozzle resolution,
+                    // which is finer than the facet paint that made this painted region; keeping
+                    // the virtual id is what lets ImageRowWalls.cpp find the row on the painted
+                    // regions that own the walls near the painted faces. What the row does not
+                    // colour still prints the painted id: image_row_base_filament() looks this
+                    // painted region's extruder up, so inner walls keep the paint.
+                    const bool keep_image_row_wall =
+                        solid_infill_filament_is_image_row(mixed_mgr, cfg.wall_filament.value, num_physical_filaments);
+                    if (! keep_image_row_wall)
+                        cfg.wall_filament.value = painted_extruder_id;
+                    const int expected_wall_filament = cfg.wall_filament.value;
                     // Image Row Phase 3: an ImageWeighted row bound to this part's own
                     // solid_infill_filament outranks the paint for TOP SOLID INFILL - the row
                     // samples the same image at nozzle resolution, which is strictly finer
@@ -1248,14 +1366,20 @@ static PrintObjectRegions* generate_print_object_regions(
                     // whatever cfg already inherited from the parent (base) region above -
                     // walls and solid infill (which can be visible on top surfaces) always
                     // stay painted regardless.
+                    // Orca #17314: keep an explicit sparse infill filament even when paint_sparse_infill is on.
+                    const bool paint_this_sparse = paint_sparse_infill &&
+                        !has_explicit_sparse_infill_filament(layer_range, parent_region_id, default_region_config);
                     const unsigned int expected_sparse_infill_filament =
-                        paint_sparse_infill ? painted_extruder_id : cfg.sparse_infill_filament.value;
-                    if (paint_sparse_infill)
+                        paint_this_sparse ? painted_extruder_id : cfg.sparse_infill_filament.value;
+                    if (paint_this_sparse)
                         cfg.sparse_infill_filament.value = painted_extruder_id;
+                    // Per-nozzle process: the parent's widths were stamped for the parent's filaments; a role the
+                    // paint moved to another nozzle takes that nozzle's width (no-op without per-nozzle processes).
+                    restamp_painted_nozzle_line_widths(cfg, parent_region.region->config());
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
-                    if (painted_region->config().wall_filament.value != painted_extruder_id ||
+                    if (painted_region->config().wall_filament.value != expected_wall_filament ||
                         painted_region->config().solid_infill_filament.value != expected_solid_infill_filament ||
                         painted_region->config().sparse_infill_filament.value != expected_sparse_infill_filament) {
                         BOOST_LOG_TRIVIAL(warning) << "Painted region filament mismatch"
@@ -1286,7 +1410,7 @@ static PrintObjectRegions* generate_print_object_regions(
             for (int parent_volume_region_id = 0; parent_volume_region_id < int(layer_range.volume_regions.size()); ++parent_volume_region_id) {
                 if (const PrintObjectRegions::VolumeRegion &parent_volume_region = layer_range.volume_regions[parent_volume_region_id]; parent_volume_region.model_volume->is_model_part() || parent_volume_region.model_volume->is_modifier()) {
                     PrintRegionConfig cfg = parent_volume_region.region->config();
-                    cfg.fuzzy_skin.value  = FuzzySkinType::All;
+                    if (cfg.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy) cfg.fuzzy_skin.value = FuzzySkinType::All;
                     layer_range.fuzzy_skin_painted_regions.push_back({FuzzySkinParentType::VolumeRegion, parent_volume_region_id, get_create_region(std::move(cfg))});
                 }
             }
@@ -1295,7 +1419,7 @@ static PrintObjectRegions* generate_print_object_regions(
                 const PrintObjectRegions::PaintedRegion &parent_painted_region = layer_range.painted_regions[parent_painted_regions_id];
 
                 PrintRegionConfig cfg = parent_painted_region.region->config();
-                cfg.fuzzy_skin.value  = FuzzySkinType::All;
+                if (cfg.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy) cfg.fuzzy_skin.value = FuzzySkinType::All;
                 layer_range.fuzzy_skin_painted_regions.push_back({FuzzySkinParentType::PaintedRegion, parent_painted_regions_id, get_create_region(std::move(cfg))});
             }
 
@@ -1370,10 +1494,7 @@ static bool painted_region_targets_match(const PrintObjectRegions           &pri
         expected_targets.reserve(layer_range.volume_regions.size() * expected_extruders.size());
 
         for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++parent_region_id) {
-            const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-            if (parent_region.region != nullptr &&
-                (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+            if (paint_targets_parent_region(layer_range, parent_region_id)) {
                 for (unsigned int extruder_id : expected_extruders)
                     expected_targets.emplace_back(parent_region_id, extruder_id);
             }
@@ -1405,6 +1526,122 @@ static bool same_layer_pointillism_enabled(const MixedFilamentManager &mixed_mgr
     return false;
 }
 
+// Orca: The shrinkage compensation is baked into the PrintObject transformations, so it has to be known before apply()
+// creates them. Derive it from the filaments the new model prints with instead of from the existing PrintObjects and
+// their regions, which do not exist yet on the first apply(). Every feature filament of every part, height range and
+// modifier counts, whether the feature ends up printing or not, so filaments that disagree switch the compensation
+// off rather than letting a wrong compensation through.
+void Print::update_shrinkage_compensation(size_t num_extruders)
+{
+    const auto set_compensation = [this](unsigned int extruder) {
+        // 100% from the user is the equivalent to 0 in orca.
+        const double xy_compensation = 100.0 / m_config.filament_shrink.get_at(extruder);
+        const double z_compensation  = 100.0 / m_config.filament_shrinkage_compensation_z.get_at(extruder);
+        m_shrinkage_compensation = { xy_compensation, xy_compensation, z_compensation };
+    };
+    const auto same_shrinkage = [this](unsigned int a, unsigned int b) {
+        return m_config.filament_shrink.get_at(a) == m_config.filament_shrink.get_at(b) &&
+               m_config.filament_shrinkage_compensation_z.get_at(a) == m_config.filament_shrinkage_compensation_z.get_at(b);
+    };
+    // Usually all filaments share the same shrinkage, then it does not matter which of them print.
+    bool uniform = true;
+    for (unsigned int extruder = 1; extruder < num_extruders && uniform; ++ extruder)
+        uniform = same_shrinkage(0, extruder);
+    if (uniform) {
+        m_same_shrinkage_compensations = true;
+        set_compensation(0);
+        return;
+    }
+
+    const size_t num_filaments = m_mixed_filament_mgr.total_filaments(num_extruders);
+    std::vector<unsigned int> extruders;
+    const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
+        for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
+                        config.sparse_infill_filament.value, config.solid_infill_filament.value }) {
+            if (id <= 0)
+                continue; // outer_wall_filament 0 follows wall_filament
+            const unsigned int i = (unsigned int)std::max(0, id - 1);
+            extruders.emplace_back(i >= num_filaments ? 0 : i);
+        }
+    };
+    for (const ModelObject *model_object : m_model.objects) {
+        if (std::none_of(model_object->instances.begin(), model_object->instances.end(), [](const ModelInstance *mi) { return mi->is_printable(); }))
+            continue;
+        std::vector<const ModelVolume*> modifiers;
+        std::copy_if(model_object->volumes.begin(), model_object->volumes.end(), std::back_inserter(modifiers), [](const ModelVolume *mv) { return mv->is_modifier(); });
+        for (const ModelVolume *part : model_object->volumes) {
+            if (! part->is_model_part())
+                continue;
+            std::vector<PrintRegionConfig> parents { region_config_from_model_volume(m_default_region_config, nullptr, *part, num_filaments) };
+            for (const auto &[range, range_config] : model_object->layer_config_ranges)
+                parents.emplace_back(region_config_from_model_volume(m_default_region_config, &range_config.get(), *part, num_filaments));
+            for (const PrintRegionConfig &parent : parents) {
+                append_feature_extruders(parent);
+                for (const ModelVolume *modifier : modifiers)
+                    append_feature_extruders(region_config_from_model_volume(parent, nullptr, *modifier, num_filaments));
+            }
+        }
+        append_model_object_extruders(*model_object, extruders);
+        const PrintObjectConfig object_config = PrintObject::object_config_from_model_object(m_default_object_config, *model_object, num_filaments);
+        if (PrintObject::has_support_material(object_config))
+            append_support_extruders(object_config, (unsigned int)num_filaments, extruders);
+        else if (PrintObject::has_stabilizers(object_config) && object_config.support_filament != 0) {
+            // Stabilizers without supports print with the support filament; 0 follows the object.
+            unsigned int i = (unsigned int)object_config.support_filament - 1;
+            extruders.emplace_back((i >= num_filaments) ? 0 : i);
+        }
+    }
+    this->append_tool_change_extruders(extruders);
+    // A mixed slot prints with its physical components.
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+    // The wipe tower filament may also be flushed into the objects.
+    this->append_wipe_tower_extruder(extruders);
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+
+    m_same_shrinkage_compensations = ! extruders.empty() &&
+        std::all_of(extruders.begin(), extruders.end(), [&](unsigned int extruder) { return same_shrinkage(extruders.front(), extruder); });
+    m_shrinkage_compensation = Vec3d::Ones();
+    if (m_same_shrinkage_compensations)
+        set_compensation(extruders.front());
+}
+
+bool Print::install_pending_extruder_filament_info_unguarded()
+{
+    if (!m_extruder_filament_info_pending)
+        return false;
+    bool invalidated = false;
+    if (FilamentGroupUtils::machine_filaments_changed(m_extruder_filament_info, m_pending_extruder_filament_info)) {
+        // Both steps are attempted on purpose, and the result is true only when one was actually
+        // taken back, so a print that is already invalid stays unchanged.
+        const bool wipe_tower_invalidated = this->invalidate_step(psWipeTower);
+        const bool skirt_brim_invalidated = this->invalidate_step(psSkirtBrim);
+        invalidated = wipe_tower_invalidated || skirt_brim_invalidated;
+        if (invalidated)
+            BOOST_LOG_TRIVIAL(warning) << "Print: plate " << m_plate_index + 1 << " filament grouping invalidated: the printer's loaded filaments changed";
+    }
+    m_extruder_filament_info         = std::move(m_pending_extruder_filament_info);
+    m_pending_extruder_filament_info = {};
+    m_extruder_filament_info_pending = false;
+    return invalidated;
+}
+
+bool Print::install_pending_extruder_filament_info()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return this->install_pending_extruder_filament_info_unguarded();
+}
+
+// What normalize_fdm_2 calls the number of objects: print by object builds a prime tower only for a plate with one
+// copy on it (the plater and the CLI's tower placement count copies). Several copies of one object are one PrintObject,
+// and counting PrintObjects left the tower on for them, so the G-code printed the copies layer by layer.
+static int printed_copies_count(const PrintObjectPtrs &objects)
+{
+    size_t count = 0;
+    for (const PrintObject *object : objects)
+        count += object->instances().size();
+    return int(count);
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1413,15 +1650,41 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: add more logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter")%__LINE__;
+    // Visual-only keys (multi-colour filament split / angle / twist) never reach the slicer: dropped
+    // before anything below reads, compares or stores the config, so they cannot change G-code or
+    // invalidate a step. tests/design_multicolour_filament_view.md 6.1.
+    strip_visual_only_options(new_full_config);
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
+    // Per-nozzle process P7: the nozzle size each tool carries in this project (nozzle_diameter_override) becomes its
+    // nozzle_diameter before anything reads it. No-op without an override.
+    apply_nozzle_diameter_override(new_full_config);
+    // Per-nozzle process P4: a filament's values for the nozzle it prints on (filament_nozzle_variants) become its
+    // own values, so every reader and the G-code's config block see what is printed.
+    resolve_filament_nozzle_variants(new_full_config);
+    // Chip-scope fix (2026-11-04): the per-filament per-nozzle values were filled for the filament map the settings had; the
+    // plate's own map (applied after that fill) may put a filament on another nozzle. Its values follow it. No-op otherwise.
+    realign_nozzle_filament_values(new_full_config);
+    // Per-nozzle process P6: every line width for the nozzle that prints it (explicit per-nozzle widths, mm widths
+    // scaled to the nozzle's size on a printer with mixed sizes). No-op with one nozzle size.
+    resolve_nozzle_line_widths(new_full_config);
+    // Mixed color sublayer: a mixed filament reads its components' nozzle entries. No-op without mixed filaments.
+    extend_nozzle_filament_values_to_mixed(new_full_config);
+    // Only WipeTower2 rotates; the Bambu Lab (Type1) tower is always printed unrotated, as the
+    // greyed-out Process field and the inert Rotate tool show. The CLI sets is_BBL_printer() after
+    // apply(), so printer_model decides too (resolve_wipe_tower_type).
+    if (auto *angle = new_full_config.option<ConfigOptionFloat>("wipe_tower_rotation_angle");
+        angle != nullptr && angle->value != 0. &&
+        (m_isBBLPrinter || resolve_wipe_tower_type(new_full_config) == WipeTowerType::Type1))
+        angle->value = 0.;
 	new_full_config.option("print_settings_id",            true);
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
     // Ensure newly introduced dithering keys are present so in-session updates are detected.
     new_full_config.option("dithering_z_step_size", true);
     new_full_config.option("dithering_local_z_mode", true);
+    new_full_config.option("enable_mixed_color_sublayer", true);
     new_full_config.option("dithering_local_z_whole_objects", true);
     new_full_config.option("dithering_local_z_infill", true);
     new_full_config.option("dithering_local_z_direct_multicolor", true);
@@ -1438,6 +1701,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("mixed_filament_definitions", true);
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
+    m_config.option("enable_mixed_color_sublayer", true);
     m_config.option("dithering_local_z_whole_objects", true);
     m_config.option("dithering_local_z_infill", true);
     m_config.option("dithering_local_z_direct_multicolor", true);
@@ -1454,6 +1718,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("mixed_filament_definitions", true);
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
+    m_default_object_config.option("enable_mixed_color_sublayer", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
     m_default_object_config.option("dithering_local_z_infill", true);
     m_default_object_config.option("dithering_local_z_direct_multicolor", true);
@@ -1476,7 +1741,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //new_full_config.normalize_fdm(used_filaments);
     new_full_config.normalize_fdm_1();
-    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(objects().size(), used_filaments);
+    t_config_option_keys changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), used_filaments);
     if (changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got changed_keys, size=%1%")%changed_keys.size();
         for (int i = 0; i < changed_keys.size(); i++)
@@ -1496,7 +1761,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             return c.has("seam_slope_type") && c.opt_enum<SeamScarfType>("seam_slope_type") != SeamScarfType::None;
         };
         const bool has_scarf_joint_seam = std::any_of(o.begin(), o.end(), [&new_full_config, &opt_has_scarf_joint_seam](ModelObject* obj) {
-            return obj->get_config_value<ConfigOptionEnum<SeamScarfType>>(new_full_config, "seam_slope_type")->value != SeamScarfType::None ||
+            // Read the enum through the base option + virtual getInt(): the value may be
+            // stored as ConfigOptionEnumGeneric (DynamicConfig), where a typed downcast is UB.
+            const ConfigOption* seam_slope_opt = obj->config.has("seam_slope_type") ?
+                obj->config.option("seam_slope_type") : new_full_config.option("seam_slope_type");
+            return (seam_slope_opt != nullptr && static_cast<SeamScarfType>(seam_slope_opt->getInt()) != SeamScarfType::None) ||
                    std::any_of(obj->volumes.begin(), obj->volumes.end(), [&opt_has_scarf_joint_seam](const ModelVolume* v) { return opt_has_scarf_joint_seam(v->config.get());}) ||
                    std::any_of(obj->layer_config_ranges.begin(), obj->layer_config_ranges.end(), [&opt_has_scarf_joint_seam](const auto& r) { return opt_has_scarf_joint_seam(r.second.get());});
         });
@@ -1561,9 +1830,18 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Grab the lock for the Print / PrintObject milestones.
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
 
+    // The device-owned AMS inventory only feeds filament grouping, so a changed payload invalidates
+    // the grouping steps (upstream Orca #17195).
+    if (m_extruder_filament_info_pending && this->install_pending_extruder_filament_info_unguarded())
+        update_apply_status(true);
+
     // The following call may stop the background processing.
     if (! print_diff.empty())
         update_apply_status(this->invalidate_state_by_config_options(new_full_config, print_diff));
+    // Bambu Studio 2.9.1: the Type 1 tower's first layer purges at initial_layer_flow_ratio (here the region option
+    // bottom_solid_infill_flow_ratio, otherwise read at G-code export only), so the tower is generated again.
+    if (std::find(region_diff.begin(), region_diff.end(), "bottom_solid_infill_flow_ratio") != region_diff.end())
+        update_apply_status(this->invalidate_step(psWipeTower));
 
     // Apply variables to placeholder parser. The placeholder parser is used by G-code export,
     // which should be stopped if print_diff is not empty.
@@ -1574,6 +1852,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: found full_config_diff changed.")%__LINE__;
         update_apply_status(this->invalidate_step(psGCodeExport));
         m_placeholder_parser.clear_config();
+        // clear_config() wiped the constructor-set "version"; restore it for custom G-code.
+        m_placeholder_parser.set("version", std::string(Snapmaker_VERSION));
         // Set the profile aliases for the PrintBase::output_filename()
 		m_placeholder_parser.set("print_preset",              new_full_config.option("print_settings_id")->clone());
 		m_placeholder_parser.set("filament_preset",           new_full_config.option("filament_settings_id")->clone());
@@ -1931,6 +2211,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // 4) Generate PrintObjects from ModelObjects and their instances.
     {
+        this->update_shrinkage_compensation(num_extruders);
         PrintObjectPtrs print_objects_new;
         print_objects_new.reserve(std::max(m_objects.size(), m_model.objects.size()));
         bool new_objects = false;
@@ -2023,7 +2304,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: check the config again
     int new_used_filaments = this->extruders(true).size();
-    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(objects().size(), new_used_filaments);
+    t_config_option_keys new_changed_keys = new_full_config.normalize_fdm_2(printed_copies_count(m_objects), new_used_filaments);
     if (new_changed_keys.size() > 0) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got new_changed_keys, size=%1%")%new_changed_keys.size();
         for (int i = 0; i < new_changed_keys.size(); i++)
@@ -2043,6 +2324,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: full_config_diff previous empty, need to apply now.")%__LINE__;
 
             m_placeholder_parser.clear_config();
+            // clear_config() wiped the constructor-set "version"; restore it for custom G-code.
+            m_placeholder_parser.set("version", std::string(Snapmaker_VERSION));
             // Set the profile aliases for the PrintBase::output_filename()
             m_placeholder_parser.set("print_preset",              new_full_config.option("print_settings_id")->clone());
             m_placeholder_parser.set("filament_preset",           new_full_config.option("filament_settings_id")->clone());
@@ -2212,7 +2495,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             print_object_regions = generate_print_object_regions(
                 print_object_regions,
                 print_object.model_object()->volumes,
-                LayerRanges(print_object.model_object()->layer_config_ranges),
+                // Orca #16491: the ranges follow the Z shrinkage compensation (upstream skips it on belt printers, which we lack).
+                LayerRanges(print_object.model_object()->layer_config_ranges, this->shrinkage_compensation().z()),
                 m_default_region_config,
                 model_object_status.print_instances.front().trafo,
                 num_total_filaments ,
@@ -2279,7 +2563,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         DynamicPrintConfig after              = m_full_print_config;
         if (auto *ept = after.option<ConfigOptionBool>("enable_prime_tower"))
             ept->value = requested_enable_prime_tower;
-        t_config_option_keys keys = after.normalize_fdm_2(int(m_objects.size()), used_after_regions);
+        t_config_option_keys keys = after.normalize_fdm_2(printed_copies_count(m_objects), used_after_regions);
         auto                 differs = [&](const t_config_option_key &key) {
             const ConfigOption *live = m_config.option(key);
             const ConfigOption *want = after.option(key);
@@ -2295,6 +2579,56 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             m_default_region_config.apply_only(after, keys, true);
             m_full_print_config.apply_only(after, keys, true);
         }
+    }
+
+    // EdgeSlicer: support interface temperatures (support_interface_nozzle_temperature). They depend on the
+    // objects' support settings and on which filaments print model parts, all final here. The tower and the
+    // G-code read them; a change re-runs both (the object option alone only invalidates psGCodeExport).
+    {
+        SupportInterfaceTemperatures resolved = this->resolve_support_interface_temperatures();
+        if (resolved != m_support_interface_temperatures) {
+            // Only the ignored list (warnings, read by validate()) changing needs no step re-run.
+            if (resolved.temperatures != m_support_interface_temperatures.temperatures)
+                update_apply_status(this->invalidate_steps({psWipeTower, psGCodeExport}));
+            m_support_interface_temperatures = std::move(resolved);
+        }
+    }
+
+    // EdgeSlicer, curved tops (review finding a): the guards in apply_curved_tops() read settings of
+    // the print, the object and the other objects (supports, skirt, sequence, filaments, copies...)
+    // whose change does not by itself re-run posContouring, and a block already cut the planar walls
+    // under it. When anything a guard read differs from the last run, or a run was left unfinished
+    // over cut walls (a cancel), regenerate the object's walls: posPerimeters invalidates the fills
+    // and posContouring after it, so the block is planned again on uncut layers. Objects without
+    // curved tops on are not looked at, so a print without the feature invalidates exactly as before.
+    // Review r2: the record holds verdicts, not counts, and an object that was refused (walls not cut,
+    // so its G-code is already the planar one) and is still refused by a setting is left alone: adding
+    // a part to a plate where every part is refused re-slices nothing. (Its refusal text may then name
+    // the earlier reason until the object is sliced again.) The record is read under the state mutex
+    // this function holds; the slicing thread writes it under the same mutex.
+    int multi_filament = -1; // computed once, for the first object that needs it
+    for (PrintObject *object : m_objects) {
+        if (!object->config().curved_tops_enabled.value)
+            continue;
+        const bool unfinished = object->curved_tops_clipped() && !object->is_step_done_unguarded(posContouring);
+        bool       regenerate = unfinished;
+        if (!regenerate && !object->curved_tops_guard_inputs_used().empty()) {
+            if (multi_filament < 0)
+                multi_filament = this->extruders(true).size() > 1 ? 1 : 0;
+            const std::string now = curved_tops_guard_inputs(*object, multi_filament);
+            if (object->curved_tops_guard_inputs_used() != now) {
+                // P3: a change of the developer overrides (or of Developer mode) always re-plans, so the
+                // warning that lists them is never stale; without overrides both tails are empty.
+                const auto dev_tail = [](const std::string &record) {
+                    const size_t pos = record.find(";dev=");
+                    return pos == std::string::npos ? std::string() : record.substr(pos);
+                };
+                regenerate = object->curved_tops_clipped() || !curved_tops_blocked_by_settings(*object, multi_filament) ||
+                             dev_tail(object->curved_tops_guard_inputs_used()) != dev_tail(now);
+            }
+        }
+        if (regenerate)
+            update_apply_status(object->invalidate_step(posPerimeters));
     }
 
     // Update SlicingParameters for each object where the SlicingParameters is not valid.

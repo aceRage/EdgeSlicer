@@ -4,7 +4,10 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -14,15 +17,34 @@
 #include "libslic3r/Zipper.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
+#include <thread>
+
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Slic3r;
 
@@ -306,6 +328,309 @@ SCENARIO("A project built from the static default config survives a project 3MF 
             }
         }
     }
+}
+
+// The prime tower angle set on the Process tab or with the Rotate tool is an ordinary print
+// setting (Orca #15227): a project saves and reopens with it, next to the per-plate position.
+TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3mf][Config][WipeTowerRotation]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    store_config.set_key_value("wipe_tower_rotation_angle", new ConfigOptionFloat(37.5));
+    store_config.set_key_value("wipe_tower_x", new ConfigOptionFloats({ 120.25 }));
+    store_config.set_key_value("wipe_tower_y", new ConfigOptionFloats({ 80.5 }));
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "wipe_tower_rotation_project.3mf").string();
+
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                               &is_bbl_3mf, &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                                   LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+
+    REQUIRE(stored);
+    REQUIRE(loaded);
+    REQUIRE(dst_config.has("wipe_tower_rotation_angle"));
+    CHECK(dst_config.opt_float("wipe_tower_rotation_angle") == Approx(37.5));
+    REQUIRE(dst_config.option<ConfigOptionFloats>("wipe_tower_x") != nullptr);
+    CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_x")->get_at(0) == Approx(120.25));
+    CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
+}
+
+// A part's "matrix" in model_settings.config is written as the part's placement times its source transform
+// (the placement baked into its mesh when it was imported). It was read back whole into the source transform,
+// so each save and open multiplied the part's placement into it once more. The reader now takes the part's
+// placement back out, and two round trips leave the source transform, and so the matrix written, as it was.
+TEST_CASE("A part's source transform is the same after two project round trips", "[3mf][Regression]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "two parts";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "base";
+    ModelVolume *placed = src_object->add_volume(make_cube(4., 6., 8.));
+    placed->name = "placed";
+    placed->set_rotation(Vec3d(0., PI / 6., PI / 2.));
+    placed->set_scaling_factor(Vec3d(1., 2., 1.));
+    placed->set_offset(Vec3d(12., -5., 3.));
+    // As an import that baked a placement into the part's mesh leaves it.
+    Transform3d baked = Geometry::translation_transform(Vec3d(1., 2., 3.)) * Geometry::rotation_transform(Vec3d(PI / 4., 0., 0.));
+    placed->source.transform = Geometry::Transformation(baked);
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    auto round_trip = [&](Model &src, Model &dst, const std::string &name) {
+        const std::string test_file = (tmp_root / name).string();
+        StoreParams store_params;
+        store_params.path     = test_file.c_str();
+        store_params.model    = &src;
+        store_params.config   = &store_config;
+        store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        const bool stored = store_bbs_3mf(store_params);
+
+        DynamicPrintConfig        dst_config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+        PlateDataPtrs             plate_data;
+        std::vector<Preset*>      project_presets;
+        bool                      is_bbl_3mf = false;
+        Semver                    file_version;
+        const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst, &plate_data, &project_presets,
+                                                   &is_bbl_3mf, &file_version, nullptr,
+                                                   LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                                                       LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+        release_PlateData_list(plate_data);
+        boost::filesystem::remove(test_file);
+        REQUIRE(stored);
+        REQUIRE(loaded);
+        REQUIRE(dst.objects.size() == 1);
+        REQUIRE(dst.objects.front()->volumes.size() == 2);
+    };
+
+    Model once;
+    round_trip(src_model, once, "part_matrix_once.3mf");
+    Model twice;
+    round_trip(once, twice, "part_matrix_twice.3mf");
+
+    for (const Model *model : { &once, &twice }) {
+        const ModelObject *object = model->objects.front();
+        for (size_t i = 0; i < 2; ++i) {
+            const ModelVolume *src = src_object->volumes[i];
+            const ModelVolume *dst = object->volumes[i];
+            CAPTURE(model == &once ? "once" : "twice", dst->name);
+            CHECK(dst->name == src->name);
+            INFO("source transform\n" << dst->source.transform.get_matrix().matrix() << "\nexpected\n"
+                                      << src->source.transform.get_matrix().matrix());
+            CHECK(dst->source.transform.get_matrix().isApprox(src->source.transform.get_matrix(), 1e-5));
+            INFO("placement\n" << dst->get_matrix().matrix() << "\nexpected\n" << src->get_matrix().matrix());
+            CHECK(dst->get_matrix().isApprox(src->get_matrix(), 1e-5));
+        }
+    }
+}
+
+// A project or sliced-plate file whose name holds Chinese and accented characters (the default export
+// name is the project name). The exporter writes "<name>.tmp" and renames it into place; with
+// boost::filesystem narrow paths on Windows converted by the ANSI code page, that step failed and the
+// file vanished without a message. The path is UTF-8, as the application passes it.
+TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    // As the application does at startup (Snapmaker_Orca.cpp), so boost::filesystem paths are UTF-8.
+    boost::nowide::nowide_filesystem();
+    const std::string leaf     = u8"\u6CE3\u8840_\u00E9_test.3mf";
+    const std::string tmp_leaf = leaf + ".tmp";
+    const std::string test_dir = tmp_root.string();
+    const std::string test_file = test_dir + "/" + leaf;
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+    CHECK(store_params.error.empty());
+    CHECK(boost::filesystem::exists(test_file, ec));
+    CHECK_FALSE(boost::filesystem::exists(test_dir + "/" + tmp_leaf, ec));
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                         LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE(loaded);
+    CHECK(dst_model.objects.size() == 1);
+}
+
+// The reported failure: an auxiliary picture (Model Pictures / Profile Pictures) with a Chinese file
+// name, as WeChat names its images, made the whole export fail because the exporter handed the file to
+// miniz through the ANSI code page.
+TEST_CASE("A project 3MF packs and restores an auxiliary file with a non-ASCII name", "[3mf][Regression][Utf8Path]")
+{
+    boost::nowide::nowide_filesystem();
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    const std::string pic_leaf = u8"\u5FAE\u4FE1\u56FE\u7247_20261023_3.webp";
+    const std::string pic_dir  = src_model.get_auxiliary_file_temp_path() + "/Model Pictures";
+    boost::filesystem::create_directories(pic_dir);
+    const std::string pic_file = pic_dir + "/" + pic_leaf;
+    {
+        boost::nowide::ofstream out(pic_file, std::ios::binary);
+        out << "not really a webp, but bytes";
+    }
+    REQUIRE(boost::filesystem::exists(pic_file));
+
+    const std::string test_file = (tmp_root / "aux_utf8_project.3mf").string();
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    REQUIRE(loaded);
+    const std::string restored = dst_model.get_auxiliary_file_temp_path() + "/Model Pictures/" + pic_leaf;
+    CHECK(boost::filesystem::exists(restored));
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+}
+
+// A destination that cannot be written reports why instead of failing silently.
+TEST_CASE("A failed 3MF store reports the exporter's error text", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    StoreParams store_params;
+    store_params.path     = (tmp_root / "no_such_folder_utf8" / "x.3mf").string();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    CHECK_FALSE(store_bbs_3mf(store_params));
+    CHECK_FALSE(store_params.error.empty());
+}
+
+// Orca #16503: the exclude-object outline tolerance is an ordinary print setting, saved with the project.
+TEST_CASE("A project 3MF keeps the exclude object outline tolerance", "[3mf][Config][ExcludeObject]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    store_config.set_key_value("exclude_object_tolerance", new ConfigOptionFloat(0.2));
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "exclude_object_tolerance_project.3mf").string();
+
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                               &is_bbl_3mf, &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                                   LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+
+    REQUIRE(stored);
+    REQUIRE(loaded);
+    REQUIRE(dst_config.has("exclude_object_tolerance"));
+    CHECK(dst_config.opt_float("exclude_object_tolerance") == Approx(0.2));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -623,6 +948,148 @@ SCENARIO("A sliced plate carries the multi-nozzle slice_info schema through a 3M
         }
         delete plate;
     }
+}
+
+// Owner report 2026-11-05: an H2C plate printed with the right rack's 0.8 and 0.6 showed "Nozzle Diameter: 0.4 | 0.4" in Bambu
+// Connect, because slice_info's nozzle_diameters was the printer preset's nozzle_diameter. Bambu Studio writes one value per
+// extruder, the size that extruder prints with; on a rack that is the nozzle the plate uses.
+namespace {
+std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> rack_group(const std::vector<int> &filament_nozzle,
+                                                                     const std::vector<std::pair<int, const char *>> &nozzles)
+{
+    std::vector<MultiNozzleUtils::NozzleInfo> list(nozzles.size());
+    for (size_t i = 0; i < nozzles.size(); ++i) {
+        list[i].extruder_id = nozzles[i].first;
+        list[i].diameter    = nozzles[i].second;
+        list[i].volume_type = nvtStandard;
+        list[i].group_id    = int(i);
+    }
+    std::vector<unsigned int> used;
+    for (size_t f = 0; f < filament_nozzle.size(); ++f)
+        used.push_back(unsigned(f));
+    return MultiNozzleUtils::LayeredNozzleGroupResult::create(filament_nozzle, list, used);
+}
+} // namespace
+
+TEST_CASE("slice_info nozzle_diameters: per extruder, the size the plate prints with", "[3mf][H2C][NozzleDiameters]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+
+    PlateData plate;
+    plate.nozzle_diameters = "0.4,0.4";
+    // No grouping (an unsliced plate): the extruders' own sizes.
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.4");
+    // The project's sizes (P7) win over the printer preset's.
+    plate.nozzle_diameters = "0.4,0.8";
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.8");
+    plate.nozzle_diameters.clear();
+    config.set_key_value("nozzle_diameter_override", new ConfigOptionFloats({ 0., 0.6 }));
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    config.set_key_value("nozzle_diameter_override", new ConfigOptionFloats({ 0. }));
+
+    // The owner's plate: two cubes on the right rack's 0.8 and 0.6, the left unused, the right's mounted 0.4 unused.
+    plate.nozzle_diameters    = "0.4,0.4";
+    plate.nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.8" }, { 1, "0.6" } });
+    REQUIRE(plate.nozzle_group_result);
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.8");
+    // tests/h2c_mixedslice.gcode.3mf prints the 0.6 first (nozzle_sequence [5,6]): the extruder's first nozzle in print order.
+    plate.nozzle_change_sequence = { 2, 1 };
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    plate.nozzle_change_sequence.clear();
+    // Left 0.4 for one cube, right rack 0.6 for the other.
+    plate.nozzle_group_result = rack_group({ 0, 2 }, { { 0, "0.4" }, { 1, "0.4" }, { 1, "0.6" } });
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    // The right prints with its own 0.4 too: that is its size.
+    plate.nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.4" }, { 1, "0.6" } });
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.4");
+}
+
+SCENARIO("A rack plate's nozzle_diameters survive a 3MF round trip", "[3mf][H2C][NozzleDiameters]")
+{
+    Model        src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name        = "h2c_rack_cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    for (const std::string &key : store_config.keys())
+        if (const ConfigOption *opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+            store_config.erase(key);
+            store_config.option(key, true);
+        }
+    store_config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+    store_config.set_key_value("filament_colour", new ConfigOptionStrings({ "#000000", "#FFFFFF" }));
+    store_config.set_key_value("filament_map", new ConfigOptionInts({ 2, 2 }));
+    store_config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values      = { 0, 0 };
+    store_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { 0, 0 };
+
+    PlateData *plate           = new PlateData();
+    plate->plate_index         = 0;
+    plate->is_sliced_valid     = true;
+    plate->printer_model_id    = "O1C2";
+    plate->nozzle_diameters    = "0.4,0.4";
+    plate->gcode_prediction    = "1000";
+    plate->gcode_weight        = "12.34";
+    plate->first_layer_time    = "42";
+    plate->filament_maps       = { 2, 2 };
+    plate->nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.8" }, { 1, "0.6" } });
+    REQUIRE(plate->nozzle_group_result);
+    plate->objects_and_instances.emplace_back(0, 0);
+    for (int fid = 0; fid < 2; ++fid) {
+        FilamentInfo info;
+        info.id                 = fid;
+        info.type               = "PLA";
+        info.color              = fid == 0 ? "#000000" : "#FFFFFF";
+        info.filament_id        = "GFA00";
+        info.used_m             = 1.5f;
+        info.used_g             = 4.5f;
+        info.group_id           = { fid + 1 };
+        info.nozzle_diameter    = fid == 0 ? 0.8 : 0.6;
+        info.nozzle_volume_type = get_nozzle_volume_type_string(nvtStandard);
+        info.used_for_object    = true;
+        plate->slice_filaments_info.push_back(info);
+    }
+
+    const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_rack_nozzle_diameters.3mf";
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    StoreParams store_params;
+    store_params.path            = test_file.c_str();
+    store_params.model           = &src_model;
+    store_params.config          = &store_config;
+    store_params.plate_data_list = { plate };
+    store_params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    REQUIRE(plate_data.size() == 1);
+    // The right extruder prints with its rack's 0.8 first: "0.4,0.8", not the preset's "0.4,0.4".
+    CHECK(plate_data.front()->nozzle_diameters == "0.4,0.8");
+    // The per-filament sizes carry the rest.
+    REQUIRE(plate_data.front()->slice_filaments_info.size() == 2);
+    CHECK(plate_data.front()->slice_filaments_info[0].nozzle_diameter == Approx(0.8));
+    CHECK(plate_data.front()->slice_filaments_info[1].nozzle_diameter == Approx(0.6));
+    // The project settings keep the printer preset's nozzle_diameter (the project's sizes are its override key).
+    const auto *nd = dst_config.option<ConfigOptionFloats>("nozzle_diameter");
+    REQUIRE(nd != nullptr);
+    CHECK(nd->values == std::vector<double>{ 0.4, 0.4 });
+
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+    delete plate;
 }
 
 // Deft: Metadata/model_settings.config's <object> block order came from a direct range-for over
@@ -1010,7 +1477,7 @@ static void store_painted_cube(const std::string &path, Model *out_model = nullp
 }
 
 // Loads `path` through the BBS importer into `model`, releasing the plates it returns.
-static bool load_project(const std::string &path, Model &model)
+static bool load_project(const std::string &path, Model &model, bool *is_bambu_studio = nullptr)
 {
     DynamicPrintConfig        config;
     ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
@@ -1019,7 +1486,8 @@ static bool load_project(const std::string &path, Model &model)
     bool                      is_bbl_3mf = false;
     Semver                    file_version;
     const bool loaded = load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
-                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence,
+                                     nullptr, 0, is_bambu_studio);
     release_PlateData_list(plates);
     for (Preset *preset : project_presets)
         delete preset;
@@ -1228,6 +1696,127 @@ TEST_CASE("Paint states 20, 200 and 255 round-trip through a 3MF byte-identicall
     REQUIRE_NOTHROW(restored.deserialize(dst_vol.mmu_segmentation_facets.get_data()));
     for (int i = 0; i < 3; ++i)
         REQUIRE(restored.num_facets(static_cast<EnforcerBlockerType>(states[i])) == 1);
+}
+
+TEST_CASE("The BambuStudio generator flag is set only for a BambuStudio Application stamp", "[3mf][Regression]")
+{
+    // Orca #16153 / D-13a: Edge stamps its own and Snapmaker Orca 3MFs as From_BBS, so
+    // the substitution-dialog gate must key on the generator stamp, not From_BBS.
+    const std::string path    = make_temp_3mf_path("generator_stamp.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    auto load_flag = [&](bool &flag) {
+        Model model;
+        flag          = true;
+        const bool ok = load_project(path, model, &flag);
+        REQUIRE(ok);
+        return flag;
+    };
+
+    bool is_bambu = true;
+    CHECK_FALSE(load_flag(is_bambu));
+
+    auto stamp = [&path](const std::string &value) {
+        return rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+            if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+                return false;
+            const std::string key = "name=\"Application\">";
+            const size_t      pos = data.find(key);
+            if (pos == std::string::npos)
+                return false;
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find("</metadata>", val_beg);
+            if (val_end == std::string::npos)
+                return false;
+            data.replace(val_beg, val_end - val_beg, value);
+            return true;
+        });
+    };
+
+    REQUIRE(stamp("BambuStudio-02.03.00.70"));
+    CHECK(load_flag(is_bambu));
+
+    REQUIRE(stamp("Snapmaker_Orca-2.2.0"));
+    CHECK_FALSE(load_flag(is_bambu));
+}
+
+TEST_CASE("A project whose components reference themselves fails to load", "[3mf][Regression]")
+{
+    // Point the assembly object's component back at itself. Without a visit cap the BFS
+    // in _generate_current_object_list walks A→A forever. Do not add <regex>: rewrite
+    // the objectid attributes with string find (D-03a).
+    const std::string path    = make_temp_3mf_path("cyclic_components.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &name, std::string &data) {
+        if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+            return false;
+        const size_t components = data.find("<components");
+        if (components == std::string::npos)
+            return false;
+        const size_t object_tag = data.rfind("<object id=\"", components);
+        if (object_tag == std::string::npos)
+            return false;
+        const size_t id_beg = object_tag + 12;
+        const size_t id_end = data.find('"', id_beg);
+        if (id_end == std::string::npos)
+            return false;
+        const std::string object_id = data.substr(id_beg, id_end - id_beg);
+        const std::string key       = "objectid=\"";
+        bool              changed   = false;
+        for (size_t pos = data.find(key, components); pos != std::string::npos; pos = data.find(key, pos + key.size())) {
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find('"', val_beg);
+            if (val_end == std::string::npos)
+                break;
+            data.replace(val_beg, val_end - val_beg, object_id);
+            changed = true;
+            pos     = val_beg + object_id.size();
+        }
+        return changed;
+    }));
+
+    Model model;
+    bool  loaded = true;
+    REQUIRE_NOTHROW(loaded = load_project(path, model));
+    REQUIRE_FALSE(loaded);
+}
+
+TEST_CASE("An object loads up to the component reference budget and fails past it", "[3mf][Regression]")
+{
+    // Orca #16059: at most 100000 component references are queued per object. Every reference besides
+    // the cube's own points at an object the file does not define: it counts toward the budget, then
+    // expands to nothing, so the object stays a single part whatever the count.
+    for (const auto &[references, loads] : {std::pair<int, bool>{100000, true}, std::pair<int, bool>{100001, false}}) {
+        INFO("component references " << references);
+        const std::string path    = make_temp_3mf_path("component_budget_" + std::to_string(references) + ".3mf");
+        const ScopeGuard  cleanup = remove_file_guard(path);
+        store_painted_cube(path);
+
+        std::string dangling;
+        for (int i = 1; i < references; ++i)
+            dangling += "<component objectid=\"999999\"/>";
+        REQUIRE(rewrite_3mf_entries(path, [&dangling](std::string &name, std::string &data) {
+            if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+                return false;
+            const size_t pos = data.find("</components>");
+            if (pos == std::string::npos)
+                return false;
+            data.insert(pos, dangling);
+            return true;
+        }));
+
+        Model model;
+        bool  loaded = !loads;
+        REQUIRE_NOTHROW(loaded = load_project(path, model));
+        REQUIRE(loaded == loads);
+        if (loads) {
+            REQUIRE(model.objects.size() == 1);
+            CHECK(model.objects.front()->volumes.size() == 1);
+        }
+    }
 }
 
 // Object and volume config are written as double-quoted XML attributes. ConfigOptionString
@@ -1721,4 +2310,887 @@ TEST_CASE("Seam metadata restores only recognized modes on compatible base types
         CHECK_FALSE(helper.config.has("sparse_infill_density"));
         CHECK_FALSE(helper.config.has("notes"));
     }
+}
+
+namespace {
+
+// Poll until pred() holds or the deadline passes; avoids flaky fixed sleeps.
+template<typename Pred>
+bool wait_until(Pred pred, int timeout_ms)
+{
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+// Records callback invocations; the backup worker thread calls these too,
+// so state lives in atomics.
+struct BackupCallbackRecorder
+{
+    std::atomic<int> calls{0};
+    std::atomic<int> last_action{-1};
+    std::atomic<bool> saw_backup_response{false};
+    std::function<void(int)> fn()
+    {
+        return [this](int action) {
+            last_action.store(action);
+            if (action == 1)
+                saw_backup_response.store(true);
+            calls.fetch_add(1);
+        };
+    }
+};
+
+} // namespace
+
+// Reproduces the missed-notification stall from the shutdown race:
+// a task queued while the callback is null loses its only
+// m_ui_tasks.size()==1 notification, and after a fresh callback is
+// installed the queue can never be drained again (EVT_BACKUP_POST never
+// fires). set_post_callback must re-announce pending tasks on install.
+TEST_CASE("backup ui-task notification survives null-callback window", "[3mf][bbs-backup]")
+{
+    BackupCallbackRecorder cb0, cb1;
+    set_backup_interval(0);
+
+    struct ClearBackupCallback
+    {
+        ~ClearBackupCallback() { set_backup_callback(nullptr); }
+    } clear_on_exit;
+
+    // Healthy cycle: task queued + announced (action 0), then consumed the
+    // way the GUI does it; consumption triggers the backup response (action 1).
+    set_backup_callback(cb0.fn());
+    backup_soon();
+    REQUIRE(wait_until([&] { return cb0.calls.load() > 0; }, 5000));
+    REQUIRE(cb0.last_action.load() == 0);
+    // The manager is a process-wide singleton: ui tasks left by earlier test
+    // cases make the first announcement arrive before the worker has queued
+    // our Backup task. Keep consuming (as the GUI does) until the backup
+    // response (action 1) shows up, rather than assuming exactly one pass.
+    REQUIRE(wait_until([&] {
+        run_backup_ui_tasks();
+        return cb0.saw_backup_response.load();
+    }, 5000));
+
+    // MainFrame::shutdown(): callback goes null. A task landing in the queue
+    // in this window gets no notification (previously: crash, now: silence).
+    set_backup_callback(nullptr);
+    backup_soon();
+    std::this_thread::sleep_for(std::chrono::seconds(2)); // let the worker queue it
+
+    // New MainFrame installs a fresh callback: pending tasks must be
+    // re-announced, otherwise backup stalls until process exit.
+    set_backup_callback(cb1.fn());
+    REQUIRE(wait_until([&] { return cb1.calls.load() > 0; }, 5000));
+    REQUIRE(cb1.last_action.load() == 0);
+}
+
+// Orca #16306: a relationship must name a part the package actually contains. The writer used to
+// fall back to /Metadata/plate_1.png whenever no cover image was set, so an export that wrote no
+// plate thumbnail still declared one -- a dangling relationship a strict OPC reader may reject.
+SCENARIO("thumbnail relationships are declared only for thumbnails that were written", "[3mf][thumbnail]")
+{
+    GIVEN("a project with one plate") {
+        const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+        boost::filesystem::create_directories(tmp_root);
+        Slic3r::set_temporary_dir(tmp_root.string());
+
+        Model model;
+        build_multi_object_model(model);
+
+        DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+        for (const std::string& key : store_config.keys())
+            if (const ConfigOption* opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+                store_config.erase(key);
+                store_config.option(key, true);
+            }
+
+        PlateData plate;
+        plate.plate_index = 0;
+
+        auto store = [&](const std::string& path, ThumbnailData* thumbnail) {
+            StoreParams sp;
+            sp.path            = path.c_str();
+            sp.model           = &model;
+            sp.config          = &store_config;
+            sp.plate_data_list = { &plate };
+            sp.thumbnail_data  = { thumbnail };
+            sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            return store_bbs_3mf(sp);
+        };
+
+        WHEN("no thumbnail is rendered") {
+            const std::string test_file = (tmp_root / "rels_no_thumbnail.3mf").string();
+            ThumbnailData     none;   // left invalid: nothing was rendered
+            REQUIRE_FALSE(none.is_valid());
+            REQUIRE(store(test_file, &none));
+
+            THEN("the package declares no thumbnail relationship") {
+                const std::string rels = extract_zip_entry(test_file, "_rels/.rels");
+                CHECK(rels.find("3dmodel") != std::string::npos);        // the model is still declared
+                CHECK(rels.find("plate_1.png") == std::string::npos);
+                CHECK(rels.find("plate_1_small.png") == std::string::npos);
+                CHECK(rels.find("thumbnail") == std::string::npos);
+            }
+            boost::filesystem::remove(test_file);
+        }
+
+        WHEN("a plate thumbnail is rendered") {
+            const std::string test_file = (tmp_root / "rels_with_thumbnail.3mf").string();
+            ThumbnailData     rendered;
+            rendered.set(16, 16);
+            rendered.pixels.assign(16 * 16 * 4, static_cast<unsigned char>(0xff));
+            REQUIRE(rendered.is_valid());
+            REQUIRE(store(test_file, &rendered));
+
+            THEN("the relationships name it, and the parts are in the package") {
+                const std::string rels = extract_zip_entry(test_file, "_rels/.rels");
+                CHECK(rels.find("/Metadata/plate_1.png") != std::string::npos);
+                CHECK(rels.find("/Metadata/plate_1_small.png") != std::string::npos);
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1.png").empty());
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1_small.png").empty());
+            }
+            boost::filesystem::remove(test_file);
+        }
+    }
+}
+
+// ---- Orca #16341: painter gizmos reset out-of-range paint states at load --------------------------
+//
+// A 3MF can carry any paint state in paint_seam / paint_fuzzy_skin / paint_supports. The seam,
+// fuzzy skin and support gizmos colour each facet by indexing a table that only has entries up to
+// the states they paint (seam BLOCKER, fuzzy skin FUZZY_SKIN, supports the Edge STABILIZER point
+// state), so they now deserialize with that bound. These tests pin what the gizmos rely on: the
+// loader keeps the crafted state as data, and deserialize() at each gizmo's bound drops it to NONE.
+
+// The paint string a facet painted `state` is written as.
+static std::string paint_string_for(EnforcerBlockerType state)
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 10.));
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, state);
+    REQUIRE(volume->seam_facets.set(selector));
+    const std::string out = volume->seam_facets.get_triangle_as_string(0);
+    REQUIRE_FALSE(out.empty());
+    return out;
+}
+
+TEST_CASE("Out-of-range seam, fuzzy skin and support paint states are dropped at each gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const std::string path    = make_temp_3mf_path("paint_state_out_of_range.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    // store_painted_cube() paints one ENFORCER facet in each of the three streams.
+    const std::string enforcer = paint_string_for(EnforcerBlockerType::ENFORCER);
+    const std::string state3   = paint_string_for(static_cast<EnforcerBlockerType>(3));
+    const std::string state4   = paint_string_for(static_cast<EnforcerBlockerType>(4));
+    const std::string blocker  = paint_string_for(EnforcerBlockerType::BLOCKER);
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_seam=\"" + enforcer + "\"", "paint_seam=\"" + state3 + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_fuzzy_skin=\"" + enforcer + "\"", "paint_fuzzy_skin=\"" + blocker + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_supports=\"" + enforcer + "\"", "paint_supports=\"" + state4 + "\""));
+
+    Model model;
+    REQUIRE(load_project(path, model));
+    REQUIRE(model.objects.size() == 1);
+    const ModelVolume &volume = *model.objects.front()->volumes.front();
+
+    // The loader keeps the states as data; it is the gizmo that must not trust them.
+    REQUIRE(volume.seam_facets.get_data().used_states[3]);
+    REQUIRE(volume.fuzzy_skin_facets.get_data().used_states[size_t(EnforcerBlockerType::BLOCKER)]);
+    REQUIRE(volume.supported_facets.get_data().used_states[4]);
+
+    SECTION("seam (colour table NONE/ENFORCER/BLOCKER)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.seam_facets.get_data(), true, EnforcerBlockerType::BLOCKER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(3)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+    }
+    SECTION("fuzzy skin (single state FUZZY_SKIN)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.fuzzy_skin_facets.get_data(), true, EnforcerBlockerType::FUZZY_SKIN));
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::FUZZY_SKIN) == 0);
+    }
+    SECTION("supports (Edge: up to the STABILIZER point state)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.supported_facets.get_data(), true, EnforcerBlockerType::STABILIZER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(4)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::STABILIZER) == 0);
+    }
+}
+
+// Edge adaptation: the support gizmo's bound is STABILIZER, not upstream's BLOCKER, so painted
+// stabilizer points still load into the gizmo.
+TEST_CASE("Support paint keeps STABILIZER points at the support gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleSelector   painted(mesh);
+    painted.set_facet(0, EnforcerBlockerType::ENFORCER);
+    painted.set_facet(1, EnforcerBlockerType::BLOCKER);
+    painted.set_facet(2, EnforcerBlockerType::STABILIZER);
+
+    TriangleSelector restored(mesh);
+    REQUIRE_NOTHROW(restored.deserialize(painted.serialize(), true, EnforcerBlockerType::STABILIZER));
+    CHECK(restored.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::STABILIZER) == 1);
+}
+
+// ---- Orca #16307: the no-light thumbnail has its own status flag ---------------------------------
+//
+// The no-light pass used to mark thumbnail_status, so a plate whose own thumbnail was not rendered
+// (only on disk) lost Metadata/plate_N.png, and a rendered no-light thumbnail was written a second
+// time from no_light_thumbnail_file.
+
+static int count_zip_entries_named(const std::string &zip_path, const std::string &entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path))
+        return -1;
+    int           count = 0;
+    const mz_uint n     = mz_zip_reader_get_num_files(&archive);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat st;
+        if (mz_zip_reader_file_stat(&archive, i, &st) && entry_name == st.m_filename)
+            ++count;
+    }
+    close_zip_reader(&archive);
+    return count;
+}
+
+static void write_binary_file(const std::string &path, const std::string &body)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << body;
+}
+
+SCENARIO("A rendered no-light thumbnail does not suppress the plate thumbnail", "[3mf][thumbnail]")
+{
+    GIVEN("a plate whose no-light thumbnail is rendered and whose plate thumbnail is only on disk") {
+        prepare_3mf_temp_dir();
+        Model model;
+        build_multi_object_model(model);
+        // Same store config as the thumbnail-relationship scenario above.
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        for (const std::string &key : cfg.keys())
+            if (const ConfigOption *opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+                cfg.erase(key);
+                cfg.option(key, true);
+            }
+
+        // Only the bytes matter: the exporter copies these files into the archive verbatim.
+        const std::string plate_png         = make_temp_3mf_path("no_light_plate_1.png");
+        const std::string no_light_png      = make_temp_3mf_path("no_light_disk_1.png");
+        const ScopeGuard  cleanup_plate     = remove_file_guard(plate_png);
+        const ScopeGuard  cleanup_no_light  = remove_file_guard(no_light_png);
+        const std::string plate_png_body    = std::string("\x89PNG\r\n\x1a\n", 8) + "plate-1-thumbnail-from-disk";
+        const std::string no_light_png_body = std::string("\x89PNG\r\n\x1a\n", 8) + "no-light-thumbnail-from-disk";
+        write_binary_file(plate_png, plate_png_body);
+        write_binary_file(no_light_png, no_light_png_body);
+        REQUIRE(boost::filesystem::exists(plate_png));
+        REQUIRE(boost::filesystem::exists(no_light_png));
+
+        PlateData plate;
+        plate.plate_index             = 0;
+        plate.thumbnail_file          = plate_png;
+        plate.no_light_thumbnail_file = no_light_png;
+
+        ThumbnailData plate_thumbnail; // nothing was rendered for the plate itself
+        ThumbnailData no_light_thumbnail;
+        no_light_thumbnail.set(16, 16);
+        no_light_thumbnail.pixels.assign(16 * 16 * 4, static_cast<unsigned char>(0xff));
+        REQUIRE_FALSE(plate_thumbnail.is_valid());
+        REQUIRE(no_light_thumbnail.is_valid());
+
+        WHEN("the project is written") {
+            const std::string test_file = make_temp_3mf_path("no_light_thumbnail_status.3mf");
+            const ScopeGuard  cleanup   = remove_file_guard(test_file);
+            StoreParams       sp;
+            sp.path                    = test_file.c_str();
+            sp.model                   = &model;
+            sp.config                  = &cfg;
+            sp.plate_data_list         = { &plate };
+            sp.thumbnail_data          = { &plate_thumbnail };
+            sp.no_light_thumbnail_data = { &no_light_thumbnail };
+            sp.strategy                = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            REQUIRE(store_bbs_3mf(sp));
+
+            THEN("the plate thumbnail is still copied in from disk") {
+                CHECK(extract_zip_entry(test_file, "Metadata/plate_1.png") == plate_png_body);
+            }
+            THEN("the rendered no-light thumbnail is written once, not again from disk") {
+                CHECK(count_zip_entries_named(test_file, "Metadata/plate_no_light_1.png") == 1);
+                const std::string got = extract_zip_entry(test_file, "Metadata/plate_no_light_1.png");
+                CHECK_FALSE(got.empty());
+                CHECK(got != no_light_png_body);
+            }
+        }
+    }
+}
+
+namespace {
+
+struct TempBackupDir
+{
+    boost::filesystem::path path;
+    TempBackupDir(const char *tag)
+        : path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path(std::string(tag) + "_%%%%%%%%"))
+    {
+        boost::filesystem::create_directories(path);
+    }
+    ~TempBackupDir()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(path, ec);
+    }
+};
+
+} // namespace
+
+// Every "return false" that leaves origin empty is an instruction to the caller to
+// remove_all() the backup directory (Plater.cpp's EVT_RESTORE_PROJECT handler).
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be interpreted", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+
+    SECTION("an empty lock.txt holds no pid")
+    {
+        std::ofstream lock((backup / "lock.txt").string());
+        lock.close();
+        REQUIRE(boost::filesystem::file_size(backup / "lock.txt") == 0);
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+
+    SECTION("lock.txt holds something that is not a pid")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "not-a-pid";
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+}
+
+#ifndef _WIN32
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read", "[3mf]")
+{
+    if (::geteuid() == 0) {
+        SUCCEED("root ignores the file permissions this test depends on");
+        return;
+    }
+
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+    boost::system::error_code mode_ec;
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::no_perms, mode_ec);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    if (probe.good()) {
+        SUCCEED("this filesystem does not enforce file read permissions");
+        return;
+    }
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::owner_all, mode_ec);
+}
+#endif
+
+#ifdef _WIN32
+// Windows has no mode bits to take away; a lock.txt another process holds open with no sharing
+// cannot be read either, which is the same "state unknown" case.
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read (Windows)", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+
+    struct ExclusiveHandle
+    {
+        HANDLE h;
+        explicit ExclusiveHandle(const boost::filesystem::path &p)
+            : h(::CreateFileW(p.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        ~ExclusiveHandle() { if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h); }
+    } exclusive(backup / "lock.txt");
+    REQUIRE(exclusive.h != INVALID_HANDLE_VALUE);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    REQUIRE_FALSE(probe.good());
+    probe.close();
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+}
+#endif
+TEST_CASE("has_restore_data leaves a spent backup collectable", "[3mf]")
+{
+    TempBackupDir           outer("orca_spent");
+    boost::filesystem::path backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+
+    SECTION("no lock and no project")
+    {
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("a lock from a process that is not us, and no project")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "1";
+
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("the directory does not exist at all")
+    {
+        std::string path = (outer.path / "gone").string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+}
+
+// Edgebuild job 306: with temporary_dir() unset the backup folder resolves to "/snapmaker_orca_model",
+// read-only on macOS. The project settings could not be extracted, the load still reported success with
+// an empty config, and the caller's first option read dereferenced null. A folder under a regular file
+// cannot be created on any platform, root or not, so it stands in for the read-only one here.
+TEST_CASE("A project loads without crashing when the temporary dir is not writable", "[3mf][Regression]")
+{
+    struct RestoreTemporaryDir
+    {
+        std::string saved = Slic3r::temporary_dir();
+        ~RestoreTemporaryDir() { Slic3r::set_temporary_dir(saved); }
+    } restore_temporary_dir;
+
+    TempBackupDir                 outer("orca_unwritable");
+    const boost::filesystem::path blocker = outer.path / "not_a_dir";
+    std::ofstream(blocker.string()) << "a file where the temporary dir would be";
+    const std::string unwritable = (blocker / "tmp").string();
+    Slic3r::set_temporary_dir(unwritable);
+
+    const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl = false;
+    Semver                    file_version;
+    Model                     model;
+    auto load = [&]() {
+        return load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plate_data, &project_presets, &is_bbl, &file_version, nullptr,
+                            LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    };
+
+    SECTION("the backup folder falls back to the system temp folder")
+    {
+        bool ok = false;
+        REQUIRE_NOTHROW(ok = load());
+        release_PlateData_list(plate_data);
+        REQUIRE(ok);
+        REQUIRE_FALSE(model.objects.empty());
+        // The project settings came through, so reading one does not dereference null.
+        REQUIRE(config.option("stabilizer_supports") != nullptr);
+        CHECK(config.opt_enum<StabilizerMode>("stabilizer_supports") == smOff);
+        const std::string backup = model.get_backup_path();
+        CHECK_FALSE(boost::algorithm::starts_with(backup, unwritable));
+        CHECK(boost::filesystem::is_directory(backup));
+        model.remove_backup_path_if_exist();
+    }
+
+    SECTION("a backup folder the caller chose and cannot be written fails the load")
+    {
+        model.set_backup_path((blocker / "backup").string());
+        bool ok = true;
+        REQUIRE_NOTHROW(ok = load());
+        release_PlateData_list(plate_data);
+        CHECK_FALSE(ok);
+        model.set_backup_path("detach");
+    }
+}
+
+// Project strip (tests/design_multi_project_sidebar.md): session restore writes every open project at exit as a 3MF
+// (project_park_save_strategy) and brings it back at the next start as its 3MF is opened (project_park_load_strategy). P4
+// switches keep each project live and never use it. What a restart must not lose: objects, parts and modifiers with their
+// settings and transforms, colour / support / seam paint, the plates (names, the lock), the project settings that live
+// outside the presets, and the presets embedded in it.
+TEST_CASE("A session snapshot of a project comes back as it was", "[3mf][ProjectStrip]")
+{
+    prepare_3mf_temp_dir();
+    const std::string path    = make_temp_3mf_path("project_strip_park.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+
+    Model        src;
+    ModelObject *a = src.add_object();
+    a->name        = "body";
+    ModelVolume *a_main = a->add_volume(make_cube(20., 20., 10.));
+    a_main->name        = "body";
+    ModelVolume *a_part = a->add_volume(make_cylinder(4., 12.));
+    a_part->name        = "peg";
+    a_part->set_offset(Vec3d(5., 5., 10.));
+    ModelVolume *a_mod = a->add_volume(make_cube(6., 6., 6.), ModelVolumeType::PARAMETER_MODIFIER);
+    a_mod->name        = "dense";
+    a_mod->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(60));
+    a->config.set_key_value("wall_loops", new ConfigOptionInt(4));
+    a->add_instance();
+    a->ensure_on_bed();
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(0, EnforcerBlockerType::Extruder2);
+        selector.set_facet(3, EnforcerBlockerType::Extruder3);
+        REQUIRE(a_main->mmu_segmentation_facets.set(selector));
+    }
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(1, EnforcerBlockerType::ENFORCER);
+        selector.set_facet(2, EnforcerBlockerType::BLOCKER);
+        REQUIRE(a_main->supported_facets.set(selector));
+    }
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(5, EnforcerBlockerType::ENFORCER);
+        REQUIRE(a_main->seam_facets.set(selector));
+    }
+    ModelObject *b = src.add_object();
+    b->name        = "pillar";
+    b->add_volume(make_cylinder(5., 30.))->name = "pillar";
+    ModelInstance *b_inst = b->add_instance();
+    b_inst->set_offset(Vec3d(260., 40., 0.));
+    b_inst->set_rotation(Vec3d(0., 0., 0.5));
+    b->ensure_on_bed();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings({ "#FF0000", "#00AE42", "#2850E0" }));
+    cfg.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({ 0., 140., 230., 160., 0., 180., 210., 170., 0. }));
+    cfg.set_key_value("mixed_filament_definitions", new ConfigOptionString("1,2,50,0,1"));
+    cfg.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings({ "", "0.4:high_flow,0.6" }));
+    cfg.set_key_value("layer_height", new ConfigOptionFloat(0.16));
+
+    // A filament preset saved into the project ("@project" presets travel with it).
+    Preset embedded(Preset::TYPE_FILAMENT, "Project PLA", false);
+    embedded.config = DynamicPrintConfig::full_print_config();
+    embedded.config.set_key_value("filament_settings_id", new ConfigOptionStrings({ "Project PLA" }));
+    embedded.config.set_key_value("nozzle_temperature", new ConfigOptionInts({ 213 }));
+
+    // Three plates: the first holds the body, the second (locked, named) the pillar, the third is empty.
+    std::vector<PlateData> plates(3);
+    for (int i = 0; i < 3; ++i) {
+        plates[i].plate_index = i;
+        plates[i].locked      = false;
+    }
+    plates[0].objects_and_instances.emplace_back(0, 0);
+    plates[1].objects_and_instances.emplace_back(1, 0);
+    plates[1].locked     = true;
+    plates[1].plate_name = "pillars";
+
+    StoreParams sp;
+    sp.path     = path;
+    sp.model    = &src;
+    sp.config   = &cfg;
+    sp.strategy = project_park_save_strategy() | SaveStrategy::Zip64; // as Plater::export_3mf adds it
+    sp.project_presets.push_back(&embedded);
+    for (PlateData &p : plates)
+        sp.plate_data_list.push_back(&p);
+    REQUIRE(store_bbs_3mf(sp));
+
+    Model                     dst;
+    DynamicPrintConfig        dst_cfg;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             dst_plates;
+    std::vector<Preset *>     presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    ScopeGuard                release([&dst_plates, &presets, &dst]() {
+        release_PlateData_list(dst_plates);
+        for (Preset *p : presets)
+            delete p;
+        dst.remove_backup_path_if_exist();
+    });
+    // As Plater::priv::load_files reads a project 3MF: the park load strategy plus the version check it adds.
+    REQUIRE(load_bbs_3mf(path.c_str(), &dst_cfg, &ctxt, &dst, &dst_plates, &presets, &is_bbl_3mf, &file_version, nullptr,
+                         project_park_load_strategy() | LoadStrategy::CheckVersion));
+
+    SECTION("objects, parts, modifiers, their settings and where they are")
+    {
+        REQUIRE(dst.objects.size() == 2);
+        for (size_t o = 0; o < 2; ++o) {
+            const ModelObject *s = src.objects[o];
+            const ModelObject *d = dst.objects[o];
+            INFO("object " << s->name);
+            CHECK(d->name == s->name);
+            REQUIRE(d->volumes.size() == s->volumes.size());
+            REQUIRE(d->instances.size() == s->instances.size());
+            for (size_t v = 0; v < s->volumes.size(); ++v) {
+                INFO("volume " << s->volumes[v]->name);
+                CHECK(d->volumes[v]->name == s->volumes[v]->name);
+                CHECK(d->volumes[v]->type() == s->volumes[v]->type());
+                CHECK(d->volumes[v]->mesh().its.indices.size() == s->volumes[v]->mesh().its.indices.size());
+                CHECK(d->volumes[v]->mesh().its.vertices.size() == s->volumes[v]->mesh().its.vertices.size());
+            }
+            const BoundingBoxf3 sb = s->instance_bounding_box(0);
+            const BoundingBoxf3 db = d->instance_bounding_box(0);
+            CHECK(db.min.isApprox(sb.min, 1e-4));
+            CHECK(db.max.isApprox(sb.max, 1e-4));
+        }
+        const ModelObject *d = dst.objects[0];
+        REQUIRE(d->config.has("wall_loops"));
+        CHECK(d->config.opt_int("wall_loops") == 4);
+        REQUIRE(d->volumes[2]->config.has("sparse_infill_density"));
+        CHECK(d->volumes[2]->config.get().option<ConfigOptionPercent>("sparse_infill_density")->value == 60.);
+    }
+
+    SECTION("colour, support and seam paint")
+    {
+        REQUIRE(dst.objects.size() == 2);
+        const ModelVolume *d = dst.objects[0]->volumes[0];
+        CHECK(d->mmu_segmentation_facets.equals(a_main->mmu_segmentation_facets));
+        CHECK(d->supported_facets.equals(a_main->supported_facets));
+        CHECK(d->seam_facets.equals(a_main->seam_facets));
+        CHECK_FALSE(d->mmu_segmentation_facets.empty());
+        CHECK(dst.objects[0]->volumes[1]->mmu_segmentation_facets.empty());
+    }
+
+    SECTION("plates and the lock")
+    {
+        REQUIRE(dst_plates.size() == 3);
+        CHECK_FALSE(dst_plates[0]->locked);
+        CHECK(dst_plates[1]->locked);
+        CHECK(dst_plates[1]->plate_name == "pillars");
+        CHECK_FALSE(dst_plates[2]->locked);
+    }
+
+    SECTION("the project settings outside the presets")
+    {
+        for (const char *key : { "filament_colour", "flush_volumes_matrix", "mixed_filament_definitions", "extruder_rack_nozzle_override",
+                                 "layer_height" }) {
+            INFO("option " << key);
+            REQUIRE(dst_cfg.has(key));
+            CHECK(*dst_cfg.option(key) == *cfg.option(key));
+        }
+    }
+
+    SECTION("the embedded preset")
+    {
+        REQUIRE(presets.size() == 1);
+        CHECK(presets[0]->type == Preset::TYPE_FILAMENT);
+        CHECK(presets[0]->name == "Project PLA");
+        CHECK(presets[0]->is_project_embedded);
+        REQUIRE(presets[0]->config.has("nozzle_temperature"));
+        CHECK(presets[0]->config.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{ 213 });
+    }
+
+    SECTION("the snapshot is a project file, not a backup: it holds its own meshes")
+    {
+        // A crash backup (SaveStrategy::Backup) leaves the meshes out of its .3mf; a parked project must not, or it would
+        // depend on the backup folder the next project's load removes.
+        mz_zip_archive archive;
+        mz_zip_zero_struct(&archive);
+        REQUIRE(open_zip_reader(&archive, path));
+        bool has_object_model = false;
+        for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&archive); ++i) {
+            mz_zip_archive_file_stat stat;
+            if (mz_zip_reader_file_stat(&archive, i, &stat) && boost::algorithm::starts_with(std::string(stat.m_filename), "3D/Objects/"))
+                has_object_model = true;
+        }
+        close_zip_reader(&archive);
+        CHECK(has_object_model);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Errors in the project exporter the Rust port turned up.
+
+namespace {
+
+// The entry names of a zip file.
+std::vector<std::string> zip_entry_names(const std::string &path)
+{
+    std::vector<std::string> names;
+    mz_zip_archive           zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const mz_uint n = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat st;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &st));
+        names.emplace_back(st.m_filename);
+    }
+    close_zip_reader(&zip);
+    return names;
+}
+
+} // namespace
+
+// An object's name went into the name of its file in the package as it was, so a '/' in it made a folder there, and
+// "../" climbed out of 3D/Objects. The name is now made fit for a file name; the object keeps its own.
+TEST_CASE("An object's name with a slash makes no folder in the project 3MF", "[3mf][Regression]")
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "object_name_with_slash.3mf").string();
+
+    const std::string name = "../parts/bracket\\left";
+    Model             src_model;
+    ModelObject      *src_object = src_model.add_object();
+    src_object->name             = name;
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary | SaveStrategy::SplitModel;
+    INFO(store_params.error);
+    REQUIRE(store_bbs_3mf(store_params));
+
+    size_t object_files = 0;
+    for (const std::string &entry : zip_entry_names(test_file)) {
+        INFO(entry);
+        // No step up or back in the path, and no other separator.
+        std::vector<std::string> parts;
+        boost::split(parts, entry, boost::is_any_of("/"));
+        for (const std::string &part : parts)
+            CHECK((part != ".." && part != "."));
+        CHECK(entry.find('\\') == std::string::npos);
+        if (boost::starts_with(entry, "3D/Objects/")) {
+            ++object_files;
+            // Straight in 3D/Objects, no folder of its own.
+            CHECK(entry.find('/', std::string("3D/Objects/").size()) == std::string::npos);
+        }
+    }
+    CHECK(object_files == 1);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::EnableSilent};
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf,
+                                     &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                         LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 1);
+    CHECK(dst_model.objects.front()->name == name);
+    CHECK(dst_model.objects.front()->volumes.size() == 1);
+    CHECK(dst_model.objects.front()->volumes.front()->mesh().its.indices.size() == 12);
+}
+
+// The small plate thumbnail is the picture shrunk to 128 x 128 by averaging blocks of it. Its pixel index swapped
+// the block's width and height, which comes out right only for a square picture: of a 512 x 256 picture, the top
+// half of the small one was left empty and the rows of the other half wrapped. (Its write was also checked with the
+// big picture's freed pointer where its own was meant.)
+TEST_CASE("The small plate thumbnail of a picture wider than tall is the picture shrunk", "[3mf][thumbnail][Regression]")
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "small_thumbnail_wide.3mf").string();
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube";
+    object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    object->add_instance();
+    object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    // 512 x 256: red in the left half, green in the bottom half of the rows, opaque.
+    ThumbnailData picture;
+    picture.set(512, 256);
+    for (unsigned int y = 0; y < 256; ++y)
+        for (unsigned int x = 0; x < 512; ++x) {
+            unsigned char *px = &picture.pixels[4 * (y * 512 + x)];
+            px[0] = x < 256 ? 255 : 0;
+            px[1] = y < 128 ? 255 : 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+    PlateData plate;
+    plate.plate_index = 0;
+    StoreParams sp;
+    sp.path            = test_file;
+    sp.model           = &model;
+    sp.config          = &store_config;
+    sp.plate_data_list = {&plate};
+    sp.thumbnail_data  = {&picture};
+    sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+
+    const std::string big   = extract_zip_entry(test_file, "Metadata/plate_1.png");
+    const std::string small_png = extract_zip_entry(test_file, "Metadata/plate_1_small.png");
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE_FALSE(big.empty());
+    REQUIRE_FALSE(small_png.empty());
+    png::ImageColorscale big_img, small_img;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{big.data(), big.size()}, big_img));
+    REQUIRE(png::decode_colored_png(png::ReadBuf{small_png.data(), small_png.size()}, small_img));
+    REQUIRE(big_img.cols == 512);
+    REQUIRE(big_img.rows == 256);
+    REQUIRE(small_img.cols == 128);
+    REQUIRE(small_img.rows == 128);
+    const size_t bb = size_t(big_img.bytes_per_pixel), sb = size_t(small_img.bytes_per_pixel);
+    REQUIRE(bb >= 3);
+    REQUIRE(sb >= 3);
+
+    // Each small pixel is the mean of its 4 x 2 block of the big picture as it is in the file (the rows are written
+    // bottom up, both alike).
+    size_t wrong = 0;
+    for (size_t r = 0; r < 128; ++r)
+        for (size_t c = 0; c < 128; ++c)
+            for (size_t ch = 0; ch < 3; ++ch) {
+                int sum = 0;
+                for (size_t m = 0; m < 2; ++m)
+                    for (size_t n = 0; n < 4; ++n)
+                        sum += big_img.buf[((2 * r + m) * 512 + 4 * c + n) * bb + ch];
+                if (std::abs(int(small_img.buf[(r * 128 + c) * sb + ch]) - sum / 8) > 1)
+                    ++wrong;
+            }
+    INFO(wrong << " of " << 128 * 128 * 3 << " colour values of the small thumbnail are not the mean of their block");
+    CHECK(wrong == 0);
 }

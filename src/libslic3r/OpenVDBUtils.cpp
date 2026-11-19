@@ -86,9 +86,11 @@ openvdb::FloatGrid::Ptr mesh_to_grid(const indexed_triangle_set &    mesh,
         grid = openvdb::tools::levelSetRebuild(*grid, 0., exteriorBandWidth,
                                                interiorBandWidth);
     } else if(meshparts.empty()) {
-        // Splitting failed, fall back to hollow the original mesh
+        // Splitting failed, fall back to hollow the original mesh. At the same
+        // voxel_scale as the parts above: grid_to_mesh() divides by the scale stored
+        // below, so a field built at the default scale of 1 came back shrunk by it.
         grid = openvdb::tools::meshToVolume<openvdb::FloatGrid>(
-            TriangleMeshDataAdapter{mesh}, tr, exteriorBandWidth,
+            TriangleMeshDataAdapter{mesh, voxel_scale}, tr, exteriorBandWidth,
             interiorBandWidth, flags);
     }
 

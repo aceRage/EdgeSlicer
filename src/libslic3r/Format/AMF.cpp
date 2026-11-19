@@ -311,8 +311,13 @@ void AMFParserContext::startElement(const char *name, const char **atts)
     case 2:
         if (strcmp(name, "metadata") == 0) {
             if (m_path[1] == NODE_TYPE_MATERIAL || m_path[1] == NODE_TYPE_OBJECT) {
-                m_value[0] = get_attribute(atts, "type");
-                node_type_new = NODE_TYPE_METADATA;
+                const char *type = get_attribute(atts, "type");
+                if (type == nullptr)
+                    this->stop(); // Orca #16060: malformed AMF, metadata without a type
+                else {
+                    m_value[0]     = type;
+                    node_type_new = NODE_TYPE_METADATA;
+                }
             }
         }/* else if (strcmp(name, "layer_config_ranges") == 0 && m_path[1] == NODE_TYPE_OBJECT)
                 node_type_new = NODE_TYPE_LAYER_CONFIG;*/
@@ -987,7 +992,7 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
             if (!XML_Parse(data->parser, (const char*)pBuf, (int)n, (file_ofs + n == data->stat.m_uncomp_size) ? 1 : 0) || data->ctx.error())
             {
                 char error_buf[1024];
-                ::sprintf(error_buf, "Parsing file %s error at line %d: {%s}", data->stat.m_filename, (int) XML_GetCurrentLineNumber(data->parser), data->ctx.error_message());
+                ::snprintf(error_buf, sizeof(error_buf), "Parsing file %s error at line %d: {%s}", data->stat.m_filename, (int) XML_GetCurrentLineNumber(data->parser), data->ctx.error_message());
                 throw Slic3r::FileIOError(error_buf);
             }
 

@@ -2,10 +2,13 @@
 
 #include "GLGizmoBase.hpp"
 #include "GLGizmosCommon.hpp"
+#include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/MeshUtils.hpp"
 #include "slic3r/GUI/Selection.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <glad/gl.h>
 
@@ -34,11 +37,103 @@ void FacetPicker::set_active(bool active)
         reset();
 }
 
+const indexed_triangle_set &FacetPicker::Hit::its() const
+{
+    return mesh ? mesh->its : volume->mesh().its;
+}
+
 void FacetPicker::reset()
 {
     m_hit            = Hit();
     m_rendered_facet = -1;
     m_highlight.reset();
+    m_region.clear();
+    m_region_its   = nullptr;
+    m_region_dirty = false;
+}
+
+void FacetPicker::set_highlight(std::vector<int> facets, const ColorRGBA &color, size_t max_facets)
+{
+    if (facets.size() > max_facets)
+        facets.resize(max_facets); // the face itself is still whatever the caller grew; only the overlay is capped
+    m_region       = std::move(facets);
+    m_region_its   = (m_region.empty() || !m_hit.valid()) ? nullptr : &m_hit.its();
+    m_region_color = color;
+    m_region_dirty = true;
+    m_rendered_facet = -1; // back on the single facet, rebuild it
+}
+
+bool FacetPicker::update_from_scene(const Vec2d &mouse_position, const Selection &selection, const Camera &camera)
+{
+    m_hit = Hit();
+
+    const Model *model = selection.get_model();
+    if (model == nullptr)
+        return false;
+
+    const GLVolume *closest_volume = nullptr;
+    Transform3d     closest_trafo  = Transform3d::Identity();
+    Vec3f           closest_hit    = Vec3f::Zero(), closest_normal = Vec3f::Zero();
+    size_t          closest_facet  = 0;
+    double          closest_sq     = std::numeric_limits<double>::max();
+
+    for (unsigned int idx : selection.get_volume_idxs()) {
+        const GLVolume *v = selection.get_volume(idx);
+        if (v == nullptr || v->is_modifier || v->is_wipe_tower || !v->mesh_raycaster)
+            continue;
+        const int object_idx = v->object_idx();
+        const int volume_idx = v->volume_idx();
+        if (object_idx < 0 || object_idx >= int(model->objects.size()))
+            continue;
+        const ModelObject *mo = model->objects[object_idx];
+        if (volume_idx < 0 || volume_idx >= int(mo->volumes.size()) || !mo->volumes[volume_idx]->is_model_part())
+            continue;
+
+        // The same matrix the scene raycaster places this volume with.
+        const Transform3d trafo = v->world_matrix();
+        Vec3f  hit = Vec3f::Zero(), normal = Vec3f::Zero();
+        size_t facet = 0;
+        bool   ok    = v->mesh_raycaster->unproject_on_mesh(mouse_position, trafo, camera, hit, normal, nullptr, &facet);
+        if (!ok) {
+            // unproject_on_mesh() rejects an odd number of crossings as "the camera is inside", which is also what
+            // an open or non-manifold mesh gives. Take the nearest crossing then, but not one below the bed, as
+            // unproject_on_mesh() would not.
+            ok = v->mesh_raycaster->closest_hit(mouse_position, trafo, camera, hit, normal, nullptr, &facet) &&
+                 (trafo * hit.cast<double>()).z() >= SINKING_Z_THRESHOLD;
+        }
+        if (!ok)
+            continue;
+        const double sq = (camera.get_position() - trafo * hit.cast<double>()).squaredNorm();
+        if (sq < closest_sq) {
+            closest_sq     = sq;
+            closest_volume = v;
+            closest_trafo  = trafo;
+            closest_hit    = hit;
+            closest_normal = normal;
+            closest_facet  = facet; // with the nearest hit, never after the loop (see update())
+        }
+    }
+
+    if (closest_volume == nullptr)
+        return false;
+
+    std::shared_ptr<const TriangleMesh> mesh = closest_volume->mesh_raycaster->get_mesh();
+    if (!mesh || closest_facet >= mesh->its.indices.size())
+        return false;
+
+    const Vec3d n = world_normal(closest_trafo, closest_normal);
+    if (n.isZero())
+        return false; // degenerate facet
+
+    m_hit.facet        = int(closest_facet);
+    m_hit.volume       = model->objects[closest_volume->object_idx()]->volumes[closest_volume->volume_idx()];
+    m_hit.trafo        = closest_trafo;
+    m_hit.world_pos    = closest_trafo * closest_hit.cast<double>();
+    m_hit.world_normal = n;
+    m_hit.gl_volume    = closest_volume;
+    m_hit.volume_idx   = closest_volume->volume_idx();
+    m_hit.mesh         = std::move(mesh);
+    return true;
 }
 
 bool FacetPicker::update(const Vec2d &mouse_position, const CommonGizmosDataPool *pool, const Selection &selection, const Camera &camera)
@@ -120,12 +215,41 @@ void FacetPicker::render(const Camera &camera)
     if (!m_hit.valid())
         return;
 
+    const bool region = !m_region.empty();
+    if (region) {
+        // The facets belong to the mesh they were grown on; a hit on another part waits for the caller's next region.
+        if (m_region_its != &m_hit.its())
+            return;
+        if (m_region_dirty) {
+            m_region_dirty = false;
+            m_highlight.reset();
+
+            const indexed_triangle_set &its  = *m_region_its;
+            // Lift off the surface so the highlight wins the depth test against the model.
+            const Vec3d                 bias = m_hit.world_normal * 0.05;
+
+            indexed_triangle_set temp_its;
+            temp_its.vertices.reserve(3 * m_region.size());
+            temp_its.indices.reserve(m_region.size());
+            for (int facet : m_region) {
+                if (facet < 0 || size_t(facet) >= its.indices.size())
+                    continue;
+                const auto &tri = its.indices[facet];
+                const int   first = int(temp_its.vertices.size());
+                for (int i = 0; i < 3; ++i)
+                    temp_its.vertices.push_back((m_hit.trafo * its.vertices[tri[i]].cast<double>() + bias).cast<float>());
+                temp_its.indices.push_back({ first, first + 1, first + 2 });
+            }
+            if (!temp_its.indices.empty())
+                m_highlight.init_from(temp_its);
+        }
+    }
     // Rebuild only when the hovered facet actually changes.
-    if (m_rendered_facet != m_hit.facet) {
+    else if (m_rendered_facet != m_hit.facet) {
         m_rendered_facet = m_hit.facet;
         m_highlight.reset();
 
-        const indexed_triangle_set &its = m_hit.volume->mesh().its;
+        const indexed_triangle_set &its = m_hit.its();
         const auto                 &tri = its.indices[m_hit.facet];
         // Lift off the surface so the highlight wins the depth test against the model.
         const Vec3d bias = m_hit.world_normal * 0.05;
@@ -152,7 +276,7 @@ void FacetPicker::render(const Camera &camera)
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
     // Vertices are already in world space, so the model part of the matrix is identity.
     shader->set_uniform("view_model_matrix", camera.get_view_matrix());
-    m_highlight.set_color(GLGizmoBase::FLATTEN_HOVER_COLOR);
+    m_highlight.set_color(region ? m_region_color : GLGizmoBase::FLATTEN_HOVER_COLOR);
     m_highlight.render();
     shader->stop_using();
     glsafe(::glEnable(GL_CULL_FACE));

@@ -493,6 +493,168 @@ TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixe
     CHECK(checked > 100);
 }
 
+// Snapmaker #876: an empty flush_volumes_matrix / flush_volumes_vector (written after a device
+// filament sync) made boost::lexical_cast throw and aborted the whole preset load.
+TEST_CASE("parse_flush_volume_list tolerates empty and malformed lists", "[Preset][U1][FlushVolumes]")
+{
+    std::vector<double> out{ 1.0 };
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("", out));
+    CHECK(out.empty());
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("||", out));
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("abc", out));
+
+    REQUIRE(PresetBundle::parse_flush_volume_list("0|140.5||bad|280", out));
+    CHECK(out == std::vector<double>{ 0., 140.5, 280. });
+}
+
+TEST_CASE("Loading selections with empty flush volumes does not throw and keeps the defaults", "[Preset][U1][FlushVolumes]")
+{
+    SnapmakerTree &t = tree();
+    AppConfig      config = t.wizard_enabled_u1();
+    PresetBundle::PresetPreferences preferred;
+    preferred.printer_model_id = U1_MODEL;
+    preferred.printer_variant  = "0.4";
+    t.bundle->load_selections(config, preferred);
+    const std::string printer = t.bundle->printers.get_selected_preset_name();
+    const std::vector<double> before = t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+
+    config.set_printer_setting(printer, "flush_volumes_matrix", "");
+    config.set_printer_setting(printer, "flush_volumes_vector", "");
+    CHECK_NOTHROW(t.bundle->load_selections(config, preferred));
+    CHECK_NOTHROW(t.bundle->update_selections(config));
+    CHECK(t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values == before);
+
+    // A well-formed list is still read (update_multi_material_filament_presets then resizes it to the
+    // filament count, so only check that loading it is fine and leaves a matrix behind).
+    config.set_printer_setting(printer, "flush_volumes_matrix", "0|10|20|0");
+    CHECK_NOTHROW(t.bundle->update_selections(config));
+    CHECK_FALSE(t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values.empty());
+}
+
+// Snapmaker #759 + #920: the U1 has no Cool Steel Plate (btSuperTack). It stays available only
+// through support_multi_bed_types (the "ex" list), and the start G-code never branches on it.
+// Edge (owner 2026-10-15): Cool Plate (btPC) is the fourth U1 plate.
+TEST_CASE("The U1 plate list has its three plates plus Cool Plate and no Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    const ConfigOptionDef *def = print_config_def.get("curr_bed_type");
+    REQUIRE(def != nullptr);
+
+    CHECK(def->enum_values_u1 == std::vector<std::string>{ "Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate", "Cool Plate" });
+    REQUIRE(def->enum_labels_u1.size() == def->enum_values_u1.size());
+    for (const std::string &label : def->enum_labels_u1)
+        CHECK(label != "Cool Steel Plate");
+
+    const auto &ex = def->enum_values_ex;
+    CHECK(std::find(ex.begin(), ex.end(), "Supertack Plate") != ex.end());
+    CHECK(def->enum_values_ex.size() == def->enum_labels_ex.size());
+}
+
+TEST_CASE("The U1 start G-code does not branch on the Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    SnapmakerTree &t = tree();
+    for (const char *name : { "Snapmaker U1 (0.4 nozzle)", "Snapmaker U1 (0.2 nozzle)", "Snapmaker U1 (0.6 nozzle)", "Snapmaker U1 (0.8 nozzle)" }) {
+        const Preset *printer = t.bundle->printers.find_preset(name, false);
+        REQUIRE(printer != nullptr);
+        const std::string &start = printer->config.opt_string("machine_start_gcode");
+        INFO(name);
+        CHECK(start.find("Supertack") == std::string::npos);
+        CHECK(start.find("Cool Steel") == std::string::npos);
+    }
+}
+
+// Edge (owner 2026-10-15): Cool Plate is on the U1 list, so every @U1 PLA, PLA support, PVA and TPU
+// preset can print on it at a cool-plate temperature (30-45 C), not 0 (unsupported) or 60 C.
+TEST_CASE("U1 PLA, PVA and TPU presets have Cool Plate bed temperatures", "[Preset][U1][BedType]")
+{
+    size_t checked = 0;
+    for (const Preset &preset : tree().bundle->filaments) {
+        if (!preset.is_system || preset.name.find("@U1") == std::string::npos)
+            continue;
+        const auto *type = preset.config.option<ConfigOptionStrings>("filament_type");
+        if (type == nullptr || type->values.empty())
+            continue;
+        const std::string &t = type->values.front();
+        if (t != "PLA" && t != "PVA" && t != "TPU")
+            continue;
+        ++checked;
+        INFO(preset.name);
+        for (const char *key : { "cool_plate_temp", "cool_plate_temp_initial_layer" }) {
+            const auto *temp = preset.config.option<ConfigOptionInts>(key);
+            REQUIRE(temp != nullptr);
+            for (int v : temp->values) {
+                INFO(key);
+                CHECK(v >= 30);
+                CHECK(v <= 45);
+            }
+        }
+    }
+    CHECK(checked > 50);
+}
+
+TEST_CASE("The U1 model lists Generic PLA @U1 as default materials for the wizard deselect-all path", "[Preset][U1]")
+{
+    SnapmakerTree &t  = tree();
+    const auto     vit = t.bundle->vendors.find(PresetBundle::SM_BUNDLE);
+    REQUIRE(vit != t.bundle->vendors.end());
+    const VendorProfile::PrinterModel *model = nullptr;
+    for (const VendorProfile::PrinterModel &m : vit->second.models)
+        if (m.name == U1_MODEL) {
+            model = &m;
+            break;
+        }
+    REQUIRE(model != nullptr);
+
+    const std::vector<std::string> wanted = {
+        "Generic PLA @U1 0.2 nozzle",
+        "Generic PLA @U1 0.4 nozzle",
+        "Generic PLA @U1 0.6 nozzle",
+        "Generic PLA @U1 0.8 nozzle",
+    };
+    for (const std::string &name : wanted) {
+        INFO(name);
+        CHECK(std::find(model->default_materials.begin(), model->default_materials.end(), name) !=
+              model->default_materials.end());
+        const Preset *filament = t.bundle->filaments.find_preset(name, false);
+        REQUIRE(filament != nullptr);
+        CHECK(filament->is_system);
+    }
+}
+
+TEST_CASE("Each U1 machine falls back to a compatible Generic PLA @U1 filament", "[Preset][U1]")
+{
+    SnapmakerTree &t = tree();
+
+    struct Expect {
+        const char               *printer;
+        std::vector<std::string>  filaments;
+    };
+    const Expect expected[] = {
+        { "Snapmaker U1 (0.2 nozzle)",     { "Generic PLA @U1 0.2 nozzle" } },
+        { "Snapmaker U1 (0.4 nozzle)",     { "Generic PLA @U1 0.4 nozzle" } },
+        { "Snapmaker U1 (0.6 nozzle)",     { "Generic PLA @U1 0.6 nozzle" } },
+        { "Snapmaker U1 (0.8 nozzle)",     { "Generic PLA @U1 0.8 nozzle" } },
+        { "Snapmaker U1 (0.4+0.6 nozzle)",
+          { "Generic PLA @U1 0.4 nozzle", "Generic PLA @U1 0.4 nozzle", "Generic PLA @U1 0.6 nozzle",
+            "Generic PLA @U1 0.6 nozzle" } },
+    };
+    for (const Expect &e : expected) {
+        INFO(e.printer);
+        const Preset *printer = t.bundle->printers.find_preset(e.printer, false);
+        REQUIRE(printer != nullptr);
+        const auto *dfp = printer->config.option<ConfigOptionStrings>("default_filament_profile");
+        REQUIRE(dfp != nullptr);
+        CHECK(dfp->values == e.filaments);
+        for (const std::string &name : e.filaments) {
+            INFO(name);
+            const Preset *filament = t.bundle->filaments.find_preset(name, false);
+            REQUIRE(filament != nullptr);
+            const auto *compat = filament->config.option<ConfigOptionStrings>("compatible_printers");
+            REQUIRE(compat != nullptr);
+            CHECK(std::find(compat->values.begin(), compat->values.end(), e.printer) != compat->values.end());
+        }
+    }
+}
+
 TEST_CASE("U1 toolchange lift is absolute and capped by object, relative by layer", "[Preset][U1]")
 {
     // Snap #958 / D-09a–c: 20261003 templates on all five U1 machines, including Edge's

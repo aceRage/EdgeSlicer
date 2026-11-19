@@ -2,6 +2,7 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtruderAreas.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
@@ -12,6 +13,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -423,6 +425,8 @@ DynamicPrintConfig h2d_config(const std::string &sequence, const std::string &mo
             { "wipe_tower_x", tower_x },
             { "wipe_tower_y", 250. },
             { "wipe_tower_rotation_angle", 0 },
+            // These cases size a rectangle tower by prime_tower_width; the BBL presets default to rib.
+            { "wipe_tower_wall_type", "rectangle" },
         });
     return cfg;
 }
@@ -457,9 +461,21 @@ std::string validate_warning(const DynamicPrintConfig &cfg, Model &model)
     Print print;
     print.is_BBL_printer() = true;
     print.apply(model, cfg);
-    StringObjectException warning;
-    print.validate(&warning);
-    return warning.string;
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    std::string text;
+    for (const StringObjectException &w : warnings)
+        text += w.string;
+    return text;
+}
+
+// The blocking error validate() gives for a plate with objects in the shared middle, so that only the tower can be at fault.
+std::string tower_error(const DynamicPrintConfig &cfg)
+{
+    Model model;
+    add_cube(model, 150., 1);
+    add_cube(model, 200., 2);
+    return validate(cfg, model);
 }
 
 bool reach_error(const std::string &text) { return text.find("can reach") != std::string::npos || text.find("can print everything") != std::string::npos; }
@@ -646,9 +662,147 @@ SCENARIO("the prime tower should sit where both nozzles reach", "[ExtruderAreas]
     }
     GIVEN("a manual map that uses both nozzles")
     {
-        THEN("a tower in the left-only strip is warned about")
+        THEN("a tower in the left-only strip is refused (the right nozzle cannot reach it), not just warned about")
         {
-            CHECK(tower_warned(h2d_config("by layer", "Manual", "1,2", 5.)));
+            CHECK_FALSE(tower_warned(h2d_config("by layer", "Manual", "1,2", 5.)));
+            CHECK(tower_error(h2d_config("by layer", "Manual", "1,2", 5.)).find("prime tower") != std::string::npos);
+        }
+    }
+}
+
+// The prime tower is printed by every nozzle a used filament is mapped to. A manual map names those nozzles,
+// so a tower one of them cannot reach is refused before slicing (the objects get the same treatment).
+SCENARIO("a prime tower out of reach of a nozzle that prints on it is refused", "[ExtruderAreas][H2D][PrimeTower]")
+{
+    auto has_tower_text = [](const std::string &text) { return text.find("prime tower is outside") != std::string::npos; };
+    auto refused = [&](const DynamicPrintConfig &cfg) { return has_tower_text(tower_error(cfg)); };
+
+    GIVEN("a tower inside both nozzles' areas")
+    {
+        THEN("nothing is reported, whichever nozzles print on it")
+        {
+            CHECK_FALSE(refused(h2d_config("by layer", "Manual", "1,2", 150.)));
+            CHECK_FALSE(refused(h2d_config("by layer", "Manual", "2,2", 150.)));
+            CHECK_FALSE(refused(h2d_config("by layer", "Manual", "1,1", 150.)));
+        }
+    }
+    GIVEN("a tower in the left-only strip (X 0..25)")
+    {
+        WHEN("the right nozzle prints on it")
+        {
+            const std::string text = tower_error(h2d_config("by layer", "Manual", "2,2", 5.));
+            THEN("it is refused, naming the nozzle, the filaments and what to do")
+            {
+                CAPTURE(text);
+                CHECK(has_tower_text(text));
+                CHECK(text.find("right nozzle") != std::string::npos);
+                CHECK(text.find("filament 1, 2") != std::string::npos);
+                CHECK(text.find("grouping") != std::string::npos);
+            }
+        }
+        WHEN("both nozzles are used")
+        {
+            const std::string text = tower_error(h2d_config("by layer", "Manual", "1,2", 5.));
+            THEN("only the nozzle that cannot reach it is named")
+            {
+                CAPTURE(text);
+                CHECK(has_tower_text(text));
+                CHECK(text.find("right nozzle") != std::string::npos);
+                CHECK(text.find("left nozzle") == std::string::npos);
+                CHECK(text.find("filament 2") != std::string::npos);
+            }
+        }
+        WHEN("only the left nozzle prints on it")
+        {
+            THEN("it is fine") { CHECK_FALSE(refused(h2d_config("by layer", "Manual", "1,1", 5.))); }
+        }
+        WHEN("the grouping is automatic")
+        {
+            THEN("it is not an error, because the nozzles are not known yet (the warning stays)")
+            {
+                CHECK_FALSE(refused(h2d_config("by layer", "Auto For Flush", "1,2", 5.)));
+            }
+        }
+    }
+    GIVEN("a narrow tower in the right-only strip (X 325..350)")
+    {
+        THEN("the left nozzle is refused")
+        {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "1,2", 326.);
+            cfg.option<ConfigOptionFloat>("prime_tower_width")->value = 10.;
+            const std::string text = tower_error(cfg);
+            CAPTURE(text);
+            CHECK(has_tower_text(text));
+            CHECK(text.find("left nozzle") != std::string::npos);
+            CHECK(text.find("right nozzle") == std::string::npos);
+        }
+    }
+    GIVEN("a project saved before the profiles joined the two areas (one group of eight points)")
+    {
+        const auto merge = [](DynamicPrintConfig &cfg) {
+            auto *groups = cfg.option<ConfigOptionPointsGroups>("extruder_printable_area");
+            REQUIRE(groups != nullptr);
+            REQUIRE(groups->values.size() == 2);
+            std::vector<Vec2d> merged = groups->values[0];
+            merged.insert(merged.end(), groups->values[1].begin(), groups->values[1].end());
+            REQUIRE(merged.size() == 8);
+            groups->values = { merged };
+        };
+        THEN("the areas are split back and the tower is still refused")
+        {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,2", 5.);
+            merge(cfg);
+            CHECK(refused(cfg));
+        }
+        THEN("and a tower in the middle is fine")
+        {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,2", 150.);
+            merge(cfg);
+            CHECK_FALSE(refused(cfg));
+        }
+    }
+    GIVEN("a plate that is not the first one (offset in the plate grid)")
+    {
+        // wipe_tower_x/y are per plate and plate-local; the plate sits 400 mm along X in the grid.
+        const Vec3d origin(400., 0., 0.);
+        auto on_second_plate = [&](double tower_x) {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,2", 150.);
+            cfg.option<ConfigOptionFloats>("wipe_tower_x")->values = { 150., tower_x };
+            cfg.option<ConfigOptionFloats>("wipe_tower_y")->values = { 250., 250. };
+            Model model;
+            add_cube(model, origin.x() + 150., 1);
+            add_cube(model, origin.x() + 200., 2);
+            Print print;
+            print.is_BBL_printer() = true;
+            print.set_plate_index(1);
+            print.set_plate_origin(origin);
+            print.apply(model, cfg);
+            return print.validate().string;
+        };
+        THEN("the tower is judged in plate-local coordinates")
+        {
+            CHECK(has_tower_text(on_second_plate(5.)));
+            CHECK_FALSE(has_tower_text(on_second_plate(150.)));
+        }
+    }
+    GIVEN("a printer that is not affected")
+    {
+        THEN("a profile without per-nozzle areas (the U1, the Creator 5) is never checked")
+        {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,2", 5.);
+            cfg.option<ConfigOptionPointsGroups>("extruder_printable_area")->values.clear();
+            CHECK_FALSE(refused(cfg));
+        }
+        THEN("two nozzles that reach the same bed are never checked")
+        {
+            DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "2,2", 5.);
+            auto *groups = cfg.option<ConfigOptionPointsGroups>("extruder_printable_area");
+            groups->values = { groups->values[0], groups->values[0] };
+            CHECK_FALSE(refused(cfg));
+        }
+        THEN("a plate without a tower reports nothing")
+        {
+            CHECK_FALSE(refused(h2d_config("by layer", "Manual", "2,2")));
         }
     }
 }
@@ -684,4 +838,287 @@ SCENARIO("the geometric unprintables the grouping gets", "[ExtruderAreas][H2D]")
             CHECK(group->get_extruder_map(false) == std::vector<int>{ 1, 2 });
         }
     }
+}
+
+// Upstream Orca #16947 for Edge's mixed filaments: a mixed filament's virtual slot sits above the real filament
+// count, so it used to be dropped and its components were never kept off the nozzle that cannot reach the object.
+SCENARIO("a mixed filament's components are what the grouping keeps off an unreachable nozzle", "[ExtruderAreas][H2D][MixedFilament]")
+{
+    GIVEN("an H2D plate with an object printed in a mix of filaments 1 and 2 in the left strip")
+    {
+        DynamicPrintConfig   cfg = h2d_config("by layer", "Auto For Flush", "1,1");
+        MixedFilamentManager mixed;
+        mixed.add_custom_filament(1, 2, 50, { "#E01919", "#1943E0" });
+        const unsigned int virtual_id = mixed.filament_id_from_mixed_index(0, 2);
+        REQUIRE(virtual_id == 3);
+        cfg.set("mixed_filament_definitions", mixed.serialize_custom_entries());
+        Model model;
+        add_cube(model, 12., int(virtual_id));
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        print.validate();
+        print.set_status_silent();
+        Test::gcode(print);
+        const auto &unprintables = print.get_geometric_unprintable_filaments();
+        REQUIRE(unprintables.size() == 2);
+        THEN("both components are unprintable on the right nozzle, neither on the left")
+        {
+            CHECK(unprintables[1].count(0) == 1);
+            CHECK(unprintables[1].count(1) == 1);
+            CHECK(unprintables[0].empty());
+        }
+        THEN("the grouping puts both components on the left nozzle")
+        {
+            const auto group = print.get_layered_nozzle_group_result();
+            REQUIRE(group);
+            CHECK(group->get_extruder_id(0) == 0);
+            CHECK(group->get_extruder_id(1) == 0);
+        }
+    }
+}
+
+// Every filament prints on the prime tower, so a tower in the strip only the left nozzle reaches means the
+// right nozzle cannot print anything. An automatic grouping has to know that.
+SCENARIO("an automatic grouping keeps every filament off a nozzle that cannot reach the prime tower", "[ExtruderAreas][H2D][PrimeTower]")
+{
+    GIVEN("a tower in the left-only strip and two filaments with objects in the shared middle")
+    {
+        const DynamicPrintConfig cfg = h2d_config("by layer", "Auto For Flush", "2,2", 5.);
+        Model model;
+        add_cube(model, 150., 1);
+        add_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        const StringObjectException err = print.validate();
+        CAPTURE(err.string);
+        CHECK(err.string.empty());
+        print.set_status_silent();
+        Test::gcode(print);
+        THEN("both filaments are grouped onto the left nozzle")
+        {
+            const auto group = print.get_layered_nozzle_group_result();
+            REQUIRE(group);
+            CHECK(group->get_extruder_map(false) == std::vector<int>{ 1, 1 });
+        }
+    }
+    GIVEN("a tower in the middle")
+    {
+        const DynamicPrintConfig cfg = h2d_config("by layer", "Auto For Flush", "2,2", 150.);
+        Model model;
+        add_cube(model, 150., 1);
+        add_cube(model, 200., 2);
+        Print print;
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        print.set_status_silent();
+        THEN("slicing is not blocked")
+        {
+            CHECK_NOTHROW(Test::gcode(print));
+        }
+    }
+}
+
+// ---- X2D -------------------------------------------------------------------------------------------------
+// 256 x 256 bed. Extruder 1 (the Direct Drive main nozzle) reaches the whole bed up to 261 mm; extruder 2 (the
+// Bowden auxiliary nozzle) reaches X 20.5..256 up to 256 mm (Bambu Studio's "Bambu Lab X2D 0.4 nozzle.json"),
+// so the strip X 0..20.5 is extruder 1 only and extruder 2 has no strip of its own.
+
+namespace {
+DynamicPrintConfig x2d_config(const std::string &mode, const std::string &filament_map)
+{
+    PresetBundle &b = bbl_bundle();
+    const std::string filament = "Bambu PLA Basic @BBL X2D 0.4 nozzle";
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab X2D 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X2D", true));
+    REQUIRE(b.filaments.select_preset_by_name(filament, true));
+    b.filament_presets = { filament };
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1943E0" });
+    b.filament_presets = std::vector<std::string>(2, filament);
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "enable_prime_tower", "0" },
+        { "filament_map_mode", mode },
+        { "filament_map", filament_map },
+        { "gcode_comments", 0 },
+    });
+    return cfg;
+}
+
+// A 10 x 10 x 3 mm cube centred at (x, 128).
+void add_x2d_cube(Model &model, double x, int filament, double height_scale = 0.15f)
+{
+    add_cube(model, x, filament, height_scale);
+    model.objects.back()->instances.front()->set_offset(Vec3d(x, 128., model.objects.back()->instances.front()->get_offset().z()));
+}
+} // namespace
+
+SCENARIO("the X2D profile declares Bambu's per-nozzle areas", "[ExtruderAreas][X2D]")
+{
+    const DynamicPrintConfig cfg = x2d_config("Manual", "1,2");
+    CAPTURE(cfg.option("printable_area")->serialize());
+    CAPTURE(cfg.option("extruder_printable_area")->serialize());
+    CAPTURE(cfg.option("extruder_printable_height")->serialize());
+    const ExtruderAreas areas = extruder_areas_from_config(cfg);
+    REQUIRE(areas.multi());
+    CHECK(areas.has_exclusive_regions());
+    // The left strip, X 0..20.5, the whole depth of the bed: only extruder 1 reaches it.
+    CHECK(area_mm2(areas.only[0]) == Approx(20.5 * 256.).margin(0.01));
+    CHECK(areas.only[1].empty());
+    CHECK(point_in_area(Point::new_scale(10., 5.), areas.only[0]));
+    CHECK(point_in_area(Point::new_scale(10., 250.), areas.only[0]));
+    CHECK_FALSE(point_in_area(Point::new_scale(25., 128.), areas.only[0]));
+    CHECK(area_mm2(areas.shared) == Approx(235.5 * 256.).margin(0.01));
+    CHECK(areas.height_limit(0) == Approx(261.));
+    CHECK(areas.height_limit(1) == Approx(256.));
+}
+
+SCENARIO("X2D plates are refused when a filament cannot reach its object", "[ExtruderAreas][X2D]")
+{
+    GIVEN("manual assignment: filament 1 on extruder 2 (Bowden), filament 2 on extruder 1 (Direct Drive)")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Manual", "2,1");
+        WHEN("filament 1 prints an object in the extruder-1-only strip")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 1);
+            const std::string text = validate(cfg, model);
+            THEN("the plate is refused and names the filament and the object")
+            {
+                CAPTURE(text);
+                CHECK(reach_error(text));
+                CHECK(text.find("Filament 1") != std::string::npos);
+                CHECK(text.find("cube_x10") != std::string::npos);
+            }
+        }
+        WHEN("filament 2 prints it")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 2);
+            THEN("the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+        WHEN("both filaments print objects both extruders reach")
+        {
+            Model model;
+            add_x2d_cube(model, 60., 1);
+            add_x2d_cube(model, 240., 2);
+            THEN("the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+        WHEN("filament 1 prints an object taller than extruder 2 reaches")
+        {
+            // 20 mm cube scaled by 12.9 -> 258 mm: above extruder 2's 256 mm, below extruder 1's 261 mm.
+            Model model;
+            add_x2d_cube(model, 128., 1, 12.9);
+            THEN("the plate is refused") { CHECK(reach_error(validate(cfg, model))); }
+        }
+    }
+    GIVEN("automatic grouping")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Auto For Flush", "1,1");
+        WHEN("a filament prints an object in the strip")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 1);
+            THEN("extruder 1 can take it, so the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+    }
+}
+
+SCENARIO("the X2D machine model carries Bambu's plate art placement", "[ExtruderAreas][X2D]")
+{
+    // PartPlateList::init_bed_type_info draws the bed-type tab at bottom_texture_rect with the "_n" art and the
+    // plate name at middle_texture_rect. Without them the X2D got the H2D's tab at (45, -14.5), which hangs
+    // off the front of the X2D's 256 x 256 bed model (that model's lip ends at y = -10).
+    PresetBundle &b = bbl_bundle();
+    const auto vendor = b.vendors.find("BBL");
+    REQUIRE(vendor != b.vendors.end());
+    const VendorProfile::PrinterModel *x2d = nullptr;
+    for (const VendorProfile::PrinterModel &m : vendor->second.models)
+        if (m.id == "Bambu Lab X2D")
+            x2d = &m;
+    REQUIRE(x2d != nullptr);
+    CHECK(x2d->model_id == "N6");
+    CHECK(x2d->bottom_texture_end_name == "n");
+    std::array<float, 4> bottom{}, middle{};
+    REQUIRE(PresetUtils::parse_bed_texture_rect(x2d->bottom_texture_rect, bottom));
+    REQUIRE(PresetUtils::parse_bed_texture_rect(x2d->middle_texture_rect, middle));
+    CHECK(bottom == std::array<float, 4>{ 74.f, -10.f, 148.f, 12.f });
+    CHECK(middle[0] == Approx(13.f));
+    CHECK(middle[1] == Approx(240.f));
+    CHECK(middle[2] == Approx(236.12f));
+    CHECK(middle[3] == Approx(10.f));
+    for (const char *art : { "bbl_bed_pte_bottom_n.svg", "bbl_bed_pei_bottom_n.svg", "bbl_bed_ep_bottom_n.svg", "bbl_bed_st_bottom_n.svg" }) {
+        INFO(art);
+        CHECK(boost::filesystem::exists(boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "images" / art));
+    }
+
+    // Machines without their own placement keep the defaults; the P2S (single nozzle) only swaps in the "_n" art.
+    for (const VendorProfile::PrinterModel &m : vendor->second.models) {
+        if (m.id == "Bambu Lab H2D" || m.id == "Bambu Lab H2D Pro") {
+            INFO(m.id);
+            CHECK(m.bottom_texture_end_name.empty());
+            CHECK(m.bottom_texture_rect.empty());
+            CHECK(m.middle_texture_rect.empty());
+        }
+        if (m.id == "Bambu Lab P2S") {
+            CHECK(m.bottom_texture_end_name == "n");
+            CHECK(m.bottom_texture_rect.empty());
+        }
+    }
+}
+
+TEST_CASE("bed texture rects parse like Bambu Studio's", "[ExtruderAreas]")
+{
+    std::array<float, 4> r{ 1.f, 2.f, 3.f, 4.f };
+    CHECK(PresetUtils::parse_bed_texture_rect("74,-10,148,12", r));
+    CHECK(r == std::array<float, 4>{ 74.f, -10.f, 148.f, 12.f });
+    CHECK(PresetUtils::parse_bed_texture_rect("45, -14.5, 240, 8", r));
+    CHECK(r[1] == Approx(-14.5f));
+    // Rejected, and the output is left alone.
+    const std::array<float, 4> kept = r;
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,3", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,3,4,5", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,x,4", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,0,4", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,,3,4", r));
+    CHECK(r == kept);
+}
+
+SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAreas][X2D][3mf]")
+{
+    // Bambu Studio writes extruder_type "0 1" for an X2D plate. handle_legacy drops the profile's extruder_type,
+    // so the value comes from extruder_variant_list.
+    const DynamicPrintConfig x2d = x2d_config("Manual", "1,2");
+    CHECK(slice_info_extruder_types(x2d, 2) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+    const DynamicPrintConfig h2d = h2d_config("by layer", "Manual", "1,2");
+    CHECK(slice_info_extruder_types(h2d, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etDirectDrive) }));
+    // No variant list: the single value is repeated (the old padding).
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+    CHECK(slice_info_extruder_types(cfg, 1) == std::vector<int>{ int(etDirectDrive) });
+    // A full-length value is kept as it is.
+    cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden), int(etDirectDrive) }));
+    cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
+}
+
+// Review #1056 S1: with the side scrape on (H3C presets; a user may turn it on on the H2D), the nozzle travels up to
+// wall gap + scrape length (2.2 mm) outside the tower, so the reach check counts what of that ring the tower brim
+// does not already cover.
+SCENARIO("the side scrape's ring beyond the tower brim counts in the prime tower reach check", "[ExtruderAreas][H2D][PrimeTower]")
+{
+    auto has_tower_text = [](const std::string &text) { return text.find("prime tower is outside") != std::string::npos; };
+    // Brimless tower 1 mm inside the right nozzle's area (X 25..350), both nozzles printing on it.
+    auto config = [](bool side_scrape) {
+        DynamicPrintConfig cfg = h2d_config("by layer", "Manual", "1,2", 26.);
+        cfg.set_deserialize_strict({ { "prime_tower_brim_width", "0" }, { "prime_tower_side_scrape", side_scrape ? "1" : "0" } });
+        return cfg;
+    };
+    GIVEN("the scrape off") { THEN("the tower is fine") { CHECK_FALSE(has_tower_text(tower_error(config(false)))); } }
+    GIVEN("the scrape on") { THEN("the right nozzle cannot reach the scrape's ring: refused") { CHECK(has_tower_text(tower_error(config(true)))); } }
 }

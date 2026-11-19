@@ -75,6 +75,9 @@ struct Spec
     // Download (optional): a path template on the item and file ("{id}", "{sub.id}") whose JSON
     // response has the file's URL at download_url_path; or a field of the file with its URL.
     std::string download_path;
+    // How the download endpoint is called: "GET" (default) or "POST" (an empty body). The direct link
+    // of a file, once the endpoint has answered with it, is always fetched with GET.
+    std::string download_method { "GET" };
     std::string download_url_path;
     std::string download_direct_field;
     bool        downloads_limited { false }; // the vendor counts downloads: ask before each
@@ -83,12 +86,29 @@ struct Spec
     std::string quota_used_header;
     std::string quota_limit_header;
     std::string quota_reset_header;
+
+    // CSV export (optional): the most data rows one exported file holds; the export writes numbered
+    // files beyond it. 0 = not set. Template: "csv": {"max_records": 200}.
+    int csv_max_records { 0 };
+    // CSV export (optional): "model" (one row per model) or "file" (one row per file); "" = not set.
+    // Template: "csv": {"rows": "model"}.
+    std::string csv_rows;
 };
+
+// The largest max_records a template may carry.
+constexpr int CSV_MAX_RECORDS_CAP = 1000000;
 
 // A spec from JSON (a file the user imported, or app_config), checked: throws std::runtime_error
 // with a message for the user when it cannot be used. Unknown keys are ignored.
 Spec           spec_from_json(const nlohmann::json& j);
 nlohmann::json spec_to_json(const Spec& spec); // never holds a secret
+// What is wrong with the placeholders of the spec's templates, for the user; "" when nothing. The
+// download path takes only {id} {name} {sub.id} {sub.name} {sub.variant} (anything else would be filled
+// with nothing and call the wrong address). The page URL template is filled from the raw item, so any
+// item field is valid there; only an empty {} , an unclosed { or a {sub.*} (no file there) is wrong.
+// spec_from_json() does not throw for this, so a connector saved earlier still loads (the app shows
+// the message beside it); saving and importing refuse a spec that has a problem.
+std::string template_problems(const Spec& spec);
 // A fresh id for a new connector from its name and a random suffix.
 std::string make_id(const std::string& name, uint32_t random);
 
@@ -104,6 +124,12 @@ struct Request
     // Optional: a successful (2xx) body goes here in pieces instead of into Response::body, so a big
     // file never sits in memory. false stops the transfer.
     std::function<bool(const char* data, size_t size)> sink;
+    // Optional, with a sink: called once, before the first piece of a 2xx body goes to the sink, with
+    // the status and the response headers (names lower-cased), so the sink can tell what is coming.
+    std::function<void(int status, const std::map<std::string, std::string>& headers)> on_head;
+    // "GET" or "POST". A POST is sent with an empty body (Content-Length: 0). Only the download
+    // endpoint is ever a POST; every other request is a GET.
+    std::string method { "GET" };
 };
 struct Response
 {
@@ -116,12 +142,78 @@ struct Response
 // go to another site.
 using HttpFn = std::function<Response(const Request&)>;
 
-// GET `url` through `http`, following up to `max_redirects` redirects. With `credentials`, the
+// Fetch `url` through `http` with `method` ("GET", or "POST" with an empty body), following up to
+// `max_redirects` redirects (after a 301, 302 or 303 the next hop is a GET; after a 307 or 308 it keeps
+// the method). With `credentials`, the
 // connector's credentials are added to each request for the API's own origin (scheme, host and port
 // of base_url) and to no other: a redirect to another site gets a bare request. A redirect to an
 // address that is_allowed_url() refuses, or too many of them, ends with an error (status 0).
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
-               const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5);
+               const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5, const std::string& method = "GET");
+
+// ---- Importing a connector somebody shared (a file, a pasted text, a link) ----
+// A connector that came from outside is checked more strictly than one the user typed: it is always
+// a NEW connector (any "id" is dropped), it must not carry a credential (the format has no place for
+// one: credentials are set with Credentials > Set and live in the system credential store), and the
+// JSON that is saved is rebuilt from the checked spec, so nothing the checker did not look at is kept.
+constexpr size_t IMPORT_MAX_BYTES = 256 * 1024;
+struct ImportResult
+{
+    bool           ok { false };
+    bool           credentials { false }; // refused because the JSON holds a credential
+    std::string    error;                 // for the user
+    Spec           spec;                  // its id is empty
+    nlohmann::json json;                  // spec_to_json(spec) without "id": what to save
+};
+ImportResult import_check(const std::string& text);
+
+// `text` with typographic quotes put back to the plain ones JSON needs: U+201C, U+201D, U+201E and
+// U+2033 become ", and U+2018, U+2019 and U+2032 become '. (macOS "smart quotes" does this to text
+// typed or pasted into a text box.) Everything else, including the rest of the UTF-8, is untouched.
+std::string normalize_smart_quotes(const std::string& text);
+
+// Parses `text` as JSON. Text that parses as it stands is never altered, because a connector's string
+// values may hold curly quotes on purpose. Only when it does not parse is it parsed again with
+// normalize_smart_quotes() applied; `smart_quotes_fixed` (if given) says whether that second try was
+// what worked, and one info line goes to the log when it was. false when neither try parses.
+bool parse_json_lenient(const std::string& text, nlohmann::json& out, bool* smart_quotes_fixed = nullptr);
+
+// A link a connector may be fetched from: https only, the default port, no user:password@, a host
+// NAME on the public internet (no localhost, no single-label or .local/.internal/.lan names, no IP
+// address in any spelling). `error` says why not. (A name that resolves to a private address is not
+// caught here: only the HTTP layer sees the address.)
+bool is_importable_link(const std::string& url, std::string* error = nullptr);
+
+// GET the connector text behind `url` through `http`: no credentials or cookies, every hop of up to
+// 3 redirects checked with is_importable_link(), a 2xx answer, at most IMPORT_MAX_BYTES. false with
+// `error` (for the user) otherwise.
+bool fetch_connector_text(const HttpFn& http, const std::string& url, std::string& text, std::string& error);
+
+// "edgeslicer://connector?url=<percent-encoded https url>" -> the url (decoded, not yet checked).
+bool parse_connector_link(const std::string& link, std::string& url);
+
+// ---- Importing something the user already has: update it or add a second one ----
+// The connectors an imported one would replace: the same name (case and surrounding spaces ignored),
+// or the same non-empty vendor on the same API origin when the names differ. Indices into `existing`.
+std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec& imported);
+// scheme://host[:port] of an address, lower case, without the default https port.
+std::string api_origin(const std::string& url);
+// What an update of `old_spec` by `imported` does. An update keeps the old connector's id (so its
+// secrets in the credential store stay attached) and nothing else of it.
+struct UpdatePlan
+{
+    bool                     origin_changed { false }; // the saved credentials would go to another site
+    std::string              old_origin, new_origin;
+    std::vector<std::string> keep_slots;               // secret_slots() keys that stay stored
+    std::vector<std::string> drop_slots;               // keys whose slot is gone or now asks for something else: forget them
+    bool                     reset_cache { false };    // it reads another list (address, list path, items, query): drop what was fetched
+    bool                     needs_full { false };     // needs_full_fetch(old, imported)
+};
+UpdatePlan plan_update(const Spec& old_spec, const Spec& imported);
+// True when changing `old_spec` into `now` changes how items are read from the same answers (address,
+// list, paging, since, fields, files, download, licence): what was fetched must be read again, in full.
+// Credentials, sign-in, headers, quota and the name do not.
+bool needs_full_fetch(const Spec& old_spec, const Spec& now);
 
 struct SubItem
 {
@@ -159,6 +251,9 @@ struct Cache
     int64_t           synced_at { 0 };
     Quota             quota;
     std::string       last_error;
+    // The connector's settings changed in a way that affects how items are read: the next sync
+    // fetches every model again (an incremental one would keep the old reading of unchanged ones).
+    bool needs_full { false };
 };
 nlohmann::json cache_to_json(const Cache& c);
 Cache          cache_from_json(const nlohmann::json& j);
@@ -205,8 +300,38 @@ bool build_download_request(const Spec& spec, const Secrets& secrets, const Item
                             bool& is_direct);
 // The same address without credentials ("" when there is no way to download), for fetch().
 std::string download_url(const Spec& spec, const Item& item, const SubItem* sub, bool& is_direct);
+// The request carries spec.download_method when it is not direct.
 // The file URL in the download endpoint's answer, or "" with `error` set.
 std::string resolve_download(const Spec& spec, const Secrets& secrets, const Response& response, std::string& error);
+
+// What a download endpoint answered. The answer is judged by its Content-Type (with no Content-Type or
+// text/plain, by its first character):
+//   JSON (application/json, +json)  -> Link: the file's address at download_url_path (a spec with no
+//                                      download_url_path has nowhere to read it: an error);
+//   a web page (text/html)          -> Failed (never saved as a model);
+//   anything else                   -> File: the answer IS the file, streamed to write_file as it arrives.
+// Redirects are followed by fetch(), so a redirect to the file ends as a File.
+struct EndpointResult
+{
+    enum class Kind { Failed, Link, File };
+    Kind        kind { Kind::Failed };
+    std::string error;        // Failed: for the user (status and content type included), never a secret
+    std::string link;         // Link: the file's address
+    std::string file_name;    // File: the name in Content-Disposition, "" when there is none
+    int         status { 0 };
+    std::string content_type; // as sent
+    int64_t     size { 0 };   // bytes of the answer
+};
+// Calls the endpoint `url` (spec.download_method) through `http`. For a File answer begin_file(name) is
+// called before the first byte (false = could not open it: nothing is read on); write_file gets the
+// body in pieces (false stops). `http` must call Request::on_head (when set) before the first piece of
+// a 2xx body it hands to Request::sink; a 2xx body returned in Response::body is handled as well.
+// Logs one info line: status, content type, size and the final host.
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string& name)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file);
+// The file name in a Content-Disposition value (filename*= preferred), without any folder, "" if none.
+std::string content_disposition_name(const std::string& value);
 
 // Request plumbing, exposed for the tests.
 Request     authorize(const Spec& spec, const Secrets& secrets, const std::string& url);
@@ -223,9 +348,45 @@ std::string    fill_template(const std::string& templ, const nlohmann::json& ite
 // Items mapped from one parsed response page.
 std::vector<Item> map_items(const Spec& spec, const nlohmann::json& page);
 
+// The model file extension a name ends with, lower case with its dot: ".3mf" ".stl" ".step" ".stp"
+// ".obj" ".amf" ".zip", or ".gcode.3mf" as one extension; "" when it ends with none.
+std::string model_extension(const std::string& name);
+// The default name of a downloaded file from the vendor's label for it (which may itself end in
+// ".3mf") and the extension the download address gave ("" = it gave none: an indirect download).
+// The extension is the address's, else the label's, else ".3mf"; it is never doubled. `sanitize`
+// (optional) cleans the base name for the file system before the extension is added.
+std::string download_file_name(const std::string& label, const std::string& url_ext,
+                               const std::function<std::string(std::string)>& sanitize = nullptr);
+
 // CSV of the items, one row per file (one row for an item without files): UTF-8, RFC 4180 quoting,
 // and a cell that a spreadsheet would run as a formula (= + - @ tab CR) prefixed with '.
 std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items);
+
+// Items of one connector, for a CSV that covers several connectors.
+struct CsvGroup
+{
+    std::string       connector;
+    std::string       vendor;
+    std::vector<Item> items;
+};
+// What one CSV row is. File: one per file of a model (one for a model without files), exactly the
+// columns of to_csv. Model: one per model, with the file columns folded into file_count,
+// file_names ("; " between the names) and total_size_bytes.
+enum class CsvRows { File, Model };
+// "file" / "model", and back ("" or anything else: false, `out` untouched).
+const char* csv_rows_name(CsvRows rows);
+bool        csv_rows_from_name(const std::string& name, CsvRows& out);
+// The number of data rows the groups make in that mode.
+size_t csv_row_count(const std::vector<CsvGroup>& groups, CsvRows rows = CsvRows::File);
+// The groups as CSV files of at most `max_rows` data rows each (0 = no limit: exactly one file).
+// A row is a record of the chosen mode, so in Model mode a model is never split over two files.
+// Every file has the mark and the header row, rows keep their order and are never cut, and each row
+// names its connector and vendor, so each file stands alone. Always returns at least one file.
+// File mode with no limit is byte-identical to to_csv (one group).
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows, CsvRows rows = CsvRows::File);
+// The path of file `index` (1-based) out of `count`: the path itself when there is one file, else
+// "<name>_<index><extension>" ("vendor-models.csv" -> "vendor-models_2.csv"; ".csv" when it has none).
+std::string csv_part_path(const std::string& path, size_t index, size_t count);
 
 } // namespace Vendors
 } // namespace Slic3r

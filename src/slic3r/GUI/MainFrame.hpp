@@ -13,9 +13,12 @@
 
 #include <string>
 #include <map>
+#include <chrono>
+#include <set>
 #include <vector>
 
 #include "GUI_Utils.hpp"
+#include "MainTabs.hpp"
 #include "Event.hpp"
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
@@ -54,9 +57,11 @@ class Tab;
 class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
+class ProjectStrip;
 class ParamsDialog;
 class SliceModePopup;
 class HomePanel;
+class LayerlingPanel;
 
 enum QuickSlice
 {
@@ -108,8 +113,15 @@ class MainFrame : public DPIFrame
     wxString    m_last_config = wxEmptyString;
 
     wxMenuBar*  m_menubar{ nullptr };
+    wxMenu*     m_account_menubar_menu{ nullptr }; // macOS only: the menu bar's Account menu (owned by m_menubar)
+    std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
+    // File > Export > Send plate / all plates to Bambu Connect: shown for Bambu printers only.
+    wxMenu *                  m_export_menu{ nullptr };
+    std::vector<wxMenuItem *> m_bambu_connect_items;
+    int                       m_bambu_connect_anchor_id{ wxID_NONE };
+    bool                      m_bambu_connect_items_shown{ true };
     bool        enable_multi_machine{ false };
 
 #if 0
@@ -117,6 +129,7 @@ class MainFrame : public DPIFrame
 #endif
     wxMenuItem* m_menu_item_reslice_now { nullptr };
     wxSizer*    m_main_sizer{ nullptr };
+    ProjectStrip* m_project_strip{ nullptr };
 
     size_t      m_last_selected_tab;
 
@@ -134,6 +147,8 @@ class MainFrame : public DPIFrame
     bool can_export_supports() const;
     bool can_export_gcode() const;
     bool can_export_all_gcode() const;
+    // Bambu printer selected and the plate (all plates) sliced: File > Export > Send ... to Bambu Connect.
+    bool can_send_to_bambu_connect(bool all_plates) const;
     bool can_print_3mf() const;
     bool can_send_gcode() const;
     bool can_slice() const;
@@ -223,6 +238,14 @@ public:
     // Ultra: populate the given menu contextually for the current printer's brand
     // (login/logout). Called by the topbar's Account button just before it pops the menu.
     void        refresh_account_menu(wxMenu* menu);
+    // macOS: there is no custom title bar to carry the Account button, so the same contextual menu is
+    // an entry in the native menu bar. AccountStatus::refresh() calls this when the sign-in state or
+    // the selected printer changes; it rebuilds that menu only when what it shows would differ. A
+    // no-op where there is no such menu (Windows / Linux).
+    void        update_account_menubar();
+    // The title bar's Mobile Hub button (Windows / Linux) and the macOS View menu entry: opens the
+    // hub page in the browser, starting the hub first when it is not running.
+    void        open_mobile_hub();
 
     // BBS: auto-save the project to its own file on a timer, in addition to auto-backup
     void update_autosave_timer();
@@ -233,19 +256,23 @@ public:
     bool request_quit(bool discard = false);
 
     //BBS GUI refactor
+    // The values live in MainTabs.hpp (unit tested). Showcase (D1) sits after Preview, so Device
+    // and everything after it moved up by one on 2026-10-18; nothing compares or stores these by
+    // number (see MainTabs.hpp).
     enum TabPosition
     {
-        tpHome          = 0,
-        tp3DEditor      = 1,
-        tpPreview       = 2,
-        tpMonitor       = 3,
-        tpStream        = 4,
-        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpHome          = MainTabs::Home,
+        tp3DEditor      = MainTabs::Editor3D,
+        tpPreview       = MainTabs::Preview,
+        tpShowcase      = MainTabs::Showcase, // the third page hosting the plater
+        tpMonitor       = MainTabs::Monitor,
+        tpStream        = MainTabs::Stream,
+        tpPrinters      = MainTabs::Printers, // the Printers tab (PrintersPanel); always present
         tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
-        tpProject       = 6,
-        tpCalibration   = 7,
-        tpAuxiliary     = 8,
-        toDebugTool     = 9,
+        tpProject       = MainTabs::Project,
+        tpCalibration   = MainTabs::Calibration,
+        tpAuxiliary     = MainTabs::Auxiliary,
+        toDebugTool     = MainTabs::DebugTool,
     };
 
     //BBS: add slice&&print status update logic
@@ -269,7 +296,8 @@ public:
         eSendToPrinterAll    = 6,
         eUploadGcode         = 7,
         eExportAllSlicedFile = 8,
-        ePrintMultiMachine   = 9
+        ePrintMultiMachine   = 9,
+        eSendToBambuConnect  = 10 // Bambu printers: current plate, or all plates in the all-plates view
     };
 
     void update_layout();
@@ -321,6 +349,10 @@ public:
 
     bool        is_loaded() const { return m_loaded; }
     bool        is_last_input_file() const  { return !m_qs_last_input_file.IsEmpty(); }
+    // True once the close/restart path entered MainFrame::shutdown(): children
+    // must stop pumping the event loop (e.g. synchronous webview scripts whose
+    // wxYield would run the pending frame deletion mid-handler and crash).
+    bool        is_shutting_down() const { return m_shutting_down; }
     //BBS GUI refactor: remove unused layout new/dlg
     //bool        is_dlg_layout() const { return m_layout == ESettingsLayout::Dlg; }
 
@@ -393,6 +425,23 @@ public:
     bool save_project_as(const wxString& filename = wxString());
 
     void        add_to_recent_projects(const wxString& filename);
+    // Project strip (tests/design_multi_project_sidebar.md): the open projects of this window; null in the G-code viewer.
+    ProjectStrip* project_strip() const { return m_project_strip; }
+    // Project strip P4: one live Plater per open project. m_plater (and wxGetApp().plater()) is the one shown; the others
+    // keep their model, undo history, slice and preview out of sight.
+    // A new hidden Plater for another project (built as the first one is at startup).
+    Plater*     create_project_plater();
+    // Shows that project's Plater in place of the shown one (the Prepare, Preview and Showcase tabs). The caller puts its
+    // presets back (ProjectStrip).
+    void        activate_plater(Plater *plater);
+    // Closes a hidden project's Plater: stops its slice and jobs, frees its GL data and its backup folder.
+    void        destroy_project_plater(Plater *plater);
+    const std::vector<Plater*>& project_platers() const { return m_platers; }
+    // The active project's name, file or unsaved state changed.
+    void        on_active_project_changed();
+    // Project strip P2 "Send...": the print / send action of Ctrl+Shift+G for the active project's plate. False when the plate
+    // cannot be printed yet (not sliced).
+    bool        send_current_plate();
     void        get_recent_projects(boost::property_tree::wptree &tree, int images);
     void        get_recent_projects(nlohmann::json& data, int images);
     void        open_recent_project(size_t file_id, wxString const & filename);
@@ -403,8 +452,12 @@ public:
 
     //BBS
     void        load_url(wxString url);
-    void        load_printer_url(wxString url, wxString apikey = "");
+    // Shows `url` in the Device tab's web view. `reload` loads it again even when the view shows
+    // it already (a connect made from another page); otherwise our own page is left as it is.
+    void        load_printer_url(wxString url, wxString apikey = "", bool reload = false);
     void        load_printer_url();
+    // GUI_App: startup is over, the Device tab may load its page now.
+    void        on_startup_settled();
     bool        is_printer_view() const;
     void        refresh_plugin_tips();
     void        RunScript(wxString js);
@@ -415,21 +468,42 @@ public:
 
     //SoftFever
     void show_device(bool bBBLPrinter);
+    // The notebook index the Device page is inserted at (see the .cpp).
+    int  device_page_position() const;
+    // The Layerling tab (LayerlingPanel): added or removed to follow Preferences > "Show the Layerling
+    // tab". It is always the last page and has no TabPosition: it is found by pointer, never by index.
+    void update_layerling_tab();
+    // The Layerling tab's panel, null before the tab was first shown.
+    LayerlingPanel *layerling_panel() const { return m_layerling; }
+    // Where Calibration goes back in (show_device): the end, or just before the Layerling page.
+    int  calibration_page_position() const;
+    // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
+    void show_bambu_connect_menu_items(bool show);
 
     PA_Calibration_Dlg* m_pa_calib_dlg{ nullptr };
     Temp_Calibration_Dlg* m_temp_calib_dlg{ nullptr };
     MaxVolumetricSpeed_Test_Dlg* m_vol_test_dlg { nullptr };
     VFA_Test_Dlg* m_vfa_test_dlg { nullptr };
     Retraction_Test_Dlg* m_retraction_calib_dlg{ nullptr };
+    TempRetract_Calibration_Dlg* m_temp_retract_calib_dlg{ nullptr };
     Input_Shaping_Freq_Test_Dlg* m_IS_freq_calib_dlg{ nullptr };
     Input_Shaping_Damp_Test_Dlg* m_IS_damp_calib_dlg{ nullptr };
-    Junction_Deviation_Test_Dlg* m_junction_deviation_calib_dlg{ nullptr };
+    Cornering_Test_Dlg* m_cornering_calib_dlg{ nullptr };
 
     // BBS. Replace title bar and menu bar with top bar.
     BBLTopbar*            m_topbar{ nullptr };
     wxPanel*              m_mac_topbar_panel{ nullptr }; // macOS: the plain bar the UI theme's title bar colour goes on
     PrintHostQueueDialog* printhost_queue_dlg() { return m_printhost_queue_dlg; }
     Plater*               m_plater { nullptr };
+    // Project strip P4: every open project's Plater (m_plater among them), and the hidden ones that missed a window-wide
+    // refresh (DPI, colours, preferences) or were never shown yet: done when they are shown.
+    std::vector<Plater*>  m_platers;
+    // Hidden parent new project Platers are built in (create_project_plater), then reparented to the notebook.
+    wxPanel*              m_plater_nursery{ nullptr };
+    std::set<Plater*>     m_platers_fresh;
+    std::set<Plater*>     m_platers_need_rescale;
+    std::set<Plater*>     m_platers_need_recolour;
+    std::set<Plater*>     m_platers_need_settings;
     //BBS: GUI refactor
     // Lazily constructed tabs: the m_*_holder placeholders are the actual Notebook pages
     // (so the TabPosition indices and select_tab() are unaffected) and build the panel
@@ -439,6 +513,7 @@ public:
     MonitorPanel*         m_monitor{ nullptr };
     LazyPanelHolder*      m_monitor_holder{ nullptr };
     StreamPanel*          m_stream{ nullptr };
+    LayerlingPanel*       m_layerling{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     // The old Multi-device pages, built on first use inside m_multi_machine_dlg (jump_to_multipage).
@@ -487,7 +562,11 @@ public:
     ParamsDialog*         m_param_dialog{ nullptr };
     //BBS
     SettingsDialog        m_settings_dialog;
-    DiffPresetDialog      diff_dialog;
+    // "Compare presets": built on first use (startup round 2). Its constructor copies the whole
+    // preset bundle twice, ~1 s of the main window's construction with a large preset library.
+    DiffPresetDialog&     diff_dialog();
+    // The dialog when it has been built, else null (nothing to keep up to date yet).
+    DiffPresetDialog*     diff_dialog_if_built() { return m_diff_dialog.get(); }
     wxWindow*             m_plater_page{ nullptr };
     PrintHostQueueDialog* m_printhost_queue_dlg;
 
@@ -502,6 +581,7 @@ public:
     SideButton* m_print_option_btn{ nullptr };
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
+    bool                  m_shutting_down{ false };
     bool get_enable_slice_status();
     bool get_enable_print_status();
     //BBS
@@ -517,6 +597,15 @@ public:
     uint32_t  			m_ulSHChangeNotifyRegister { 0 };
 	static constexpr int WM_USER_MEDIACHANGED { 0x7FFF }; // WM_USER from 0x0400 to 0x7FFF, picking the last one to not interfere with wxWidgets allocation
 #endif // _WIN32
+
+private:
+    // Initial button state path for the MainFrame constructor; bypasses the
+    // teardown guard in update_slice_print_status (wxGetApp().mainframe does
+    // not point at this frame yet during construction).
+    void update_slice_print_status_impl(SlicePrintEventType event, bool can_slice, bool can_print);
+    // See diff_dialog(). Destroyed with the frame's members, before wx destroys the frame's children,
+    // as the by-value member it replaces was.
+    std::unique_ptr<DiffPresetDialog> m_diff_dialog;
 };
 
 wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);

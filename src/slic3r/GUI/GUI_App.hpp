@@ -11,6 +11,7 @@
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/PresetSyncPolicy.hpp"
 #include "slic3r/GUI/WebViewDialog.hpp"
 #include "slic3r/GUI/WebUserLoginDialog.hpp"
 #include "slic3r/GUI/WebSMUserLoginDialog.hpp"
@@ -18,7 +19,7 @@
 #include "slic3r/GUI/WebPreprintDialog.hpp"
 #include "slic3r/GUI/BindDialog.hpp"
 #include "slic3r/GUI/HMS.hpp"
-#include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
+#include "slic3r/GUI/PluginInstallStatus.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "slic3r/GUI/SSWCP.hpp"
@@ -37,6 +38,7 @@
 #include <mutex>
 #include <stack>
 #include <unordered_map>
+#include <vector>
 //#define BBL_HAS_FIRST_PAGE          1
 #define STUDIO_INACTIVE_TIMEOUT     15*60*1000
 #define LOG_FILES_MAX_NUM           30
@@ -78,6 +80,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+enum class PresetManagerKind; // libslic3r/PresetManagerModel.hpp
 
 namespace GUI{
 
@@ -254,11 +257,22 @@ public:
 private:
     bool            m_initialized { false };
     bool            m_post_initialized { false };
+    // Startup is over: post_init() has run and the wx event queue it filled (project reset, config
+    // wizard step, ...) has drained, which the first idle event after post_init() tells. The GUI
+    // thread answers web pages promptly only from then on (DevicePageLoad.hpp).
+    bool            m_startup_settle_pending { false };
+    bool            m_startup_settled { false };
     // Set when a snapmaker-orca:// URL is handed to us after launch (macOS delivers these
     // through MacOpenURL rather than argv, so post_init cannot see them in input_files).
     // post_init must not start a blank project in that case, or it discards the model the
     // URL is in the middle of loading.
     bool            m_url_open_pending { false };
+#ifdef __APPLE__
+    // Model URLs that arrived before post_init(). Drain after post_init() so the
+    // download starts on a fully built GUI (Snap #997 / d29a199d3ef5094f864371acf9b2bee5c4b19511).
+    std::vector<wxString> m_pending_mac_open_urls;
+#endif // __APPLE__
+    std::string     m_pending_connector_link;
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
     bool            m_is_recreating_gui{ false };
@@ -351,7 +365,9 @@ private:
     // Ultra (plug-in guards): cached "data_dir/plugins holds our own plug-in" answer.
     bool m_ultranet_plugin_installed { false };
     bool m_networking_cancel_update { false };
-    std::shared_ptr<UpgradeNetworkJob> m_upgrade_network_job;
+    // "The network plug-in is missing" has been shown this session / is open right now.
+    bool m_network_plugin_missing_shown { false };
+    bool m_network_plugin_missing_open { false };
 
     // login widget
     ZUserLogin*     login_dlg { nullptr };
@@ -363,6 +379,19 @@ private:
     void            sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r);
     void            sm_finish_silent_login(const std::string& log_line);
     void            sm_teardown_silent_login_dlg();
+    // Sign-in by hand (the shown dialog, or one a page asked for): bumped by a sign-out, so a
+    // lookup that answers after it is dropped.
+    unsigned        m_sm_signin_gen{ 0 };
+    // GET /api/common/accounts/current with the token, off the UI thread; `done` runs on the UI
+    // thread with the verified (or refused) answer. The token is never logged.
+    void            sm_lookup_account(const std::string& token, const std::string& user_info_url,
+                                      std::function<void(const SMSilentLogin::AccountAnswer&)> done);
+    // Signed out in this app: the token and account details are dropped, and the Account menu and
+    // the pages are told (only when there was something to drop).
+    void            sm_sign_out_locally();
+    // Deletes id.snapmaker.com's session cookies from the shared browser profile (only those), so
+    // the next sign-in shows the form instead of handing back the same session. `why` is logged.
+    void            sm_clear_web_session(const char* why);
 
     // Bambu Lab startup sync (BambuSyncPolicy.hpp, PresetUpdater::sync_bambu): started at most once
     // per session, as soon as a Bambu printer or a Bambu login exists. Until then this timer looks
@@ -390,7 +419,7 @@ private:
     bool             m_show_http_errpr_msgdlg{false};
     wxString         m_info_dialog_content;
     // Ultra P4: OAuth (Google/third-party) login callback server, bound to
-    // 127.0.0.1:LOCALHOST_PORT with the default bbl_auth_handle_request handler. The
+    // 127.0.0.1:BBL_LOGIN_CALLBACK_PORT with the default bbl_auth_handle_request handler. The
     // fork had gutted this, so third-party sign-in redirects hit a dead loopback (404).
     HttpServer       m_http_server;
 
@@ -473,8 +502,18 @@ private:
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
     bool is_hub_managed() const { return m_hub_managed; }
+    // Showcase S5, --showcase-render: a hidden instance that loads one project, renders a Showcase
+    // video or still and exits with the job's code. It starts no network, no page server, no hub,
+    // registers no file types and never shows a window. Set before the app is constructed.
+    static void set_showcase_render_mode(bool on) { s_showcase_render_mode = on; }
+    static bool showcase_render_mode() { return s_showcase_render_mode; }
     // Ultra: this instance's loopback API + the hub handshake (was the Stream tab's job).
     void start_remote_access();
+private:
+    static bool s_showcase_render_mode;
+    // S5: runs the render job once the project is loaded, then ends the process with its code.
+    void run_showcase_render_job();
+public:
     bool flutter_web_config_update_dlg_open() const
     {
         return m_flutter_web_config_update_dlg_open.load(std::memory_order_acquire);
@@ -493,6 +532,10 @@ private:
 
     bool show_3d_navigator() const { return app_config->get_bool("show_3d_navigator"); }
     void toggle_show_3d_navigator() const { app_config->set_bool("show_3d_navigator", !show_3d_navigator()); }
+
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    bool show_center_of_mass() const { return app_config->get_bool("show_center_of_mass"); }
+    void toggle_show_center_of_mass() const { app_config->set_bool("show_center_of_mass", !show_center_of_mass()); }
 
     wxString get_inf_dialog_contect () {return m_info_dialog_content;};
 
@@ -595,8 +638,24 @@ private:
     void            load_gcode(wxWindow* parent, wxString& input_file) const;
 
     wxString transition_tridid(int trid_id);
+    // rack_printer: the H3C's numbering (GUI::AmsTypes::rack_tray_label: "1".."9", "1-Ext".."9-Ext").
+    wxString transition_tridid(int trid_id, bool rack_printer);
     void            ShowUserGuide();
-    void            ShowDownNetPluginDlg();
+    // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). Everything that
+    // used to offer that download - sign-in, the Device tab, the setup wizard, Preferences, the
+    // home-page banner, the start-up check - calls this instead: it tells the user that the
+    // plug-in is missing from this install and that reinstalling EdgeSlicer restores it. Silent
+    // when UltraNet is installed. user_requested = the user just clicked something that needs the
+    // plug-in (always answered); false = an automatic trigger (shown at most once per session).
+    // See network_plugin_missing_notice() in PluginGuard.hpp.
+    void            ShowNetworkPluginMissing(bool user_requested = true);
+    static wxString network_plugin_missing_text();
+    // The text for "no network agent although the plug-in is installed". When a load attempt
+    // failed this session it names the cause (blocked by Windows / security software, a missing
+    // Windows component, a missing or damaged file, a bad image) and carries the error code; only
+    // when nothing failed does it ask for the restart that loads a just-copied plug-in.
+    // *load_failed is set when the text describes a failure rather than the restart case.
+    static wxString network_plugin_not_loaded_text(bool *load_failed = nullptr);
     void            ShowUserLogin(bool show = true);
     // Ultra (plug-in guards): true when data_dir/plugins holds OUR clean-room plug-in (a
     // bambu_networking library sitting next to the ultranet marker file). Every Bambu CDN
@@ -605,7 +664,7 @@ private:
     bool            is_ultranet_plugin_installed() const { return m_ultranet_plugin_installed; }
     void            refresh_ultranet_plugin_state();
     // The one guarded entry point for "the user asked to sign in to a Bambu account": with no
-    // agent loaded it offers the plug-in download (or asks for a restart, when our own plug-in is
+    // agent loaded it says the plug-in is missing (or asks for a restart, when our own plug-in is
     // already installed) instead of opening a sign-in page whose ticket has nowhere to go.
     void            ShowUserLoginGuarded();
     void            ShowOnlyFilament();
@@ -696,6 +755,9 @@ private:
     // Stops an attempt in flight (the user opened the sign-in dialog, signed out, or the app closes).
     void            sm_cancel_silent_login(const std::string& reason);
     bool            sm_silent_login_active() const { return m_sm_silent_active; }
+    // The sign-in page handed over a token (SMUserLogin, not silent): verify it with the account
+    // service and only then sign in. `shown`: the person saw the dialog, so a failure is told.
+    void            sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown);
   
     void            request_user_logout();
     int             request_user_unbind(std::string dev_id);
@@ -719,8 +781,13 @@ private:
     void            enable_user_preset_folder(bool enable);
     // Ultra: re-mirror the logged-in Bambu Studio user presets into user\default\; when new/updated
     // files were pulled (or force_refresh), reload user presets + refresh the preset UI. Used by the
-    // "Sync now" button and the printer-switch trigger. No-op if the toggle is off.
+    // "Sync now" button (force_refresh: synchronous) and the printer-switch trigger (skipped when the
+    // Bambu Studio folder has not changed since the last clean run, otherwise run on a worker thread
+    // with the reload marshalled back to the UI thread). No-op if the toggle is off.
     void            sync_bambu_user_presets(bool force_refresh);
+    // Remember a mirror run for the printer-switch skip check (UI thread).
+    void            record_bambu_preset_mirror_run(bool clean, const std::string& fingerprint_before, const std::string& logged_in_uid);
+    void            reload_after_bambu_preset_mirror(int copied);
 
     // BBS
     bool            is_studio_active();
@@ -731,6 +798,10 @@ private:
     void            check_web_version();
     void            check_preset_version();
     void            check_new_version_sf(bool show_tips = false, bool by_user = false);
+    // Offers to migrate user filament presets made against an older release that lost printers their parent
+    // listed then. At startup it asks on every start that finds such presets, unless the user chose not to be
+    // reminded; by_user also reports when there is nothing to migrate. (OrcaSlicer #16367.)
+    void            check_legacy_user_filament_presets(bool by_user);
     void            process_network_msg(std::string dev_id, std::string msg);
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);
@@ -747,7 +818,7 @@ private:
     void            start_http_server();
     void            stop_http_server();
     void            kick_user_device_refresh(); // off-thread cloud device-list refresh after login
-    /// Actual OAuth-callback listen port (may differ from LOCALHOST_PORT if it was in use).
+    /// Actual OAuth-callback listen port (may differ from BBL_LOGIN_CALLBACK_PORT if it was in use).
     boost::asio::ip::port_type get_http_port() const { return m_http_server.get_port(); }
 
     // page loading http server
@@ -787,6 +858,8 @@ private:
     std::string     get_mode_str();
     void            save_mode(const /*ConfigOptionMode*/int mode) ;
     void            update_mode();
+    // Curved tops P3: Developer mode on and the Developer setting lines shown (the developer-override gate).
+    bool            curved_tops_developer_lines_shown();
     void            update_internal_development();
     void            show_ip_address_enter_dialog(wxString title = wxEmptyString);
     void            show_ip_address_enter_dialog_handler(wxCommandEvent &evt);
@@ -802,6 +875,11 @@ private:
     bool            check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice = true, bool use_dont_save_insted_of_discard = false);
     void            apply_keeped_preset_modifications();
     bool            check_and_keep_current_preset_changes(const wxString& caption, const wxString& header, int action_buttons, bool* postponed_apply_of_keeped_changes = nullptr);
+    // The "Transfer" answer of the dialog above, without the dialog, for a preset reload the
+    // program makes on its own (a Snapmaker printer connect installing its nozzle): every modified
+    // option of the current presets is cached for apply_keeped_preset_modifications() and logged
+    // with `why`. Returns how many options were cached (0: nothing was modified).
+    int             cache_current_preset_changes_for_transfer(const char* why);
     bool            can_load_project();
     bool            check_print_host_queue();
     bool            checked_tab(Tab* tab);
@@ -824,6 +902,8 @@ private:
     // Makes the theme app_config "ui_theme" names the running look without a restart: colours,
     // corner radii, icons, title bar, 3D view and Home page. Fonts still need one (Theme::fonts_pending()).
     void            apply_theme_live();
+    // Project strip P4: the theme's colour pass for a window made after the main window was themed (a new project's Plater).
+    void            theme_new_window(wxWindow *window);
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
@@ -872,6 +952,7 @@ private:
     void            remove_mall_system_dialog();
     void            run_script(wxString js);
     bool            is_adding_script_handler() { return m_adding_script_handler; }
+    bool            startup_settled() const { return m_startup_settled; }
     void            set_adding_script_handler(bool status) { m_adding_script_handler = status; }
 
     char            from_hex(char ch);
@@ -923,6 +1004,9 @@ private:
     void            open_web_page_localized(const std::string &http_address);
     bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
+    // The Filament manager (the Filaments row gear, "Add/Remove filaments") or the Process manager (the
+    // process row gear). Returns true when the presets were reloaded on the way out.
+    bool            run_preset_manager(PresetManagerKind kind);
     void            show_desktop_integration_dialog();
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG
@@ -950,6 +1034,9 @@ private:
 
     // URL download - PrusaSlicer gets system call to open prusaslicer:// URL which should contain address of download
     void            start_download(std::string url);
+    // edgeslicer://connector?url=<https link>: Home > Vendors > Import from link, address filled in.
+    // Before the first idle pass of start-up it is kept and run once the main window is ready.
+    void            open_connector_link(const std::string& url);
     // Files this session downloaded from the web (an "Open in" link, a MakerWorld import, the model
     // browser). Opening one of them always shows the modified-G-code warning, whatever "Don't show
     // again" said for local files.
@@ -957,26 +1044,37 @@ private:
     bool            is_web_download(const boost::filesystem::path& path) const;
 
     std::string     get_plugin_url(std::string name, std::string country_code);
+    // The Bambu CDN fetch. Refuses everything except the camera component package
+    // (bambu_cdn_package_allowed()); Bambu's network plug-in is never downloaded. There is no
+    // install_plugin() any more.
     int             download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
-    int             install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
 
     // Ultra (live view): Bambu's camera component (BambuSource), the DirectShow source filter the
-    // Device-tab live view plays through. It is NOT part of UltraNet - we ship only a placeholder
-    // of that name so the agent's LoadLibrary probe succeeds - so this is the one Bambu CDN path
-    // that stays open while UltraNet is installed. It downloads Bambu's network plug-in package
-    // and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
+    // Device-tab live view plays through. It is NOT part of UltraNet. Release builds ship it in
+    // <exe dir>/cameratools (CAMERA_BIN_DIR) and start-up seeds <data_dir>/cameratools from there
+    // (sync_bambu_camera_module); this CDN fetch is only the fallback for a build that carries no
+    // camera files (Windows, after the user says yes). It fetches the component package
+    // (camera_component.zip) and extracts ONLY BambuSource (and its live555 etc.) into
+    // <data_dir>/cameratools - never plugins/, which holds UltraNet's storage module.
     // bambu_networking and the UltraNet marker are never touched. Returns 0 on success.
     int             install_bambu_camera_component(InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
     // Ask the user whether to fetch the component, then do it with a progress dialog and register
     // the filter. Returns true when it is installed, so the caller may retry playback.
     bool            offer_bambu_camera_component(wxWindow *parent);
-    // True when <data_dir>/plugins holds a real BambuSource rather than our placeholder.
+    // True when <data_dir>/cameratools holds a real camera module.
     bool            has_bambu_camera_component() const;
-    // Register the installed BambuSource DirectShow filter: writes the HKCR\bambu source-filter
-    // CLSID and runs regsvr32 on it (two UAC prompts). Windows only; a no-op elsewhere. Refuses
-    // outright when the DLL does not export DllRegisterServer, which is what made the stock path
-    // fail with "the entry-point DllRegisterServer was not found".
+    // Register <data_dir>/cameratools/BambuSource.dll as the bambu: DirectShow source filter for
+    // this user (HKCU\Software\Classes: the CLSID's InprocServer32 and bambu\Source Filter, exactly
+    // what the filter's own DllRegisterServer and Bambu's .reg write, but per user, so no UAC).
+    // Windows only; a no-op elsewhere. Refuses outright when the DLL does not export
+    // DllRegisterServer, i.e. is not the filter.
     bool            register_bambu_source_filter();
+    // Start-up (Windows and macOS): keep the camera module out of plugins/ and in cameratools/.
+    // Moves a Bambu camera module found in <data_dir>/plugins into <data_dir>/cameratools (with its
+    // live555), puts UltraNet's storage module back in plugins/ (from the app's sidecar, else from a
+    // hand-kept <name>.ultranet copy), then seeds cameratools from the app's bundled camera folder.
+    // Logs every step under "[camera module]". Linux: does nothing.
+    void            sync_bambu_camera_module();
 
     std::string     get_http_url(std::string country_code, std::string path = {});
     std::string     get_model_http_url(std::string country_code);
@@ -987,7 +1085,6 @@ private:
     void            check_config_updates_from_updater(bool updateByuser = false) { check_updates(updateByuser); }
 
 private:
-    int             updating_bambu_networking();
     bool            on_init_inner();
     void            copy_network_if_available();
     bool            on_init_network(bool try_backup = false);
