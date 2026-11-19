@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -440,6 +441,61 @@ bool app_is_signed_release()
 #else
     return false;
 #endif
+}
+
+bool proc_status_shows_seccomp_filter(const std::string& status_text)
+{
+    auto field = [&status_text](const char* name) -> std::string {
+        const std::string key = std::string("\n") + name + ":";
+        const std::string text = "\n" + status_text;
+        const size_t      at   = text.find(key);
+        if (at == std::string::npos)
+            return {};
+        size_t       b = at + key.size();
+        const size_t e = text.find('\n', b);
+        std::string  v = text.substr(b, e == std::string::npos ? std::string::npos : e - b);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t'))
+            v.erase(v.begin());
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r'))
+            v.pop_back();
+        return v;
+    };
+    return field("Seccomp") == "2" && field("NoNewPrivs") == "1";
+}
+
+bool verify_child_sandbox(const SpawnedHost& host, const SandboxReport& report, std::string& why)
+{
+    if (!report.applied)
+        return true; // nothing claimed; the caller already treats it as unsandboxed
+#ifdef _WIN32
+    if (report.kind == k_sandbox_kind_appcontainer) {
+        HANDLE token = nullptr;
+        if (host.process == nullptr || !::OpenProcessToken(static_cast<HANDLE>(host.process), TOKEN_QUERY, &token)) {
+            why = "cannot open the plugin host's token";
+            return false;
+        }
+        DWORD      is_app = 0;
+        DWORD      len    = 0;
+        const BOOL ok     = ::GetTokenInformation(token, TokenIsAppContainer, &is_app, sizeof(is_app), &len);
+        ::CloseHandle(token);
+        if (!ok || is_app == 0) {
+            why = "the plugin host reported an AppContainer but its token is not one";
+            return false;
+        }
+    }
+#elif defined(__linux__)
+    if (report.kind == k_sandbox_kind_landlock_seccomp) {
+        boost::nowide::ifstream in("/proc/" + std::to_string(host.pid) + "/status");
+        const std::string       text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (!proc_status_shows_seccomp_filter(text)) {
+            why = "the plugin host reported Landlock+seccomp but /proc shows no seccomp filter";
+            return false;
+        }
+    }
+#else
+    (void) host;
+#endif
+    return true;
 }
 
 bool helper_runnable(std::string& reason)

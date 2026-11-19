@@ -48,6 +48,15 @@ bool helper_signature_policy_allows(bool app_signed, bool helper_signed);
 // builds). Always false on macOS and Linux for now. Checked once per process.
 bool app_is_signed_release();
 
+// M8: the parent's own check of what the helper reported in hello_ok. Windows: an
+// "appcontainer" report must match TokenIsAppContainer on the child's token. Linux: a
+// "landlock+seccomp" report must match Seccomp: 2 and NoNewPrivs: 1 in /proc/<pid>/status.
+// Other kinds (macOS App Sandbox is checked by the kernel in the child) pass. False with
+// `why` when the report cannot be confirmed; the caller then treats the helper as unsandboxed.
+bool verify_child_sandbox(const SpawnedHost& host, const SandboxReport& report, std::string& why);
+// Linux /proc/<pid>/status text check, for tests.
+bool proc_status_shows_seccomp_filter(const std::string& status_text);
+
 // EDGE_PLUGIN_HOST / EDGE_PLUGIN_HOST_IN_PROCESS are ignored unless this is true.
 // Production never enables it; slic3rutils tests may. Hidden so a release DSO does not
 // export a switch for the env gate (Russ accepted the runtime-only gate).

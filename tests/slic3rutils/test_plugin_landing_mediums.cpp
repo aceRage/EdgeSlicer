@@ -170,3 +170,28 @@ TEST_CASE("M2: the Linux helper may signal itself but not EdgeSlicer", "[PluginL
     CHECK(completion.result.message == "parent=denied self=ok");
 }
 #endif
+
+TEST_CASE("M8: the parent reads the helper's seccomp state from /proc, not from its report", "[PluginLanding][M8][PluginSandbox]")
+{
+    CHECK(plugin_ipc::proc_status_shows_seccomp_filter("Name:\tedge-plugin-host\nNoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t1\n"));
+    CHECK_FALSE(plugin_ipc::proc_status_shows_seccomp_filter("Name:\tx\nNoNewPrivs:\t0\nSeccomp:\t2\n"));
+    CHECK_FALSE(plugin_ipc::proc_status_shows_seccomp_filter("Name:\tx\nNoNewPrivs:\t1\nSeccomp:\t0\n"));
+    CHECK_FALSE(plugin_ipc::proc_status_shows_seccomp_filter(""));
+
+    // A report that claims a sandbox the parent cannot confirm is refused (a dead pid here).
+    plugin_ipc::SpawnedHost   nobody;
+    plugin_ipc::SandboxReport claim;
+    claim.applied = true;
+#ifdef _WIN32
+    claim.kind = plugin_ipc::k_sandbox_kind_appcontainer;
+#else
+    claim.kind = plugin_ipc::k_sandbox_kind_landlock_seccomp;
+#endif
+    std::string why;
+#if defined(_WIN32) || defined(__linux__)
+    CHECK_FALSE(plugin_ipc::verify_child_sandbox(nobody, claim, why));
+    CHECK_FALSE(why.empty());
+#endif
+    plugin_ipc::SandboxReport none;
+    CHECK(plugin_ipc::verify_child_sandbox(nobody, none, why));
+}
