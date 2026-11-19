@@ -132,6 +132,12 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
     bool perimeter_extruder_active                  = feature_extruder_active(print_config.opt_int("wall_filament"));
     bool infill_extruder_active                     = feature_extruder_active(print_config.opt_int("wall_filament"));
     bool solid_infill_extruder_active               = feature_extruder_active(print_config.opt_int("solid_infill_filament"));
+    // EdgeSlicer surface filaments: the top surface prints with top_surface_filament, 0 = the outer wall's.
+    const int top_surface_filament = print_config.has("top_surface_filament") && print_config.opt_int("top_surface_filament") > 0 ?
+        print_config.opt_int("top_surface_filament") :
+        (print_config.has("outer_wall_filament") && print_config.opt_int("outer_wall_filament") > 0 ? print_config.opt_int("outer_wall_filament") :
+                                                                                                      print_config.opt_int("wall_filament"));
+    bool top_surface_extruder_active                = feature_extruder_active(top_surface_filament);
     bool support_material_extruder_active           = feature_extruder_active(print_config.opt_int("support_filament"));
     bool support_material_interface_extruder_active = feature_extruder_active(print_config.opt_int("support_interface_filament"));
 
@@ -173,11 +179,10 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
         }
         if (! bridging && infill_extruder_active)
             test_flow(frInfill, sparse_infill_line_width, sparse_infill_speed, L("sparse infill"));
-        if (solid_infill_extruder_active) {
+        if (solid_infill_extruder_active)
             test_flow(frInfill, internal_solid_infill_line_width, internal_solid_infill_speed, L("internal solid infill"));
-            if (! bridging)
-                test_flow(frInfill, top_surface_line_width, top_surface_speed, L("top surface"));
-        }
+        if (! bridging && top_surface_extruder_active)
+            test_flow(frInfill, top_surface_line_width, top_surface_speed, L("top surface"));
         if (! bridging && support_material_extruder_active)
             test_flow(frSupportMaterial, support_line_width, support_speed, L("support"));
         if (support_material_interface_extruder_active)
