@@ -86,6 +86,8 @@ add_executable(${_TEST_NAME}_tests
 	test_height_colour_pattern.cpp
 	test_height_pattern_input.cpp
 	test_cut_paint.cpp
+	test_paint_transfer_cut.cpp
+	test_paint_transfer_boolean.cpp
 	test_cut_groove.cpp
 	test_cut.cpp
 	test_cut_mesh_caps.cpp
