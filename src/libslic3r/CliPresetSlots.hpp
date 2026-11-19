@@ -7,6 +7,7 @@
 // Kept out of Snapmaker_Orca.cpp so Catch2 can test it.
 
 #include <cstddef>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,26 @@ void cli_flatten_filament_flow_variants(DynamicPrintConfig &config, size_t filam
 // filament_count, dropping what a longer project list had past it.
 void cli_set_filament_preset_value(DynamicPrintConfig &config, const std::string &key, const DynamicPrintConfig &filament,
                                    size_t filament_idx, size_t filament_count);
+
+// Identity for the CLI load_filaments_set. Same preset name with a different colour is a
+// different filament: keying on the name alone collapsed four "Generic PLA" colours to one
+// and turned the prime tower off (Snapmaker/OrcaSlicer #1190).
+std::string cli_filament_identity(const std::string &name, const std::string &colour);
+
+// First non-empty filament_colour value on a config, else empty.
+std::string cli_filament_colour_of(const DynamicPrintConfig &config);
+
+// Distinct colours from the loaded filament configs. If those are not already distinct,
+// also take colours from the project config (the 3MF, populated before filament loading).
+std::set<std::string> cli_distinct_filament_colours(const std::vector<DynamicPrintConfig> &filament_configs,
+                                                    const DynamicPrintConfig              *project_config);
+
+// Disable the prime tower only when a Bambu/Orca 3MF is sliced with loaded filaments that
+// all collapse to one identity and at most one colour.
+bool cli_should_disable_wipe_tower_after_mapping(bool   is_bbl_3mf,
+                                                 int    load_filament_count,
+                                                 size_t distinct_identities,
+                                                 size_t distinct_colours);
 
 } // namespace Slic3r
 
