@@ -21731,6 +21731,8 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
 }
 
 LoadType determine_load_type(std::string filename, std::string override_setting = "");
+// File > Import: "Import geometry only" or "Import with object settings" (no "Open as project"). False when cancelled.
+static bool ask_import_project_mode(const std::string &label, custom_models::ProjectImportMode default_mode, custom_models::ProjectImportMode &mode_out);
 
 // BBS: FIXME, missing resotre logic
 void Plater::load_project(wxString const& filename2,
@@ -22530,6 +22532,28 @@ bool Plater::add_model(bool imperial_units, std::string fname)
     if (paths.empty())
         return false;
 
+    // A project 3MF with per-object / per-part / modifier / height-range settings: ask how to bring
+    // it in (once for the whole batch). Plain models and 3MFs without such settings are not asked.
+    bool keep_3mf_settings = false;
+    if (fname.empty()) {
+        std::string first_with_settings;
+        std::size_t files_with_settings = 0;
+        for (const fs::path &path : paths)
+            if (custom_models::project_3mf_has_object_settings(path)) {
+                if (files_with_settings++ == 0)
+                    first_with_settings = path.filename().string();
+            }
+        const custom_models::ImportChoice choice = custom_models::decide_import_project_choice(
+            wxGetApp().app_config->get(SETTING_PROJECT_LOAD_BEHAVIOUR), wxGetApp().app_config->get("import_project_action"), files_with_settings > 0);
+        custom_models::ProjectImportMode mode = choice.mode;
+        if (choice.ask) {
+            const std::string label = files_with_settings == 1 ? first_with_settings : (std::to_string(files_with_settings) + " files");
+            if (!ask_import_project_mode(label, choice.default_mode, mode))
+                return false;
+        }
+        keep_3mf_settings = mode == custom_models::ProjectImportMode::GeometryWithObjectSettings;
+    }
+
     std::string snapshot_label;
     assert(! paths.empty());
     if (paths.size() == 1) {
@@ -22565,7 +22589,19 @@ bool Plater::add_model(bool imperial_units, std::string fname)
 
     auto strategy = LoadStrategy::LoadModel;
     if (imperial_units) strategy = strategy | LoadStrategy::ImperialUnits;
-    const bool loaded = !load_files(paths, strategy, ask_multi).empty();
+    bool loaded = false;
+    if (keep_3mf_settings) {
+        // The 3MFs keep their object settings; plain models are loaded the usual way.
+        std::vector<fs::path> project_files, other_files;
+        for (const fs::path &path : paths)
+            (boost::iends_with(path.filename().string(), ".3mf") ? project_files : other_files).push_back(path);
+        if (!project_files.empty())
+            loaded = !load_files(project_files, strategy | LoadStrategy::KeepObjectSettings, false).empty();
+        if (!other_files.empty())
+            loaded = !load_files(other_files, strategy, other_files.size() > 1 && ask_multi).empty() || loaded;
+    } else {
+        loaded = !load_files(paths, strategy, ask_multi).empty();
+    }
     if (loaded) {
 
         if (get_project_name() == _L("Untitled") && paths.size() > 0) {
@@ -24655,24 +24691,18 @@ static int dialog_action_from_mode(custom_models::ProjectImportMode mode)
     default: return int(LoadType::OpenProject);
     }
 }
-static int dialog_index_from_action(int action)
-{
-    return action == int(LoadType::LoadGeometryWithSettings) ? 2 : (action == int(LoadType::LoadGeometry) ? 1 : 0);
-}
-static int dialog_action_from_index(int index)
-{
-    return index == 2 ? int(LoadType::LoadGeometryWithSettings) : (index == 1 ? int(LoadType::LoadGeometry) : int(LoadType::OpenProject));
-}
-
 class ProjectDropDialog : public DPIDialog
 {
 private:
     wxColour          m_def_color = wxColour(255, 255, 255);
     int               m_action{1};
+    std::vector<int>  m_actions; // LoadType of each radio button, in order
     bool              m_remember_choice{false};
 
 public:
-    ProjectDropDialog(const std::string &filename);
+    // `allow_open_project` false (File > Import): only the two ways of adding the models are listed.
+    ProjectDropDialog(const std::string &filename, bool allow_open_project = true,
+                      custom_models::ProjectImportMode default_mode = custom_models::ProjectImportMode::OpenAsProject, bool use_default_mode = false);
 
     wxPanel *     m_top_line;
     wxStaticText *m_fname_title;
@@ -24693,10 +24723,10 @@ protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;
 };
 
-ProjectDropDialog::ProjectDropDialog(const std::string &filename)
+ProjectDropDialog::ProjectDropDialog(const std::string &filename, bool allow_open_project, custom_models::ProjectImportMode default_mode, bool use_default_mode)
     : DPIDialog(static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
-                from_u8((boost::format(_utf8(L("Drop project file")))).str()),
+                allow_open_project ? from_u8((boost::format(_utf8(L("Drop project file")))).str()) : _L("Import project file"),
                 wxDefaultPosition,
                 wxDefaultSize,
                 wxCAPTION | wxCLOSE_BOX)
@@ -24704,8 +24734,12 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
     // "import_project_action" on OK. Falling back to LoadType::OpenProject rather than
     // LoadGeometry: this dialog is shown for a *project* file, and importing geometry only
     // silently discards the embedded printer, filament and process settings.
-    , m_action(dialog_action_from_mode(custom_models::project_import_mode_from_action(wxGetApp().app_config->get("import_project_action"))))
+    , m_action(dialog_action_from_mode(use_default_mode ? default_mode : custom_models::project_import_mode_from_action(wxGetApp().app_config->get("import_project_action"))))
 {
+    m_actions = allow_open_project ? std::vector<int>{int(LoadType::OpenProject), int(LoadType::LoadGeometry), int(LoadType::LoadGeometryWithSettings)} :
+                                     std::vector<int>{int(LoadType::LoadGeometry), int(LoadType::LoadGeometryWithSettings)};
+    if (std::find(m_actions.begin(), m_actions.end(), m_action) == m_actions.end())
+        m_action = m_actions.front();
     // def setting
     SetBackgroundColour(m_def_color);
 
@@ -24752,18 +24786,28 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
 
     m_sizer_main->Add(m_sizer_name, 1, wxEXPAND | wxLEFT | wxRIGHT, 20);
 
-    auto radio_group = new RadioGroup(this, {
-        _L("Open as project"),                // 0
-        _L("Import geometry only"),           // 1
-        _L("Import with object settings")     // 2
-    }, wxVERTICAL);
+    const wxString tip_open     = _L("Replaces the current project with this one. Its printer, filament and process settings and all its objects come in.");
+    const wxString tip_geometry = _L("Adds only the models to the current project. Settings set on an object or on one of its parts (and on modifiers) are not kept, so the models follow the current project's settings. The file's printer, filament and process settings are not imported.");
+    const wxString tip_settings = _L("Adds the models to the current project and keeps the settings set on each object, each part and each modifier (including height-range settings). Scripts, host addresses and similar settings are removed, and filaments the current project does not have become filament 1. The file's printer, filament and process settings are not imported.");
+    std::vector<wxString> radio_labels;
+    std::vector<wxString> radio_tips;
+    for (int action : m_actions) {
+        if (action == int(LoadType::OpenProject)) { radio_labels.push_back(_L("Open as project")); radio_tips.push_back(tip_open); }
+        else if (action == int(LoadType::LoadGeometry)) { radio_labels.push_back(_L("Import geometry only")); radio_tips.push_back(tip_geometry); }
+        else { radio_labels.push_back(_L("Import with object settings")); radio_tips.push_back(tip_settings); }
+    }
+    auto radio_group = new RadioGroup(this, radio_labels, wxVERTICAL);
     radio_group->SetMinSize(wxSize(FromDIP(300),-1));
-    radio_group->SetRadioTooltip(0, _L("Replaces the current project with this one. Its printer, filament and process settings and all its objects come in."));
-    radio_group->SetRadioTooltip(1, _L("Adds only the models to the current project. Settings set on an object or on one of its parts (and on modifiers) are not kept, so the models follow the current project's settings. The file's printer, filament and process settings are not imported."));
-    radio_group->SetRadioTooltip(2, _L("Adds the models to the current project and keeps the settings set on each object, each part and each modifier (including height-range settings). Scripts, host addresses and similar settings are removed, and filaments the current project does not have become filament 1. The file's printer, filament and process settings are not imported."));
-    radio_group->SetSelection(dialog_index_from_action(get_action()));
+    for (size_t i = 0; i < radio_tips.size(); ++i)
+        radio_group->SetRadioTooltip(int(i), radio_tips[i]);
+    {
+        const auto it = std::find(m_actions.begin(), m_actions.end(), m_action);
+        radio_group->SetSelection(int(it - m_actions.begin()));
+    }
     radio_group->Bind(wxEVT_COMMAND_RADIOBOX_SELECTED, [this, radio_group](wxCommandEvent &e) {
-        set_action(dialog_action_from_index(radio_group->GetSelection()));
+        const int index = radio_group->GetSelection();
+        if (index >= 0 && index < int(m_actions.size()))
+            set_action(m_actions[index]);
     });
 
     m_sizer_main->Add(radio_group, 0, wxEXPAND | wxLEFT | wxRIGHT, 20);
@@ -24877,6 +24921,18 @@ void ProjectDropDialog::on_dpi_changed(const wxRect& suggested_rect)
 }
 
 //BBS: remove GCodeViewer as seperate APP logic
+static bool ask_import_project_mode(const std::string &label, custom_models::ProjectImportMode default_mode, custom_models::ProjectImportMode &mode_out)
+{
+    ProjectDropDialog dlg(label, false, default_mode, true);
+    if (dlg.ShowModal() != wxID_OK)
+        return false;
+    const int choice = dlg.get_action();
+    wxGetApp().app_config->set("import_project_action", std::to_string(choice));
+    mode_out = choice == int(LoadType::LoadGeometryWithSettings) ? custom_models::ProjectImportMode::GeometryWithObjectSettings :
+                                                                   custom_models::ProjectImportMode::GeometryOnly;
+    return true;
+}
+
 bool Plater::load_files(const wxArrayString& filenames, bool from_url)
 {
     const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip|glb|gltf)", std::regex::icase);
