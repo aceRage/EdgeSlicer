@@ -1199,11 +1199,16 @@ std::vector<indexed_triangle_set> its_make_helical_sweep(const std::vector<Vec2d
     const size_t nrings = nsteps + 1;
     const double dir    = left_hand ? -1. : 1.;
 
-    // THE LEAD-IN. The profile's radial extent is scaled to zero over `lead_frac` of a turn at
-    // each end, which tapers the thread out of existence instead of ending it in a wall. At
-    // scale 0 the whole ring collapses onto the centreline, so the ribbon closes there by
-    // itself; that degenerate ring is the cap. With lead_frac == 0 the ends stay full size and
-    // are capped with a flat fan instead.
+    // THE LEAD-IN. The profile is scaled to zero over `lead_frac` of a turn at each end, which
+    // tapers the thread out of existence instead of ending it in a wall. It is scaled as a whole
+    // about the middle of its innermost (root) edge: a convex profile shrunk about a point of its
+    // own stays inside its full self, with its flanks at the same angle, so a faded thread stays
+    // inside the groove cut for the full one, and it keeps its root on the core it grows from.
+    // (Scaling only the radial offsets, towards the centreline, kept the root's full axial width
+    // while lifting it off the core, and its root corners stood out past the full profile's
+    // flanks, through the groove's clearance.) At scale 0 the whole ring collapses onto that
+    // point, so the ribbon closes there by itself; that degenerate ring is the cap. With
+    // lead_frac == 0 the ends stay full size and are capped with a flat fan instead.
     const double lead_turns = std::max(0., std::min(lead_frac, 0.5 * turns));
     auto depth_scale = [lead_turns, turns](double t) {
         // t is the position along the helix in TURNS.
@@ -1213,6 +1218,18 @@ std::vector<indexed_triangle_set> its_make_helical_sweep(const std::vector<Vec2d
         return std::max(0., std::min(1., a / lead_turns));
     };
     const bool taper = lead_turns > 0.;
+
+    // The point the lead-in shrinks the profile about: the middle of its innermost edge.
+    double anchor_r = std::numeric_limits<double>::max();
+    for (const Vec2d &q : prof)
+        anchor_r = std::min(anchor_r, q.x());
+    double root_lo = std::numeric_limits<double>::max(), root_hi = std::numeric_limits<double>::lowest();
+    for (const Vec2d &q : prof)
+        if (q.x() <= anchor_r + 1e-9) {
+            root_lo = std::min(root_lo, q.y());
+            root_hi = std::max(root_hi, q.y());
+        }
+    const Vec2d anchor(anchor_r, 0.5 * (root_lo + root_hi));
 
     for (int s = 0; s < starts; ++ s) {
         indexed_triangle_set mesh;
@@ -1236,16 +1253,15 @@ std::vector<indexed_triangle_set> its_make_helical_sweep(const std::vector<Vec2d
             ring_base[i]       = int(mesh.vertices.size());
             ring_degenerate[i] = (taper && sc <= 0.) ? 1 : 0;
             if (ring_degenerate[i]) {
-                // The whole ring has collapsed onto the centreline: one point closes the end.
-                mesh.vertices.emplace_back((radius * er + Vec3d(0., 0., zc)).cast<float>());
+                // The whole ring has collapsed onto the anchor: one point closes the end.
+                mesh.vertices.emplace_back(((radius + anchor.x()) * er + Vec3d(0., 0., zc + anchor.y())).cast<float>());
                 continue;
             }
             for (size_t j = 0; j < np; ++ j) {
-                // The profile lives in (radial, axial): dr rides er, dz rides +Z. Only the
-                // RADIAL extent tapers - an axially tapered lead would pinch the flanks
-                // together and give the boolean a knife edge to chew on.
-                const double dr = sc * prof[j].x();
-                const double dz = prof[j].y();
+                // The profile lives in (radial, axial): dr rides er, dz rides +Z.
+                const Vec2d  o  = anchor + sc * (prof[j] - anchor);
+                const double dr = o.x();
+                const double dz = o.y();
                 const Vec3d  q  = (radius + dr) * er + Vec3d(0., 0., zc + dz);
                 mesh.vertices.emplace_back(q.cast<float>());
             }
