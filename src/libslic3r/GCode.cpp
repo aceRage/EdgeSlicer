@@ -4926,6 +4926,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 auto to_physical = [&](const std::vector<int> &logical) {
                     std::vector<int> physical(num_nozzles, -1);
                     for (size_t e = 0; e < num_nozzles; ++e) {
+                        // Orca #17476: the map value is a firmware tool number, so it may fall
+                        // outside this table. An out-of-range entry is skipped; a short map still
+                        // falls back to the logical index (the one-entry {0} default).
                         const size_t p = (e < pem.size() && pem[e] >= 0 && size_t(pem[e]) < num_nozzles) ? size_t(pem[e]) : e;
                         physical[p] = logical[e];
                     }
