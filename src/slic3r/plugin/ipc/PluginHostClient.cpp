@@ -39,6 +39,8 @@ std::atomic<bool>          g_force_in_process{false};
 std::atomic<int>           g_execute_timeout_ms{k_default_timeout_ms};
 std::atomic<std::uint64_t> g_spawn_count{0};
 std::atomic<bool>          g_logged_fallback{false};
+std::function<void()>      g_job_hook_for_testing;
+std::mutex                 g_job_hook_mutex;
 
 void log_host_fallback_once(const char* reason)
 {
@@ -88,6 +90,8 @@ struct Job
     std::uint64_t                                                          request_id{0};
     std::function<void(const ScriptCompletion&)>                           on_done;
     std::shared_ptr<std::promise<std::pair<ExecutionResult, std::string>>> post_promise;
+    // Set once the caller has been told the outcome, so an error path never reports twice.
+    bool                                                                   finished{false};
 };
 
 } // namespace
@@ -186,8 +190,9 @@ struct PluginHostClient::Impl
 
     void fail_job(Job& job, const std::string& error, bool cancelled)
     {
-        if (job.kind == Job::Kind::Unload)
+        if (job.kind == Job::Kind::Unload || job.finished)
             return;
+        job.finished = true;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             active.erase(job.plugin_key);
@@ -206,6 +211,21 @@ struct PluginHostClient::Impl
         } else if (job.post_promise) {
             job.post_promise->set_value({ExecutionResult::failure(PluginResult::FatalError, error), error});
         }
+    }
+
+    // H2: every message from the helper goes through the schema check. A violation is reported
+    // like a transport failure, and every caller then kills and resets the helper.
+    bool read_child(nlohmann::json& msg, int timeout_ms, std::string& error)
+    {
+        if (!host.channel.read_json(msg, timeout_ms, error))
+            return false;
+        std::string why;
+        if (!validate_child_message(msg, why)) {
+            error = "plugin host protocol violation: " + why;
+            BOOST_LOG_TRIVIAL(error) << error;
+            return false;
+        }
+        return true;
     }
 
     bool prompt_unsandboxed(std::unique_lock<std::mutex>& io, const std::string& plugin_key, const std::string& reason, std::string& error)
@@ -265,17 +285,17 @@ struct PluginHostClient::Impl
             return false;
         }
         nlohmann::json reply;
-        if (!host.channel.read_json(reply, k_handshake_timeout_ms, error)) {
+        if (!read_child(reply, k_handshake_timeout_ms, error)) {
             enrich_host_error(host, error);
             reset_child_locked();
             return false;
         }
-        if (reply.value("type", std::string()) != k_type_hello_ok) {
+        if (reply["type"].get<std::string>() != k_type_hello_ok) {
             error = "plugin host handshake failed";
             reset_child_locked();
             return false;
         }
-        int remote = reply.value("protocol_version", 0);
+        const int remote = static_cast<int>(reply["protocol_version"].get<std::int64_t>());
         if (!handshake_versions_compatible(remote, error)) {
             reset_child_locked();
             return false;
@@ -325,7 +345,7 @@ struct PluginHostClient::Impl
             return false;
         }
         nlohmann::json reply;
-        if (!host.channel.read_json(reply, g_execute_timeout_ms.load(), error)) {
+        if (!read_child(reply, g_execute_timeout_ms.load(), error)) {
             reset_child_locked();
             return false;
         }
@@ -335,7 +355,7 @@ struct PluginHostClient::Impl
             reset_child_locked();
             return false;
         }
-        if (reply.value("type", std::string()) == k_type_load_ok) {
+        if (reply["type"].get<std::string>() == k_type_load_ok) {
             loaded.insert(plugin_key);
             return true;
         }
@@ -373,7 +393,9 @@ struct PluginHostClient::Impl
                 wait_ms = k_pump_poll_ms;
             }
             nlohmann::json msg;
-            if (!host.channel.read_json(msg, wait_ms, error)) {
+            if (!read_child(msg, wait_ms, error)) {
+                if (error.rfind("plugin host protocol violation", 0) == 0)
+                    return false;
                 {
                     std::lock_guard<std::mutex> lock(state_mutex);
                     if (is_cancelled_locked(expected_id)) {
@@ -394,7 +416,7 @@ struct PluginHostClient::Impl
                 }
                 return false;
             }
-            const std::string type = msg.value("type", std::string());
+            const std::string type = msg["type"].get<std::string>();
             if (type == k_type_host_call) {
                 HostCall call;
                 call.plugin_key        = msg.value("plugin_key", plugin_key);
@@ -404,7 +426,7 @@ struct PluginHostClient::Impl
                 const HostResult hr    = handle_host_call(call);
                 nlohmann::json   reply = {
                     {"type", k_type_host_result},
-                    {"id", msg.value("id", 0)},
+                    {"id", msg.value("id", static_cast<std::uint64_t>(0))},
                     {"ok", hr.ok},
                 };
                 if (hr.ok)
@@ -446,7 +468,7 @@ struct PluginHostClient::Impl
                 (void) event_name;
                 nlohmann::json reply = {
                     {"type", k_type_audit_result},
-                    {"id", msg.value("id", 0)},
+                    {"id", msg.value("id", static_cast<std::uint64_t>(0))},
                     {"ok", allowed},
                     {"reason", reason},
                 };
@@ -490,7 +512,7 @@ struct PluginHostClient::Impl
             return;
         }
         nlohmann::json reply;
-        if (!host.channel.read_json(reply, 5000, error)) {
+        if (!read_child(reply, 5000, error)) {
             reset_child_locked();
             return;
         }
@@ -599,6 +621,7 @@ struct PluginHostClient::Impl
         if (job.kind == Job::Kind::Script) {
             ScriptCompletion completion;
             completion.result.status  = static_cast<PluginResult>(reply.value("status", 0));
+            job.finished              = true;
             completion.result.message = reply.value("message", std::string());
             completion.result.data    = reply.value("data", std::string());
             completion.cancelled      = reply.value("cancelled", false) || cancelled;
@@ -627,6 +650,7 @@ struct PluginHostClient::Impl
 #endif
             }
             io.unlock();
+            job.finished = true;
             if (job.post_promise)
                 job.post_promise->set_value({result, std::string()});
         }
@@ -655,8 +679,44 @@ struct PluginHostClient::Impl
                     continue;
                 }
             }
-            run_job(*job);
+            run_job_contained(*job);
         }
+    }
+
+    // H2: nothing that comes back from the helper may end the app. Any exception from a job
+    // (a malformed reply that slipped past the schema check, a host RPC that threw, an
+    // allocation failure) kills and resets the helper and fails this run with the reason.
+    void run_job_contained(Job& job)
+    {
+        std::string failure;
+        try {
+            {
+                std::function<void()> hook;
+                {
+                    std::lock_guard<std::mutex> lock(g_job_hook_mutex);
+                    hook = g_job_hook_for_testing;
+                }
+                if (hook)
+                    hook();
+            }
+            run_job(job);
+            return;
+        } catch (const std::exception& ex) {
+            failure = ex.what();
+        } catch (...) {
+            failure = "unknown error";
+        }
+        BOOST_LOG_TRIVIAL(error) << "plugin host job for " << job.plugin_key << " failed: " << failure;
+        try {
+            std::unique_lock<std::mutex> io(io_mutex, std::try_to_lock);
+            if (!io.owns_lock())
+                kill_live();
+            else
+                reset_child_locked();
+        } catch (...) {}
+        try {
+            fail_job(job, "plugin host error: " + failure, false);
+        } catch (...) {}
     }
 };
 
@@ -690,6 +750,12 @@ void PluginHostClient::set_execute_timeout_for_testing(int timeout_ms)
 void PluginHostClient::set_allow_env_overrides_for_testing(bool allow) { set_allow_helper_env_overrides_for_testing(allow); }
 
 void PluginHostClient::reset_spawn_count_for_testing() { g_spawn_count.store(0, std::memory_order_release); }
+
+void PluginHostClient::set_job_hook_for_testing(std::function<void()> hook)
+{
+    std::lock_guard<std::mutex> lock(g_job_hook_mutex);
+    g_job_hook_for_testing = std::move(hook);
+}
 
 std::uint64_t PluginHostClient::spawn_count() { return g_spawn_count.load(std::memory_order_acquire); }
 

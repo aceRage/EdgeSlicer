@@ -55,6 +55,21 @@ void     write_le32(uint8_t bytes[4], uint32_t value);
 
 bool handshake_versions_compatible(int remote_version, std::string& error);
 
+// H2: limits on what the parent accepts from the helper. decode_payload refuses deeper nesting;
+// validate_child_message refuses longer strings and lists.
+inline constexpr int         k_max_json_depth          = 64;
+inline constexpr std::size_t k_max_short_string_bytes  = 4096;               // ids, keys, method names, paths
+inline constexpr std::size_t k_max_message_bytes       = 64u * 1024u;        // human-readable message / reason
+inline constexpr std::size_t k_max_data_bytes          = 8u * 1024u * 1024u; // ExecutionResult.data
+inline constexpr std::size_t k_max_audit_targets       = 64;
+
+// H2: strict schema check of a message the helper sent to Edge (result, error, host_call,
+// audit_check, load_ok, unload_ok, hello_ok, shutdown_ok). Every field the parent reads must
+// have the right JSON type and be in range (ids non-negative integers, status a PluginResult,
+// strings and lists within the limits above). Returns false with a reason otherwise; the parent
+// then kills the helper and fails the run. Never throws.
+bool validate_child_message(const nlohmann::json& msg, std::string& error);
+
 bool in_child_process();
 void set_in_child_process();
 

@@ -38,6 +38,8 @@ public:
     static void          set_execute_timeout_for_testing(int timeout_ms);
     static void          set_allow_env_overrides_for_testing(bool allow);
     static void          reset_spawn_count_for_testing();
+    // Runs at the start of every worker job; a test throws from it to check containment (H2).
+    static void          set_job_hook_for_testing(std::function<void()> hook);
     static std::uint64_t spawn_count();
 
     // Snapshot of print config for a post-process execute. Omits the same banned keys

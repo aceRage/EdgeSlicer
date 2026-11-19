@@ -186,6 +186,8 @@ SandboxReport sandbox_report_from_json(const nlohmann::json& json)
     SandboxReport report;
     if (!json.is_object())
         return report;
+    // H2: a wrongly typed field (the helper wrote it) means "not applied", never an exception.
+    try {
     report.applied      = json.value("applied", false);
     report.kind         = json.value("kind", std::string(k_sandbox_kind_none));
     report.detail       = json.value("detail", std::string());
@@ -193,6 +195,11 @@ SandboxReport sandbox_report_from_json(const nlohmann::json& json)
     report.network      = json.value("network", false);
     report.exec         = json.value("exec", false);
     report.degraded     = json.value("degraded", false);
+    } catch (const std::exception&) {
+        report        = SandboxReport{};
+        report.detail = "malformed sandbox report from the plugin host";
+        return report;
+    }
     if (!report.applied)
         report.kind = k_sandbox_kind_none;
     return report;
