@@ -10,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <optional>
 #include <string>
 #include <vector>
 #include "libslic3r.h"
@@ -2001,6 +2002,10 @@ public:
         legend,
         // Vector value, but edited as a single string.
         one_string,
+        // Plugin capability picker (bare capability names). Falls through to a text field until a picker UI exists.
+        plugin_picker,
+        // Plugin capability config JSON, edited through a dialog rather than typed.
+        plugin_config,
     };
 
 	// Identifier of this option. It is stored here so that it is accessible through the by_serialization_key_ordinal map.
@@ -2123,6 +2128,11 @@ public:
     std::string                         category;
     // A tooltip text shown in the GUI.
     std::string                         tooltip;
+    // Empty unless this option names a plugin capability type (e.g. "slicing-pipeline").
+    // Unused by default; adding a value here is the only step that makes an option plugin-backed.
+    // Not serialized into G-code.
+    std::string                         plugin_type;
+    bool is_plugin_backed() const { return !plugin_type.empty(); }
     // Text right from the input field, usually a unit of measurement.
     std::string                         sidetext;
     // Format of this parameter on a command line.
@@ -2438,12 +2448,31 @@ public:
     // is_custom is the Ultra is_custom_defined header; the file overload passes it through so preset files stay unchanged.
     void save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8 = false, const std::string is_custom = "") const;
 
+    // Plugin-backed option helpers. A resolver (GUI/plugin layer) turns a bare capability name
+    // into the full "name;uuid;capability" reference stored in the "plugins" manifest. Without a
+    // resolver (CLI / EDGE_PYTHON_PLUGINS OFF) the manifest is left as loaded.
+    using ResolveCapabilityFn = std::function<std::string(std::string capability_name, std::string plugin_type)>;
+    static void set_resolve_capability_fn(ResolveCapabilityFn fn) { resolve_capability_fn = std::move(fn); }
+    std::vector<std::string> collect_plugin_manifest() const;
+    struct UnresolvedPluginCapability {
+        std::string opt_key;
+        std::string capability_name;
+    };
+    std::vector<UnresolvedPluginCapability> unresolved_plugin_capabilities() const;
+    void update_plugin_manifest();
+    // True for plugins / slicing_pipeline_plugin / *_plugin_config_overrides when empty or
+    // all-empty. G-code headers, --export-settings and preset/3MF JSON omit them so an OFF
+    // build's bytes match main. Non-empty values still serialize (ON round-trip).
+    static bool plugin_option_is_empty(const std::string &opt_key, const ConfigOption *opt);
+
 	// Set all the nullable values to nils.
     void null_nullables();
 
     static size_t load_from_gcode_string_legacy(ConfigBase& config, const char* str, ConfigSubstitutionContext& substitutions);
 
 private:
+    static ResolveCapabilityFn resolve_capability_fn;
+    void for_each_plugin_capability(const std::function<void(const std::string& opt_key, const std::string& plugin_type, const std::string& capability_name)>& fn) const;
     // Set a configuration value from a string.
     bool set_deserialize_raw(const t_config_option_key& opt_key_src, const std::string& value, ConfigSubstitutionContext& substitutions, bool append);
 };
@@ -2641,6 +2670,18 @@ protected:
     /// Set all statically defined config options to their defaults defined by this->def().
     void set_defaults();
 };
+
+// A plugin capability referenced by a preset as "name;uuid;capability". The UUID is empty for
+// local plugins (two consecutive semicolons). Lives here so dispatch templates in PluginManager
+// can parse refs without pulling the plugin layer into every Config.hpp consumer's compile.
+struct PluginCapabilityRef
+{
+    std::string name;
+    std::string capability_name;
+    std::string uuid;
+};
+
+std::optional<PluginCapabilityRef> parse_capability_ref(const std::string& value);
 
 }
 

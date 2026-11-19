@@ -300,6 +300,13 @@ fieldset.group legend { font-weight: 600; padding: 0 6px; }
   background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
 .toast.error { background: var(--danger); color: #fff; }
 
+/* ---- plugins ---- */
+#plugins-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.plug-caps { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.plug-cap { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mute); cursor: pointer; }
+.plug-cap input { accent-color: var(--accent); margin: 0; }
+.plug-trust:empty { display: none; }
+
 @media (max-width: 720px) {
   .detail-head { flex-direction: column; }
   .detail-thumb { flex-basis: auto; height: 180px; }

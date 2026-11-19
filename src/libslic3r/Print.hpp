@@ -170,6 +170,16 @@ enum PrintObjectStep {
     posCount,
 };
 
+// Plugin-facing pipeline seams. pos* steps fire from Print::process() after the matching
+// PrintObjectStep is done. psWipeTower / psSkirtBrim fire with a null object. psGCodePostProcess
+// fires from the G-code export path (PostProcessor.cpp), never from process().
+enum class SlicingPipelineStepPlugin {
+    posSlice, posPerimeters, posEstimateCurledExtrusions, posPrepareInfill, posInfill, posIroning, posContouring,
+    posSupportMaterial, posDetectOverhangsForLift, posSimplifyPath, psWipeTower, psSkirtBrim,
+    // At this step the plugin edits the exported G-code file in place.
+    psGCodePostProcess
+};
+
 // Which of a PrintRegion's three configured filaments an extrusion that lives in a
 // LayerRegion's *fills* collection has to follow.
 //
@@ -1292,6 +1302,16 @@ private: // Prevents erroneous use by other classes.
     typedef std::pair<PrintObject *, bool>         PrintObjectInfo;
 
 public:
+    using SlicingPipelineHookFn = std::function<void(Print&, const PrintObject*, SlicingPipelineStepPlugin)>;
+    // Cross-layer injection (mirrors ConfigBase::set_resolve_capability_fn): the GUI/plugin
+    // layer registers a dispatcher; libslic3r stays free of any plugin/Python dependency.
+    // Default is empty, so G-code is unchanged when no pipeline plugin is selected.
+    // Thread safe: process() takes its own copy at the start of a run, so replacing or clearing
+    // the dispatcher while a background slice runs never touches the function being called.
+    static void set_slicing_pipeline_hook_fn(SlicingPipelineHookFn fn);
+    // A copy of the dispatcher currently registered (empty when none).
+    static SlicingPipelineHookFn slicing_pipeline_hook_fn();
+
     Print() = default;
 	virtual ~Print() { this->clear(); }
 
@@ -1757,6 +1777,14 @@ private:
     
     //SoftFever: calibration
     Calib_Params m_calib_params;
+
+    // This run's copy of the registered dispatcher (set at the start of process()).
+    SlicingPipelineHookFn m_pipeline_hook;
+    bool m_pipeline_plugin_active { false };
+    void run_pipeline_hook(SlicingPipelineStepPlugin step, const PrintObject* object) {
+        if (m_pipeline_plugin_active && m_pipeline_hook)
+            m_pipeline_hook(*this, object, step);
+    }
 
     // To allow GCode to set the Print's GCodeExport step status.
     friend class GCode;
