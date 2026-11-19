@@ -351,10 +351,12 @@ struct ResamplePlanner
         const S     sab = sampler(mab), sbc = sampler(mbc), sca = sampler(mca);
         const float area = 0.5f * (b - a).cross(c - a).norm();
 
-        bool    uniform  = true;
-        float   min_leaf = 0.f;
-        int64_t leaf     = -1;
+        bool    uniform      = true;
+        bool    states_agree = true;
+        float   min_leaf     = 0.f;
+        int64_t leaf         = -1;
         for (const S *s : { &centre, &sa, &sb, &sc, &sab, &sbc, &sca }) {
+            states_agree = states_agree && s->state == centre.state;
             uniform = uniform && s->state == centre.state && (s->leaf_area <= 0.f || area <= s->leaf_area);
             // Samples in different pieces of split painting: a border of the same state's pieces
             // can hide a stroke of another state between the samples.
@@ -367,9 +369,14 @@ struct ResamplePlanner
             if (s->leaf_area > 0.f && (min_leaf <= 0.f || s->leaf_area < min_leaf))
                 min_leaf = s->leaf_area;
         }
-        if (! uniform && min_leaf > 0.f && area <= 0.5f * min_leaf)
-            uniform = true;
         const float longest_sqr = std::max({ (b - a).squaredNorm(), (c - b).squaredNorm(), (a - c).squaredNorm() });
+        // Smaller than the pieces of painting it sits on: the samples agree, so nothing can hide
+        // between them. Samples that disagree mean a border runs through: that is followed down to
+        // a small fraction of those pieces (2% of their size), not stopped at their size, which
+        // left whole sub-triangles of one colour on the wrong side of a border.
+        if (! uniform && min_leaf > 0.f &&
+            (states_agree ? area <= 0.5f * min_leaf : longest_sqr <= std::max(edge_limit_sqr, 4e-4f * min_leaf)))
+            uniform = true;
         if (uniform || depth > 30 || longest_sqr <= edge_limit_sqr) {
             plan.push_back(int16_t(centre.state));
             return;
