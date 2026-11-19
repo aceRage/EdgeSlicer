@@ -8,6 +8,7 @@
 #ifdef __WXOSX__
 #include "libslic3r/PrintConfig.hpp"
 #endif
+#include "libslic3r/Slicing.hpp"
 
 class wxBoxSizer;
 
@@ -21,6 +22,18 @@ typedef double                          coordf_t;
 typedef std::pair<coordf_t, coordf_t>   t_layer_height_range;
 
 class ObjectLayers;
+
+// What typing new heights into a height range's Min Z / Max Z would do to the object's ranges.
+enum class LayerRangeEditCheck
+{
+    Ok,
+    Negative,   // it would start below the bed
+    Empty,      // it would end where it starts, or below (the slicer drops a range that thin)
+    Taken,      // another range has these heights: it would be replaced, its settings lost
+};
+// range: the range edited, a key of ranges; new_range: its heights after the edit.
+LayerRangeEditCheck check_layer_range_edit(const t_layer_config_ranges &ranges, const t_layer_height_range &range,
+                                           const t_layer_height_range &new_range);
 
 enum EditorType
 {
