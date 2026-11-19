@@ -93,11 +93,14 @@ public:
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   fills;
 
-    unsigned int extruder(FlowRole role) const;
+    // EdgeSlicer surface filaments: `fill_role` names the fill's ExtrusionRole where the FlowRole alone
+    // cannot tell a bottom skin (frSolidInfill, like internal solid infill) from the solid layers above it;
+    // a bottom surface role then takes bottom_surface_filament's filament and nozzle. erNone: as before.
+    unsigned int extruder(FlowRole role, ExtrusionRole fill_role = erNone) const;
     Flow    flow(FlowRole role) const;
     Flow    flow(FlowRole role, double layer_height) const;
-    Flow    flow(FlowRole role, double layer_height, bool use_initial_layer_width) const;
-    Flow    bridging_flow(FlowRole role, bool thick_bridge = false) const;
+    Flow    flow(FlowRole role, double layer_height, bool use_initial_layer_width, ExtrusionRole fill_role = erNone) const;
+    Flow    bridging_flow(FlowRole role, bool thick_bridge = false, ExtrusionRole fill_role = erNone) const;
 
     void    slices_to_fill_surfaces_clipped();
     void    prepare_fill_surfaces();

@@ -1088,6 +1088,9 @@ TEST_CASE("total_toolchanges counts tool changes without a wipe tower", "[Print]
             {"sparse_infill_density",  "20%"},
             {"sparse_infill_filament", "2"},
             {"solid_infill_filament",  "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",  "2"},
+            {"bottom_surface_filament",  "2"},
             {"machine_start_gcode",    "; TT=[total_toolchanges] TT2={total_toolchanges}\n"},
         });
         Print print;
@@ -1341,6 +1344,9 @@ TEST_CASE("Every printing tool is heated when the start G-code sets no nozzle te
             {"wall_filament",                    "1"},
             {"sparse_infill_filament",           "2"},
             {"solid_infill_filament",            "2"},
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament",            "2"},
+            {"bottom_surface_filament",            "2"},
         });
         Print print;
         Model model;

@@ -1400,7 +1400,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 		        const PrintRegionConfig &region_config = layerm.region().config();
 		        FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill : (surface.is_solid() ? frSolidInfill : frInfill);
 		        bool     is_bridge 	    = layer.id() > 0 && surface.is_bridge();
-                const unsigned int effective_extruder = layerm.extruder(extrusion_role);
+                unsigned int effective_extruder = layerm.extruder(extrusion_role);
 		        params.extruder 	 = effective_extruder;
 		        params.pattern 		 = region_config.sparse_infill_pattern.value;
 		        params.density       = float(region_config.sparse_infill_density);
@@ -1473,6 +1473,14 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     } else {
                         params.extrusion_role = erSolidInfill;
                     }
+                }
+                // EdgeSlicer surface filaments: a bottom skin (bottom surface, bottom over support, bottom
+                // bridge) prints with bottom_surface_filament (0 = the outer wall's filament), and its flow
+                // below takes that filament's nozzle. The top skin already did through frTopSolidInfill.
+                const ExtrusionRole surface_fill_role = is_bottom_surface_filament_role(params.extrusion_role) ? params.extrusion_role : erNone;
+                if (surface_fill_role != erNone) {
+                    effective_extruder = layerm.extruder(extrusion_role, surface_fill_role);
+                    params.extruder    = effective_extruder;
                 }
                 // Phase 3 (image row): see this field's own comment above - 0 for every print that
                 // does not use the feature. Phase 5a keys EVERY solid role, not only the top: a
@@ -1547,8 +1555,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 const bool is_thick_bridge = surface.is_bridge() && (surface.is_internal_bridge() ? object_config.thick_internal_bridges : object_config.thick_bridges);
 				params.flow   = params.bridge ?
 					//Orca: enable thick bridge based on config
-					layerm.bridging_flow(extrusion_role, is_thick_bridge) :
-					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness);
+					layerm.bridging_flow(extrusion_role, is_thick_bridge, surface_fill_role) :
+					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness, layer.id() == 0, surface_fill_role);
 				// record speed params: the speed GCode::_extrude will use for this role (flow variant
 				// slot of the fill's filament), so two regions with different speeds are never merged.
                 const PrintConfig  &print_config = layer.object()->print()->config();
@@ -2480,12 +2488,14 @@ void Layer::make_ironing()
 				    ((config.top_shell_layers > 0 || (this->object()->print()->config().spiral_mode && config.bottom_shell_layers > 1)) &&
 					    (config.ironing_type == IroningType::TopSurfaces ||
 					        (config.ironing_type == IroningType::TopmostOnly && layerm->layer()->upper_layer == nullptr))))) {
-				if (config.wall_filament == config.solid_infill_filament || config.wall_loops == 0) {
+				// EdgeSlicer surface filaments: ironing follows the top surface filament (0 = the outer
+				// wall's), the filament of the skin it irons.
+				if (config.wall_filament.value == top_surface_filament_1based(config) || config.wall_loops == 0) {
 					// Iron the whole face.
-					ironing_params.extruder = config.solid_infill_filament;
+					ironing_params.extruder = top_surface_filament_1based(config);
 				} else {
 					// Iron just the infill.
-					ironing_params.extruder = config.solid_infill_filament;
+					ironing_params.extruder = top_surface_filament_1based(config);
 				}
 				// PHASE 4, step 3: ironing IS now split per image, so ironing_params.extruder's
 				// virtual id is only the fallback for the case the split declines (see the

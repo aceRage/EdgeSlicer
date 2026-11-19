@@ -384,6 +384,41 @@ unsigned int LayerTools::solid_infill_filament(const PrintRegion &region) const
 	return resolve_grouped_or_mixed_1based(region, id) - 1;
 }
 
+// EdgeSlicer surface filaments. 0 follows the outer wall, through the same resolution the outer wall
+// itself takes (outer_wall_filament() -> wall_filament() when unset), so a skin left at its default
+// can never land on a different physical extruder than the wall around it.
+unsigned int LayerTools::top_surface_filament(const PrintRegion &region) const
+{
+	const int top = region.config().top_surface_filament.value;
+	if (this->extruder_override != 0)
+		return solid_infill_filament(region); // the override, resolved as the solid infill always was
+	if (top <= 0)
+		return outer_wall_filament(region);
+	return resolve_grouped_or_mixed_1based(region, unsigned(top)) - 1;
+}
+
+unsigned int LayerTools::bottom_surface_filament(const PrintRegion &region) const
+{
+	const int bottom = region.config().bottom_surface_filament.value;
+	if (this->extruder_override != 0)
+		return solid_infill_filament(region); // the override, resolved as the solid infill always was
+	if (bottom <= 0)
+		return outer_wall_filament(region);
+	return resolve_grouped_or_mixed_1based(region, unsigned(bottom)) - 1;
+}
+
+unsigned int LayerTools::fill_filament(const PrintRegion &region, ExtrusionRole role) const
+{
+	switch (fill_filament_source(region.config(), role)) {
+	case FillFilamentSource::Wall:          return wall_filament(region);
+	case FillFilamentSource::SolidInfill:   return solid_infill_filament(region);
+	case FillFilamentSource::TopSurface:    return top_surface_filament(region);
+	case FillFilamentSource::BottomSurface: return bottom_surface_filament(region);
+	case FillFilamentSource::SparseInfill:
+	default:                                return sparse_infill_filament(region);
+	}
+}
+
 // Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
 unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const
 {
@@ -403,6 +438,11 @@ unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, c
         const ExtrusionRole role = extrusions.entities.empty() ? erNone : extrusions.entities.front()->role();
         if (internal_solid_infill_uses_sparse_filament(region, role))
             return sparse_infill_filament(region);
+        // EdgeSlicer surface filaments: the top / bottom skins and ironing follow their own keys.
+        if (is_top_surface_filament_role(role))
+            return top_surface_filament(region);
+        if (is_bottom_surface_filament_role(role))
+            return bottom_surface_filament(region);
         return is_solid_infill(role) ? solid_infill_filament(region) : sparse_infill_filament(region);
     }
     return wall_filament(region);
@@ -1024,6 +1064,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
             bool has_sparse_infill = false;
             bool has_solid_infill  = false;
+            // EdgeSlicer surface filaments: the top / bottom skins (and ironing) of this region on this layer.
+            bool has_top_surface    = false;
+            bool has_bottom_surface = false;
             bool something_nonoverriddable = false;
             for (const ExtrusionEntity *ee : layerm->fills.entities) {
                 // fill represents infill extrusions of a single island.
@@ -1059,6 +1102,8 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     switch (fill_filament_source(region.config(), role)) {
                     case FillFilamentSource::Wall:        break; // covered by the perimeters loop above
                     case FillFilamentSource::SolidInfill: has_solid_infill  = true; break;
+                    case FillFilamentSource::TopSurface:    has_top_surface    = true; break;
+                    case FillFilamentSource::BottomSurface: has_bottom_surface = true; break;
                     case FillFilamentSource::SparseInfill:
                     default:                              has_sparse_infill = true; break;
                     }
@@ -1078,7 +1123,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 	                if (has_sparse_infill) {
 		                    layer_tools.extruders.emplace_back(layer_tools.sparse_infill_filament(region) + 1);
 	                }
-            	} else if (has_solid_infill || has_sparse_infill) {
+	                if (has_top_surface)
+	                    layer_tools.extruders.emplace_back(layer_tools.top_surface_filament(region) + 1);
+	                if (has_bottom_surface)
+	                    layer_tools.extruders.emplace_back(layer_tools.bottom_surface_filament(region) + 1);
+            	} else if (has_solid_infill || has_sparse_infill || has_top_surface || has_bottom_surface) {
             		layer_tools.extruders.emplace_back(resolve_mixed(extruder_override,
                                                                       layerCount,
                                                                       float(layer->print_z),
@@ -1086,7 +1135,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                                       &object));
             	}
             }
-            if (has_solid_infill || has_sparse_infill)
+            if (has_solid_infill || has_sparse_infill || has_top_surface || has_bottom_surface)
                 layer_tools.has_object = true;
         }
         layerCount++;
