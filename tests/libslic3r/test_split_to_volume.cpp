@@ -2457,7 +2457,11 @@ TEST_CASE("Split to Fit: painting of every kind survives the cuts and the loose 
                     out += area((pv->*k.member).get_facets(*pv, k.state));
         INFO(k.name << ": source " << in << " mm2, parts " << out << " mm2");
         REQUIRE(in > 100.);
-        CHECK(std::abs(out - in) <= 0.01 * in);
+        // Kinds whose border lies on facets the Z plane splits are resampled there: the U's wall
+        // facets run its whole height, so the fuzzy band's two borders (800 mm) are resampled
+        // from a source painted at 0.5 mm, and come through to about 0.2 mm. The others are copies.
+        const double tol = k.member == &ModelVolume::fuzzy_skin_facets ? 0.03 : 0.01;
+        CHECK(std::abs(out - in) <= tol * in);
     }
     // Each pillar top got its own share of the fuzzy band (the band crosses the Z plane at 150).
     for (size_t i = 1; i < 3; ++i) {
