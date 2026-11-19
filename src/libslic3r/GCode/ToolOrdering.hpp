@@ -148,6 +148,12 @@ public:
     unsigned int outer_wall_filament(const PrintRegion &region) const;
     unsigned int sparse_infill_filament(const PrintRegion &region) const;
     unsigned int solid_infill_filament(const PrintRegion &region) const;
+    // EdgeSlicer surface filaments: the top / bottom skin (top_surface_filament / bottom_surface_filament,
+    // 0 = the outer wall's filament, resolved exactly as outer_wall_filament() resolves it).
+    unsigned int top_surface_filament(const PrintRegion &region) const;
+    unsigned int bottom_surface_filament(const PrintRegion &region) const;
+    // Zero based extruder of a fill extrusion of `role` (fill_filament_source()), or extruder_override.
+    unsigned int fill_filament(const PrintRegion &region, ExtrusionRole role) const;
 	// Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
 	unsigned int extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const;
 

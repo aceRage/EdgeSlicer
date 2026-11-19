@@ -855,6 +855,9 @@ TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blan
         { "outer_wall_filament", "2" },
         { "sparse_infill_filament", "3" },
         { "solid_infill_filament", "3" },
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", "3"},
+        {"bottom_surface_filament", "3"},
         { "gcode_comments", "1" },
     });
     Print print;
@@ -1007,6 +1010,9 @@ TEST_CASE("The tower entry crosses the wall only through its gap when the purge 
             { "outer_wall_filament", "2" },
             { "sparse_infill_filament", filaments == 2 ? "1" : "3" },
             { "solid_infill_filament", filaments == 2 ? "1" : "3" },
+            // Skins on the infill filament, as before the surface filaments followed the walls.
+            {"top_surface_filament", filaments == 2 ? "1" : "3"},
+            {"bottom_surface_filament", filaments == 2 ? "1" : "3"},
         });
         Print print;
         Model model;
@@ -1196,6 +1202,8 @@ static void set_object_filaments(ModelObject *object, int wall, int infill)
     object->config.set("outer_wall_filament", wall);
     object->config.set("sparse_infill_filament", infill);
     object->config.set("solid_infill_filament", infill);
+    object->config.set("top_surface_filament", infill);
+    object->config.set("bottom_surface_filament", infill);
     if (object->volumes.empty())
         return;
     ModelVolume *volume = object->volumes.front();
@@ -1204,6 +1212,8 @@ static void set_object_filaments(ModelObject *object, int wall, int infill)
     volume->config.set("outer_wall_filament", wall);
     volume->config.set("sparse_infill_filament", infill);
     volume->config.set("solid_infill_filament", infill);
+    volume->config.set("top_surface_filament", infill);
+    volume->config.set("bottom_surface_filament", infill);
 }
 
 static void set_both_filaments(Model &model)
