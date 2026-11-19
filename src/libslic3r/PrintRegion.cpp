@@ -44,9 +44,63 @@ FillFilamentSource fill_filament_source(const PrintRegionConfig &config, Extrusi
         return FillFilamentSource::Wall;
     if (role == erSolidInfill && std::abs(config.sparse_infill_density.value - 100.) < EPSILON)
         return FillFilamentSource::SparseInfill;
+    // EdgeSlicer surface filaments: the visible skins have their own source. With both keys at 0 and
+    // wall_filament == solid_infill_filament (and no outer wall filament) they resolve to the same
+    // filament as SolidInfill did, so such a print is unchanged.
+    if (is_top_surface_filament_role(role))
+        return FillFilamentSource::TopSurface;
+    if (is_bottom_surface_filament_role(role))
+        return FillFilamentSource::BottomSurface;
     if (is_solid_infill(role))
         return FillFilamentSource::SolidInfill;
     return FillFilamentSource::SparseInfill;
+}
+
+int outer_wall_filament_1based(const PrintRegionConfig &config)
+{
+    return config.outer_wall_filament.value > 0 ? config.outer_wall_filament.value : config.wall_filament.value;
+}
+
+int top_surface_filament_1based(const PrintRegionConfig &config)
+{
+    return config.top_surface_filament.value > 0 ? config.top_surface_filament.value : outer_wall_filament_1based(config);
+}
+
+int bottom_surface_filament_1based(const PrintRegionConfig &config)
+{
+    return config.bottom_surface_filament.value > 0 ? config.bottom_surface_filament.value : outer_wall_filament_1based(config);
+}
+
+// EdgeSlicer surface filaments + per-nozzle process: a role width is stamped for the nozzle of the filament
+// that prints the role (stamp_nozzle_line_widths(), NozzleProcess.cpp), which for internal solid infill and
+// bridges is the solid infill filament. A bottom skin printed by another filament takes that filament's width
+// instead, unless the width was set on the object, part, modifier or layer range (it then differs from the
+// stamp, and wins). No per-nozzle processes (empty array) or the same filament: the width as it is.
+ConfigOptionFloatOrPercent bottom_surface_role_width(const PrintRegionConfig &c, const ConfigOptionFloatOrPercent &width,
+                                                     const ConfigOptionFloatsOrPercents &array)
+{
+    const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? c.sparse_infill_filament.value : c.solid_infill_filament.value;
+    const int bottom = bottom_surface_filament_1based(c);
+    const int count  = int(array.values.size());
+    if (bottom == solid || bottom < 1 || bottom > count || solid < 1 || solid > count)
+        return width;
+    const FloatOrPercent &stamped = array.values[size_t(solid - 1)];
+    if (width.value != stamped.value || width.percent != stamped.percent)
+        return width;
+    const FloatOrPercent &w = array.values[size_t(bottom - 1)];
+    return ConfigOptionFloatOrPercent(w.value, w.percent);
+}
+
+int fill_filament_source_1based(const PrintRegionConfig &config, FillFilamentSource source)
+{
+    switch (source) {
+    case FillFilamentSource::Wall:          return config.wall_filament.value;
+    case FillFilamentSource::SolidInfill:   return config.solid_infill_filament.value;
+    case FillFilamentSource::TopSurface:    return top_surface_filament_1based(config);
+    case FillFilamentSource::BottomSurface: return bottom_surface_filament_1based(config);
+    case FillFilamentSource::SparseInfill:
+    default:                                return config.sparse_infill_filament.value;
+    }
 }
 
 // 1-based extruder identifier for this region and role.
@@ -63,7 +117,8 @@ unsigned int PrintRegion::extruder(FlowRole role) const
     else if (role == frSolidInfill)
         extruder = internal_solid_infill_uses_sparse_filament(m_config, role) ? m_config.sparse_infill_filament : m_config.solid_infill_filament;
     else if (role == frTopSolidInfill)
-        extruder = m_config.solid_infill_filament;
+        // EdgeSlicer surface filaments: the top skin (0 = the outer wall's filament).
+        extruder = top_surface_filament_1based(m_config);
     else
         throw Slic3r::InvalidArgument("Unknown role");
     return extruder;
@@ -150,6 +205,11 @@ void PrintRegion::collect_object_printing_extruders(const PrintConfig &print_con
         emplace_extruder(region_config.sparse_infill_filament);
     if (region_config.top_shell_layers.value > 0 || region_config.bottom_shell_layers.value > 0)
     	emplace_extruder(region_config.solid_infill_filament);
+    // EdgeSlicer surface filaments: the top and bottom skins.
+    if (region_config.top_shell_layers.value > 0)
+        emplace_extruder(top_surface_filament_1based(region_config));
+    if (region_config.bottom_shell_layers.value > 0)
+        emplace_extruder(bottom_surface_filament_1based(region_config));
 }
 
 void PrintRegion::collect_object_printing_extruders(const Print &print, std::vector<unsigned int> &object_extruders) const
@@ -163,6 +223,8 @@ void PrintRegion::collect_object_printing_extruders(const Print &print, std::vec
     assert(this->config().wall_filament           <= int(num_filaments));
     assert(this->config().sparse_infill_filament  <= int(num_filaments));
     assert(this->config().solid_infill_filament   <= int(num_filaments));
+    assert(this->config().top_surface_filament    <= int(num_filaments));
+    assert(this->config().bottom_surface_filament <= int(num_filaments));
 #endif
     collect_object_printing_extruders(print.config(), this->config(), print.has_brim(), object_extruders, num_filaments);
 }

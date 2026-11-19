@@ -159,6 +159,11 @@ void append_gated_feature_filament_ids(const PrintRegionConfig &region, bool has
         ids.push_back(region.sparse_infill_filament.value);
     if ((region.top_shell_layers.value > 0 || region.bottom_shell_layers.value > 0) && region.solid_infill_filament.value > 0)
         ids.push_back(region.solid_infill_filament.value);
+    // EdgeSlicer surface filaments: 0 follows the outer wall (already pushed when walls print).
+    if (region.top_shell_layers.value > 0 && region.top_surface_filament.value > 0)
+        ids.push_back(region.top_surface_filament.value);
+    if (region.bottom_shell_layers.value > 0 && region.bottom_surface_filament.value > 0)
+        ids.push_back(region.bottom_surface_filament.value);
 }
 
 PrintRegionConfig effective_region(const ConfigBase &global, const ConfigBase *object_cfg, const ConfigBase *overlay)
@@ -325,6 +330,10 @@ void append_feature_filament_overrides(const ConfigBase &cfg, std::vector<int> &
     if (cfg.option("solid_infill_filament") &&
         (region.top_shell_layers.value > 0 || region.bottom_shell_layers.value > 0) && region.solid_infill_filament.value > 0)
         ids.push_back(region.solid_infill_filament.value);
+    if (cfg.option("top_surface_filament") && region.top_shell_layers.value > 0 && region.top_surface_filament.value > 0)
+        ids.push_back(region.top_surface_filament.value);
+    if (cfg.option("bottom_surface_filament") && region.bottom_shell_layers.value > 0 && region.bottom_surface_filament.value > 0)
+        ids.push_back(region.bottom_surface_filament.value);
 }
 
 void append_config_filament_ids(const DynamicPrintConfig &cfg, std::vector<int> &ids)

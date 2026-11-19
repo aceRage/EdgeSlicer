@@ -295,7 +295,8 @@ const std::vector<std::string> &filament_index_keys()
     // own / the default" for all of them and is never clamped.
     static const std::vector<std::string> keys = {"extruder",         "sparse_infill_filament", "wall_filament",
                                                   "outer_wall_filament", "solid_infill_filament", "support_filament",
-                                                  "support_interface_filament", "wipe_tower_filament"};
+                                                  "support_interface_filament", "wipe_tower_filament",
+                                                  "top_surface_filament", "bottom_surface_filament"};
     return keys;
 }
 

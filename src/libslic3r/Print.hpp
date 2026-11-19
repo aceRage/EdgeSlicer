@@ -180,14 +180,43 @@ enum PrintObjectStep {
 // therefore wrong for gap fill; it has to be decided from the extrusion ROLE. This helper
 // is that decision, shared by GCode::process_layer's two extruder-id lambdas so the rule
 // exists once.
+//
+// EdgeSlicer surface filaments: TopSurface / BottomSurface are the visible top and bottom skins
+// (top_surface_filament / bottom_surface_filament). Every switch over this enum must list them:
+// a `default:` falling back to the sparse infill filament would silently print the skins with it.
 enum class FillFilamentSource {
     Wall,
     SolidInfill,
     SparseInfill,
+    TopSurface,
+    BottomSurface,
 };
 
 // `role` is the role of the collection's leading entity, as GCode::process_layer reads it.
 FillFilamentSource fill_filament_source(const PrintRegionConfig &config, ExtrusionRole role);
+
+// EdgeSlicer surface filaments. The roles printed with top_surface_filament: the topmost skin
+// (stTop -> erTopSolidInfill) and the ironing over it.
+inline bool is_top_surface_filament_role(ExtrusionRole role) { return role == erTopSolidInfill || role == erIroning; }
+// The roles printed with bottom_surface_filament: the bottommost skin (stBottom -> erBottomSurface),
+// that skin printed on support (erBottomSurfaceOverSupport) and that skin bridged over air
+// (stBottomBridge -> erBridgeInfill). Internal bridges (erInternalBridgeInfill) are not a visible face
+// and keep the solid infill filament.
+inline bool is_bottom_surface_filament_role(ExtrusionRole role)
+{
+    return role == erBottomSurface || role == erBottomSurfaceOverSupport || role == erBridgeInfill;
+}
+// The configured 1-based filament of the outer wall: outer_wall_filament, 0 = wall_filament.
+int outer_wall_filament_1based(const PrintRegionConfig &config);
+// The configured 1-based filament of the top / bottom skin: the surface key, 0 = the outer wall's.
+int top_surface_filament_1based(const PrintRegionConfig &config);
+int bottom_surface_filament_1based(const PrintRegionConfig &config);
+// The configured (not mixed-resolved) 1-based filament of a fill extrusion source.
+int fill_filament_source_1based(const PrintRegionConfig &config, FillFilamentSource source);
+// The width of a bottom skin role (internal_solid_infill_line_width / bridge_line_width with its per-nozzle
+// array) on the bottom surface filament's nozzle; see the definition in PrintRegion.cpp.
+ConfigOptionFloatOrPercent bottom_surface_role_width(const PrintRegionConfig &c, const ConfigOptionFloatOrPercent &width,
+                                                     const ConfigOptionFloatsOrPercents &array);
 
 // A PrintRegion object represents a group of volumes to print
 // sharing the same config (including the same assigned extruder(s))
