@@ -25,6 +25,7 @@
 #include <boost/filesystem/directory.hpp>
 #include <boost/filesystem/file_status.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <slic3r/Utils/BoostProcessCompat.hpp>
 #ifdef _WIN32
 #include <boost/process/windows.hpp>
@@ -46,6 +47,7 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -663,14 +665,89 @@ bool is_archive_or_path_requirement(const std::string& trimmed)
 
 } // namespace
 
-std::vector<std::string> uv_install_args(const std::string&              python_executable,
-                                         const std::string&              target_dir,
-                                         const std::vector<std::string>& pkgs)
+std::vector<std::string> uv_install_args(const std::string& python_executable,
+                                         const std::string& target_dir,
+                                         const std::string& requirements_file)
 {
-    std::vector<std::string> args = {"pip",      "install",  "--python", python_executable, "--no-python-downloads",
-                                     "--target", target_dir, "--"};
-    args.insert(args.end(), pkgs.begin(), pkgs.end());
-    return args;
+    return {"pip",           "install",          "--no-config",       "--python",
+            python_executable, "--no-python-downloads", "--target",   target_dir,
+            "--only-binary", ":all:",            "--no-build",        "--require-hashes",
+            "--index-url",   "https://pypi.org/simple", "-r",          requirements_file};
+}
+
+namespace {
+
+bool is_sha256_hash_option(const std::string& token)
+{
+    static const std::string prefix = "--hash=sha256:";
+    if (token.size() != prefix.size() + 64 || token.compare(0, prefix.size(), prefix) != 0)
+        return false;
+    for (size_t i = prefix.size(); i < token.size(); ++i) {
+        const char c = token[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return false;
+    }
+    return true;
+}
+
+// The version specifier of a PEP 508 requirement is exactly one "==<version>" with no wildcard.
+bool is_exact_pin(const std::string& requirement)
+{
+    std::string spec = requirement.substr(0, requirement.find(';'));
+    const size_t eq  = spec.find("==");
+    if (eq == std::string::npos || spec.find("===") != std::string::npos)
+        return false;
+    if (spec.find_first_of("<>!~,*", 0) != std::string::npos)
+        return false;
+    if (spec.find("==", eq + 2) != std::string::npos)
+        return false;
+    std::string version = spec.substr(eq + 2);
+    version.erase(std::remove_if(version.begin(), version.end(), [](char c) { return c == ' ' || c == '\t' || c == ')'; }),
+                  version.end());
+    return !version.empty();
+}
+
+} // namespace
+
+bool validate_locked_requirements(const std::vector<std::string>& pkgs,
+                                  std::vector<std::string>&       requirement_lines,
+                                  std::string&                    error)
+{
+    requirement_lines.clear();
+    for (const std::string& pkg : pkgs) {
+        if (pkg.find('\0') != std::string::npos || pkg.find('\n') != std::string::npos || pkg.find('\r') != std::string::npos) {
+            error = "Refused Python dependency: line breaks are not allowed";
+            return false;
+        }
+        const size_t      hash_at     = pkg.find(" --hash=");
+        const std::string requirement = pkg.substr(0, hash_at);
+        if (!validate_pep508_requirements({requirement}, error))
+            return false;
+        std::vector<std::string> hashes;
+        if (hash_at != std::string::npos) {
+            std::istringstream tokens(pkg.substr(hash_at));
+            std::string        token;
+            while (tokens >> token) {
+                if (!is_sha256_hash_option(token)) {
+                    error = "Refused Python dependency '" + requirement + "': only --hash=sha256:<64 hex digits> may follow it";
+                    return false;
+                }
+                hashes.push_back(token);
+            }
+        }
+        if (!is_exact_pin(requirement) || hashes.empty()) {
+            error = "Refused Python dependency '" + requirement +
+                    "': dependencies must be pinned to one exact version with a SHA-256 hash of the wheel, "
+                    "e.g. name==1.2.3 --hash=sha256:<64 hex digits>";
+            return false;
+        }
+        std::string line = requirement;
+        boost::algorithm::trim(line);
+        for (const std::string& h : hashes)
+            line += " " + h;
+        requirement_lines.push_back(std::move(line));
+    }
+    return true;
 }
 
 bool uv_child_environment_keeps(const char* key)
@@ -1022,12 +1099,33 @@ bool load(const PluginDescriptor&                          descriptor,
     return true;
 }
 
+bool refuse_new_startup_hooks(const std::string& target_dir, const std::vector<std::string>& hooks_before, std::string& error)
+{
+    namespace fs = boost::filesystem;
+    std::vector<std::string> added;
+    for (const std::string& name : PythonInterpreter::find_startup_hook_files(target_dir))
+        if (std::find(hooks_before.begin(), hooks_before.end(), name) == hooks_before.end())
+            added.push_back(name);
+    if (added.empty())
+        return true;
+    for (const std::string& name : added) {
+        boost::system::error_code rm_ec;
+        fs::remove_all(fs::path(target_dir) / name, rm_ec);
+        if (rm_ec)
+            BOOST_LOG_TRIVIAL(error) << "Could not remove the Python start-up hook " << name << ": " << rm_ec.message();
+    }
+    error = "Refused Python dependencies: they install interpreter start-up code (" + boost::algorithm::join(added, ", ") +
+            "), which EdgeSlicer does not allow. The files were removed.";
+    return false;
+}
+
 bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
 {
     if (pkgs.empty())
         return true;
 
-    if (!validate_pep508_requirements(pkgs, error))
+    std::vector<std::string> requirement_lines;
+    if (!validate_locked_requirements(pkgs, requirement_lines, error))
         return false;
 
     const std::string uv_path = PythonInterpreter::bundled_uv_path();
@@ -1052,9 +1150,10 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
         return false;
     }
 
-    const std::vector<std::string> args = uv_install_args(python_executable, target_dir, pkgs);
-
     BOOST_LOG_TRIVIAL(info) << "Installing Python packages via uv for " << python_executable << ": " << boost::algorithm::join(pkgs, ", ");
+
+    // Start-up hook files already in the shared folder; anything new after the install is refused.
+    const std::vector<std::string> hooks_before = PythonInterpreter::find_startup_hook_files(target_dir);
 
     struct UvCwd
     {
@@ -1086,6 +1185,20 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
             return false;
         }
     }
+
+    // The locked requirements go to uv as a requirements file (hashes are file syntax).
+    const fs::path requirements_file = uv_cwd.p / "requirements.txt";
+    {
+        boost::nowide::ofstream req(requirements_file.string(), std::ios::binary | std::ios::trunc);
+        for (const std::string& line : requirement_lines)
+            req << line << '\n';
+        req.close();
+        if (!req) {
+            error = "Failed to write the requirements file for uv";
+            return false;
+        }
+    }
+    const std::vector<std::string> args = uv_install_args(python_executable, target_dir, requirements_file.string());
 
     try {
         namespace process = boost::process;
@@ -1152,6 +1265,11 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
                 error = "uv pip install failed (exit code " + std::to_string(exit_code) + "): " + err_output;
             else
                 error = "uv pip install failed with exit code " + std::to_string(exit_code);
+            BOOST_LOG_TRIVIAL(error) << error;
+            return false;
+        }
+
+        if (!refuse_new_startup_hooks(target_dir, hooks_before, error)) {
             BOOST_LOG_TRIVIAL(error) << error;
             return false;
         }

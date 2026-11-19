@@ -238,18 +238,102 @@ TEST_CASE("PEP 723 / Requires-Dist entries that look like uv installer options a
     }
 }
 
-TEST_CASE("uv pip install argv puts -- before the package list", "[PluginInstall]")
+TEST_CASE("uv pip install installs pinned, hashed wheels from PyPI only (H6)", "[PluginInstall]")
 {
     using plugin_loader::uv_install_args;
-    const auto args = uv_install_args("/opt/python", "/tmp/target", {"numpy>=1.20", "pillow"});
+    const auto args = uv_install_args("/opt/python", "/tmp/target", "/tmp/uv/requirements.txt");
     REQUIRE(args.size() >= 4);
     CHECK(args.front() == "pip");
-    const auto dash = std::find(args.begin(), args.end(), "--");
-    REQUIRE(dash != args.end());
-    REQUIRE(dash + 2 < args.end());
-    CHECK(*(dash + 1) == "numpy>=1.20");
-    CHECK(*(dash + 2) == "pillow");
-    CHECK(std::find(args.begin(), dash, "numpy>=1.20") == dash);
+    CHECK(args[1] == "install");
+    auto has = [&args](const char* a) { return std::find(args.begin(), args.end(), a) != args.end(); };
+    auto after = [&args](const char* a) {
+        const auto it = std::find(args.begin(), args.end(), a);
+        return (it == args.end() || it + 1 == args.end()) ? std::string() : *(it + 1);
+    };
+    CHECK(has("--no-config"));
+    CHECK(has("--no-build"));
+    CHECK(has("--require-hashes"));
+    CHECK(has("--no-python-downloads"));
+    CHECK(after("--only-binary") == ":all:");
+    CHECK(after("--index-url") == "https://pypi.org/simple");
+    CHECK(after("--target") == "/tmp/target");
+    CHECK(after("--python") == "/opt/python");
+    CHECK(after("-r") == "/tmp/uv/requirements.txt");
+    // Package names never reach argv: they come only from the requirements file.
+    CHECK_FALSE(has("--"));
+    CHECK_FALSE(has("--extra-index-url"));
+    CHECK_FALSE(has("--find-links"));
+}
+
+TEST_CASE("Dependencies must be pinned to one version with a SHA-256 hash (H6)", "[PluginInstall]")
+{
+    using plugin_loader::validate_locked_requirements;
+    const std::string h1 = "--hash=sha256:" + std::string(64, 'a');
+    const std::string h2 = "--hash=sha256:" + std::string(63, '0') + "F";
+
+    std::vector<std::string> lines;
+    std::string              error;
+    REQUIRE(validate_locked_requirements({"numpy==1.26.4 " + h1, "Pillow[extra]==10.0.1 ; python_version >= \"3.8\" " + h1 + " " + h2},
+                                         lines, error));
+    CHECK(error.empty());
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "numpy==1.26.4 " + h1);
+    CHECK(lines[1].find(h2) != std::string::npos);
+
+    for (const std::string& bad : {
+             std::string("numpy"),
+             std::string("numpy==1.26.4"),                                   // no hash
+             std::string("numpy>=1.20 ") + h1,                              // not pinned
+             std::string("numpy==1.* ") + h1,                               // wildcard
+             std::string("numpy===1.0 ") + h1,                              // arbitrary equality
+             std::string("numpy==1.0,<2 ") + h1,                            // more than a pin
+             std::string("numpy==1.0 --hash=md5:") + std::string(32, 'a'),  // not SHA-256
+             std::string("numpy==1.0 --hash=sha256:abc"),                   // short
+             std::string("numpy==1.0 ") + h1 + " --index-url=https://evil.example/simple",
+             std::string("numpy==1.0 ") + h1 + " --no-binary=:all:",
+             std::string("--index-url=https://evil.example/simple ") + h1,
+             std::string("numpy==1.0 ") + h1 + "\n--index-url=https://evil.example",
+             std::string("evil.whl ") + h1,
+         }) {
+        INFO(bad);
+        std::vector<std::string> out;
+        std::string              err;
+        CHECK_FALSE(validate_locked_requirements({bad}, out, err));
+        CHECK_FALSE(err.empty());
+        // install_packages refuses before it looks for uv, Python or the network.
+        std::string install_error;
+        CHECK_FALSE(plugin_loader::install_packages({bad}, install_error));
+        CHECK(install_error == err);
+    }
+}
+
+TEST_CASE("A dependency that installs a start-up hook is refused and the hook removed (H1)", "[PluginInstall]")
+{
+    ScopedTemporaryDir tmp("orca-startup-hooks");
+    const fs::path     target = tmp.path();
+    auto touch = [](const fs::path& p) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p.string(), std::ios::binary) << "import os\n";
+    };
+    touch(target / "already.pth");
+    touch(target / "pkg" / "__init__.py");
+    const std::vector<std::string> before = PythonInterpreter::find_startup_hook_files(target.string());
+    CHECK(before == std::vector<std::string>{"already.pth"});
+
+    std::string error;
+    CHECK(plugin_loader::refuse_new_startup_hooks(target.string(), before, error));
+    CHECK(error.empty());
+
+    touch(target / "sitecustomize.py");
+    touch(target / "usercustomize" / "__init__.py");
+    touch(target / "evil.pth");
+    touch(target / "SiteCustomize.cpython-312.pyc");
+    CHECK(PythonInterpreter::find_startup_hook_files(target.string()).size() == 5);
+    CHECK_FALSE(plugin_loader::refuse_new_startup_hooks(target.string(), before, error));
+    CHECK(error.find("sitecustomize.py") != std::string::npos);
+    CHECK(error.find("evil.pth") != std::string::npos);
+    CHECK(PythonInterpreter::find_startup_hook_files(target.string()) == before);
+    CHECK(fs::exists(target / "pkg" / "__init__.py"));
 }
 
 TEST_CASE("uv child environment keep-list includes cache homes", "[PluginInstall]")
