@@ -378,8 +378,11 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
                 if (hit.source < 0 || sources[hit.source].cutter)
                     return out;
                 if (selectors[hit.source]) {
-                    out.state = selectors[hit.source]->leaf_state_at(hit.facet, hit.local, &out.leaf_area);
+                    int leaf_idx = -1;
+                    out.state = selectors[hit.source]->leaf_state_at(hit.facet, hit.local, &out.leaf_area, &leaf_idx);
                     out.leaf_area *= prepared[hit.source].area_to_world * world_to_target_area;
+                    if (leaf_idx >= 0)
+                        out.leaf = (int64_t(hit.source) << 32) | int64_t(uint32_t(leaf_idx));
                 }
                 if (colour && out.state == EnforcerBlockerType::NONE && sources[hit.source].filament != base_filament)
                     out.state = EnforcerBlockerType(sources[hit.source].filament);

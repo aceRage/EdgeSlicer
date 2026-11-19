@@ -333,14 +333,18 @@ public:
     // Carry painting to another mesh (booleans, split, cut). Additive: does not change select_patch or paint-depth.
     // State of the leaf under `pt` (mesh coords, on or very near original facet `facet_idx`).
     // Walks the split tree to the child that best contains the point. `leaf_area` is that leaf's
-    // area in mesh coords when the facet is split by a stroke (0 otherwise).
-    [[nodiscard]] EnforcerBlockerType leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area = nullptr) const;
+    // area in mesh coords when the facet is split by a stroke (0 otherwise), `leaf_idx` that leaf.
+    [[nodiscard]] EnforcerBlockerType leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area = nullptr, int *leaf_idx = nullptr) const;
 
     struct SampledState {
         EnforcerBlockerType state     = EnforcerBlockerType::NONE;
         // Area of the painted piece the sample fell in (this selector's mesh coords); 0 = no limit.
         // A triangle bigger than that could hide a stroke between its samples, so it is split.
         float               leaf_area = 0.f;
+        // Which piece of the painting that is (any id unique to it), -1 for none. Samples of one
+        // triangle that land in different pieces of a split facet mean a border may run between
+        // them, so the triangle is split until it is smaller than those pieces.
+        int64_t             leaf      = -1;
     };
     // Repaint the whole mesh from a function that gives the state at any point (mesh coords).
     // Each triangle is sampled at its corners, edge midpoints and centre; where the samples
