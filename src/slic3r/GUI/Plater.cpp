@@ -554,6 +554,8 @@ static void collect_filament_slots_from_config(
         "wall_filament",
         "sparse_infill_filament",
         "solid_infill_filament",
+        "top_surface_filament",
+        "bottom_surface_filament",
         "wipe_tower_filament"
     };
     for (const char* key : feature_keys)
@@ -588,6 +590,8 @@ static void collect_filament_slots_from_model_config(
         "wall_filament",
         "sparse_infill_filament",
         "solid_infill_filament",
+        "top_surface_filament",
+        "bottom_surface_filament",
         "wipe_tower_filament"
     };
     for (const char* key : feature_keys)
@@ -669,7 +673,8 @@ static void collect_used_filament_slots_on_plate(
         }
 
         if (uses_default_extruder) {
-            static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
+            static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                                                                       "top_surface_filament", "bottom_surface_filament"};
             for (const char* key : default_keys) {
                 const ConfigOptionInt* option = plater_working_config->option<ConfigOptionInt>(key);
                 if (option != nullptr && option->value >= 1 && option->value <= num_filaments)
@@ -1021,7 +1026,9 @@ enum class LoadType : unsigned char
     Unknown,
     OpenProject,
     LoadGeometry,
-    LoadConfig
+    LoadConfig,
+    // Added after the others so the stored numbers 1 and 2 ("import_project_action") keep their meaning.
+    LoadGeometryWithSettings = 4
 };
 
 class SlicedInfo : public wxStaticBoxSizer
@@ -1668,6 +1675,11 @@ std::vector<int> get_min_flush_volumes(const DynamicPrintConfig& full_config)
 struct DynamicFilamentList : DynamicList
 {
     std::vector<std::pair<wxString, wxBitmap *>> items;
+    // The label of entry 0 (value 0); nullptr: "Default". Untranslated, marked with L() where it is given.
+    const char *default_label = nullptr;
+
+    DynamicFilamentList() = default;
+    explicit DynamicFilamentList(const char *default_label) : default_label(default_label) {}
 
     void apply_on(Choice *c) override
     {
@@ -1676,7 +1688,7 @@ struct DynamicFilamentList : DynamicList
         auto cb = dynamic_cast<ComboBox *>(c->window);
         auto n  = cb->GetSelection();
         cb->Clear();
-        cb->Append(_L("Default"));
+        cb->Append(default_label != nullptr ? _(default_label) : _L("Default"));
         for (auto i : items) {
             cb->Append(i.first, *i.second);
         }
@@ -2285,6 +2297,7 @@ MixedColorMatchRecipeResult prompt_best_color_match_recipe(wxWindow*            
 
 static DynamicFilamentList dynamic_filament_list;
 static DynamicFilamentList1Based dynamic_filament_list_1_based;
+static DynamicFilamentList dynamic_filament_list_same_as_walls(L("Same as walls"));
 
 static wxString nozzle_type_key_to_label(const std::string& key)
 {
@@ -2353,6 +2366,9 @@ Sidebar::Sidebar(Plater *parent)
     Choice::register_dynamic_list("outer_wall_filament", &dynamic_filament_list);
     Choice::register_dynamic_list("sparse_infill_filament", &dynamic_filament_list_1_based);
     Choice::register_dynamic_list("solid_infill_filament", &dynamic_filament_list_1_based);
+    // EdgeSlicer surface filaments: index 0 is "Same as walls" (value 0 = follow the outer wall).
+    Choice::register_dynamic_list("top_surface_filament", &dynamic_filament_list_same_as_walls);
+    Choice::register_dynamic_list("bottom_surface_filament", &dynamic_filament_list_same_as_walls);
     Choice::register_dynamic_list("wipe_tower_filament", &dynamic_filament_list);
 
     p->scrolled = new wxPanel(this);
@@ -11672,6 +11688,7 @@ void Sidebar::update_dynamic_filament_list()
 {
     dynamic_filament_list.update();
     dynamic_filament_list_1_based.update();
+    dynamic_filament_list_same_as_walls.update();
 }
 
 void Sidebar::sync_nozzle_flow_combos()
@@ -13261,7 +13278,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "extruder_colour", "filament_colour", "material_colour", "printable_height", "printer_model", "printer_technology",
         // These values are necessary to construct SlicingParameters by the Canvas3D variable layer height editor.
         "layer_height", "initial_layer_print_height", "min_layer_height", "max_layer_height",
-        "brim_width", "wall_loops", "wall_filament", "sparse_infill_density", "sparse_infill_filament", "solid_infill_filament", "top_shell_layers",
+        "brim_width", "wall_loops", "wall_filament", "sparse_infill_density", "sparse_infill_filament", "solid_infill_filament", "top_surface_filament", "bottom_surface_filament", "top_shell_layers",
         "enable_support", "support_filament", "support_interface_filament",
         "support_top_z_distance", "support_bottom_z_distance", "raft_layers",
         "wipe_tower_rotation_angle", "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow", "local_z_wipe_tower_purge_lines", "wipe_tower_max_purge_speed",
@@ -14735,15 +14752,19 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 show_info(q, text, _L("Newer 3mf version"));
                             }
                         }
-                    } else if (keep_object_settings) {
-                        // Custom model: keep the object / part settings, modifiers and paint. The file's
-                        // project settings and embedded presets are never applied on this path, so what
-                        // is left to check is the settings of the objects themselves, and the filament
-                        // numbers: a project with fewer filaments than the file asks for is not extended,
-                        // the numbers above its count become filament 1.
+                    } else if (!load_config) {
+                        // Model-only add of a 3MF. "Import geometry only" resets the object / part settings
+                        // except the extruder (From_Prusa is handled earlier). "Import with object settings"
+                        // (KeepObjectSettings, also Add Custom Models) keeps the object / part settings,
+                        // modifiers and paint, removes the untrusted keys (post_process, print-host
+                        // credentials, ...) and clamps the filament numbers above the project's count.
+                        // Mixed filament counts come from MixedFilamentManager, never filament_is_mixed.
                         PresetBundle *pb = wxGetApp().preset_bundle;
                         const size_t filament_total = pb != nullptr ? pb->mixed_filaments.total_filaments(pb->filament_presets.size()) : size_t(1);
-                        const custom_models::ImportReport report = custom_models::prepare_imported_objects(model.objects, filament_total);
+                        const custom_models::ProjectImportMode import_mode = keep_object_settings ?
+                                                                                 custom_models::ProjectImportMode::GeometryWithObjectSettings :
+                                                                                 custom_models::ProjectImportMode::GeometryOnly;
+                        const custom_models::ImportReport report = custom_models::apply_project_import_mode(model.objects, import_mode, filament_total);
                         if (q->get_notification_manager() != nullptr) {
                             if (report.untrusted_settings_removed > 0)
                                 q->get_notification_manager()->push_plater_warning_notification(
@@ -14752,29 +14773,6 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 q->get_notification_manager()->push_plater_warning_notification(
                                     into_u8(format_wxstr(_L("\"%1%\" uses filament %2%, but this project has %3% filament(s). Everything assigned to a missing filament now uses filament 1."),
                                                          from_path(real_filename), report.highest_filament_requested, filament_total)));
-                        }
-                    } else if (!load_config) {
-                        // reset config except color
-                        for (ModelObject *model_object : model.objects) {
-                            bool has_extruder = model_object->config.has("extruder");
-                            int  extruder_id  = -1;
-                            // save the extruder information before reset
-                            if (has_extruder) { extruder_id = model_object->config.extruder(); }
-
-                            model_object->config.reset();
-
-                            // restore the extruder after reset
-                            if (has_extruder) { model_object->config.set("extruder", extruder_id); }
-
-                            // Is there any modifier or advanced config data?
-                            for (ModelVolume *model_volume : model_object->volumes) {
-                                has_extruder = model_volume->config.has("extruder");
-                                if (has_extruder) { extruder_id = model_volume->config.extruder(); }
-
-                                model_volume->config.reset();
-
-                                if (has_extruder) { model_volume->config.set("extruder", extruder_id); }
-                            }
                         }
                     }
 
@@ -21815,6 +21813,7 @@ void Plater::load_project(wxString const& filename2,
         switch (determine_load_type(filename.ToStdString())) {
             case LoadType::OpenProject: break; // Do nothing
             case LoadType::LoadGeometry:; strategy = LoadStrategy::LoadModel; break;
+            case LoadType::LoadGeometryWithSettings: strategy = LoadStrategy::LoadModel | LoadStrategy::KeepObjectSettings; break;
             default: return; // User cancelled
         }
     }
@@ -24645,6 +24644,26 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
 
 #define PROJECT_DROP_DIALOG_SELECT_PLANE_SIZE wxSize(FromDIP(350), FromDIP(120))
 
+// The three choices of the "Drop project file" dialog, in the order they are listed, and the
+// LoadType each stands for (the stored numbers are custom_models::project_import_action_value).
+static int dialog_action_from_mode(custom_models::ProjectImportMode mode)
+{
+    switch (mode) {
+    case custom_models::ProjectImportMode::GeometryOnly: return int(LoadType::LoadGeometry);
+    case custom_models::ProjectImportMode::GeometryWithObjectSettings: return int(LoadType::LoadGeometryWithSettings);
+    case custom_models::ProjectImportMode::OpenAsProject:
+    default: return int(LoadType::OpenProject);
+    }
+}
+static int dialog_index_from_action(int action)
+{
+    return action == int(LoadType::LoadGeometryWithSettings) ? 2 : (action == int(LoadType::LoadGeometry) ? 1 : 0);
+}
+static int dialog_action_from_index(int index)
+{
+    return index == 2 ? int(LoadType::LoadGeometryWithSettings) : (index == 1 ? int(LoadType::LoadGeometry) : int(LoadType::OpenProject));
+}
+
 class ProjectDropDialog : public DPIDialog
 {
 private:
@@ -24685,9 +24704,7 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
     // "import_project_action" on OK. Falling back to LoadType::OpenProject rather than
     // LoadGeometry: this dialog is shown for a *project* file, and importing geometry only
     // silently discards the embedded printer, filament and process settings.
-    , m_action(std::max(1, std::min(2, wxGetApp().app_config->get("import_project_action").empty()
-                                       ? 1
-                                       : std::atoi(wxGetApp().app_config->get("import_project_action").c_str()))))
+    , m_action(dialog_action_from_mode(custom_models::project_import_mode_from_action(wxGetApp().app_config->get("import_project_action"))))
 {
     // def setting
     SetBackgroundColour(m_def_color);
@@ -24736,13 +24753,17 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
     m_sizer_main->Add(m_sizer_name, 1, wxEXPAND | wxLEFT | wxRIGHT, 20);
 
     auto radio_group = new RadioGroup(this, {
-        _L("Open as project"),     // 0
-        _L("Import geometry only") // 1
+        _L("Open as project"),                // 0
+        _L("Import geometry only"),           // 1
+        _L("Import with object settings")     // 2
     }, wxVERTICAL);
     radio_group->SetMinSize(wxSize(FromDIP(300),-1));
-    radio_group->SetSelection(get_action() - 1);
+    radio_group->SetRadioTooltip(0, _L("Replaces the current project with this one. Its printer, filament and process settings and all its objects come in."));
+    radio_group->SetRadioTooltip(1, _L("Adds only the models to the current project. Settings set on an object or on one of its parts (and on modifiers) are not kept, so the models follow the current project's settings. The file's printer, filament and process settings are not imported."));
+    radio_group->SetRadioTooltip(2, _L("Adds the models to the current project and keeps the settings set on each object, each part and each modifier (including height-range settings). Scripts, host addresses and similar settings are removed, and filaments the current project does not have become filament 1. The file's printer, filament and process settings are not imported."));
+    radio_group->SetSelection(dialog_index_from_action(get_action()));
     radio_group->Bind(wxEVT_COMMAND_RADIOBOX_SELECTED, [this, radio_group](wxCommandEvent &e) {
-        set_action(radio_group->GetSelection() + 1);
+        set_action(dialog_action_from_index(radio_group->GetSelection()));
     });
 
     m_sizer_main->Add(radio_group, 0, wxEXPAND | wxLEFT | wxRIGHT, 20);
@@ -24834,6 +24855,9 @@ void ProjectDropDialog::on_select_ok(wxCommandEvent &event)
                 break;
             case LoadType::LoadGeometry:
                 wxGetApp().app_config->set(SETTING_PROJECT_LOAD_BEHAVIOUR, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY);
+                break;
+            case LoadType::LoadGeometryWithSettings:
+                wxGetApp().app_config->set(SETTING_PROJECT_LOAD_BEHAVIOUR, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY_WITH_SETTINGS);
                 break;
         }
     }
@@ -25035,6 +25059,8 @@ LoadType determine_load_type(std::string filename, std::string override_setting)
 
     if (setting == OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY) {
         return LoadType::LoadGeometry;
+    } else if (setting == OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY_WITH_SETTINGS) {
+        return LoadType::LoadGeometryWithSettings;
     } else if (setting == OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK) {
         ProjectDropDialog dlg(filename);
         if (dlg.ShowModal() == wxID_OK) {
@@ -25081,6 +25107,11 @@ bool Plater::open_3mf_file(const fs::path &file_path, bool from_url)
         case LoadType::LoadGeometry: {
             Plater::TakeSnapshot snapshot(this, "Import Object");
             load_files({file_path}, LoadStrategy::LoadModel);
+            break;
+        }
+        case LoadType::LoadGeometryWithSettings: {
+            Plater::TakeSnapshot snapshot(this, "Import Object");
+            load_files({file_path}, LoadStrategy::LoadModel | LoadStrategy::KeepObjectSettings);
             break;
         }
         case LoadType::LoadConfig: {
@@ -28686,7 +28717,8 @@ bool Plater::check_filament_temp_mixing(int plate_index, FilamentTempMixingDetai
             // wall / infill extruders apply and must be collected.
             if (uses_default_extruder)
             {
-                static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
+                static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                                                                       "top_surface_filament", "bottom_surface_filament"};
                 for (const char* key : default_keys)
                 {
                     const ConfigOptionInt* option = config()->option<ConfigOptionInt>(key);
@@ -29006,7 +29038,8 @@ bool Plater::check_flow_ratio_zero(int plate_index, FlowRatioZeroDetail& detail)
             }
 
             if (uses_default_extruder) {
-                static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
+                static const std::vector<const char*> default_keys = {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                                                                       "top_surface_filament", "bottom_surface_filament"};
                 for (const char* key : default_keys) {
                     const ConfigOptionInt* option = config()->option<ConfigOptionInt>(key);
                     if (option != nullptr && option->value >= 1 && option->value <= num_filaments)
@@ -29582,7 +29615,8 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
         }
         // Orca: update when *_filament changed
         else if (opt_key == "support_interface_filament" || opt_key == "support_filament" || opt_key == "wall_filament" ||
-                 opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament") {
+                 opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament" ||
+                 opt_key == "top_surface_filament" || opt_key == "bottom_surface_filament") {
             update_scheduled = true;
         }
         // Orca #16291: the center of mass markers weigh the parts by it.
