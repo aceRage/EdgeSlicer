@@ -10,6 +10,7 @@
 #include "slic3r/GUI/BambuReprint.hpp"
 #include "slic3r/GUI/FilamentCommands.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/RemoteControl.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "slic3r/GUI/DualNozzleState.hpp"
 #include "libslic3r/BambuDualNozzleSync.hpp"
@@ -434,6 +435,53 @@ static void compose_for(const MachineObject& obj, const std::vector<FilamentInfo
         in.filament_ids.push_back("GFA00");
     in.blocked_ams_ids = obj.mapping_blocked_ams_ids();
     BambuSendMapping::compose(result, job, in, v0, v1, info);
+}
+
+TEST_CASE("The hub names the AMS 3H and marks the slot feeding the toolhead", "[BambuAmsReport][Hub]")
+{
+    MachineObject obj { nullptr, "fake-h3c", "FAKEN100000009", "127.0.0.1" };
+    parse_h3c(obj);
+
+    const json ams = RemoteControl::ams_json(&obj);
+    REQUIRE(ams.size() == 1);
+    const json& u = ams[0];
+    CHECK(u["id"] == "32");
+    // The app's own rule ("AMS " + id + 1) made this "AMS 33".
+    CHECK(u["name"] == "AMS 3H");
+    REQUIRE(u["trays"].size() == 9);
+    // The extruder's snow is AMS 32 slot 1: slot 2, which feeds rack nozzle 2.
+    for (int s = 0; s < 9; ++s) {
+        const json& t = u["trays"][s];
+        CHECK(t["id"] == std::to_string(s));
+        CHECK(t.value("active", false) == (s == 1));
+    }
+}
+
+TEST_CASE("An ordinary AMS gets no name, and its loaded tray is active", "[BambuAmsReport][Hub]")
+{
+    MachineObject obj { nullptr, "fake-x1", "FAKEX100000009", "127.0.0.1" };
+    // An AMS 2 Pro (type 3) with all four slots loaded, on a one-nozzle printer on the old protocol.
+    json print;
+    print["ams"] = {
+        { "ams", json::array({ unit("0", "3", 4, 4) }) },
+        { "ams_exist_bits", "1" },
+        { "tray_exist_bits", "f" },
+    };
+    REQUIRE_NOTHROW(obj.parse_ams_report(print, false));
+    REQUIRE_FALSE(obj.is_enable_np);
+    obj.m_tray_now = "2";
+
+    const json ams = RemoteControl::ams_json(&obj);
+    REQUIRE(ams.size() == 1);
+    CHECK_FALSE(ams[0].contains("name"));
+    REQUIRE(ams[0]["trays"].size() == 4);
+    for (int s = 0; s < 4; ++s)
+        CHECK(ams[0]["trays"][s].value("active", false) == (s == 2));
+
+    // Nothing loaded: no tray is active.
+    obj.m_tray_now = "255";
+    for (const json& t : RemoteControl::ams_json(&obj)[0]["trays"])
+        CHECK_FALSE(t.contains("active"));
 }
 
 TEST_CASE("Each H3C rack nozzle is fed from its AMS 3H slot or its spool holder", "[BambuAmsReport]")

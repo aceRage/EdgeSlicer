@@ -298,7 +298,7 @@ const std::vector<std::string> &filament_index_keys()
     static const std::vector<std::string> keys = {"extruder",         "sparse_infill_filament", "wall_filament",
                                                   "outer_wall_filament", "solid_infill_filament", "support_filament",
                                                   "support_interface_filament", "wipe_tower_filament",
-                                                  "top_surface_filament", "bottom_surface_filament"};
+                                                  "top_surface_filament", "bottom_surface_filament", "ironing_filament"};
     return keys;
 }
 

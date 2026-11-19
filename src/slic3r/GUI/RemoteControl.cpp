@@ -1,5 +1,6 @@
 #include "RemoteControl.hpp"
 
+#include "AmsTypes.hpp"
 #include "DeviceControls.hpp"
 #include "FilamentCommands.hpp"
 #include "DeviceManager.hpp"
@@ -226,7 +227,12 @@ static std::string tray_rgb(const std::string& rrggbbaa)
 // Every AMS unit the printer reports, read-only: which nozzle it feeds (on the two-nozzle machines
 // the Device tab's own L / R split), how damp it is, and each tray's colour, material and what is
 // left. The desktop's AMS panel reads the same fields.
-static json ams_json(MachineObject* m)
+//
+// A rack AMS (the H3C's AMS 3H, wire id "32") carries its own name, since the app's "AMS <id + 1>"
+// would call it "AMS 33". The tray feeding the toolhead now has active true (the slot_loaded test
+// the load / unload buttons make); on the H3C slot N feeds rack nozzle N, so it is also the
+// toolhead in use.
+json ams_json(MachineObject* m)
 {
     json out = json::array();
     const bool dual = m->m_extder_data.total_extder_count > 1;
@@ -238,6 +244,7 @@ static json ams_json(MachineObject* m)
         u["nozzle"]         = a->nozzle;
         u["side"]           = dual ? (a->nozzle == 1 ? "L" : "R") : "";
         u["type"]           = a->type;
+        if (GUI::AmsTypes::is_rack_ams(a->type)) u["name"] = GUI::AmsTypes::display_name(a->type);
         u["humidity_level"] = a->humidity;
         if (a->humidity_raw >= 0) u["humidity_pct"] = a->humidity_raw;
         if (a->current_temperature != INVALID_AMS_TEMPERATURE) u["temp"] = a->current_temperature;
@@ -253,8 +260,10 @@ static json ams_json(MachineObject* m)
             j["sub_type"] = t->sub_brands;
             j["color"]    = tray_rgb(t->color);
             j["remain"]   = t->remain;
+            const bool loaded = slot_loaded(m, a->id, t->id);
+            if (loaded && t->is_exists) j["active"] = true;
             FilamentCommands::write_availability(
-                FilamentCommands::availability(filament_state(m), t->is_exists, slot_loaded(m, a->id, t->id)), j);
+                FilamentCommands::availability(filament_state(m), t->is_exists, loaded), j);
             trays.push_back(j);
         }
         u["trays"] = trays;

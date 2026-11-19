@@ -184,20 +184,26 @@ enum PrintObjectStep {
 // EdgeSlicer surface filaments: TopSurface / BottomSurface are the visible top and bottom skins
 // (top_surface_filament / bottom_surface_filament). Every switch over this enum must list them:
 // a `default:` falling back to the sparse infill filament would silently print the skins with it.
+// Ironing (ironing_filament) is its own source only when that key names a filament; otherwise ironing
+// takes the source of the surface it irons (IronedSurface, set on the collection by Layer::make_ironing).
 enum class FillFilamentSource {
     Wall,
     SolidInfill,
     SparseInfill,
     TopSurface,
     BottomSurface,
+    Ironing,
 };
 
-// `role` is the role of the collection's leading entity, as GCode::process_layer reads it.
-FillFilamentSource fill_filament_source(const PrintRegionConfig &config, ExtrusionRole role);
+// `role` is the role of the collection's leading entity, as GCode::process_layer reads it; `ironed` the
+// surface an ironing collection irons (ExtrusionEntityCollection::ironed_surface), ignored for other roles.
+FillFilamentSource fill_filament_source(const PrintRegionConfig &config, ExtrusionRole role, IronedSurface ironed = IronedSurface::Top);
+// The same for a fill collection: its leading entity's role and its ironed surface.
+FillFilamentSource fill_filament_source(const PrintRegionConfig &config, const ExtrusionEntityCollection &fill);
 
-// EdgeSlicer surface filaments. The roles printed with top_surface_filament: the topmost skin
-// (stTop -> erTopSolidInfill) and the ironing over it.
-inline bool is_top_surface_filament_role(ExtrusionRole role) { return role == erTopSolidInfill || role == erIroning; }
+// EdgeSlicer surface filaments. The role printed with top_surface_filament: the topmost skin
+// (stTop -> erTopSolidInfill). Ironing over it follows it too, through fill_filament_source().
+inline bool is_top_surface_filament_role(ExtrusionRole role) { return role == erTopSolidInfill; }
 // The roles printed with bottom_surface_filament: the bottommost skin (stBottom -> erBottomSurface),
 // that skin printed on support (erBottomSurfaceOverSupport) and that skin bridged over air
 // (stBottomBridge -> erBridgeInfill). Internal bridges (erInternalBridgeInfill) are not a visible face
@@ -211,6 +217,9 @@ int outer_wall_filament_1based(const PrintRegionConfig &config);
 // The configured 1-based filament of the top / bottom skin: the surface key, 0 = the outer wall's.
 int top_surface_filament_1based(const PrintRegionConfig &config);
 int bottom_surface_filament_1based(const PrintRegionConfig &config);
+// The configured 1-based filament of ironing over `surface`: ironing_filament, 0 = the filament of that surface
+// (top / bottom surface filament, or the solid infill's: solid_infill_filament, sparse at 100% density).
+int ironing_filament_1based(const PrintRegionConfig &config, IronedSurface surface);
 // The configured (not mixed-resolved) 1-based filament of a fill extrusion source.
 int fill_filament_source_1based(const PrintRegionConfig &config, FillFilamentSource source);
 // The width of a bottom skin role (internal_solid_infill_line_width / bridge_line_width with its per-nozzle

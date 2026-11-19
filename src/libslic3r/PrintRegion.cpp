@@ -38,8 +38,20 @@ bool internal_solid_infill_uses_sparse_filament(const PrintRegionConfig &config,
 // emission used to disagree about which extruder the painted band's gap fill needs. They now
 // agree. Only erGapFill is redirected, deliberately: erNone (an empty collection) and any future
 // role keep the old fall-through.
-FillFilamentSource fill_filament_source(const PrintRegionConfig &config, ExtrusionRole role)
+FillFilamentSource fill_filament_source(const PrintRegionConfig &config, ExtrusionRole role, IronedSurface ironed)
 {
+    // EdgeSlicer: ironing prints with ironing_filament, or with the filament of the surface it irons.
+    if (role == erIroning) {
+        if (config.ironing_filament.value > 0)
+            return FillFilamentSource::Ironing;
+        switch (ironed) {
+        case IronedSurface::Bottom: return FillFilamentSource::BottomSurface;
+        case IronedSurface::Solid:  return std::abs(config.sparse_infill_density.value - 100.) < EPSILON ? FillFilamentSource::SparseInfill :
+                                                                                                         FillFilamentSource::SolidInfill;
+        case IronedSurface::Top:
+        default:                    return FillFilamentSource::TopSurface;
+        }
+    }
     if (role == erGapFill)
         return FillFilamentSource::Wall;
     if (role == erSolidInfill && std::abs(config.sparse_infill_density.value - 100.) < EPSILON)
@@ -54,6 +66,17 @@ FillFilamentSource fill_filament_source(const PrintRegionConfig &config, Extrusi
     if (is_solid_infill(role))
         return FillFilamentSource::SolidInfill;
     return FillFilamentSource::SparseInfill;
+}
+
+FillFilamentSource fill_filament_source(const PrintRegionConfig &config, const ExtrusionEntityCollection &fill)
+{
+    const ExtrusionRole role = fill.entities.empty() ? erNone : fill.entities.front()->role();
+    return fill_filament_source(config, role, fill.ironed_surface);
+}
+
+int ironing_filament_1based(const PrintRegionConfig &config, IronedSurface surface)
+{
+    return fill_filament_source_1based(config, fill_filament_source(config, erIroning, surface));
 }
 
 int outer_wall_filament_1based(const PrintRegionConfig &config)
@@ -98,6 +121,7 @@ int fill_filament_source_1based(const PrintRegionConfig &config, FillFilamentSou
     case FillFilamentSource::SolidInfill:   return config.solid_infill_filament.value;
     case FillFilamentSource::TopSurface:    return top_surface_filament_1based(config);
     case FillFilamentSource::BottomSurface: return bottom_surface_filament_1based(config);
+    case FillFilamentSource::Ironing:       return config.ironing_filament.value;
     case FillFilamentSource::SparseInfill:
     default:                                return config.sparse_infill_filament.value;
     }
@@ -210,6 +234,9 @@ void PrintRegion::collect_object_printing_extruders(const PrintConfig &print_con
         emplace_extruder(top_surface_filament_1based(region_config));
     if (region_config.bottom_shell_layers.value > 0)
         emplace_extruder(bottom_surface_filament_1based(region_config));
+    // EdgeSlicer: an ironing filament of its own (0 irons with the filaments listed above).
+    if (region_config.ironing_type.value != IroningType::NoIroning && region_config.ironing_filament.value > 0)
+        emplace_extruder(region_config.ironing_filament);
 }
 
 void PrintRegion::collect_object_printing_extruders(const Print &print, std::vector<unsigned int> &object_extruders) const
@@ -225,6 +252,7 @@ void PrintRegion::collect_object_printing_extruders(const Print &print, std::vec
     assert(this->config().solid_infill_filament   <= int(num_filaments));
     assert(this->config().top_surface_filament    <= int(num_filaments));
     assert(this->config().bottom_surface_filament <= int(num_filaments));
+    assert(this->config().ironing_filament        <= int(num_filaments));
 #endif
     collect_object_printing_extruders(print.config(), this->config(), print.has_brim(), object_extruders, num_filaments);
 }

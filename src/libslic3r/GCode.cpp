@@ -8518,7 +8518,7 @@ LayerResult GCode::process_layer(const Print& print,
                 return entities.image_row_extruder_1based;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
             // EdgeSlicer surface filaments: fill_filament_source_1based() covers the top / bottom skins too.
-            return unsigned(fill_filament_source_1based(region.config(), fill_filament_source(region.config(), role)));
+            return unsigned(fill_filament_source_1based(region.config(), fill_filament_source(region.config(), role, entities.ironed_surface)));
         }
         return layer_tools.extruder_override == 0 ? unsigned(region.config().wall_filament.value) : layer_tools.extruder_override;
     };
@@ -8540,7 +8540,7 @@ LayerResult GCode::process_layer(const Print& print,
                 return int(entities.image_row_extruder_1based) - 1;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
             // EdgeSlicer surface filaments: LayerTools::fill_filament() covers the top / bottom skins too.
-            return int(layer_tools.fill_filament(region, role));
+            return int(layer_tools.fill_filament(region, role, entities.ironed_surface));
         }
         return int(layer_tools.wall_filament(region));
     };
