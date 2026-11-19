@@ -112,6 +112,7 @@ add_executable(${_TEST_NAME}_tests
 	test_wipe_tower.cpp
 	test_region_print_order.cpp
 	test_adaptive_pa.cpp
+	test_tool_ordering.cpp
 	test_adaptive_pressure_advance.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
