@@ -185,6 +185,29 @@ std::string describe_upload_failure(const std::string& body, const std::string& 
     return out;
 }
 
+std::string encode_file_name_header(const std::string& name)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    std::string       out;
+    for (unsigned char c : name) {
+        const bool plain = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == ''' || c == '(' || c == ')';
+        if (plain) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 15]);
+        }
+    }
+    return out;
+}
+
+bool upload_error_retryable(int http_status, const std::string& body)
+{
+    return http_status != 401 && http_status != 403 && int_at(parse_object(body), "error_code", -1) != ERR_ACCESS_DENIED;
+}
+
 std::string content_range(size_t offset, size_t length, size_t total)
 {
     const size_t last = length == 0 ? offset : offset + length - 1;
@@ -378,7 +401,15 @@ std::string error_text(int error_code)
     case ERR_INVALID_PARAMETER:
     case ERR_INVALID_PARAMETER2: return "the printer refused the request as invalid";
     case ERR_BUSY: return "the printer is busy";
-    case ERR_UPLOAD_REJECTED: return "the printer rejected the uploaded file (error 9004)";
+    case ERR_UPLOAD_OFFSET_MISMATCH: return "the printer lost track of the upload (offset mismatch, error 9000)";
+    case 9001:
+    case 9002:
+    case 9003: return "the printer could not write the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_MD5_FAILED: return "the printer's checksum of the uploaded file did not match (error 9004)";
+    case ERR_UPLOAD_PATH_MISSING: return "the printer's upload folder does not exist (error 9007)";
+    case 9008:
+    case 9009: return "the printer could not check the uploaded file (error " + std::to_string(error_code) + ")";
+    case ERR_UPLOAD_SAME_NAME: return "the printer could not replace an existing file of the same name (error 9010)";
     case ERR_FILE_NOT_FOUND: return "the printer cannot find the uploaded file";
     case ERR_MISSING_BED_LEVELING: return "the printer has no bed leveling data";
     case -1: return "the printer did not say whether it worked";

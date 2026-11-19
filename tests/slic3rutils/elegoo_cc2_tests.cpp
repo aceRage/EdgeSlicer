@@ -188,6 +188,23 @@ TEST_CASE("CC2 /system/info and /upload answers", "[ElegooCc2]")
     CHECK(ElegooCc2::describe_upload_failure(R"({"error_code":0})", "x", 1).empty());
     CHECK(ElegooCc2::describe_upload_failure("<html>", "x", 1).empty());
 
+    // X-File-Name is encodeURIComponent of the UTF-8 name, as ElegooSlicer's web client sends it.
+    CHECK(ElegooCc2::encode_file_name_header("ECC2_0.4_Pikachu+Charizard+v1 _0.12_23m2s.gcode") ==
+          "ECC2_0.4_Pikachu%2BCharizard%2Bv1%20_0.12_23m2s.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("cube.gcode") == "cube.gcode");
+    CHECK(ElegooCc2::encode_file_name_header(std::string("caf") + char(0xC3) + char(0xA9) + " (1)!~*'.gcode") == "caf%C3%A9%20(1)!~*'.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("a%b&c=d.gcode") == "a%25b%26c%3Dd.gcode");
+    CHECK(ElegooCc2::encode_file_name_header("").empty());
+
+    CHECK(ElegooCc2::error_text(9004).find("checksum") != std::string::npos);
+    CHECK(ElegooCc2::error_text(9000).find("offset mismatch") != std::string::npos);
+    CHECK(ElegooCc2::error_text(9010).find("same name") != std::string::npos);
+    CHECK(ElegooCc2::upload_error_retryable(200, R"({"error_code":9004,"md5":"x","offset":1})"));
+    CHECK(ElegooCc2::upload_error_retryable(0, ""));
+    CHECK_FALSE(ElegooCc2::upload_error_retryable(401, ""));
+    CHECK_FALSE(ElegooCc2::upload_error_retryable(200, R"({"error_code":1000})"));
+    CHECK(ElegooCc2::UPLOAD_CHUNK_RETRIES == 3);
+
     CHECK(ElegooCc2::content_range(0, 1048576, 2500000) == "bytes 0-1048575/2500000");
     CHECK(ElegooCc2::content_range(2097152, 402848, 2500000) == "bytes 2097152-2499999/2500000");
 }

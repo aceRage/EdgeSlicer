@@ -63,8 +63,11 @@ constexpr int ERR_INVALID_PARAMETER2    = 1003;
 constexpr int ERR_BUSY                  = 1009;
 constexpr int ERR_FILE_NOT_FOUND        = 1021;
 constexpr int ERR_MISSING_BED_LEVELING  = 1026;
-// Seen on an /upload answer that also carried "md5" and "offset"; the meaning is not documented.
-constexpr int ERR_UPLOAD_REJECTED       = 9004;
+// Upload errors, named as ElegooSlicer's bundled LAN web client names them.
+constexpr int ERR_UPLOAD_OFFSET_MISMATCH = 9000;
+constexpr int ERR_UPLOAD_MD5_FAILED      = 9004; // MD5CheckFailed: the printer's checksum of the stored file differs from X-File-MD5
+constexpr int ERR_UPLOAD_PATH_MISSING    = 9007;
+constexpr int ERR_UPLOAD_SAME_NAME       = 9010; // UploadDeleteSameNameFileFailed
 
 // "Elegoo Centauri Carbon 2" and "Elegoo Centauri 2" (any case, surrounding blanks ignored), the two
 // models that speak this protocol. Not the Centauri Carbon 1, not anything else.
@@ -92,6 +95,14 @@ bool parse_upload_reply(const std::string& body, std::string& error);
 // A failed /upload answer as one line for the user: the error text plus whatever the printer reported
 // (offset, checksum compared with ours, message). Empty when the answer is not a JSON error.
 std::string describe_upload_failure(const std::string& body, const std::string& our_md5, size_t total);
+// X-File-Name as ElegooSlicer's web client sends it: JavaScript encodeURIComponent of the UTF-8 name
+// (everything but A-Z a-z 0-9 - _ . ! ~ * ' ( ) becomes %XX, so a space is %20 and "+" is %2B).
+std::string encode_file_name_header(const std::string& name);
+// Extra tries of one chunk after a failed answer, and the wait between them (the web client: 3 and 200 ms).
+constexpr int    UPLOAD_CHUNK_RETRIES  = 3;
+constexpr int    UPLOAD_CHUNK_RETRY_MS = 200;
+// Whether a failed chunk is worth sending again: not when the printer refused the access code.
+bool upload_error_retryable(int http_status, const std::string& body);
 // "bytes <first>-<last>/<total>" for one chunk.
 std::string content_range(size_t offset, size_t length, size_t total);
 

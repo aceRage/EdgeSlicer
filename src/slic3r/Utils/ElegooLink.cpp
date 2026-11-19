@@ -631,7 +631,9 @@ namespace Slic3r {
     // The Centauri Carbon 2: PUT /upload in 1 MiB chunks (Content-Range, X-File-Name, X-File-MD5 in
     // lower-case hex, X-Token), each answered {"error_code":0}; then, for Upload and Print, the MQTT
     // start command (ElegooCc2::start_print) with the dialog's options and CANVAS slot_map.
-    // The chunked PUT follows upstream OrcaSlicer's ElegooLink (loopUploadCC2).
+    // The chunked PUT follows upstream OrcaSlicer's ElegooLink (loopUploadCC2) and ElegooSlicer's LAN web
+    // client (AGPL-3.0, ELEGOO-3D/ElegooSlicer 2d507e39a9, resources/web/elegoolink/lan_service_web): the
+    // X-File-Name header is encodeURIComponent'd and a failed chunk is retried.
     bool ElegooLink::cc2_upload(const std::string& url, PrintHostUpload upload_data, ProgressFn progress_fn, ErrorFn error_fn, InfoFn info_fn) const
     {
         const char*       name            = get_name();
@@ -661,6 +663,11 @@ namespace Slic3r {
         const size_t total        = static_cast<size_t>(size);
         const size_t packageCount = (total + MAX_UPLOAD_PACKAGE_LENGTH - 1) / MAX_UPLOAD_PACKAGE_LENGTH;
         bool         res          = false;
+        // X-File-Name is percent-encoded as ElegooSlicer's LAN web client does (encodeURIComponent): a name
+        // with spaces or "+" arrives as typed, and the printer's checksum of the stored file can match.
+        const std::string encoded_name = ElegooCc2::encode_file_name_header(upload_filename);
+        auto              http         = Http::put2(url);
+        http.timeout_connect(30).timeout_max(180);
         for (size_t i = 0; i < packageCount; ++i) {
             const size_t offset = MAX_UPLOAD_PACKAGE_LENGTH * i;
             const size_t length = std::min<size_t>(MAX_UPLOAD_PACKAGE_LENGTH, total - offset);
@@ -673,46 +680,67 @@ namespace Slic3r {
             }
             BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2%/%3% (Centauri Carbon 2)") % name % (i + 1) % packageCount;
 
-            res       = false;
-            auto http = Http::put2(url);
-            http.timeout_connect(30).timeout_max(180);
-            http.header("Accept", "application/json")
-                .header("Content-Type", "application/octet-stream")
-                .header("Content-Range", ElegooCc2::content_range(offset, length, total))
-                .header("X-File-Name", upload_filename)
-                .header("X-File-MD5", md5)
-                .header("X-Token", token)
-                .set_post_body(chunk)
-                .on_complete([&](std::string body, unsigned status) {
-                    std::string why;
-                    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: CC2 chunk %2%/%3% Content-Range `%4%`, file %5% bytes, md5 %6%: HTTP %7%, answer `%8%`") %
-                                                   name % (i + 1) % packageCount % ElegooCc2::content_range(offset, length, total) % total % md5 % status % body;
-                    if (ElegooCc2::parse_upload_reply(body, why))
-                        res = true;
-                    else {
-                        const std::string detail = ElegooCc2::describe_upload_failure(body, md5, total);
-                        error_fn(format_error(body, detail.empty() ? why : detail, status));
-                    }
-                })
-                .on_error([&](std::string body, std::string error, unsigned status) {
-                    BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading CC2 chunk: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
-                    if (status == 401 || status == 403)
-                        error_fn(format_error(body, "the printer refused the access code", status));
-                    else
-                        error_fn(format_error(body, error, status));
-                })
-                .on_progress([&](Http::Progress progress, bool& cancel) {
-                    if (progress.ultotal == progress.ulnow)
-                        return;
-                    Http::Progress merged(0, 0, total, std::min(total, offset + progress.ulnow), progress.buffer);
-                    progress_fn(merged, cancel);
-                })
+            // One handle for every chunk, as ElegooSlicer's LAN web client and upstream's loopUploadCC2 do:
+            // libcurl keeps the connection to the printer open between the chunks. A chunk that fails is
+            // sent again after 200 ms, up to 3 more times (the web client's retry); the error is shown
+            // only when they all fail.
+            std::string last_error;
+            bool        cancelled = false;
+            res                   = false;
+            for (int attempt = 0; attempt <= ElegooCc2::UPLOAD_CHUNK_RETRIES && !res && !cancelled; ++attempt) {
+                if (attempt > 0) {
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: CC2 chunk %2%/%3% failed, sending it again (%4%/%5%)") % name % (i + 1) % packageCount % attempt %
+                                                      ElegooCc2::UPLOAD_CHUNK_RETRIES;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(ElegooCc2::UPLOAD_CHUNK_RETRY_MS));
+                }
+                bool retryable = true;
+                http.clear_headers();
+                http.header("Accept", "application/json")
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Content-Length", std::to_string(length))
+                    .header("Content-Range", ElegooCc2::content_range(offset, length, total))
+                    .header("X-File-Name", encoded_name)
+                    .header("X-File-MD5", md5)
+                    .header("X-Token", token)
+                    .set_post_body(chunk)
+                    .on_complete([&](std::string body, unsigned status) {
+                        std::string why;
+                        BOOST_LOG_TRIVIAL(info) << boost::format("%1%: CC2 chunk %2%/%3% Content-Range `%4%`, file %5% bytes, md5 %6%: HTTP %7%, answer `%8%`") %
+                                                       name % (i + 1) % packageCount % ElegooCc2::content_range(offset, length, total) % total % md5 % status % body;
+                        if (ElegooCc2::parse_upload_reply(body, why)) {
+                            res = true;
+                        } else {
+                            const std::string detail = ElegooCc2::describe_upload_failure(body, md5, total);
+                            last_error               = format_error(body, detail.empty() ? why : detail, status);
+                            retryable                = ElegooCc2::upload_error_retryable(static_cast<int>(status), body);
+                        }
+                    })
+                    .on_error([&](std::string body, std::string error, unsigned status) {
+                        BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading CC2 chunk: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
+                        retryable = ElegooCc2::upload_error_retryable(static_cast<int>(status), body);
+                        last_error = (status == 401 || status == 403) ? format_error(body, "the printer refused the access code", status) :
+                                                                         format_error(body, error, status);
+                    })
+                    .on_progress([&](Http::Progress progress, bool& cancel) {
+                        if (progress.ultotal == progress.ulnow)
+                            return;
+                        Http::Progress merged(0, 0, total, std::min(total, offset + progress.ulnow), progress.buffer);
+                        progress_fn(merged, cancel);
+                        if (cancel)
+                            cancelled = true;
+                    })
 #ifdef WIN32
-                .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
+                    .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
 #endif
-                .perform_sync();
-            if (!res)
+                    .perform_sync();
+                if (!res && !retryable)
+                    break;
+            }
+            if (!res) {
+                if (!cancelled)
+                    error_fn(last_error);
                 return false;
+            }
         }
 
         if (upload_data.post_action != PrintHostPostUploadAction::StartPrint)
