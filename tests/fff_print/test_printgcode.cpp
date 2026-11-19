@@ -1787,6 +1787,9 @@ std::string slice_with_toolchange(const char *change_gcode)
         {"wall_filament", 1},
         {"sparse_infill_filament", 2},
         {"solid_infill_filament", 2},
+        // Skins on the infill filament, as before the surface filaments followed the walls.
+        {"top_surface_filament", 2},
+        {"bottom_surface_filament", 2},
         {"skirt_loops", 0},
         {"brim_type", "no_brim"},
         {"slow_down_for_layer_cooling", "1,1"},
