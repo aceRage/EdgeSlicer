@@ -3210,7 +3210,7 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     // stroke's end - sits within Extension of the line, the extended surface ran
     // through it and the boolean cut a slot into the neighbour. Each entry below
     // is the distance from one rail's base point along its extension direction to
-    // the first mesh hit (infinity when there is none), minus a small margin, so
+    // the first face it goes into from outside (infinity when there is none), minus a small margin, so
     // the cutter can clamp the outward rail per sample instead of trusting the
     // slider value everywhere.
     //
@@ -3227,16 +3227,12 @@ std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
     const std::vector<DrawCutSample>& p = m_draw_stroke.path();
     const auto& em = m_draw_raycaster->get_aabb_mesh();
 
-    // The origin starts 0.05 mm along the cast direction so the facet the stroke
-    // was drawn on cannot be the first hit; the same 0.05 mm comes back out of
-    // the reported distance, and a further 0.1 mm margin keeps grazing
-    // self-intersections (a curved wall the ray clips on its own way out) from
-    // zeroing the clamp.
+    // Only a face the ray goes INTO from outside stops it - see
+    // draw_cut_extension_clearance(). A line drawn on a flat face lies in that face's
+    // plane, so stopping at the first face of any kind clamped the extension at the
+    // face's own edge and the cut ended on the part's side wall.
     auto clearance_along = [&em](const Vec3d& from, const Vec3d& dir) -> double {
-        const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
-        const auto  hit = em.query_ray_hit(from + 0.05 * d, d);
-        const double t  = hit.is_hit() ? hit.distance() + 0.05 : std::numeric_limits<double>::max();
-        return std::max(0.0, t - 0.1);
+        return draw_cut_extension_clearance(em, from, dir);
     };
 
     const size_t n = p.size();
@@ -3552,11 +3548,12 @@ void GLGizmoCut3D::commit_draw_points()
     // would corrupt undo. Undo still works - the entry pushed before the edit holds the
     // chain as it was, ranges and all - it just makes the edited line one link.
     //
-    // Editing is only reachable on a VALID stroke, which means a CLOSED chain, so the
-    // closed flag is restored unconditionally. (set_samples() refuses to call a chain
-    // of fewer than MinChainSamples closed, which is the guard against an edit that
-    // deletes its way down to a triangle.)
-    m_draw_chain.set_samples(m_draw_points, /*closed*/ true);
+    // Editing is reachable on any VALID stroke: a CLOSED chain or one the user finished
+    // OPEN with "Cut along the line". The edit keeps whichever it was - an open line
+    // whose point is moved stays an open line, it does not become a loop.
+    // (set_samples() refuses to call a chain of fewer than MinChainSamples closed or
+    // finished, which is the guard against an edit that deletes its way down to a dab.)
+    draw_cut_chain_set_edited(m_draw_chain, m_draw_points);
     refresh_draw_stroke();
 }
 
@@ -6633,7 +6630,9 @@ void GLGizmoCut3D::update_bb()
         m_snap_fine_out_radius    = m_grabber_connection_len * 1.15;
 
         // input params for cut with tongue and groove
-        m_groove.depth = m_groove.depth_init = std::max(1.f , 0.5f * float(get_grabber_mean_size(m_bounding_box)));
+        // From the object, not from get_grabber_mean_size(): with ENABLE_FIXED_GRABBER that is a screen
+        // size (32 px / zoom), and the groove first offered depended on the camera's zoom.
+        m_groove.depth = m_groove.depth_init = cut_groove_default_depth(m_bounding_box);
         m_groove.width = m_groove.width_init = 4.0f * m_groove.depth;
         m_groove.flaps_angle = m_groove.flaps_angle_init = float(PI) / 3.f;
         m_groove.angle = m_groove.angle_init = 0.f;
@@ -9306,6 +9305,10 @@ void GLGizmoCut3D::render_input_window_warning_lines() const
 {
     if (const auto* si = m_c ? m_c->selection_info() : nullptr)
         if (const ModelObject* mo = si->model_object())
+            if (const std::string flexi_error = flexi_connectors_error(mo->cut_connectors); !flexi_error.empty())
+                m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(flexi_error));
+    if (const auto* si = m_c ? m_c->selection_info() : nullptr)
+        if (const ModelObject* mo = si->model_object())
             for (const CutConnector& c : mo->cut_connectors)
                 if (c.attribs.type == CutConnectorType::TacJoint) {
                     if (std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
@@ -9550,20 +9553,8 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
         // plane at the connector, not in the cut plane - see the projection below.
         its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     } else {
-        const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
-        const int   sectorCount = shape == CutConnectorShape::Triangle  ? 3 :
-                                  shape == CutConnectorShape::Square    ? 4 :
-                                  shape == CutConnectorShape::Circle    ? 60: // supposably, 60 points are enough for conflict detection
-                                  shape == CutConnectorShape::Hexagon   ? 6 : 1 ;
-
-        vertices.reserve(sectorCount + 1);
-
-        float fa = 2 * PI / sectorCount;
-        auto vec = Eigen::Vector2f(0, cur_connector.radius);
-        for (float angle = 0; angle < 2.f * PI; angle += fa) {
-            Vec2f p = Eigen::Rotation2Df(angle) * vec;
-            vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
-        }
+        // The outline turned by the connector's Rotation, as it is drawn: see cut_connector_outline().
+        vertices = cut_connector_outline(cur_connector);
         its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     }
 
@@ -9624,7 +9615,8 @@ bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& co
         for (const Vec3f& vertex : tac_joint_cutter_mesh(cur_connector.tac_joint).vertices)
             cur_tbb.merge(matrix * vertex.cast<double>());
     } else {
-        const Transform3d matrix = frame *
+        // Turned by its Rotation, as drawn, or a turned connector's box is tested unturned.
+        const Transform3d matrix = frame * rotation_transform(-cur_connector.z_angle * Vec3d::UnitZ()) *
                                    scale_transform(Vec3f(cur_connector.radius, cur_connector.radius, cur_connector.height).cast<double>());
         cur_tbb = m_shapes[cur_connector.attribs].model.get_bounding_box().transformed(matrix);
     }
@@ -9843,9 +9835,12 @@ bool GLGizmoCut3D::can_perform_cut() const
     if (! m_invalid_connectors_idxs.empty() || (!m_keep_upper && !m_keep_lower) || m_connectors_editing)
         return false;
 
-    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why).
+    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why), and
+    // so does a Flexi joint with another Flexi joint or connector beside it.
     if (m_c->selection_info() != nullptr)
-        if (const ModelObject* mo = m_c->selection_info()->model_object())
+        if (const ModelObject* mo = m_c->selection_info()->model_object()) {
+            if (!flexi_connectors_error(mo->cut_connectors).empty())
+                return false;
             for (const CutConnector& c : mo->cut_connectors) {
                 if (c.attribs.type == CutConnectorType::PushFit && !pushfit_validate(c.pushfit, double(flexi_nozzle_diameter())).empty())
                     return false;
@@ -9859,6 +9854,7 @@ bool GLGizmoCut3D::can_perform_cut() const
                         return false;
                 }
             }
+        }
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         return has_valid_groove();
@@ -10583,6 +10579,11 @@ void GLGizmoCut3D::begin_reedit()
             first_instance_trafo = Geometry::Transformation(first_instance_trafo.get_matrix() * first->volumes.front()->get_matrix() *
                                                             frame.inverse());
     }
+    // The stand-in takes the cut instance's turn and size: the recipe's plane is in that frame. See
+    // cut_recipe_stand_in_matrix().
+    if (first_has_instance)
+        first_instance_trafo = Geometry::Transformation(
+            cut_recipe_stand_in_matrix(m_reedit_pending_recipe, first_instance_trafo.get_matrix()));
     const bool             first_printable    = first_has_instance ? first->instances.front()->printable : true;
 
     m_reedit_recipe = m_reedit_pending_recipe;

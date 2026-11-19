@@ -643,7 +643,10 @@ namespace {
 
 // GLGizmoCut3D::apply_cut_connectors() and the Plug / Dowel / Snap branch of get_connector_mesh() as
 // they were before P2 moved them to libslic3r (copied from main at 2999085364, gizmo snap defaults).
-void p2_old_gizmo_bake(ModelObject *mo, const std::string &connector_name)
+// `height_only` = the placement fix of #1006 (add_cut_connector_volume): the unit mesh is centred on
+// its height only, so a shape whose box is off its axis (a triangle) is not moved sideways. With
+// `height_only` false it is the pre-#1006 code, which let add_volume() centre the whole box.
+void p2_old_gizmo_bake(ModelObject *mo, const std::string &connector_name, bool height_only = true)
 {
     using namespace Geometry;
     const float snap_space = 0.3f, snap_bulge = 0.15f;
@@ -666,8 +669,10 @@ void p2_old_gizmo_bake(ModelObject *mo, const std::string &connector_name)
             connector_mesh = its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
         else
             connector_mesh = its_make_frustum_dowel(1.0, 1.0, sectorCount);
+        if (height_only)
+            its_translate(connector_mesh, Vec3f(0.f, 0.f, -float(bounding_box(connector_mesh).center().z())));
         TriangleMesh mesh       = TriangleMesh(connector_mesh);
-        ModelVolume *new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
+        ModelVolume *new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME, !height_only);
         new_volume->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
                                        rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
                                        scale_transform(Vec3f(connector.radius, connector.radius, connector.height).cast<double>()));
@@ -872,6 +877,24 @@ TEST_CASE("Split to Fit P2: the connector bake moved out of the Cut gizmo is unc
             REQUIRE(n->cut_info.connector_type == o->cut_info.connector_type);
             REQUIRE(n->cut_info.radius_tolerance == o->cut_info.radius_tolerance);
             REQUIRE(n->cut_info.height_tolerance == o->cut_info.height_tolerance);
+        }
+
+        // These shapes are centred on their axis, so the #1006 placement leaves them where the
+        // pre-#1006 code put them (only a shape off its axis, a triangle, moves).
+        {
+            Model        pre_model;
+            ModelObject *pre_obj = p2_cube(pre_model);
+            pre_obj->cut_connectors.push_back(c);
+            p2_old_gizmo_bake(pre_obj, "Connector", false);
+            REQUIRE(pre_obj->volumes.size() == new_obj->volumes.size());
+            const ModelVolume  *p  = pre_obj->volumes.back();
+            const ModelVolume  *n  = new_obj->volumes.back();
+            const BoundingBoxf3 pb = p->mesh().transformed_bounding_box(p->get_matrix());
+            const BoundingBoxf3 nb = n->mesh().transformed_bounding_box(n->get_matrix());
+            for (int a = 0; a < 3; ++a) {
+                REQUIRE_THAT(nb.min[a], WithinAbs(pb.min[a], 1e-4));
+                REQUIRE_THAT(nb.max[a], WithinAbs(pb.max[a], 1e-4));
+            }
         }
 
         // And the cut a single manual connector gives is the same.
