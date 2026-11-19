@@ -50,6 +50,11 @@ DynamicPrintConfig two_filaments(bool tower)
         { "skirt_loops", "0" },
         { "brim_type", "no_brim" },
         { "gcode_comments", "1" },
+        // Inside the default bed, clear of the arranged cube (as test_wipe_tower.cpp places it).
+        { "wipe_tower_x", "15" },
+        { "wipe_tower_y", "120" },
+        { "prime_tower_width", "35" },
+        { "prime_tower_brim_width", "0" },
     });
     return config;
 }
