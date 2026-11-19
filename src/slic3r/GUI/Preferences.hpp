@@ -128,8 +128,14 @@ public:
     wxBoxSizer *create_camera_orbit_mult_input(wxString title, wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_backup_input(wxString title, wxWindow *parent, wxString tooltip, std::string param);
     wxBoxSizer *create_item_autosave_input(wxString title, wxWindow *parent, wxString tooltip, std::string param);
+    // Orca #11407: "Auto slice after changes" with its delay in seconds, on one row.
+    wxBoxSizer *create_item_auto_reslice(wxString title, wxWindow *parent, wxString checkbox_tooltip, wxString delay_tooltip);
     // Ultra (G-code archive): a folder row with a Browse button, and the retention count.
     wxWindow   *create_item_gcode_archive_dir(wxWindow *parent, wxString tooltip);
+    // Home > Vaults: where vault downloads go (a folder row with Browse and Default).
+    wxWindow   *create_item_vault_downloads_dir(wxWindow *parent, wxString tooltip);
+    // ZIP files (PR C): extraction folder, its size, Open folder and Clean now.
+    wxWindow   *create_item_zip_work_folder(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gcode_archive_max(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip);
     // Selected-object highlight: style combo (Glow / Thin outline) plus the Glow strength slider.

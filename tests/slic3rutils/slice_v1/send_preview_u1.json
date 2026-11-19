@@ -1,0 +1,23 @@
+{
+  "mapping_kind": "toolheads",
+  "editable": true,
+  "targets": [
+    {"id": "T1", "label": "T1", "type": "PLA", "color": "#FFFFFF", "ready": true, "side": "", "wire": "0"},
+    {"id": "T2", "label": "T2", "type": "PETG", "color": "#000000", "ready": true, "side": "", "wire": "1"},
+    {"id": "T3", "label": "T3", "type": null, "color": null, "ready": false, "side": "", "wire": "2"},
+    {"id": "T4", "label": "T4", "type": "PLA", "color": "#FF0000", "ready": true, "side": "", "wire": "3"}
+  ],
+  "filaments": [
+    {"index": 0, "type": "PLA", "color": "#FFFFFF", "grams": 20.5, "target": "T1", "auto": true, "problems": []},
+    {"index": 1, "type": "PLA", "color": "#101010", "grams": 3.25, "target": "T2", "auto": false, "problems": []},
+    {"index": 3, "type": "PLA", "color": "#FF0000", "grams": 1.0, "target": "T3", "auto": false,
+     "problems": ["toolhead 3 is empty; load it, pick another, or send anyway"]}
+  ],
+  "problems": [
+    {"filament": 3, "code": "mapping", "text": "toolhead 3 is empty; load it, pick another, or send anyway"}
+  ],
+  "mapping": "0:0,1:1,3:2",
+  "policy": "",
+  "warnings": ["Filament 2 (PLA) prints from toolhead 2, which holds PETG."],
+  "can_send": false
+}

@@ -32,7 +32,7 @@ different binary next week and the sha256 above would stop matching. The dated t
 Staged (outside the repo, as with FlashNetwork and UltraNet) at:
 
 ```
-C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\ffmpeg_out\ship\
+%TEMP%\snorca_hubtest\ffmpeg_out\ship\
     ffmpeg.exe
     FFMPEG-LICENSE.txt        (the build's LICENSE.txt, renamed so it is unambiguous
                                once it sits beside go2rtc's own note)
@@ -232,7 +232,7 @@ So an unwatched `_med`/`_low` costs nothing at all. The gate asserts all three.
 `CMakeLists.txt` gains `FFMPEG_BIN_DIR`, mirroring the `FLASHNETWORK_BIN_DIR` block beside it:
 
 ```
--DFFMPEG_BIN_DIR=C:/Users/acesa/AppData/Local/Temp/snorca_hubtest/ffmpeg_out/ship
+-DFFMPEG_BIN_DIR=%TEMP%/snorca_hubtest/ffmpeg_out/ship
 ```
 
 It installs `ffmpeg.exe` into `<install>/resources/tools/go2rtc/` — beside `go2rtc.exe`, which is

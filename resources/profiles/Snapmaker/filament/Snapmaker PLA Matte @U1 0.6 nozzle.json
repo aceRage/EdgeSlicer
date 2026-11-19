@@ -6,7 +6,8 @@
     "setting_id": "119531393501",
     "inherits": "Snapmaker PLA Matte @U1 base",
     "compatible_printers": [
-        "Snapmaker U1 (0.6 nozzle)"
+        "Snapmaker U1 (0.6 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)"
     ],
     "complete_print_exhaust_fan_speed": [
         "70"
@@ -69,10 +70,10 @@
         "45"
     ],
     "textured_plate_temp": [
-        "45"
+        "65"
     ],
     "textured_plate_temp_initial_layer": [
-        "45"
+        "65"
     ],
     "additional_cooling_fan_speed": [
         "80"
@@ -126,10 +127,10 @@
         "0.015"
     ],
     "graphic_effect_plate_temp": [
-        "0"
+        "65"
     ],
     "graphic_effect_plate_temp_initial_layer": [
-        "0"
+        "65"
     ],
     "supertack_plate_temp": [
         "35"

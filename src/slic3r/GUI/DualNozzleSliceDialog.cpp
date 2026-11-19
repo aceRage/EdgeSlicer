@@ -70,7 +70,8 @@ wxBitmap swatch(const wxColour &c, int size)
 
 wxString tray_label(const Tray &t)
 {
-    wxString label = from_u8(BambuExtruderMap::tray_name(t.ams_id, t.slot_id));
+    // "Ext-L" / "Ext-R" for an extruder's external spool holder.
+    wxString label = from_u8(BambuExtruderMap::tray_display_name(t.ams_id, t.slot_id));
     if (!t.type.empty())
         label += " " + from_u8(t.type);
     return label;
@@ -607,7 +608,8 @@ void DualNozzleSliceDialog::rebuild_columns()
     Thaw();
 }
 
-static wxString side_summary(const std::map<int, int> &ams, const std::map<NozzleVolumeType, int> &nozzles, bool nozzles_known)
+static wxString side_summary(const std::map<int, int> &ams, const std::map<NozzleVolumeType, int> &nozzles, bool nozzles_known,
+                             const std::string &external_type)
 {
     wxArrayString parts;
     auto ht  = ams.find(1);
@@ -618,6 +620,8 @@ static wxString side_summary(const std::map<int, int> &ams, const std::map<Nozzl
         parts.Add(wxString::Format("%d x AMS HT", ht->second));
     if (parts.empty())
         parts.Add(_L("no AMS"));
+    if (!external_type.empty())
+        parts.Add(wxString::Format(_L("external spool (%s)"), from_u8(external_type)));
     if (nozzles_known) {
         int      n = 0;
         wxString types;
@@ -653,8 +657,12 @@ void DualNozzleSliceDialog::update_status()
         const auto ams   = extruder_ams_counts(m_state, 2);
         const auto stats = extruder_nozzle_stats(m_state, 2, m_diameters);
         const bool nk    = !m_state.nozzles.empty();
+        std::string ext_type[2];
+        for (const auto &t : m_state.all_trays())
+            if (t.external && (t.logical_extruder == 0 || t.logical_extruder == 1))
+                ext_type[t.logical_extruder] = t.tray.type.empty() ? std::string("?") : t.tray.type;
         text = wxString::Format(_L("Synced with %s. Left: %s. Right: %s."), from_u8(m_state.dev_name.empty() ? m_state.dev_id : m_state.dev_name),
-                                side_summary(ams[0], stats[0], nk), side_summary(ams[1], stats[1], nk));
+                                side_summary(ams[0], stats[0], nk, ext_type[0]), side_summary(ams[1], stats[1], nk, ext_type[1]));
     }
     m_status->SetLabel(text);
     m_status->SetForegroundColour(warn ? wxColour(0xFF, 0x6F, 0x00) : StateColor::darkModeColorFor(wxColour("#4A4A4A")));
@@ -681,7 +689,7 @@ void DualNozzleSliceDialog::update_issues()
     wxArrayString lines;
     bool          blocking = false;
     for (const Issue &is : validate_arrangement(m_arr, m_state, m_used, 2, m_diameters)) {
-        const wxString tray = from_u8(BambuExtruderMap::tray_name(is.tray.ams_id, is.tray.slot_id));
+        const wxString tray = from_u8(BambuExtruderMap::tray_display_name(is.tray.ams_id, is.tray.slot_id));
         switch (is.kind) {
         case Issue::Kind::TrayOnOtherExtruder:
             lines.Add(wxString::Format(_L("Filament %d: slot %s feeds the other extruder."), is.filament + 1, tray));

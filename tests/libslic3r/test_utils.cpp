@@ -9,7 +9,9 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/cstdio.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -1003,6 +1005,18 @@ TEST_CASE("Floats print as printf prints them in the C locale", "[LocalesUtils]"
 
 TEST_CASE("Floats print with a decimal point in a locale whose decimal separator is a comma", "[LocalesUtils]")
 {
+    // The setlocale below is process-wide outside Windows: the setter there uses uselocale and
+    // cannot undo it. Put the previous LC_NUMERIC back on every exit, or later tests parse "0.4" as 0.
+    struct RestoreNumericLocale
+    {
+        std::string previous;
+        RestoreNumericLocale()
+        {
+            const char *cur = std::setlocale(LC_NUMERIC, nullptr);
+            previous        = cur ? cur : "C";
+        }
+        ~RestoreNumericLocale() { std::setlocale(LC_NUMERIC, previous.c_str()); }
+    } restore_numeric_locale;
     CNumericLocalesSetter outer;
     const char *candidates[] = {"de_DE.UTF-8", "de_DE", "fr_FR.UTF-8", "fr_FR", "C"};
     bool applied_comma = false;
@@ -1022,6 +1036,40 @@ TEST_CASE("Floats print with a decimal point in a locale whose decimal separator
     CHECK(float_to_string_decimal_point(25. / 3., 3) == "8.333");
 }
 
+// Orca #16967 / #11534: camera_orbit_mult is saved with FromCDouble (always '.').
+// string_to_double_decimal_point must keep the fractional part under a comma locale;
+// std::stod stops at '.' so "1.5" becomes 1 and "0.99" becomes 0.
+TEST_CASE("string_to_double_decimal_point keeps a point-separated preference under a comma locale", "[LocalesUtils]")
+{
+    struct RestoreNumericLocale
+    {
+        std::string previous;
+        RestoreNumericLocale()
+        {
+            const char *cur = std::setlocale(LC_NUMERIC, nullptr);
+            previous        = cur ? cur : "C";
+        }
+        ~RestoreNumericLocale() { std::setlocale(LC_NUMERIC, previous.c_str()); }
+    } restore_numeric_locale;
+    const char *candidates[] = {"de_DE.UTF-8", "de_DE", "fr_FR.UTF-8", "fr_FR"};
+    bool applied_comma = false;
+    for (const char *name : candidates) {
+        if (std::setlocale(LC_NUMERIC, name) != nullptr) {
+            applied_comma = true;
+            break;
+        }
+    }
+    if (!applied_comma) {
+        WARN("no locale with a comma decimal separator is installed");
+        return;
+    }
+    CHECK(std::abs(string_to_double_decimal_point("1.5") - 1.5) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("0.99") - 0.99) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("1.99") - 1.99) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("2.00") - 2.00) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("0.05") - 0.05) < 1e-12);
+}
+
 TEST_CASE("atof_decimal_point and string_to_double_decimal_point return 0 for text with no number", "[LocalesUtils]")
 {
     // fast_float leaves the output untouched on failure; the result must not be indeterminate.
@@ -1037,4 +1085,89 @@ TEST_CASE("atof_decimal_point and string_to_double_decimal_point return 0 for te
             REQUIRE(string_to_double_decimal_point(std::string_view(text)) == 0.);
         }
     }
+}
+
+// Orca #14607: temp dirs are isolated per user on Linux/macOS so two users sharing /tmp do not
+// collide on each other's scratch files.
+TEST_CASE("per_user_temp_dir composes a per-user temp root", "[utils]") {
+    const std::string base = "/tmp";
+
+    SECTION("an empty id returns base unchanged") {
+        REQUIRE(per_user_temp_dir(base, "") == base);
+    }
+    SECTION("a non-empty id is appended at the top level") {
+        REQUIRE(per_user_temp_dir(base, "1000") == base + "/edgeslicer_1000");
+    }
+    SECTION("distinct ids produce distinct roots") {
+        REQUIRE(per_user_temp_dir(base, "1000") != per_user_temp_dir(base, "1001"));
+    }
+}
+
+TEST_CASE("per_user_temp_id follows the platform contract", "[utils]") {
+    const std::string id = per_user_temp_id();
+
+    SECTION("stable across calls") {
+        REQUIRE(per_user_temp_id() == id);
+    }
+#ifdef _WIN32
+    SECTION("empty on Windows (its temp dir is already per-user)") {
+        REQUIRE(id.empty());
+    }
+#else
+    SECTION("the current uid on Linux/macOS") {
+        REQUIRE_FALSE(id.empty());
+        REQUIRE(id == std::to_string(static_cast<unsigned long>(::getuid())));
+    }
+#endif
+}
+
+// The end-to-end contract callers depend on: the temp root is left alone on
+// Windows and isolated per user on Linux/macOS.
+TEST_CASE("per-user temp root is unchanged on Windows, isolated elsewhere", "[utils]") {
+    const std::string base = "/tmp";
+    const std::string root = per_user_temp_dir(base, per_user_temp_id());
+#ifdef _WIN32
+    REQUIRE(root == base);
+#else
+    REQUIRE(root != base);
+    REQUIRE_THAT(root, Catch::Matchers::StartsWith(base + "/edgeslicer_"));
+#endif
+}
+
+// Orca #15582: the Windows branch of copy_file() wrote "Error: " + errCode, which adds an integer
+// to a string literal (it indexes into the literal and runs off its end for any code above 7)
+// instead of appending the number.
+TEST_CASE("copy_file reports the OS error when the destination cannot be written", "[utils]")
+{
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+                                        boost::filesystem::unique_path("copy_err_%%%%%%%%");
+    boost::filesystem::create_directories(dir);
+    const boost::filesystem::path source = dir / "source.txt";
+    {
+        std::ofstream ofs(source.string(), std::ios::binary);
+        ofs << "orca";
+    }
+    REQUIRE(boost::filesystem::exists(source));
+
+    // A directory that was never created, so the copy fails on every platform.
+    const boost::filesystem::path destination = dir / "orca-missing-dir" / "copy.txt";
+    REQUIRE_FALSE(boost::filesystem::exists(destination.parent_path()));
+
+    std::string error_message;
+    const CopyFileResult result = copy_file(source.string(), destination.string(), error_message);
+    boost::system::error_code ec;
+    boost::filesystem::remove(source, ec);
+    boost::filesystem::remove(dir, ec);
+
+    REQUIRE(result == FAIL_COPY_FILE);
+    REQUIRE_FALSE(error_message.empty());
+
+#ifdef _WIN32
+    const std::string prefix = "Error: ";
+    REQUIRE(error_message.rfind(prefix, 0) == 0);
+
+    const std::string code = error_message.substr(prefix.size());
+    REQUIRE_FALSE(code.empty());
+    REQUIRE(std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isdigit(c) != 0; }));
+#endif // _WIN32
 }

@@ -1,0 +1,15 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: silk walls at a raking light", "plate_index": 0, "source": "model", "preset_base": "studio_white",
+      "background": { "type": "radial_gradient", "color1": "#FFFFFF", "color2": "#D9DCE1" },
+      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45 },
+      "lighting": { "azimuth": 120, "elevation": 15, "shadow_intensity": 0.45, "key_intensity": 1.2, "fill": true,
+                    "rim_intensity": 0.8, "environment": "studio", "env_intensity": 1.0 },
+      "materials": { "layer_lines": "real", "filaments": [ { "slot": 1, "finish": "silk" } ] },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

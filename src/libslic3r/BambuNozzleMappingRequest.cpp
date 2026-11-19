@@ -1,5 +1,6 @@
 #include "BambuNozzleMappingRequest.hpp"
 #include "BambuExtruderMap.hpp"
+#include "LocalesUtils.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -14,18 +15,17 @@ using nlohmann::json;
 
 std::string diameter_str(double d)
 {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.2f", (float) d);
-    return buf;
+    // Sent to the printer: a decimal point in any UI language (snprintf gave "0,40" under German).
+    return float_to_string_decimal_point(double(float(d)), 2);
 }
 
 std::string diameter_str(const std::string &d)
 {
     if (d.empty())
         return d;
-    char *end = nullptr;
-    const double v = std::strtod(d.c_str(), &end);
-    if (end == d.c_str())
+    size_t       used = 0;
+    const double v    = string_to_double_decimal_point(d, &used); // the printer's "0.4", in any UI locale
+    if (used == 0)
         return d;
     return diameter_str(v);
 }
@@ -37,6 +37,7 @@ static std::string flow_string(NozzleVolumeType v)
     case nvtStandard:    return "Standard";
     case nvtHighFlow:    return "High Flow";
     case nvtTPUHighFlow: return "TPU High Flow";
+    case nvtTPU285:      return "TPU285";
     case nvtE3DHighFlow: return "E3D High Flow";
     default:             return "Standard";
     }

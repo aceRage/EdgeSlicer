@@ -1,6 +1,6 @@
 @echo off
 setlocal
-rem Snapmaker Orca Ultra - Flashforge tester setup
+rem EdgeSlicer - Flashforge tester setup
 rem Run this from the EdgeSlicer folder (next to EdgeSlicer.exe).
 rem It copies the two files the Flashforge connection needs from your
 rem Flash Studio installation and turns on debug logging.

@@ -16,6 +16,7 @@ class wxString;
 class wxStaticText;
 class wxComboBox;
 class wxStaticBitmap;
+class wxCheckBox;
 
 #define SAVE_PRESET_DIALOG_DEF_COLOUR wxColour(255, 255, 255)
 #define SAVE_PRESET_DIALOG_INPUT_SIZE wxSize(FromDIP(360), FromDIP(24))
@@ -23,6 +24,10 @@ class wxStaticBitmap;
 
 namespace Slic3r {
 namespace GUI {
+
+// The message a preset name check (validate_preset_name, also used by the preset managers' rename) shows;
+// empty when the name is fine. A warning (saving over an existing user preset) adds the overwrite note.
+wxString preset_name_check_message(const PresetNameCheck &check, const std::string &name);
 
 class SavePresetDialog : public DPIDialog
 {
@@ -55,6 +60,10 @@ class SavePresetDialog : public DPIDialog
         std::string     preset_name()   const { return m_preset_name; }
         //BBS: add project embedded preset relate logic
         bool save_to_project() const { return m_save_to_project; }
+        // Ultra: "Use for every printer", offered for process and filament presets saved to the project.
+        ProjectPresetPrinters project_printers() const;
+        // Orca #7071: "Detach from parent" (Develop mode)
+        bool is_detached() const { return m_detach; }
 
         Preset::Type    m_type;
         ValidationType  m_valid_type;
@@ -71,6 +80,8 @@ class SavePresetDialog : public DPIDialog
         //BBS: add project embedded preset relate logic
         bool                m_save_to_project {false};
         RadioGroup*         m_radio_group; // ORCA
+        wxCheckBox*         m_every_printer {nullptr};
+        bool                m_detach{false};
 
         void update();
     };
@@ -81,13 +92,14 @@ class SavePresetDialog : public DPIDialog
     wxStaticText*       m_label             {nullptr};
     wxBoxSizer*         m_radio_sizer       {nullptr};  
     ActionType          m_action            {UndefAction};
+    int                 m_mode              {0};
 
     std::string         m_ph_printer_name;
     std::string         m_old_preset_name;
 
 public:
-    SavePresetDialog(wxWindow *parent, Preset::Type type, std::string suffix = "");
-    SavePresetDialog(wxWindow* parent, std::vector<Preset::Type> types, std::string suffix = "");
+    SavePresetDialog(wxWindow *parent, Preset::Type type, int mode = 0, std::string suffix = "");
+    SavePresetDialog(wxWindow* parent, std::vector<Preset::Type> types, int mode = 0, std::string suffix = "");
     ~SavePresetDialog();
 
     void AddItem(Preset::Type type, const std::string& suffix);
@@ -103,6 +115,9 @@ public:
     void layout();
     //BBS: add project embedded preset relate logic
     bool get_save_to_project_selection(Preset::Type type);
+    ProjectPresetPrinters get_project_printers_selection(Preset::Type type);
+    // Orca #7071: the "Detach from parent" choice
+    bool get_detach_value(Preset::Type type);
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;

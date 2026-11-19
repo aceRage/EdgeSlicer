@@ -112,6 +112,25 @@ std::string format_action_ids(const std::vector<int>& ids)
     return out;
 }
 
+PrintErrorButtonLayout layout_print_error_buttons(const std::vector<int>& buttons, const std::string& job_id, bool can_send)
+{
+    PrintErrorButtonLayout out;
+    const bool have_job_id = !job_id.empty();
+    for (int id : buttons) {
+        if (print_error_action_needs_job_id(id) && (!have_job_id || !can_send)) {
+            out.hidden.push_back(id);
+            // No job outranks the connection: with no job there is nothing to stop on any link.
+            out.why = have_job_id ? PrintErrorButtonLayout::Why::CannotSend : PrintErrorButtonLayout::Why::NoJobId;
+            continue;
+        }
+        out.shown.push_back(id);
+    }
+    const bool has_pressable = std::any_of(out.shown.begin(), out.shown.end(),
+                                           [](int id) { return id != PrintErrorAction::REMOVE_CLOSE_BTN; });
+    if (!has_pressable) out.shown.insert(out.shown.begin(), PrintErrorAction::OK_BUTTON);
+    return out;
+}
+
 // ---- the remote surface ----
 
 namespace {
@@ -746,6 +765,29 @@ bool build_dont_remind_next_time(const json& action_json, const std::string& seq
     out = json();
     out["print"] = print_block;
     return true;
+}
+
+std::string strip_trailing_error_code(const std::string& text, const std::string& code)
+{
+    auto normalise = [](const std::string& in) {
+        std::string out;
+        for (unsigned char ch : in)
+            if (ch != ' ') out.push_back(static_cast<char>(std::toupper(ch)));
+        return out;
+    };
+    const std::string want = normalise(code);
+    if (want.empty()) return text;
+
+    size_t end = text.size();
+    while (end > 0 && std::isspace(static_cast<unsigned char>(text[end - 1]))) --end;
+    if (end == 0 || text[end - 1] != ')') return text;
+    const size_t open = text.rfind('(', end - 1);
+    if (open == std::string::npos) return text;
+    if (normalise(text.substr(open + 1, end - open - 2)) != want) return text;
+
+    size_t keep = open;
+    while (keep > 0 && std::isspace(static_cast<unsigned char>(text[keep - 1]))) --keep;
+    return text.substr(0, keep);
 }
 
 }} // namespace Slic3r::GUI

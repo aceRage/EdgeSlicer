@@ -40,6 +40,7 @@
 #include "Widgets/PopupWindow.hpp"
 #include <wx/simplebook.h>
 #include <wx/hashmap.h>
+#include <map>
 
 #include "Jobs/Worker.hpp"
 
@@ -131,7 +132,10 @@ enum class ConfigNozzleIdx : int
 std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type);
 
 
-WX_DECLARE_HASH_MAP(int, Material *, wxIntegerHash, wxIntegerEqual, MaterialHash);
+// Orca #14408: MaterialHash is keyed by material/extruder index and is iterated in key order in
+// several places (the AMS override preview, the materials row), so it must be an ordered container.
+// A hash map iterates in an unspecified, implementation-dependent order, which scrambled them.
+using MaterialHash = std::map<int, Material *>;
 
 #define SELECT_MACHINE_DIALOG_BUTTON_SIZE wxSize(FromDIP(68), FromDIP(23))
 // The Send button on the prepare page is deliberately larger (about 1.6x) than the
@@ -283,6 +287,9 @@ protected:
     Label*                              m_st_txt_extra_info{nullptr};
     Label*                              m_ams_backup_tip{nullptr};
     wxHyperlinkCtrl*                    m_link_network_state{ nullptr };
+    // EdgeSlicer: "Re-enter access code" under the printer combo, shown while the selected LAN
+    // printer's last dial was refused (DeviceManager::lan_access_code_refused).
+    wxHyperlinkCtrl*                    m_link_access_code{ nullptr };
     wxSimplebook*                       m_rename_switch_panel{nullptr};
     wxSimplebook*                       m_simplebook{nullptr};
     wxStaticText*                       m_rename_text{nullptr};
@@ -389,12 +396,13 @@ public:
     void update_print_status_msg(wxString msg, bool is_warning = false, bool is_printer = true);
     void update_print_error_info(int code, std::string msg, std::string extra);
     void set_flow_calibration_state(bool state, bool show_tips = true);
-    bool is_show_timelapse();
     bool has_timelapse_warning();
     void update_timelapse_enable_status();
     bool is_same_printer_model();
     bool is_blocking_printing(MachineObject* obj_);
-    bool is_same_nozzle_diameters(float& tag_nozzle_diameter) const;
+    // tag_nozzle_diameter / printer_nozzle_diameter: the preset's and the printer's diameter of the
+    // first used extruder that differs. A diameter the printer has not reported counts as a match.
+    bool is_same_nozzle_diameters(float& tag_nozzle_diameter, float& printer_nozzle_diameter) const;
     bool is_same_nozzle_type(const Extder& extruder, std::string& filament_type) const;
     bool has_tips(MachineObject* obj);
     bool is_timeout();
@@ -407,6 +415,8 @@ public:
      * physical_extruder_map; and the filaments whose mapped AMS tray feeds the other extruder. */
     std::vector<int> sliced_filament_map() const;
     std::vector<int> printer_physical_extruder_map() const;
+    // Physical extruder the sliced plate prints this filament with; -1 on a one-extruder job.
+    int filament_physical_extruder(int filament_id) const;
     std::vector<int> filaments_mapped_to_wrong_extruder(MachineObject* obj_) const;
     bool get_ams_mapping_result(std::string& mapping_array_str, std::string& mapping_array_str2, std::string& ams_mapping_info);
     bool build_nozzles_info(std::string& nozzles_info);

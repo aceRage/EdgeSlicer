@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "WallToolPaths.hpp"
+#include "../FineDetail.hpp"
 
 #include "SkeletalTrapezoidation.hpp"
 #include "../ClipperUtils.hpp"
@@ -23,11 +24,13 @@
 namespace Slic3r::Arachne
 {
 
-WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config)
+WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                                      const PrintRegionConfig *region_config)
 {
     WallToolPathsParams input_params;
     {
-        const double min_nozzle_diameter = *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end());
+        // Per-nozzle process P4: rack nozzles (H2C) count too.
+        const double min_nozzle_diameter = min_physical_nozzle_diameter(print_config);
         if (const auto &min_feature_size_opt = print_object_config.min_feature_size)
             input_params.min_feature_size = min_feature_size_opt.value * 0.01 * min_nozzle_diameter;
 
@@ -54,9 +57,50 @@ WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfi
         input_params.wall_distribution_count = print_object_config.wall_distribution_count.value;
 
         input_params.is_top_or_bottom_layer = false; // Set to default value
+
+        if (const auto& wall_maximum_resolution_opt = print_object_config.wall_maximum_resolution)
+            input_params.wall_maximum_resolution = scaled<coord_t>(wall_maximum_resolution_opt.value);
+
+        if (const auto& wall_maximum_deviation_opt = print_object_config.wall_maximum_deviation)
+            input_params.wall_maximum_deviation = scaled<coord_t>(wall_maximum_deviation_opt.value);
+
+        // EdgeSlicer, Fine detail (C1/C2). Not on the first layer: initial_layer_min_bead_width does every job there.
+        if (layer_id > 0) {
+            input_params.min_odd_wall_width  = float(print_object_config.min_odd_wall_line_width.value * 0.01 * min_nozzle_diameter);
+            input_params.min_even_wall_width = float(print_object_config.min_even_wall_line_width.value * 0.01 * min_nozzle_diameter);
+            if (region_config != nullptr) {
+                const FineDetail::Floors floors = FineDetail::floors(*region_config);
+                input_params.thin_bead_width    = float(floors.line_percent * 0.01 * min_nozzle_diameter);
+                input_params.thin_feature_size  = float(floors.feature_percent * 0.01 * min_nozzle_diameter);
+            }
+        }
     }
 
     return input_params;
+}
+
+// EdgeSlicer, Fine detail (C1): with thin_bead_width / thin_feature_size / min_odd_wall_width at 0 this is
+// (min_feature_size, min_bead_width), the pair the strategy always got.
+WideningLimits widening_limits(const WallToolPathsParams &params, coord_t bead_width_0, coord_t bead_width_x, coordf_t layer_height)
+{
+    const coord_t min_bead_width = scaled<coord_t>(params.min_bead_width);
+    const coord_t thin_bead_width = params.thin_bead_width > 0.f ?
+        scaled<coord_t>(FineDetail::effective_thin_bead_width(params.thin_bead_width, params.min_bead_width, layer_height)) :
+        min_bead_width;
+    const coord_t thin_feature_size = params.thin_feature_size > 0.f ?
+        scaled<coord_t>(FineDetail::effective_thin_feature_size(params.thin_feature_size, params.min_feature_size)) :
+        scaled<coord_t>(params.min_feature_size);
+    const coord_t min_odd_wall_width = scaled<coord_t>(params.min_odd_wall_width > 0.f ? params.min_odd_wall_width : params.min_bead_width);
+    const float   external_perimeter_extrusion_width = Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(bead_width_0), float(layer_height));
+    const double  wall_split_middle_threshold = std::clamp(2. * unscaled<double>(min_odd_wall_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99);
+
+    // A thin-feature line wider than the point where one line splits into two would make a single line wider than the
+    // two that follow it. Only when the new keys are in play, so Off stays as it was.
+    coord_t output_width = thin_bead_width;
+    if (params.thin_bead_width > 0.f || params.min_odd_wall_width > 0.f)
+        output_width = std::min(output_width, coord_t((1. + wall_split_middle_threshold) * double(bead_width_0)));
+    (void) bead_width_x;
+    return { thin_feature_size, output_width };
 }
 
 WallToolPaths::WallToolPaths(const Polygons& outline, const coord_t bead_width_0, const coord_t bead_width_x,
@@ -70,6 +114,9 @@ WallToolPaths::WallToolPaths(const Polygons& outline, const coord_t bead_width_0
     , print_thin_walls(Slic3r::Arachne::fill_outline_gaps)
     , min_feature_size(scaled<coord_t>(params.min_feature_size))
     , min_bead_width(scaled<coord_t>(params.min_bead_width))
+    // EdgeSlicer, Fine detail: with the four fields at 0 these are exactly min_bead_width.
+    , min_odd_wall_width(scaled<coord_t>(params.min_odd_wall_width > 0.f ? params.min_odd_wall_width : params.min_bead_width))
+    , min_even_wall_width(scaled<coord_t>(params.min_even_wall_width > 0.f ? params.min_even_wall_width : params.min_bead_width))
     , small_area_length(static_cast<double>(bead_width_0) / 2.)
     , wall_transition_filter_deviation(scaled<coord_t>(params.wall_transition_filter_deviation))
     , toolpaths_generated(false)
@@ -125,7 +172,11 @@ void simplify(Polygon &thiss, const int64_t smallest_line_segment_squared, const
         accumulated_area_removed += removed_area_next;
 
         const int64_t length2 = (current - previous).cast<int64_t>().squaredNorm();
-        if (length2 < scaled<int64_t>(25.)) {
+
+        // Orca:
+        // Checking if the segment's length is smaller than 5 microns (0.005mm).
+        // The value of `length2` is scaled and squared, so we need to compare it with the squared value of 5 microns
+        if (length2 < Slic3r::sqr(scaled<coord_t>(0.005))) {
             // We're allowed to always delete segments of less than 5 micron.
             continue;
         }
@@ -143,8 +194,8 @@ void simplify(Polygon &thiss, const int64_t smallest_line_segment_squared, const
         //h^2 = (L / b)^2     [square it]
         //h^2 = L^2 / b^2     [factor the divisor]
         const int64_t height_2 = double(area_removed_so_far) * double(area_removed_so_far) / double(base_length_2);
-        if ((height_2 <= Slic3r::sqr(scaled<coord_t>(0.005)) //Almost exactly colinear (barring rounding errors).
-             && Line::distance_to_infinite(current, previous, next) <= scaled<double>(0.005))) // make sure that height_2 is not small because of cancellation of positive and negative areas
+        if ((height_2 <= Slic3r::sqr(colinear_vertex_tolerance()) //Almost exactly colinear (barring rounding errors).
+             && Line::distance_to_infinite(current, previous, next) <= double(colinear_vertex_tolerance()))) // make sure that height_2 is not small because of cancellation of positive and negative areas
             continue;
 
         if (length2 < smallest_line_segment_squared
@@ -473,8 +524,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
     if (this->inset_count < 1)
         return toolpaths;
 
-    const coord_t smallest_segment = Slic3r::Arachne::meshfix_maximum_resolution();
-    const coord_t allowed_distance = Slic3r::Arachne::meshfix_maximum_deviation();
+    const coord_t smallest_segment = m_params.wall_maximum_resolution;
+    const coord_t allowed_distance = m_params.wall_maximum_deviation;
     const coord_t epsilon_offset = (allowed_distance / 2) - 1;
     const double  transitioning_angle = Geometry::deg2rad(m_params.wall_transition_angle);
     const coord_t discretization_step_size = scaled<coord_t>(0.8);
@@ -507,9 +558,14 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 
     const coord_t wall_transition_length = scaled<coord_t>(this->m_params.wall_transition_length);
 	
-	const double wall_split_middle_threshold = std::clamp(2. * unscaled<double>(this->min_bead_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99); // For an uneven nr. of lines: When to split the middle wall into two.
-    const double wall_add_middle_threshold   = std::clamp(unscaled<double>(this->min_bead_width) / perimeter_extrusion_width, 0.01, 0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
+	// EdgeSlicer, Fine detail (C1): the split / add thresholds take the odd / even minimums, which are min_bead_width
+	// unless set; the thin-feature floor below (thin_bead_width) no longer moves them.
+	const double wall_split_middle_threshold = std::clamp(2. * unscaled<double>(this->min_odd_wall_width) / external_perimeter_extrusion_width - 1., 0.01, 0.99); // For an uneven nr. of lines: When to split the middle wall into two.
+    const double wall_add_middle_threshold   = std::clamp(unscaled<double>(this->min_even_wall_width) / perimeter_extrusion_width, 0.01, 0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
     
+    // EdgeSlicer, Fine detail: the two widths the thin-feature rule gets (see widening_limits()).
+    const WideningLimits widening = widening_limits(this->m_params, bead_width_0, bead_width_x, this->layer_height);
+
     const int wall_distribution_count = this->m_params.wall_distribution_count;
     const size_t max_bead_count = (inset_count < std::numeric_limits<coord_t>::max() / 2) ? 2 * inset_count : std::numeric_limits<coord_t>::max();
     const auto beading_strat = BeadingStrategyFactory::makeStrategy
@@ -519,8 +575,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
             wall_transition_length,
             transitioning_angle,
             print_thin_walls,
-            min_bead_width,
-            min_feature_size,
+            widening.output_width,
+            widening.input_width,
             wall_split_middle_threshold,
             wall_add_middle_threshold,
             max_bead_count,
@@ -547,7 +603,7 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 
     separateOutInnerContour();
 
-    simplifyToolPaths(toolpaths);
+    simplifyToolPaths(toolpaths, m_params);
 
     removeEmptyToolPaths(toolpaths);
     assert(std::is_sorted(toolpaths.cbegin(), toolpaths.cend(),
@@ -688,16 +744,21 @@ void WallToolPaths::removeSmallLines(std::vector<VariableWidthLines> &toolpaths)
     }
 }
 
-void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines>& toolpaths, const WallToolPathsParams& params)
 {
-    for (size_t toolpaths_idx = 0; toolpaths_idx < toolpaths.size(); ++toolpaths_idx)
+    const int64_t maximum_resolution = params.wall_maximum_resolution;
+    const int64_t maximum_deviation  = params.wall_maximum_deviation;
+
+    const int64_t smallest_line_segment_squared  = maximum_resolution * maximum_resolution;
+    const int64_t allowed_error_distance_squared = maximum_deviation * maximum_deviation;
+
+    const int64_t maximum_extrusion_area_deviation = Slic3r::Arachne::meshfix_maximum_extrusion_area_deviation(); // unit: μm²
+
+    for (VariableWidthLines& lines : toolpaths)
     {
-        const int64_t maximum_resolution = Slic3r::Arachne::meshfix_maximum_resolution();
-        const int64_t maximum_deviation = Slic3r::Arachne::meshfix_maximum_deviation();
-        const int64_t maximum_extrusion_area_deviation = Slic3r::Arachne::meshfix_maximum_extrusion_area_deviation(); // unit: μm²
-        for (auto& line : toolpaths[toolpaths_idx])
+        for (ExtrusionLine& line : lines)
         {
-            line.simplify(maximum_resolution * maximum_resolution, maximum_deviation * maximum_deviation, maximum_extrusion_area_deviation);
+            line.simplify(smallest_line_segment_squared, allowed_error_distance_squared, maximum_extrusion_area_deviation);
         }
     }
 }
@@ -786,7 +847,8 @@ bool WallToolPaths::removeEmptyToolPaths(std::vector<VariableWidthLines> &toolpa
      * Get the order constraints of the insets when printing walls per region / hole.
      * Each returned pair consists of adjacent wall lines where the left has an inset_idx one lower than the right.
      *
-     * Odd walls should always go after their enclosing wall polygons.
+     * Odd walls follow the same order as even ones, so that the centre line of a narrow wall is an inner wall
+     * like any other when printing inner to outer.
      *
      * \param outer_to_inner Whether the wall polygons with a lower inset_idx should go before those with a higher one.
  */
@@ -860,12 +922,7 @@ WallToolPaths::ExtrusionLineSet WallToolPaths::getRegionOrder(const std::vector<
                 continue; // not directly adjacent
             if (!shorter_then(loc_here - lineloc_nearby.j.p, (lineloc_here.j.w + lineloc_nearby.j.w) / 2 * diagonal_extension))
                 continue; // points are too far away from each other
-            if (here->is_odd || nearby->is_odd) {
-                if (here->is_odd && !nearby->is_odd && nearby->inset_idx < here->inset_idx)
-                    order_requirements.emplace(std::make_pair(nearby, here));
-                if (nearby->is_odd && !here->is_odd && here->inset_idx < nearby->inset_idx)
-                    order_requirements.emplace(std::make_pair(here, nearby));
-            } else if ((nearby->inset_idx < here->inset_idx) == outer_to_inner) {
+            if ((nearby->inset_idx < here->inset_idx) == outer_to_inner) {
                 order_requirements.emplace(std::make_pair(nearby, here));
             } else {
                 assert((nearby->inset_idx > here->inset_idx) == outer_to_inner);

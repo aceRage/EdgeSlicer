@@ -21,8 +21,15 @@
 #include "TriangleSelector.hpp"
 #include "ImageFill.hpp"
 #include "FlexiJoint.hpp"
+#include "PushFit.hpp"
+#include "TacJoint.hpp"
 #include "CutRecipe.hpp"
+#include "HeightColourPattern.hpp"
+#include "CostPricing.hpp"
+#include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
+#include "Airbrush/AirbrushField.hpp"
+#include "TextureDisplacement.hpp"
 
 //BBS: add bbs 3mf
 #include "Format/bbs_3mf.hpp"
@@ -32,6 +39,7 @@
 #include "Format/STL.hpp"
 #include "Format/OBJ.hpp"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -250,19 +258,36 @@ enum class CutMode : int {
 };
 
 enum class CutConnectorType : int {
-    Plug
-    , Dowel
-    , Snap
-    , Undef
+    Plug,
+    Dowel,
+    Snap,
+    Undef
     // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef so the values of
     // the three original types are untouched. Since phase 3 a flexi connector DOES reach a 3MF
     // - a project saved with the joint placed but not yet cut carries it, and its parameters,
     // in Metadata/cut_information.xml - so the 3MF reader's type range check bounds against
-    // this enumerator rather than against Undef. Keep FlexiJoint last.
-    , FlexiJoint
+    // this enumerator rather than against Undef.
+    ,
+    FlexiJoint
+    // Push-fit "Pin": a separate printed pin pushed into a generated hole in each half
+    // (tests/design_pushfit_connector.md). Appended after FlexiJoint so no stored value moves;
+    // 3 is deliberately avoided (BambuStudio's Thread). The 3MF readers bound the type against
+    // the last enumerator.
+    ,
+    PushFit
+    // Versioned reference-mesh joint, appended so existing project enum values stay unchanged.
+    ,
+    TacJoint
 };
 
 inline bool is_flexi_connector_type(CutConnectorType t) { return t == CutConnectorType::FlexiJoint; }
+inline bool is_pushfit_connector_type(CutConnectorType t) { return t == CutConnectorType::PushFit; }
+inline bool is_tac_joint_connector_type(CutConnectorType t) { return t == CutConnectorType::TacJoint; }
+// A connector that becomes a separate object of its own (CreateDowels): the Dowel and the Pin.
+inline bool is_separate_pin_connector_type(CutConnectorType t)
+{
+    return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit || t == CutConnectorType::TacJoint;
+}
 
 enum class CutConnectorStyle : int {
     Prism
@@ -327,6 +352,9 @@ struct CutConnector
     CutConnectorAttributes attribs;
     // Only meaningful when attribs.type == CutConnectorType::FlexiJoint.
     FlexiJointParams flexi;
+    // Only meaningful when attribs.type == CutConnectorType::PushFit.
+    PushFitParams    pushfit;
+    TacJointParams   tac_joint;
 
     CutConnector()
         : pos(Vec3d::Zero()), rotation_m(Transform3d::Identity()), radius(5.f), height(10.f), radius_tolerance(0.f), height_tolerance(0.1f), z_angle(0.f)
@@ -338,14 +366,18 @@ struct CutConnector
 
     CutConnector(const CutConnector& rhs) :
         CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs)
-    { flexi = rhs.flexi; }
+    {
+        flexi     = rhs.flexi;
+        pushfit   = rhs.pushfit;
+        tac_joint = rhs.tac_joint;
+    }
 
     bool operator==(const CutConnector& other) const;
 
     bool operator!=(const CutConnector& other) const { return !(other == (*this)); }
 
     template<class Archive> inline void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit, tac_joint);
     }
 };
 
@@ -415,6 +447,9 @@ public:
     //BBS: add module name for assemble
     std::string             module_name;
     std::string             input_file;    // XXX: consider fs::path
+    // The Layerling design this object came from (layerling::serialize_link: origin, project id,
+    // name), "" for none. Set by the Layerling tab's Send to Plate, saved in the project 3MF.
+    std::string             layerling_design;
     // Instances of this ModelObject. Each instance defines a shift on the print bed, rotation around the Z axis and a uniform scaling.
     // Instances are owned by this ModelObject.
     ModelInstancePtrs       instances;
@@ -425,6 +460,9 @@ public:
     ModelConfigObject 		config;
     // Variation of a layer thickness for spans of Z coordinates + optional parameter overrides.
     t_layer_config_ranges   layer_config_ranges;
+    // Height colour patterns (HeightColourPattern.hpp): the authoring record of the ranges a
+    // pattern generated. Normally empty; the slicer never reads it, only the ranges.
+    std::vector<HeightColourPattern> height_colour_patterns;
     // Profile of increasing z to a layer height, to be linearly interpolated when calculating the layers.
     // The pairs of <z, layer_height> are packed into a 1D array.
     LayerHeightProfile      layer_height_profile;
@@ -764,12 +802,12 @@ private:
         ar(cereal::base_class<ObjectBase>(this));
         Internal::StaticSerializationWrapper<ModelConfigObject const> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
-        ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
+        ar(name, module_name, input_file, layerling_design, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -777,12 +815,12 @@ private:
         Internal::StaticSerializationWrapper<LayerHeightProfile> layer_heigth_profile_wrapper(layer_height_profile);
         // BBS: add backup, check modify
         SaveObjectGaurd gaurd(*this);
-        ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
+        ar(name, module_name, input_file, layerling_design, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -816,6 +854,7 @@ public:
     void assign(const FacetsAnnotation &rhs) { if (! this->timestamp_matches(rhs)) { m_data = rhs.m_data; this->copy_timestamp(rhs); } }
     void assign(FacetsAnnotation &&rhs) { if (! this->timestamp_matches(rhs)) { m_data = std::move(rhs.m_data); this->copy_timestamp(rhs); } }
     const TriangleSelector::TriangleSplittingData &get_data() const noexcept { return m_data; }
+    void set_data(TriangleSelector::TriangleSplittingData &&data) { m_data = std::move(data); this->touch(); }
     bool set(const TriangleSelector& selector);
     indexed_triangle_set get_facets(const ModelVolume& mv, EnforcerBlockerType type) const;
     // BBS
@@ -853,6 +892,8 @@ private:
     // Constructor with ignored int parameter to assign an invalid ID, to be replaced
     // by an existing ID copied from elsewhere.
     explicit FacetsAnnotation(int) : ObjectWithTimestamp(-1) {}
+    // EdgeSlicer: an id from the secondary range (texture displacement masks, see ObjectBase::SecondaryId).
+    explicit FacetsAnnotation(SecondaryId tag) : ObjectWithTimestamp(tag) {}
     // Copy constructor copies the ID.
     explicit FacetsAnnotation(const FacetsAnnotation &rhs) = default;
     // Move constructor copies the ID.
@@ -916,6 +957,10 @@ public:
         // regenerates both the male body and the female cavity from these, so they have to
         // travel with the connector volume from the gizmo down into CutUtils.
         FlexiJointParams    flexi;
+        // Only meaningful when connector_type == CutConnectorType::PushFit: the cut builds the
+        // pin and both holes from these.
+        PushFitParams       pushfit;
+        TacJointParams      tac_joint;
 
         CutInfo() = default;
         CutInfo(CutConnectorType type, float rad_tolerance, float h_tolerance, bool processed = false) :
@@ -931,9 +976,11 @@ public:
         void reset_from_upper() { is_from_upper = true; }
 
         bool is_flexi_joint() const { return is_connector && is_flexi_connector_type(connector_type); }
+        bool is_pushfit() const { return is_connector && is_pushfit_connector_type(connector_type); }
+        bool is_tac_joint() const { return is_connector && is_tac_joint_connector_type(connector_type); }
 
         template<class Archive> inline void serialize(Archive& ar) {
-            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi);
+            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit, tac_joint);
         }
     };
     CutInfo             cut_info;
@@ -971,6 +1018,104 @@ public:
     // List of mesh facets painted for fuzzy skin.
     FacetsAnnotation    fuzzy_skin_facets;
 
+    // One independent paint mask per texture-displacement layer slot (see texture_displacement_layers
+    // below). Unlike the other facets fields above, a triangle may be painted (ENFORCER) in more
+    // than one of these simultaneously -- that overlap is what makes the layers "blend".
+    //
+    // These are 8 plain named fields rather than a std::array<FacetsAnnotation, N>: FacetsAnnotation's
+    // default/copy constructors are private and friended only to ModelVolume, but std::array's own
+    // implicitly-defined default/copy constructors are generated with std::array's access rights,
+    // not ModelVolume's -- so an array of FacetsAnnotation ends up with its default/copy
+    // constructors implicitly deleted regardless of the friend declaration. Use
+    // texture_displacement_facet(slot) below for array-like indexed access.
+    //
+    // EdgeSlicer: their ids come from the secondary id range (ObjectBase::SecondaryId), so the eight
+    // masks per part do not shift the ids of later objects and instances - "; model label id" in the
+    // G-code is an instance id. set_new_unique_id() / assign_new_unique_ids_recursive() keep them there.
+    FacetsAnnotation texture_displacement_facets_0 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_1 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_2 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_3 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_4 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_5 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_6 { SecondaryId{} };
+    FacetsAnnotation texture_displacement_facets_7 { SecondaryId{} };
+
+    FacetsAnnotation& texture_displacement_facet(int slot) {
+        switch (slot) {
+        case 0: return texture_displacement_facets_0;
+        case 1: return texture_displacement_facets_1;
+        case 2: return texture_displacement_facets_2;
+        case 3: return texture_displacement_facets_3;
+        case 4: return texture_displacement_facets_4;
+        case 5: return texture_displacement_facets_5;
+        case 6: return texture_displacement_facets_6;
+        default: assert(slot == 7); return texture_displacement_facets_7;
+        }
+    }
+    const FacetsAnnotation& texture_displacement_facet(int slot) const { return const_cast<ModelVolume*>(this)->texture_displacement_facet(slot); }
+
+    // Small helpers for the constructor asserts below (kept out of line-noise at each call site).
+    bool texture_displacement_facets_ids_valid() const {
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+            if (!texture_displacement_facet(i).id().valid() || texture_displacement_facet(i).id() == this->id())
+                return false;
+        return true;
+    }
+    bool texture_displacement_facets_ids_invalid() const {
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+            if (texture_displacement_facet(i).id().valid())
+                return false;
+        return true;
+    }
+    bool texture_displacement_facets_all_empty() const {
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+            if (!texture_displacement_facet(i).empty())
+                return false;
+        return true;
+    }
+
+    // Texture assets (height maps) and their projection/displacement parameters. Element order
+    // is not meaningful for baking (layers are applied in TextureDisplacementLayer::slot order,
+    // see build_texture_displacement()); it only reflects UI insertion order.
+    std::vector<TextureDisplacementLayer> texture_displacement_layers;
+
+    // Whole-stack displacement settings (border handling, post-process smoothing) - see
+    // TextureDisplacementOptions. They live beside the layers rather than on one of them because
+    // they are not a property of any single layer.
+    TextureDisplacementOptions texture_displacement_options;
+
+    // The model's own texture coordinates, as the file it was imported from carried them: three per
+    // triangle of mesh().its, in its triangle order (corner k of triangle i at 3i+k), V already
+    // flipped to the sampling convention (V = 0 is the image's top row). Empty when the source had
+    // none, which is every STL and every 3mf - only a textured OBJ brings one in today.
+    //
+    // Per corner rather than per vertex because that is what a UV layout is: the two sides of a seam
+    // are the same vertex with two different coordinates, and collapsing them would smear the texture
+    // across every island boundary. TextureProjectionMethod::ModelUV maps through it, which is what
+    // lets a model that already carries a UV channel be textured on the artist's own layout instead
+    // of on a fresh unwrap.
+    //
+    // Indexed by triangle, so anything that *replaces* the mesh has to bring it across (or drop it):
+    // see transfer_uv_channel(), and reset_texture_uv() for the cases that cannot.
+    std::vector<Vec2f> texture_uv;
+
+    bool has_texture_uv() const { return !texture_uv.empty() && texture_uv.size() == mesh().its.indices.size() * 3; }
+    // Forgets the channel. For a mesh change that nothing can carry it across - a split, a boolean -
+    // where leaving it would map the texture by another mesh's triangle numbering.
+    void reset_texture_uv() { texture_uv.clear(); }
+
+    // Save painting data before reset_extra_facets() discards it.
+    // Used for replacing mesh without losing painting data.
+    // Only for model parts (not modifiers/connectors).
+    // (OrcaSlicer #13472 "Keep painting after cut", core only.)
+    std::optional<TriangleSelector::SavedPainting> save_painting() const;
+
+    // Remap painting data from previous saved source to this mesh
+    void restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, bool keep_existing_paint = false);
+    // Airbrush P3 (A4): the map from a saved painting's field space into this volume's mesh space.
+    Transform3d airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const;
+
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
     mutable Timestamp        mmuseg_ts;
@@ -990,6 +1135,12 @@ public:
     // (fillet, chamfer, shell, "Convert to CAD body") produced or sourced one. Only trusted while
     // the mesh still matches its fingerprint: use BRep::attached_cad_body(), not this directly.
     std::shared_ptr<const BRep::CadBody> cad_body;
+
+    // Airbrush (Airbrush/AirbrushField.hpp): the colour field this volume's MMU paint is baked
+    // from, or null. Immutable and shared like cad_body; a change replaces the pointer. Written to
+    // the 3MF as Metadata/airbrush/field_<n>.bin, never in a Bambu-compatible export, and carried
+    // through the undo stack as its blob.
+    std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
 
     // A parent object owning this modifier volume.
     ModelObject*        get_object() const { return this->object; }
@@ -1109,12 +1260,18 @@ public:
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+            this->texture_displacement_facet(i).set_new_unique_secondary_id();
     }
 
     bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
     bool is_seam_painted() const { return !this->seam_facets.empty(); }
     bool is_mm_painted() const { return !this->mmu_segmentation_facets.empty(); }
     bool is_fuzzy_skin_painted() const { return !this->fuzzy_skin_facets.empty(); }
+    bool is_texture_displacement_painted() const { return !this->texture_displacement_facets_all_empty(); }
+    bool is_any_painted() const {
+        return is_fdm_support_painted() || is_seam_painted() || is_mm_painted() || is_fuzzy_skin_painted() || is_texture_displacement_painted();
+    }
     
     // Orca: Implement prusa's filament shrink compensation approach
     // Returns 0-based indices of extruders painted by multi-material painting gizmo.
@@ -1167,6 +1324,7 @@ private:
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
         assert(this->fuzzy_skin_facets.id().valid());
+        assert(this->texture_displacement_facets_ids_valid());
         assert(this->id() != this->config.id());
         assert(this->id() != this->supported_facets.id());
         assert(this->id() != this->seam_facets.id());
@@ -1183,6 +1341,7 @@ private:
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
         assert(this->fuzzy_skin_facets.id().valid());
+        assert(this->texture_displacement_facets_ids_valid());
         assert(this->id() != this->config.id());
         assert(this->id() != this->supported_facets.id());
         assert(this->id() != this->seam_facets.id());
@@ -1197,6 +1356,7 @@ private:
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
         assert(this->fuzzy_skin_facets.id().valid());
+        assert(this->texture_displacement_facets_ids_valid());
         assert(this->id() != this->config.id());
         assert(this->id() != this->supported_facets.id());
         assert(this->id() != this->seam_facets.id());
@@ -1210,11 +1370,19 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
-        cad_body(other.cad_body)
+        fuzzy_skin_facets(other.fuzzy_skin_facets),
+        texture_displacement_facets_0(other.texture_displacement_facets_0), texture_displacement_facets_1(other.texture_displacement_facets_1),
+        texture_displacement_facets_2(other.texture_displacement_facets_2), texture_displacement_facets_3(other.texture_displacement_facets_3),
+        texture_displacement_facets_4(other.texture_displacement_facets_4), texture_displacement_facets_5(other.texture_displacement_facets_5),
+        texture_displacement_facets_6(other.texture_displacement_facets_6), texture_displacement_facets_7(other.texture_displacement_facets_7),
+        texture_displacement_layers(other.texture_displacement_layers),
+        texture_displacement_options(other.texture_displacement_options),
+        texture_uv(other.texture_uv),
+        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
+        cad_body(other.cad_body), airbrush_field(other.airbrush_field)
     {
-		assert(this->id().valid()); 
-        assert(this->config.id().valid()); 
+		assert(this->id().valid());
+        assert(this->config.id().valid());
         assert(this->supported_facets.id().valid());
         assert(this->seam_facets.id().valid());
         assert(this->mmu_segmentation_facets.id().valid());
@@ -1234,7 +1402,11 @@ private:
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
         name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
-        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
+        // D15: the field is position-keyed and survives a split or cut; its bake record (facet indices
+        // of the old mesh) is stale now, so airbrush_bake() refuses it until
+        // airbrush_rebake_after_mesh_edit() has run on the new mesh.
+        airbrush_field(other.airbrush_field)
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
@@ -1264,6 +1436,8 @@ private:
         assert(this->seam_facets.empty());
         assert(this->mmu_segmentation_facets.empty());
         assert(this->fuzzy_skin_facets.empty());
+        assert(this->texture_displacement_facets_all_empty());
+        assert(this->texture_displacement_layers.empty());
     }
 
     ModelVolume& operator=(ModelVolume &rhs) = delete;
@@ -1271,13 +1445,17 @@ private:
 	friend class cereal::access;
 	friend class UndoRedo::StackImpl;
 	// Used for deserialization, therefore no IDs are allocated.
-	ModelVolume() : ObjectBase(-1), config(-1), supported_facets(-1), seam_facets(-1), mmu_segmentation_facets(-1), fuzzy_skin_facets(-1), object(nullptr) {
+	ModelVolume() : ObjectBase(-1), config(-1), supported_facets(-1), seam_facets(-1), mmu_segmentation_facets(-1), fuzzy_skin_facets(-1),
+		texture_displacement_facets_0(-1), texture_displacement_facets_1(-1), texture_displacement_facets_2(-1), texture_displacement_facets_3(-1),
+		texture_displacement_facets_4(-1), texture_displacement_facets_5(-1), texture_displacement_facets_6(-1), texture_displacement_facets_7(-1),
+		object(nullptr) {
 		assert(this->id().invalid());
         assert(this->config.id().invalid());
         assert(this->supported_facets.id().invalid());
         assert(this->seam_facets.id().invalid());
         assert(this->mmu_segmentation_facets.id().invalid());
         assert(this->fuzzy_skin_facets.id().invalid());
+        assert(this->texture_displacement_facets_ids_invalid());
 	}
 	template<class Archive> void load(Archive &ar) {
 		bool has_convex_hull;
@@ -1297,6 +1475,13 @@ private:
         mesh_changed |= t != mmu_segmentation_facets.timestamp();
         cereal::load_by_value(ar, fuzzy_skin_facets);
         mesh_changed |= t != fuzzy_skin_facets.timestamp();
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i) {
+            FacetsAnnotation &f  = texture_displacement_facet(i);
+            Timestamp         tf = f.timestamp();
+            cereal::load_by_value(ar, f);
+            mesh_changed |= tf != f.timestamp();
+        }
+        ar(texture_displacement_layers, texture_displacement_options, texture_uv);
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1306,6 +1491,14 @@ private:
             ar(cad_body);
         else
             cad_body.reset();
+        bool has_airbrush = false;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            std::string blob;
+            ar(blob);
+            airbrush_field = Airbrush::AirbrushField::from_blob(blob);
+        } else
+            airbrush_field.reset();
 		assert(m_mesh);
 		if (has_convex_hull) {
 			cereal::load_optional(ar, m_convex_hull);
@@ -1324,6 +1517,9 @@ private:
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
         cereal::save_by_value(ar, fuzzy_skin_facets);
+        for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+            cereal::save_by_value(ar, texture_displacement_facet(i));
+        ar(texture_displacement_layers, texture_displacement_options, texture_uv);
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);
@@ -1331,6 +1527,12 @@ private:
         ar(has_cad_body);
         if (has_cad_body)
             ar(cad_body);
+        const bool has_airbrush = airbrush_field != nullptr;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            const std::string blob = airbrush_field->to_blob();
+            ar(blob);
+        }
 		if (has_convex_hull)
 			cereal::save_optional(ar, m_convex_hull);
 	}
@@ -1456,7 +1658,7 @@ public:
     Transform3d get_matrix_no_offset() const { return m_transformation.get_matrix_no_offset(); }
 
     bool is_printable() const { return object->printable && printable && (print_volume_state == ModelInstancePVS_Inside); }
-    bool is_assemble_initialized() { return m_assemble_initialized; }
+    bool is_assemble_initialized() const { return m_assemble_initialized; }
 
     //BBS
     double get_auto_brim_width(double deltaT, double adhesion) const;
@@ -1576,6 +1778,7 @@ struct GlobalSpeedMap
     double topSolidInfillSpeed;
     double supportSpeed;
     double smallPerimeterSpeed;
+    double smallSupportPerimeterSpeed;
     double maxSpeed;
     Polygon bed_poly;
 };
@@ -1649,6 +1852,9 @@ public:
     std::shared_ptr<ModelDesignInfo> design_info = nullptr;
     std::shared_ptr<ModelInfo> model_info = nullptr;
     std::shared_ptr<ModelProfileInfo> profile_info = nullptr;
+    // Fees and markup of this project (Costs > Project), over your defaults. Display only: not a
+    // print setting, never in G-code; saved as 3MF model metadata "edgeslicer_pricing" (CostPricing.hpp).
+    ProjectPricing pricing;
 
     // Image Fill (Phase 2): the content-hashed image store. A PLAIN VALUE MEMBER, not an
     // ObjectBase and not a pointer to one, so it consumes no global object id and cannot shift
@@ -1656,6 +1862,10 @@ public:
     // picture share one entry because the key is the content's SHA-256; the 3MF writes each
     // entry once as Metadata/image_fill/<sha256>.png.
     ImageAssetStore image_assets;
+
+    // Showcase tab: the per-plate presentation scenes and their images (Metadata/showcase/ in the
+    // 3MF). A plain value member like image_assets: no object id, not part of undo/redo.
+    Showcase::Project showcase;
 
     //makerlab information
     std::string mk_name;
@@ -1764,7 +1974,7 @@ public:
     static Model read_from_archive(
         const std::string& input_file,
         DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, En3mfType& out_file_type,
-        LoadStrategy options = LoadStrategy::AddDefaultInstances, PlateDataPtrs* plate_data = nullptr, std::vector<Preset*>* project_presets = nullptr, Semver* file_version = nullptr, Import3mfProgressFn proFn = nullptr, BBLProject* project = nullptr);
+        LoadStrategy options = LoadStrategy::AddDefaultInstances, PlateDataPtrs* plate_data = nullptr, std::vector<Preset*>* project_presets = nullptr, Semver* file_version = nullptr, Import3mfProgressFn proFn = nullptr, BBLProject* project = nullptr, bool *is_bambu_studio = nullptr);
 
     // Add a new ModelObject to this Model, generate a new ID for this ModelObject.
     ModelObject* add_object();
@@ -1820,6 +2030,9 @@ public:
     // Croaks if the duplicated objects do not fit the print bed.
     void duplicate_objects_grid(size_t x, size_t y, coordf_t dist);
 
+    // Turns the content of a freshly read file around Z as one piece. Placed objects are centered around their own
+    // origin without moving; unplaced ones are centered in XY only, the shift recorded in origin_translation.
+    void          rotate_and_center_objects(double angle_z);
     bool 		  looks_like_multipart_object() const;
     void 		  convert_multipart_object(unsigned int max_extruders);
     bool          looks_like_imperial_units() const;
@@ -1939,6 +2152,16 @@ bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo
 bool model_has_multi_part_objects(const Model &model);
 // If the model has advanced features, then it cannot be processed in simple mode.
 bool model_has_advanced_features(const Model &model);
+
+// Reload from disk: finds the volume of `new_model` (freshly read from the source file) that replaces `old_volume`.
+// Returns {object index, volume index}; the volume index is -1 when only an object (a STEP model loaded as one volume)
+// matched, and both are -1 when nothing matched.
+// The indices stored in old_volume.source are those of the file the volume was first imported from. A 3MF project
+// records them for every volume and keeps them after objects were deleted, merged or reordered, so they only count
+// when the volume found there still has the old volume's name; otherwise the volume is looked up by name.
+// `file_matches_source` / `file_named_like_volume`: the reloaded file has the volume's source file name / the volume's name.
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume);
 
 #ifndef NDEBUG
 // Verify whether the IDs of Model / ModelObject / ModelVolume / ModelInstance / ModelMaterial are valid and unique.

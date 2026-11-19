@@ -7,8 +7,11 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <stdexcept>
+
+#include <boost/log/trivial.hpp>
 
 namespace Slic3r {
 namespace Vendors {
@@ -400,7 +403,19 @@ Spec spec_from_json(const json& j)
     s.download_url_path     = text_of(dl, "url_field", 200);
     s.download_direct_field = text_of(dl, "direct_field", 200);
     s.downloads_limited     = dl.is_object() && dl.value("limited", false);
-    if (!s.download_path.empty() && s.download_url_path.empty())
+    // "GET" when absent, null or empty (connectors written before this key existed behave as before).
+    if (dl.is_object() && dl.contains("method") && !dl["method"].is_null()) {
+        if (!dl["method"].is_string())
+            throw std::runtime_error("The download method must be GET or POST.");
+        std::string method = trim(dl["method"].get<std::string>());
+        std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+        if (!method.empty() && method != "GET" && method != "POST")
+            throw std::runtime_error("The download method must be GET or POST.");
+        s.download_method = method.empty() ? std::string("GET") : method;
+    }
+    // A path with no "url_field" key at all keeps its old default "url". A blank one (the key present
+    // and empty) means the endpoint's answer IS the file.
+    if (!s.download_path.empty() && s.download_url_path.empty() && !(dl.is_object() && dl.contains("url_field")))
         s.download_url_path = "url";
 
     const json& quota = obj(j, "quota");
@@ -410,6 +425,16 @@ Spec spec_from_json(const json& j)
     for (const std::string* h : {&s.quota_used_header, &s.quota_limit_header, &s.quota_reset_header})
         if (!h->empty() && !is_token(*h))
             throw std::runtime_error("A quota header has a bad name.");
+
+    // Optional: how many CSV rows one exported file holds before the export splits (absent = no limit).
+    const json& csv = obj(j, "csv");
+    s.csv_max_records = int_of(csv, "max_records", 0, 1, CSV_MAX_RECORDS_CAP);
+    if (csv.contains("rows")) {
+        CsvRows rows;
+        if (!csv.at("rows").is_string() || !csv_rows_from_name(csv.at("rows").get<std::string>(), rows))
+            throw std::runtime_error("\"rows\" must be \"model\" or \"file\".");
+        s.csv_rows = csv_rows_name(rows);
+    }
     return s;
 }
 
@@ -422,7 +447,7 @@ json spec_to_json(const Spec& s)
     list["paging"] = {{"type", s.paging}, {"param", s.page_param}, {"start", s.page_start}, {"size_param", s.size_param},
                       {"size", s.page_size}, {"has_more", s.has_more_path}, {"total", s.total_path}, {"cursor", s.cursor_path}};
     list["since"] = {{"param", s.since_param}, {"field", s.since_field}};
-    return {{"format", "edgeslicer-vendor-connector"},
+    json out = {{"format", "edgeslicer-vendor-connector"},
             {"version", 1},
             {"id", s.id},
             {"name", s.name},
@@ -436,6 +461,60 @@ json spec_to_json(const Spec& s)
             {"files", {{"path", s.subs_path}, {"fields", s.sub_fields}}},
             {"download", {{"path", s.download_path}, {"url_field", s.download_url_path}, {"direct_field", s.download_direct_field}, {"limited", s.downloads_limited}}},
             {"quota", {{"used", s.quota_used_header}, {"limit", s.quota_limit_header}, {"resets", s.quota_reset_header}}}};
+    // Only what is set (like the csv keys), so a GET connector's file stays exactly as it was.
+    if (s.download_method == "POST")
+        out["download"]["method"] = "POST";
+    if (s.csv_max_records > 0)
+        out["csv"]["max_records"] = s.csv_max_records;
+    if (!s.csv_rows.empty())
+        out["csv"]["rows"] = s.csv_rows;
+    return out;
+}
+
+// The placeholders ({...}) of a template, with what is wrong with its braces: "" or the message.
+static std::string template_names(const std::string& templ, std::vector<std::string>& names)
+{
+    size_t pos = 0;
+    while (pos < templ.size()) {
+        const size_t open = templ.find('{', pos);
+        if (open == std::string::npos)
+            break;
+        const size_t close = templ.find('}', open);
+        if (close == std::string::npos)
+            return "it has a { with no closing }";
+        const std::string name = templ.substr(open + 1, close - open - 1);
+        if (name.empty() || name.find('{') != std::string::npos)
+            return "it has an empty or unfinished {}";
+        names.push_back(name);
+        pos = close + 1;
+    }
+    return std::string();
+}
+
+std::string template_problems(const Spec& s)
+{
+    static const char* VALID = "{id} {name} {sub.id} {sub.name} {sub.variant}";
+    static const std::set<std::string> DOWNLOAD_NAMES { "id", "name", "sub.id", "sub.name", "sub.variant" };
+    std::vector<std::string> names;
+    std::string              brace = template_names(s.download_path, names);
+    if (!brace.empty())
+        return "The download path is wrong: " + brace + ". Valid placeholders: " + VALID + ".";
+    for (const std::string& n : names)
+        if (!DOWNLOAD_NAMES.count(n))
+            return "The download path uses {" + n + "}, which the connector does not know, so it would be sent empty. Valid placeholders: " +
+                   VALID + ".";
+    auto page = s.fields.find("page_url");
+    if (page != s.fields.end() && page->second.find('{') != std::string::npos) {
+        names.clear();
+        brace = template_names(page->second, names);
+        if (!brace.empty())
+            return "The page URL template is wrong: " + brace + ".";
+        for (const std::string& n : names)
+            if (starts_with(n, "sub."))
+                return "The page URL template uses {" + n + "}, but a page belongs to the model, not to one of its files. "
+                       "Use a field of the model, like {slug}.";
+    }
+    return std::string();
 }
 
 std::string make_id(const std::string& name, uint32_t random)
@@ -507,9 +586,10 @@ Request authorize(const Spec& spec, const Secrets& secrets, const std::string& u
 }
 
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
-               const std::function<bool(const char*, size_t)>& sink, int max_redirects)
+               const std::function<bool(const char*, size_t)>& sink, int max_redirects, const std::string& method)
 {
     std::string current = url;
+    std::string verb    = method == "POST" ? "POST" : "GET";
     for (int hop = 0;; ++hop) {
         Response error;
         if (!is_allowed_url(current)) {
@@ -518,6 +598,7 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
         }
         Request req = credentials && same_origin(current, spec.base_url) ? authorize(spec, secrets, current) : Request { current, {} };
         req.sink    = sink;
+        req.method  = verb;
         Response resp = http(req);
         const bool redirect = resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308;
         auto       location = resp.headers.find("location");
@@ -528,6 +609,9 @@ Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, con
             return error;
         }
         current = join_url(current, location->second);
+        // As a browser does: 301, 302 and 303 go on as a GET, 307 and 308 keep the method.
+        if (resp.status != 307 && resp.status != 308)
+            verb = "GET";
     }
 }
 
@@ -604,12 +688,25 @@ static std::string clean_url(const Spec& spec, const std::string& ref)
     return is_allowed_url(url) ? url : std::string();
 }
 
+// A mapping value starting with "=" is a fixed text used for every item ("=N3D"); "==x" is the
+// literal "=x". Anything else is a path into the item. Not used for id/name (they must differ per item).
+static bool literal_of(const std::string& mapping, std::string& out)
+{
+    if (mapping.empty() || mapping[0] != '=')
+        return false;
+    out = trim(mapping.substr(1)); // "==x" keeps one "="
+    return true;
+}
+
 static std::string field(const Spec& spec, const json& item, const char* name, size_t max_len = 400)
 {
     auto it = spec.fields.find(name);
     if (it == spec.fields.end() || it->second.empty())
         return std::string();
-    std::string v = trim(scalar_text(at_path(item, it->second)));
+    std::string v;
+    if (std::string(name) != "id" && std::string(name) != "name" && literal_of(it->second, v))
+        return v.size() > max_len ? v.substr(0, max_len) : v;
+    v = trim(scalar_text(at_path(item, it->second)));
     return v.size() > max_len ? v.substr(0, max_len) : v;
 }
 
@@ -658,7 +755,19 @@ std::vector<Item> map_items(const Spec& spec, const json& page)
         it.description = field(spec, raw, "description", 2000);
         it.updated     = field(spec, raw, "updated", 64);
         auto tg = spec.fields.find("tags");
-        if (tg != spec.fields.end() && !tg->second.empty()) {
+        std::string tag_lit;
+        if (tg != spec.fields.end() && literal_of(tg->second, tag_lit)) {
+            size_t pos = 0; // "=a, b": the same tags on every item
+            while (pos <= tag_lit.size()) {
+                const size_t c = tag_lit.find(',', pos);
+                const std::string v = trim(tag_lit.substr(pos, c == std::string::npos ? std::string::npos : c - pos));
+                if (!v.empty() && v.size() <= 80 && it.tags.size() < 30 && std::find(it.tags.begin(), it.tags.end(), v) == it.tags.end())
+                    it.tags.push_back(v);
+                if (c == std::string::npos)
+                    break;
+                pos = c + 1;
+            }
+        } else if (tg != spec.fields.end() && !tg->second.empty()) {
             const json t = at_path(raw, tg->second);
             auto add = [&it](const std::string& s) {
                 const std::string v = trim(s);
@@ -774,7 +883,7 @@ json cache_to_json(const Cache& c)
     return {{"version", 1},        {"items", items},
             {"since", c.since},    {"synced_at", c.synced_at},
             {"quota", {{"used", c.quota.used}, {"limit", c.quota.limit}, {"resets", c.quota.resets}}},
-            {"last_error", c.last_error}};
+            {"last_error", c.last_error}, {"needs_full", c.needs_full}};
 }
 
 Cache cache_from_json(const json& j)
@@ -791,6 +900,7 @@ Cache cache_from_json(const json& j)
     c.since      = get_or<std::string>(j, "since", "");
     c.synced_at  = get_or<int64_t>(j, "synced_at", 0);
     c.last_error = get_or<std::string>(j, "last_error", "");
+    c.needs_full = j.contains("needs_full") && j["needs_full"].is_boolean() && j["needs_full"].get<bool>();
     const json q = j.contains("quota") ? j["quota"] : json::object();
     c.quota.used   = get_or<std::string>(q, "used", "");
     c.quota.limit  = get_or<std::string>(q, "limit", "");
@@ -870,7 +980,7 @@ SyncResult sync(const Spec& spec, const Secrets& secrets, const Cache& previous,
     SyncResult result;
     result.cache            = previous;
     result.cache.last_error = std::string();
-    const bool  incremental = !options.full && !spec.since_param.empty() && !previous.since.empty() && !previous.items.empty();
+    const bool  incremental = !options.full && !previous.needs_full && !spec.since_param.empty() && !previous.since.empty() && !previous.items.empty();
     const std::string since = incremental ? previous.since : std::string();
 
     Pager             pager(spec);
@@ -960,8 +1070,11 @@ SyncResult sync(const Spec& spec, const Secrets& secrets, const Cache& previous,
         }
     }
     // The newest change seen only moves on when the whole list came through.
-    if (done)
+    if (done) {
         result.cache.since = newest;
+        if (!incremental)
+            result.cache.needs_full = false; // every model was read again
+    }
     result.cache.synced_at  = now;
     result.cache.last_error = result.error;
     result.ok               = done;
@@ -1024,6 +1137,8 @@ bool build_download_request(const Spec& spec, const Secrets& secrets, const Item
         return false;
     // Credentials go only to the API's own site.
     out = same_origin(url, spec.base_url) ? authorize(spec, secrets, url) : Request { url, {} };
+    // Only the endpoint is a POST; a direct link to the file is always a GET.
+    out.method = !is_direct && spec.download_method == "POST" ? "POST" : "GET";
     return true;
 }
 
@@ -1041,6 +1156,187 @@ std::string resolve_download(const Spec& spec, const Secrets& secrets, const Res
     } catch (...) {
         error = host_of(spec.base_url) + " did not answer with JSON.";
         return std::string();
+    }
+}
+
+std::string content_disposition_name(const std::string& v)
+{
+    auto base = [](std::string name) {
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos)
+            name.erase(0, slash + 1);
+        name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }), name.end());
+        return trim(name);
+    };
+    const std::string l    = lower(v);
+    const size_t      star = l.find("filename*=");
+    if (star != std::string::npos) { // filename*=UTF-8''percent%20encoded
+        const size_t q1 = v.find('\'', star + 10);
+        const size_t q2 = q1 == std::string::npos ? q1 : v.find('\'', q1 + 1);
+        if (q2 != std::string::npos) {
+            const size_t end = v.find(';', q2 + 1);
+            const std::string enc = trim(v.substr(q2 + 1, end == std::string::npos ? std::string::npos : end - q2 - 1));
+            std::string out;
+            for (size_t i = 0; i < enc.size(); ++i) {
+                if (enc[i] == '%' && i + 2 < enc.size() && std::isxdigit((unsigned char) enc[i + 1]) && std::isxdigit((unsigned char) enc[i + 2])) {
+                    out += char(std::stoi(enc.substr(i + 1, 2), nullptr, 16));
+                    i += 2;
+                } else
+                    out += enc[i];
+            }
+            out = base(out);
+            if (!out.empty())
+                return out;
+        }
+    }
+    const size_t at = l.find("filename=");
+    if (at == std::string::npos)
+        return std::string();
+    size_t p = at + 9;
+    while (p < v.size() && v[p] == ' ')
+        ++p;
+    if (p < v.size() && v[p] == '"') {
+        const size_t end = v.find('"', p + 1);
+        return base(v.substr(p + 1, end == std::string::npos ? std::string::npos : end - p - 1));
+    }
+    const size_t end = v.find(';', p);
+    return base(v.substr(p, end == std::string::npos ? std::string::npos : end - p));
+}
+
+EndpointResult call_download_endpoint(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url,
+                                      const std::function<bool(const std::string&)>& begin_file,
+                                      const std::function<bool(const char*, size_t)>& write_file)
+{
+    enum Mode { Undecided, AsJson, AsFile, AsPage, FileNotOpened };
+    constexpr size_t JSON_LIMIT = 4u * 1024 * 1024;
+    struct State
+    {
+        int                                status { 0 };
+        std::map<std::string, std::string> headers;
+        Mode                               mode { Undecided };
+        std::string                        json;
+        bool                               json_too_big { false };
+        int64_t                            size { 0 };
+        std::string                        file_name;
+    } st;
+    std::string last_url = url;
+
+    const HttpFn wrapped = [&](const Request& q) {
+        last_url = q.url;
+        Request r = q;
+        r.on_head = [&st](int status, const std::map<std::string, std::string>& headers) {
+            st.status  = status;
+            st.headers = headers;
+            st.mode    = Undecided;
+        };
+        return http(r);
+    };
+    auto header = [&st](const char* name) {
+        auto it = st.headers.find(name);
+        return it == st.headers.end() ? std::string() : it->second;
+    };
+    auto media_type = [&header]() {
+        std::string ct = lower(header("content-type"));
+        ct             = trim(ct.substr(0, ct.find(';')));
+        return ct;
+    };
+    const std::function<bool(const char*, size_t)> sink = [&](const char* data, size_t size) {
+        if (st.mode == Undecided) {
+            const std::string media = media_type();
+            if (media == "application/json" || (media.size() > 5 && media.compare(media.size() - 5, 5, "+json") == 0))
+                st.mode = AsJson;
+            else if (media == "text/html" || media == "application/xhtml+xml")
+                st.mode = AsPage;
+            else if (media.empty() || media == "text/plain") { // no say from the server: look at the first character
+                char first = 0;
+                for (size_t i = 0; i < size && first == 0; ++i)
+                    if (!std::isspace((unsigned char) data[i]))
+                        first = data[i];
+                st.mode = first == '{' || first == '[' || first == 0 ? AsJson : first == '<' ? AsPage : AsFile;
+            } else
+                st.mode = AsFile;
+            if (st.mode == AsFile) {
+                st.file_name = content_disposition_name(header("content-disposition"));
+                if (!begin_file(st.file_name))
+                    st.mode = FileNotOpened;
+            }
+        }
+        st.size += int64_t(size);
+        switch (st.mode) {
+        case AsJson:
+            if (st.json.size() + size > JSON_LIMIT) {
+                st.json_too_big = true;
+                return false;
+            }
+            st.json.append(data, size);
+            return true;
+        case AsFile: return write_file(data, size);
+        default: return false;
+        }
+    };
+
+    const Response resp = fetch(spec, secrets, wrapped, url, true, sink, 5, spec.download_method);
+    if (st.headers.empty()) // an error answer or a body that was returned whole: no on_head call, but the headers are here
+        st.headers = resp.headers;
+    if (st.mode == Undecided && resp.status >= 200 && resp.status < 300 && !resp.body.empty()) { // an HttpFn that returns the body
+        st.status = resp.status;
+        sink(resp.body.data(), resp.body.size());
+    }
+
+    EndpointResult out;
+    out.status = resp.status != 0 ? resp.status : st.status;
+    {
+        std::string ct = header("content-type");
+        if (has_control(ct))
+            ct.clear();
+        out.content_type = ct.substr(0, 100);
+    }
+    out.size = st.size;
+    const std::string host      = host_of(spec.base_url);
+    const std::string final_host = host_of(last_url);
+    BOOST_LOG_TRIVIAL(info) << "Vendor download endpoint: status " << out.status << ", content-type \"" << out.content_type << "\", " << out.size
+                            << " bytes, host " << final_host;
+    const std::string detail = out.status == 0 ? std::string()
+                                               : " (HTTP " + std::to_string(out.status) + ", " + (out.content_type.empty() ? std::string("no content type") : out.content_type) + ")";
+
+    if (st.mode == AsPage) {
+        out.error = host + " answered with a web page instead of a file or JSON." + detail;
+        return out;
+    }
+    if (st.json_too_big) {
+        out.error = host + " answered with JSON that is far too large." + detail;
+        return out;
+    }
+    if (st.mode == AsFile || st.mode == FileNotOpened) {
+        // The caller judges the transfer (its own write errors, `status`, `error`, `size`).
+        out.kind      = EndpointResult::Kind::File;
+        out.file_name = st.file_name;
+        if (resp.status < 200 || resp.status >= 300)
+            out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+        out.error = http_error(spec, resp, secrets) + detail;
+        return out;
+    }
+    switch (st.mode) {
+    case AsJson: {
+        if (spec.download_url_path.empty()) {
+            out.error = host + " answered with JSON, but \"File link in its answer at\" is empty, so there is no link to read." + detail;
+            return out;
+        }
+        Response answer;
+        answer.status = 200;
+        answer.body   = st.json;
+        std::string error;
+        out.link = resolve_download(spec, secrets, answer, error);
+        if (out.link.empty())
+            out.error = error + detail;
+        else
+            out.kind = EndpointResult::Kind::Link;
+        return out;
+    }
+    default: out.error = host + " answered with nothing." + detail; return out;
     }
 }
 
@@ -1062,30 +1358,74 @@ static std::string csv_cell(std::string v)
     return v;
 }
 
-std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items)
+static const char* const CSV_BOM = "\xEF\xBB\xBF"; // a UTF-8 mark, so spreadsheets read names right
+
+static std::string csv_line(const std::vector<std::string>& cells)
 {
-    static const char* const header[] = {"connector", "vendor",    "item_id",   "name",       "designer", "license",
-                                         "tags",      "updated",   "page_url",  "thumbnail",  "file_id",  "file_name",
-                                         "variant",   "size_bytes", "plates",   "print_time", "colours"};
-    std::string out = "\xEF\xBB\xBF"; // a UTF-8 mark, so spreadsheets read names right
-    auto row = [&out](const std::vector<std::string>& cells) {
-        for (size_t i = 0; i < cells.size(); ++i) {
-            if (i) out += ',';
-            out += csv_cell(cells[i]);
-        }
-        out += "\r\n";
-    };
-    row(std::vector<std::string>(std::begin(header), std::end(header)));
+    std::string out;
+    for (size_t i = 0; i < cells.size(); ++i) {
+        if (i) out += ',';
+        out += csv_cell(cells[i]);
+    }
+    out += "\r\n";
+    return out;
+}
+
+static const std::vector<std::string>& csv_header()
+{
+    static const std::vector<std::string> header = {"connector", "vendor",    "item_id",   "name",       "designer", "license",
+                                                    "tags",      "updated",   "page_url",  "thumbnail",  "file_id",  "file_name",
+                                                    "variant",   "size_bytes", "plates",   "print_time", "colours"};
+    return header;
+}
+
+// One row per model: the model columns, then how many files it has, their names and their sizes added up.
+static const std::vector<std::string>& csv_model_header()
+{
+    static const std::vector<std::string> header = {"connector", "vendor",    "item_id",   "name",       "designer",  "license",
+                                                    "tags",      "updated",   "page_url",  "thumbnail",  "file_count", "file_names",
+                                                    "total_size_bytes"};
+    return header;
+}
+
+// The model columns that both modes start with.
+static std::vector<std::string> csv_item_head(const std::string& connector, const std::string& vendor, const Item& i)
+{
+    std::string tags;
+    for (const std::string& t : i.tags)
+        tags += (tags.empty() ? "" : "; ") + t;
+    return {connector, vendor, i.id, i.name, i.designer, i.license, tags, i.updated, i.page_url, i.thumbnail};
+}
+
+static void csv_model_rows(const std::string& connector, const std::string& vendor, const std::vector<Item>& items,
+                           std::vector<std::string>& rows)
+{
     for (const Item& i : items) {
-        std::string tags;
-        for (const std::string& t : i.tags)
-            tags += (tags.empty() ? "" : "; ") + t;
-        const std::vector<std::string> head = {connector, vendor, i.id, i.name, i.designer, i.license, tags, i.updated, i.page_url,
-                                               i.thumbnail};
+        std::string names;
+        long long   total = 0;
+        for (const SubItem& s : i.subs) {
+            const std::string& n = !s.name.empty() ? s.name : (!s.variant.empty() ? s.variant : s.id);
+            names += (names.empty() ? "" : "; ") + n;
+            if (s.size > 0)
+                total += s.size;
+        }
+        std::vector<std::string> cells = csv_item_head(connector, vendor, i);
+        cells.insert(cells.end(), {std::to_string(i.subs.size()), names, total > 0 ? std::to_string(total) : std::string()});
+        rows.push_back(csv_line(cells));
+    }
+}
+
+// The finished rows (one per file, one for an item without files) of the items, in order.
+static void csv_rows(const std::string& connector, const std::string& vendor, const std::vector<Item>& items,
+                     std::vector<std::string>& rows)
+{
+    const size_t columns = csv_header().size();
+    for (const Item& i : items) {
+        const std::vector<std::string> head = csv_item_head(connector, vendor, i);
         if (i.subs.empty()) {
             std::vector<std::string> cells = head;
-            cells.resize(std::size(header));
-            row(cells);
+            cells.resize(columns);
+            rows.push_back(csv_line(cells));
             continue;
         }
         for (const SubItem& s : i.subs) {
@@ -1096,10 +1436,473 @@ std::string to_csv(const std::string& connector, const std::string& vendor, cons
             cells.insert(cells.end(), {s.id, s.name, s.variant, s.size > 0 ? std::to_string(s.size) : std::string(),
                                        s.plates > 0 ? std::to_string(s.plates) : std::string(),
                                        s.print_time_s > 0 ? std::to_string(s.print_time_s) : s.print_time_text, colours});
-            row(cells);
+            rows.push_back(csv_line(cells));
         }
     }
+}
+
+std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items)
+{
+    std::vector<std::string> rows;
+    csv_rows(connector, vendor, items, rows);
+    std::string out = CSV_BOM + csv_line(csv_header());
+    for (const std::string& r : rows)
+        out += r;
     return out;
+}
+
+const char* csv_rows_name(CsvRows rows)
+{
+    return rows == CsvRows::Model ? "model" : "file";
+}
+
+bool csv_rows_from_name(const std::string& name, CsvRows& out)
+{
+    if (name == "model")
+        out = CsvRows::Model;
+    else if (name == "file")
+        out = CsvRows::File;
+    else
+        return false;
+    return true;
+}
+
+size_t csv_row_count(const std::vector<CsvGroup>& groups, CsvRows rows)
+{
+    size_t n = 0;
+    for (const CsvGroup& g : groups)
+        for (const Item& i : g.items)
+            n += rows == CsvRows::Model ? 1 : std::max<size_t>(1, i.subs.size());
+    return n;
+}
+
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows, CsvRows mode)
+{
+    std::vector<std::string> rows;
+    for (const CsvGroup& g : groups) {
+        if (mode == CsvRows::Model)
+            csv_model_rows(g.connector, g.vendor, g.items, rows);
+        else
+            csv_rows(g.connector, g.vendor, g.items, rows);
+    }
+    // A row is finished text, so a cell with a comma, quote or line break is never cut.
+    const size_t per_file = (max_rows == 0 || max_rows >= rows.size()) ? std::max<size_t>(1, rows.size()) : max_rows;
+    const std::string head = CSV_BOM + csv_line(mode == CsvRows::Model ? csv_model_header() : csv_header());
+    std::vector<std::string> files;
+    for (size_t from = 0; from < rows.size() || files.empty(); from += per_file) {
+        std::string out = head;
+        for (size_t k = from; k < rows.size() && k < from + per_file; ++k)
+            out += rows[k];
+        files.push_back(std::move(out));
+    }
+    return files;
+}
+
+std::string csv_part_path(const std::string& path, size_t index, size_t count)
+{
+    if (count <= 1)
+        return path;
+    const size_t slash = path.find_last_of("/\\");
+    const size_t dot   = path.find_last_of('.');
+    const bool   has_ext = dot != std::string::npos && dot > (slash == std::string::npos ? 0 : slash + 1) && dot + 1 < path.size();
+    const std::string base = has_ext ? path.substr(0, dot) : path;
+    const std::string ext  = has_ext ? path.substr(dot) : std::string(".csv");
+    return base + "_" + std::to_string(index) + ext;
+}
+
+// ------------------------------------------------------------------------------ import ----
+
+// A key that names a credential. Nothing the connector format itself uses matches (no key of the
+// format has "token", "secret", "password"... in it), so a match is somebody's secret.
+static bool is_secret_name(const std::string& name)
+{
+    const std::string l = lower(name);
+    for (const char* w : {"token", "secret", "password", "passwd", "api_key", "api-key", "apikey", "authorization", "credential", "bearer"})
+        if (l.find(w) != std::string::npos)
+            return true;
+    return false;
+}
+
+static bool has_value(const json& v)
+{
+    if (v.is_null() || v.is_boolean())
+        return false;
+    if (v.is_string())
+        return !trim(v.get<std::string>()).empty();
+    if (v.is_object() || v.is_array())
+        return !v.empty();
+    return true;
+}
+
+static bool scan_secret_keys(const json& j, int depth)
+{
+    if (depth > 32)
+        return true; // nothing legitimate is nested this deep
+    if (j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it)
+            if ((is_secret_name(it.key()) && has_value(it.value())) || scan_secret_keys(it.value(), depth + 1))
+                return true;
+    } else if (j.is_array()) {
+        for (const json& v : j)
+            if (scan_secret_keys(v, depth + 1))
+                return true;
+    }
+    return false;
+}
+
+// True when `j` carries a credential value anywhere the format could hold one.
+static bool holds_credential(const json& j)
+{
+    if (scan_secret_keys(j, 0))
+        return true;
+    // The sign-in block says how the key is sent (type, name); nothing else belongs in it.
+    const json& auth = obj(j, "auth");
+    for (auto it = auth.begin(); it != auth.end(); ++it)
+        if (it.key() != "type" && it.key() != "name" && has_value(it.value()))
+            return true;
+    // A header is either fixed (name + value) or secret (name + secret:true, the value comes from the
+    // credential store). A secret one with a value, or a fixed one that is plainly a credential, is a leak.
+    if (j.contains("headers") && j["headers"].is_array())
+        for (const json& h : j["headers"]) {
+            if (!h.is_object())
+                continue;
+            const bool        secret = h.value("secret", false);
+            const bool        value  = h.contains("value") && has_value(h["value"]);
+            const std::string name   = h.contains("name") && h["name"].is_string() ? h["name"].get<std::string>() : std::string();
+            if (value && (secret || is_secret_name(name)))
+                return true;
+        }
+    // A fixed query parameter that is a key.
+    const json& q = obj(obj(j, "list"), "query");
+    for (auto it = q.begin(); it != q.end(); ++it) {
+        const std::string k = lower(it.key());
+        if ((is_secret_name(k) || k == "key" || k == "auth" || k == "sig" || k == "signature") && has_value(it.value()))
+            return true;
+    }
+    return false;
+}
+
+std::string normalize_smart_quotes(const std::string& text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        // Every typographic quote is E2 80 xx in UTF-8.
+        if (i + 2 < text.size() && (unsigned char) text[i] == 0xE2 && (unsigned char) text[i + 1] == 0x80) {
+            switch ((unsigned char) text[i + 2]) {
+            case 0x9C: // U+201C
+            case 0x9D: // U+201D
+            case 0x9E: // U+201E
+            case 0xB3: // U+2033
+                out += '"';
+                i += 2;
+                continue;
+            case 0x98: // U+2018
+            case 0x99: // U+2019
+            case 0xB2: // U+2032
+                out += '\'';
+                i += 2;
+                continue;
+            default: break;
+            }
+        }
+        out += text[i];
+    }
+    return out;
+}
+
+bool parse_json_lenient(const std::string& text, nlohmann::json& out, bool* smart_quotes_fixed)
+{
+    if (smart_quotes_fixed)
+        *smart_quotes_fixed = false;
+    try {
+        out = json::parse(text);
+        return true;
+    } catch (const std::exception&) {
+    }
+    const std::string plain = normalize_smart_quotes(text);
+    if (plain == text)
+        return false;
+    try {
+        out = json::parse(plain);
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (smart_quotes_fixed)
+        *smart_quotes_fixed = true;
+    BOOST_LOG_TRIVIAL(info) << "Vendor connector import: the text only parsed once its smart quotes were corrected";
+    return true;
+}
+
+ImportResult import_check(const std::string& raw)
+{
+    ImportResult r;
+    std::string  text = raw;
+    if (text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0)
+        text.erase(0, 3);
+    if (text.size() > IMPORT_MAX_BYTES) {
+        r.error = "That is too large to be a connector (the limit is 256 KB).";
+        return r;
+    }
+    text = trim(text);
+    if (text.empty()) {
+        r.error = "There is nothing to import.";
+        return r;
+    }
+    json j;
+    if (!parse_json_lenient(text, j)) {
+        r.error = "That is not valid JSON.";
+        return r;
+    }
+    if (!j.is_object()) {
+        r.error = "A connector is a JSON object.";
+        return r;
+    }
+    if (j.contains("format") && !(j["format"].is_string() && j["format"].get<std::string>() == "edgeslicer-vendor-connector")) {
+        r.error = "That is not an EdgeSlicer connector.";
+        return r;
+    }
+    if (j.contains("version") && j["version"].is_number() && j["version"].get<double>() > 1) {
+        r.error = "That connector was made by a newer EdgeSlicer.";
+        return r;
+    }
+    if (holds_credential(j)) {
+        r.credentials = true;
+        r.error       = "It contains a credential (a key, token, password or secret value). Credentials are never imported.";
+        return r;
+    }
+    j.erase("id"); // always a new connector
+    try {
+        r.spec = spec_from_json(j);
+    } catch (const std::exception& e) {
+        r.error = e.what();
+        return r;
+    }
+    // A connector from outside is checked strictly: a placeholder it does not know is refused.
+    r.error = template_problems(r.spec);
+    if (!r.error.empty())
+        return r;
+    r.spec.id.clear();
+    r.json = spec_to_json(r.spec);
+    r.json.erase("id");
+    r.ok = true;
+    return r;
+}
+
+bool is_importable_link(const std::string& url, std::string* error)
+{
+    auto fail = [error](const char* why) {
+        if (error)
+            *error = why;
+        return false;
+    };
+    if (url.empty() || url.size() > 2048 || has_control(url) || url.find_first_of(" \\") != std::string::npos)
+        return fail("That is not a web address.");
+    const std::string l = lower(url);
+    if (!starts_with(l, "https://"))
+        return fail(starts_with(l, "http://") ? "Only https:// links are accepted." : "The link must start with https://.");
+    const size_t      s         = 8;
+    const size_t      e         = l.find_first_of("/?#", s);
+    const std::string authority = l.substr(s, e == std::string::npos ? std::string::npos : e - s);
+    if (authority.empty())
+        return fail("The link has no host name.");
+    if (authority.find('@') != std::string::npos)
+        return fail("Links with a user name or password are not accepted.");
+    if (authority[0] == '[')
+        return fail("IP addresses are not accepted; use a host name.");
+    std::string  host  = authority;
+    const size_t colon = host.find(':');
+    if (colon != std::string::npos) {
+        if (host.substr(colon + 1) != "443")
+            return fail("Only the standard https port is accepted.");
+        host.resize(colon);
+    }
+    while (!host.empty() && host.back() == '.')
+        host.pop_back();
+    if (host.empty() || host.size() > 253)
+        return fail("The link has no host name.");
+    if (!std::all_of(host.begin(), host.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '.'; }))
+        return fail("The host name has characters that are not allowed.");
+    std::vector<std::string> labels;
+    for (size_t b = 0;;) {
+        const size_t d = host.find('.', b);
+        labels.push_back(host.substr(b, d == std::string::npos ? std::string::npos : d - b));
+        if (d == std::string::npos)
+            break;
+        b = d + 1;
+    }
+    for (const std::string& lab : labels)
+        if (lab.empty() || lab.size() > 63 || lab.front() == '-' || lab.back() == '-')
+            return fail("The host name is not valid.");
+    const std::string& tld = labels.back();
+    if (is_digits(tld) || starts_with(tld, "0x")) // 127.0.0.1, 2130706433, 0x7f.1, 0177.0.0.1
+        return fail("IP addresses are not accepted; use a host name.");
+    if (labels.size() < 2)
+        return fail("Links to this computer or a local network are not accepted.");
+    for (const char* local : {"localhost", "local", "internal", "lan", "home", "arpa", "corp", "intranet", "localdomain", "test", "invalid", "example"})
+        if (tld == local)
+            return fail("Links to this computer or a local network are not accepted.");
+    return true;
+}
+
+bool fetch_connector_text(const HttpFn& http, const std::string& url, std::string& text, std::string& error)
+{
+    std::string current = trim(url);
+    for (int hop = 0;; ++hop) {
+        std::string why;
+        if (!is_importable_link(current, &why)) {
+            error = hop == 0 ? why : "The link redirects to an address that is not accepted. " + why;
+            return false;
+        }
+        Request req; // no headers: nothing of ours goes to the site
+        req.url             = current;
+        Response   resp     = http(req);
+        const bool redirect = resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308;
+        auto       location = resp.headers.find("location");
+        if (redirect && location != resp.headers.end() && !location->second.empty()) {
+            if (hop >= 3) {
+                error = "The link redirects too many times.";
+                return false;
+            }
+            current = join_url(current, location->second);
+            continue;
+        }
+        if (resp.status == 0) {
+            error = "Could not reach " + host_of(current) + (resp.error.empty() ? std::string() : ": " + resp.error.substr(0, 200));
+            return false;
+        }
+        if (resp.status < 200 || resp.status >= 300) {
+            error = "The site answered with status " + std::to_string(resp.status) + ".";
+            return false;
+        }
+        if (resp.body.size() > IMPORT_MAX_BYTES) {
+            error = "That is too large to be a connector (the limit is 256 KB).";
+            return false;
+        }
+        text = std::move(resp.body);
+        return true;
+    }
+}
+
+bool parse_connector_link(const std::string& link, std::string& url)
+{
+    static const std::string head = "edgeslicer://connector";
+    const std::string        l    = lower(link);
+    if (!starts_with(l, head))
+        return false;
+    size_t at = head.size();
+    if (at < l.size() && l[at] == '/')
+        ++at;
+    if (l.compare(at, 5, "?url=") != 0)
+        return false;
+    std::string  payload = link.substr(at + 5);
+    const size_t amp     = payload.find('&');
+    if (amp != std::string::npos)
+        payload.resize(amp);
+    auto        hex = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    std::string out;
+    for (size_t i = 0; i < payload.size(); ++i) {
+        if (payload[i] == '%' && i + 2 < payload.size() && hex(payload[i + 1]) >= 0 && hex(payload[i + 2]) >= 0) {
+            out.push_back(char(hex(payload[i + 1]) * 16 + hex(payload[i + 2])));
+            i += 2;
+        } else
+            out.push_back(payload[i]);
+    }
+    out = trim(out);
+    if (out.empty())
+        return false;
+    url = out;
+    return true;
+}
+
+// ---- updating a connector the user already has ----
+
+// scheme://host[:port], lower case, the default https port left out.
+std::string api_origin(const std::string& url)
+{
+    std::string o = origin_of(url);
+    if (o.size() > 4 && o.compare(o.size() - 4, 4, ":443") == 0 && starts_with(o, "https://"))
+        o.resize(o.size() - 4);
+    return o;
+}
+
+std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec& imported)
+{
+    const std::string name   = lower(trim(imported.name));
+    const std::string vendor = lower(trim(imported.vendor));
+    const std::string origin = api_origin(imported.base_url);
+    std::vector<size_t> out;
+    for (size_t i = 0; i < existing.size(); ++i) {
+        const Spec& s = existing[i];
+        if (lower(trim(s.name)) == name || (!vendor.empty() && lower(trim(s.vendor)) == vendor && api_origin(s.base_url) == origin))
+            out.push_back(i);
+    }
+    return out;
+}
+
+// Where the list comes from: when this changes, what was fetched belongs to another list.
+static bool list_source_differs(const Spec& a, const Spec& b)
+{
+    return a.base_url != b.base_url || a.list_path != b.list_path || a.list_query != b.list_query || a.items_path != b.items_path;
+}
+
+// Everything that decides how items are read from the answers.
+bool needs_full_fetch(const Spec& a, const Spec& b)
+{
+    return list_source_differs(a, b) || a.license != b.license || a.paging != b.paging || a.page_param != b.page_param || a.page_start != b.page_start ||
+           a.size_param != b.size_param || a.page_size != b.page_size || a.has_more_path != b.has_more_path ||
+           a.total_path != b.total_path || a.cursor_path != b.cursor_path || a.since_param != b.since_param ||
+           a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields ||
+           a.download_path != b.download_path || a.download_method != b.download_method || a.download_url_path != b.download_url_path ||
+           a.download_direct_field != b.download_direct_field;
+}
+
+UpdatePlan plan_update(const Spec& old_spec, const Spec& imported)
+{
+    UpdatePlan p;
+    p.old_origin     = api_origin(old_spec.base_url);
+    p.new_origin     = api_origin(imported.base_url);
+    p.origin_changed = p.old_origin != p.new_origin;
+    // A stored secret stays only where the new connector asks for the same thing under the same key
+    // and label ("auth" as a bearer token is not "auth" as the X-Api-Key header, or a password).
+    const auto now = secret_slots(imported);
+    for (const auto& old : secret_slots(old_spec))
+        (std::find(now.begin(), now.end(), old) != now.end() ? p.keep_slots : p.drop_slots).push_back(old.first);
+    p.reset_cache = list_source_differs(old_spec, imported);
+    p.needs_full  = needs_full_fetch(old_spec, imported);
+    return p;
+}
+
+// ---- download file names ----
+
+std::string model_extension(const std::string& name)
+{
+    const std::string l = lower(trim(name));
+    for (const char* e : {".gcode.3mf", ".3mf", ".stl", ".step", ".stp", ".obj", ".amf", ".zip"}) {
+        const size_t n = std::strlen(e);
+        if (l.size() >= n && l.compare(l.size() - n, n, e) == 0)
+            return e;
+    }
+    return std::string();
+}
+
+std::string download_file_name(const std::string& label, const std::string& url_ext, const std::function<std::string(std::string)>& sanitize)
+{
+    std::string base = trim(label);
+    const std::string label_ext = model_extension(base);
+    if (!label_ext.empty())
+        base.resize(base.size() - label_ext.size());
+    // Whatever model extensions are left on the base would double up ("x.3mf.3mf").
+    for (std::string e; !(e = model_extension(base)).empty();)
+        base.resize(base.size() - e.size());
+    std::string ext = lower(trim(url_ext));
+    if (ext.empty() || ext[0] != '.')
+        ext = label_ext.empty() ? std::string(".3mf") : label_ext;
+    else if (!label_ext.empty() && label_ext.size() > ext.size() && label_ext.compare(label_ext.size() - ext.size(), ext.size(), ext) == 0)
+        ext = label_ext; // ".gcode.3mf" from a ".3mf" address
+    if (sanitize)
+        base = sanitize(base);
+    return base + ext;
 }
 
 } // namespace Vendors

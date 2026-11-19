@@ -1485,11 +1485,11 @@ msgstr "Funzione 1"
 msgid "Reverse rotation"
 msgstr "Rotazione inversa"
 
-msgid "Rotate around center:"
-msgstr "Ruota attorno al centro:"
+msgid "Orbit"
+msgstr "Ruota attorno al centro"
 
-msgid "Parallel distance:"
-msgstr "Distanza parallela:"
+msgid "Parallel distance"
+msgstr "Distanza parallela"
 
 msgid "Flip by Face 2"
 msgstr "Capovolgi da Faccia 2"
@@ -8551,8 +8551,8 @@ msgstr ""
 msgid "Presets inherited by other presets cannot be deleted!"
 msgstr "I profili ereditati da altri profili non possono essere eliminati!"
 
-msgid "The following presets inherit this preset."
-msgid_plural "The following preset inherits this preset."
+msgid "The following preset inherits this preset."
+msgid_plural "The following presets inherit this preset."
 msgstr[0] "Il seguente profilo eredita questo profilo."
 msgstr[1] "I seguentii profili ereditano questi profili."
 

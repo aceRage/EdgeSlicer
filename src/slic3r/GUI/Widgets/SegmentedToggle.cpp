@@ -177,6 +177,12 @@ int SegmentedToggle::getSelected() const
     return m_selectedIndex;
 }
 
+void SegmentedToggle::setSegmentToolTip(int index, const wxString& tip)
+{
+    if (index >= 0 && index < (int)m_buttons.size() && m_buttons[index] != nullptr)
+        m_buttons[index]->SetToolTip(tip);
+}
+
 void SegmentedToggle::bindSelectionCallback(SelectionCallback cb)
 {
     m_selectionCallback = std::move(cb);

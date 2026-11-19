@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "Selection.hpp"
+#include <cfloat>
 
 #include "3DScene.hpp"
 #include "GLCanvas3D.hpp"
@@ -525,9 +526,34 @@ void Selection::center()
     return;
 }
 
+double Selection::get_drop_min_z() const
+{
+    if (!m_valid)
+        return 0.;
+    if (m_mode == Volume)
+        return get_bounding_box().min.z();
+
+    double min_z = DBL_MAX;
+    for (const auto& [obj_idx, inst_idxs] : m_cache.content) {
+        if (obj_idx < 0 || obj_idx >= (int)m_model->objects.size())
+            continue; // wipe tower
+        for (int inst_idx : inst_idxs)
+            min_z = std::min(min_z, m_model->objects[obj_idx]->get_instance_min_z(inst_idx));
+    }
+    return min_z == DBL_MAX ? 0. : min_z;
+}
+
+bool Selection::can_drop() const
+{
+    return !is_empty() && std::abs(get_drop_min_z()) > -SINKING_Z_THRESHOLD;
+}
+
 void Selection::drop()
 {
-    this->move_to_center(Vec3d(0, 0, -this->get_bounding_box().min.z()));
+    const double min_z = get_drop_min_z();
+    if (std::abs(min_z) < -SINKING_Z_THRESHOLD)
+        return; // already on the bed, see can_drop()
+    this->move_to_center(Vec3d(0, 0, -min_z));
     wxGetApp().plater()->get_view3D_canvas3D()->do_move(L("Move Object"));
 }
 
@@ -700,7 +726,8 @@ void Selection::clear(bool notify_sidebar)
 #endif
 
     // #et_FIXME fake KillFocus from sidebar
-    if (notify_sidebar)
+    // Skip on shutdown: Plater's pImpl is already freed (Orca #14588), so plater()->canvas3D() would use-after-free.
+    if (notify_sidebar && !wxGetApp().is_closing())
         wxGetApp().plater()->canvas3D()->handle_sidebar_focus_event("", false);
 }
 
@@ -1209,6 +1236,20 @@ void Selection::translate(const Vec3d &displacement, TransformationType transfor
             if (v.is_wipe_tower) {//in world cs
                 int           plate_idx           = v.object_idx() - 1000;
                 BoundingBoxf3 plate_bbox          = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx)->get_bounding_box();
+                {
+                    // Dual-nozzle printers (H2D / H2C / X2D): every nozzle purges into the tower, so keep it where
+                    // all of them reach (the strips only one nozzle reaches are off limits), like Bambu Studio.
+                    PartPlateList       &plate_list = wxGetApp().plater()->get_partplate_list();
+                    const ExtruderAreas &areas      = plate_list.get_extruder_areas();
+                    if (areas.multi() && areas.has_exclusive_regions() && !areas.shared.empty()) {
+                        const BoundingBox shared = get_extents(areas.shared);
+                        const Vec3d       origin = plate_list.get_plate(plate_idx)->get_origin();
+                        plate_bbox.min.x() = std::max(plate_bbox.min.x(), unscale<double>(shared.min.x()) + origin.x());
+                        plate_bbox.min.y() = std::max(plate_bbox.min.y(), unscale<double>(shared.min.y()) + origin.y());
+                        plate_bbox.max.x() = std::min(plate_bbox.max.x(), unscale<double>(shared.max.x()) + origin.x());
+                        plate_bbox.max.y() = std::min(plate_bbox.max.y(), unscale<double>(shared.max.y()) + origin.y());
+                    }
+                }
                 Vec3d         tower_size          = v.bounding_box().size();
                 Vec3d         tower_origin        = m_cache.volumes_data[i].get_volume_position();
                 Vec3d         actual_displacement = displacement;
@@ -1228,6 +1269,15 @@ void Selection::translate(const Vec3d &displacement, TransformationType transfor
                     actual_displacement(1) = plate_bbox.min(1) - tower_origin(1) + margin;
                 } else if (tower_origin(1) + actual_displacement(1) + tower_size(1) + margin > plate_bbox.max(1)) {
                     actual_displacement(1) = plate_bbox.max(1) - tower_origin(1) - tower_size(1) - margin;
+                }
+                // Orca #15146: on a delta, circular or custom bed the box above still has corners the bed
+                // does not; slide the tower onto the real outline (zero on rectangular beds).
+                {
+                    const Vec3d  lo = tower_origin + actual_displacement;
+                    const Vec2d  move = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx)->wipe_tower_move_onto_bed(
+                        BoundingBoxf(Vec2d(lo.x(), lo.y()), Vec2d(lo.x() + tower_size.x(), lo.y() + tower_size.y())), margin);
+                    actual_displacement(0) += move.x();
+                    actual_displacement(1) += move.y();
                 }
 
                 v.set_volume_offset(m_cache.volumes_data[i].get_volume_position() + actual_displacement);
@@ -1915,6 +1965,10 @@ void Selection::notify_instance_update(int object_idx, int instance_idx)
         for (unsigned int i : m_list)
         {
             int obj_index = (*m_volumes)[i]->object_idx();
+            // Orca #14499: skip the wipe tower (synthetic id >= 1000) and any other volume that is
+            // not a ModelObject; the id is not an index into m_model->objects.
+            if (obj_index < 0 || obj_index >= int(m_model->objects.size()))
+                continue;
             //-1 means all the instance in this object
             if (instance_idx == -1)
             {
@@ -2805,9 +2859,14 @@ void Selection::render_bounding_box(const BoundingBoxf3& box, const Transform3d&
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    glsafe(::glLineWidth(2.0f * m_scale_factor));
+#if SLIC3R_OPENGL_ES
+    GLShaderProgram* shader = wxGetApp().get_shader("dashed_lines");
+#else
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(2.0f * m_scale_factor));
 
-    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    GLShaderProgram* shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
     if (shader == nullptr)
         return;
 
@@ -2815,6 +2874,16 @@ void Selection::render_bounding_box(const BoundingBoxf3& box, const Transform3d&
     const Camera& camera = wxGetApp().plater()->get_camera();
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafo);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        const std::array<int, 4>& viewport = camera.get_viewport();
+        shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+        shader->set_uniform("width", 1.5f);
+        shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
     m_box.set_color(to_rgba(color));
     m_box.render();
     shader->stop_using();

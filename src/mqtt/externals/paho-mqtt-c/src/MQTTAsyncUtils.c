@@ -1471,6 +1471,19 @@ static int MQTTAsync_processCommand(void)
 
 		rc = MQTTProtocol_startPublish(command->client->c, p, command->command.details.pub.qos, command->command.details.pub.retained, &msg);
 
+		/* EdgeSlicer (EDGESLICER-E): for QoS 1/2, MQTTProtocol_startPublish has stored the publication
+		 * (MQTTProtocol_storePublication) in the client's outboundMsgs, and that record now owns the
+		 * very topic and payload buffers this command points to. On SOCKET_ERROR the command is freed
+		 * below (MQTTAsync_freeCommand frees destinationName and payload) while the outbound record
+		 * stays (cleansession=0 keeps it for a retry), so the same buffers were freed a second time by
+		 * MQTTProtocol_removePublication - on the PUBACK after a reconnect, or in MQTTAsync_destroy:
+		 * STATUS_HEAP_CORRUPTION. The outbound record frees them; the command must not. */
+		if (rc == SOCKET_ERROR && command->command.details.pub.qos > 0 && msg != NULL)
+		{
+			command->command.details.pub.payload = NULL; /* owned by the stored publication */
+			command->command.details.pub.destinationName = NULL; /* owned by the stored publication */
+		}
+
 		if (command->command.details.pub.qos == 0)
 		{
 			if (rc == TCPSOCKET_COMPLETE)

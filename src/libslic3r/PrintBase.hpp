@@ -37,7 +37,8 @@ struct StringObjectException
     std::string string;
     ObjectBase const *object = nullptr;
     std::string opt_key;
-    StringExceptionType         type;   // warning type for tips
+    StringExceptionType         type = STRING_EXCEPT_NOT_DEFINED;   // warning type for tips
+    bool is_warning = false;
     std::vector<std::string>    params; // warning params for tips
 };
 
@@ -122,7 +123,47 @@ public:
         // active_step_add_warning de-duplicates by id.
         SlicingStabilizerPaintUnreachable,
         // Side stabilizers set to Manual on an object with no painted stabilizer points. Appended; own id.
-        SlicingStabilizerManualUnpainted
+        SlicingStabilizerManualUnpainted,
+        // Airbrush P3: an airbrushed part's grain is finer than the slicing nozzle prints cleanly.
+        // Appended; own id.
+        SlicingAirbrushGrainBelowNozzle,
+        // A filament-only modifier on a colour-painted object whose filament equals the object's:
+        // reported instead of the plain "no settings" notice because painted areas override modifier
+        // filaments anyway. Appended; own id because active_step_add_warning de-duplicates by id.
+        SlicingModifierSameFilamentPainted,
+        // A modifier with a different filament overlapping colour-painted volumes: the painted areas
+        // win where they overlap. Appended; own id.
+        SlicingModifierOverriddenByPaint,
+        // H2C (two-extruder rack): the plate's nozzle grouping uses two or more nozzle diameters on one extruder's rack,
+        // which the firmware refuses to swap mid-print. Raised during export_gcode; appended, own id.
+        SlicingRackMixedDiameter,
+        // precise_z_height could not bring an object's last layer to the object's height (fewer than six
+        // layers, or the last five at the layer height limits). Appended; own id.
+        SlicingPreciseZNotApplied,
+        // An object rests on the bed but its first layer has no extrusions (a bed contact narrower
+        // than the first-layer wall can print), so it gets no brim and starts in mid-air. Appended; own id.
+        SlicingEmptyFirstLayer,
+        // Head clearance check (GCode/HeadCollisionCheck.hpp): a Z-contoured print has moves where the
+        // printer's head model would touch already printed material. Raised during export_gcode; appended, own id.
+        SlicingHeadCollision,
+        // Curved tops (CurvedTops.hpp) asked for on a printer with no known head clearance: left planar.
+        // Raised in posContouring; appended, own id. Also every other refusal of curved tops (the
+        // object prints planar), each naming its reason.
+        SlicingCurvedTopsUnavailable,
+        // Curved tops built a block: one summary line (rise and slope used against the limits, head data)
+        // plus any notes (surfaces left flat, beyond what has been printed). Raised in posContouring;
+        // appended, own id.
+        SlicingCurvedTopsSummary,
+        // Curved tops P3: developer overrides are in force for an object (each listed with its value).
+        // Raised in posContouring on every slice; appended, own id.
+        SlicingCurvedTopsDevOverrides,
+        // Curved tops P3: the head check's result on a curved print with developer overrides in force
+        // (contacts downgraded to a warning, or none found, with the nearest head part). Raised during
+        // export_gcode; CRITICAL when there is a contact. Appended, own id.
+        SlicingCurvedTopsHeadCheck,
+        // Thin features (ThinFeatures.hpp): features the wall generator skipped, or printed wider than the model.
+        // Raised in the wall step, one notice per object; appended, own id.
+        SlicingThinFeatures
     };
 
     typedef size_t TimeStamp;
@@ -456,7 +497,7 @@ public:
 
     // Validate the print, return empty string if valid, return error if process() cannot (or should not) be started.
     //BBS: add more paremeters to validate
-    virtual StringObjectException validate(StringObjectException *warning = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const { return {}; }
+    virtual StringObjectException validate(std::vector<StringObjectException> *warnings = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const { return {}; }
 
     enum ApplyStatus {
         // No change after the Print::apply() call.
@@ -632,11 +673,15 @@ protected:
     // false, sets CANCELED_INTERNAL and throws CanceledException.
     // An atomic flag prevents concurrent dialog invocations from TBB workers.
     void                   check_memory_guard() {
-        auto now = std::chrono::steady_clock::now();
-        // Throttle to one sample per 500ms per Print instance.
-        if (now - m_last_mem_check < std::chrono::milliseconds(500))
+        // Throttle to one sample per 500ms per Print instance. This runs from every TBB worker
+        // (throw_if_canceled() is const, hence the const_cast at the caller), so the timestamp is an
+        // atomic and exactly one thread wins each sampling window.
+        const auto now_ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto last_ticks = m_last_mem_check_ticks.load(std::memory_order_relaxed);
+        if (std::chrono::steady_clock::duration(now_ticks - last_ticks) < std::chrono::milliseconds(500))
             return;
-        m_last_mem_check = now;
+        if (! m_last_mem_check_ticks.compare_exchange_strong(last_ticks, now_ticks, std::memory_order_relaxed))
+            return;
 
         size_t avail = Slic3r::get_available_physical_memory();
         if (avail == 0)
@@ -710,7 +755,8 @@ private:
     std::atomic<int>                        m_low_mem_count{0};
 
     // Last memory-guard sample timestamp (throttle: 1 sample / 500ms).
-    std::chrono::steady_clock::time_point   m_last_mem_check{std::chrono::steady_clock::now()};
+    // Stored as steady_clock ticks so concurrent workers can update it atomically.
+    std::atomic<std::chrono::steady_clock::rep> m_last_mem_check_ticks{std::chrono::steady_clock::now().time_since_epoch().count()};
 
     // Mutex used for synchronization of the worker thread with the UI thread:
     // The mutex will be used to guard the worker thread against entering a stage
@@ -754,6 +800,10 @@ protected:
         { return m_state.invalidate_multiple(il.begin(), il.end(), this->cancel_callback()); }
     bool            invalidate_all_steps()
         { return m_state.invalidate_all(this->cancel_callback()); }
+    // invalidate_step() for the background processing thread, about a step it finished itself. It skips the
+    // cancel callback, which stops the background processing and so would wait for this very thread.
+    bool            invalidate_step_from_worker(PrintStepEnum step)
+        { std::scoped_lock<std::mutex> lock(this->state_mutex()); return m_state.invalidate(step, []() {}); }
 
 	bool            is_step_started_unguarded(PrintStepEnum step) const { return m_state.is_started_unguarded(step); }
 	bool            is_step_done_unguarded(PrintStepEnum step) const { return m_state.is_done_unguarded(step); }

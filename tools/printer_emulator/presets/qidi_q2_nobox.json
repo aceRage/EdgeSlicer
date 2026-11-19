@@ -1,0 +1,18 @@
+{
+  "id": "qidi-q2",
+  "personality": "qidi",
+  "name": "EMU QIDI Q2 (no Box)",
+  "edgeslicer_preset": "Qidi Q2 0.4 nozzle",
+  "bind": "127.0.0.12",
+  "port": 7125,
+  "lan": false,
+  "state": "standby",
+  "qidi": {
+    "box_report": "mcc+vars",
+    "boxes": 0,
+    "polar_cooler": true,
+    "stale_value_t": {}
+  },
+  "slots": [],
+  "faults": {}
+}

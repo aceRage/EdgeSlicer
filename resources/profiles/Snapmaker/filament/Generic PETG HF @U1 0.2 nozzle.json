@@ -437,12 +437,12 @@
         "0"
     ],
     "nozzle_temperature": [
-        "220",
-        "220"
+        "230",
+        "230"
     ],
     "nozzle_temperature_initial_layer": [
-        "220",
-        "220"
+        "230",
+        "230"
     ],
     "nozzle_temperature_range_low": [
         "220"

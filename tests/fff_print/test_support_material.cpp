@@ -960,6 +960,8 @@ TEST_CASE("SupportMaterial: per-group roof fill, classic tree", "[SupportMateria
     CHECK(grouped_b > control_b * 1.20);
     // A's roof did not move at all: the geometry is shared and untouched, and A is still filled with
     // the object's own interface parameters.
+    // The lowest roof layer (Roof1stLayer) is interface material since Orca #11812, so this also pins
+    // that a grouped Roof1stLayer is filled over the same area as the ungrouped one.
     CHECK(std::abs(grouped_a - control_a) <= control_a * 0.01);
     // And the roof DEPTH is identical on both sides - the documented 4b limit, asserted rather than
     // asserted-about.

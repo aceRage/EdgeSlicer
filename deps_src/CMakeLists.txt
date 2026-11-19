@@ -10,7 +10,6 @@ add_subdirectory(cgltf)       # glTF 2.0 / GLB parser (single header, MIT)
 add_subdirectory(fast_float)
 add_subdirectory(nanosvg)
 add_subdirectory(nlohmann)
-add_subdirectory(spline)      # Header-only spline library
 add_subdirectory(stb_dxt)     # Header-only STB DXT compression library
 
 # Static libraries
@@ -27,6 +26,7 @@ add_subdirectory(imguizmo)
 add_subdirectory(libigl)
 add_subdirectory(libnest2d)
 add_subdirectory(mcut)
+add_subdirectory(mdns)        # mDNS / DNS-SD (mjansson/mdns public domain + cxmdns AGPL-3.0, see mdns/NOTICE.md)
 add_subdirectory(meshoptimizer)   # EXT_meshopt_compression decoder (MIT, decoder only)
 add_subdirectory(miniz)
 add_subdirectory(minilzo)

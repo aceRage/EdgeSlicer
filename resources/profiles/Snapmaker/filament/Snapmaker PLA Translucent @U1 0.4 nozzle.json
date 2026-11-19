@@ -5,7 +5,8 @@
     "name": "Snapmaker PLA Translucent @U1 0.4 nozzle",
     "inherits": "Snapmaker PLA Translucent @U1 base",
     "compatible_printers": [
-        "Snapmaker U1 (0.4 nozzle)"
+        "Snapmaker U1 (0.4 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)"
     ],
     "additional_cooling_fan_speed": [
         "100"
@@ -14,16 +15,16 @@
         "70"
     ],
     "cool_plate_temp": [
-        "60"
+        "35"
     ],
     "cool_plate_temp_initial_layer": [
-        "60"
+        "35"
     ],
     "during_print_exhaust_fan_speed": [
         "70"
     ],
     "enable_pressure_advance": [
-        "1"
+        "0"
     ],
     "eng_plate_temp": [
         "60"
@@ -139,10 +140,10 @@
         "5"
     ],
     "graphic_effect_plate_temp": [
-        "65"
+        "70"
     ],
     "graphic_effect_plate_temp_initial_layer": [
-        "65"
+        "70"
     ],
     "supertack_plate_temp": [
         "45"
@@ -153,5 +154,6 @@
     "filament_flow_support": [
         "standard",
         "high_flow"
-    ]
+    ],
+    "close_fan_the_first_x_layers": ["3"]
 }

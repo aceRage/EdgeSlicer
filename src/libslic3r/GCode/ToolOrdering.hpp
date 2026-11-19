@@ -126,6 +126,12 @@ public:
     bool operator==(const LayerTools &rhs) const { return print_z == rhs.print_z; }
 
     bool is_extruder_order(unsigned int a, unsigned int b) const;
+    // The order this layer's extruders are printed in, given the extruder already loaded when the
+    // layer starts. The G-code export and both wipe tower plans (Bambu WipeTower, WipeTower2) take
+    // the order from here, so they cannot disagree about which tool changes a layer has. The list is
+    // rotated to start with the loaded extruder, unless fixed_extruder_order says it must be printed
+    // as it is. A negative or absent start extruder leaves it unchanged.
+    std::vector<unsigned int> nominal_extruder_order(int start_extruder) const;
     bool has_extruder(unsigned int extruder) const { return std::find(this->extruders.begin(), this->extruders.end(), extruder) != this->extruders.end(); }
 
     // Resolve a 1-based filament ID the same way ToolOrdering::collect_extruders
@@ -151,6 +157,10 @@ public:
     // Zero based extruder IDs, ordered to minimize tool switches.
     std::vector<unsigned int> 	extruders;
     bool                        preserve_extruder_order = false;
+    // The order of `extruders` was fixed by Cyclic tool-change ordering or a per-plate custom
+    // sequence ("other layers print sequence"): every layer prints it as given, even when the
+    // extruder loaded from the layer below sits later in the list (Orca #13582 semantics).
+    bool                        fixed_extruder_order = false;
     // If per layer extruder switches are inserted by the G-code preview slider, this value contains the new (1 based) extruder, with which the whole object layer is being printed with.
     // If not overriden, it is set to 0.
     unsigned int 				extruder_override = 0;
@@ -171,6 +181,13 @@ public:
     // and to support the wipe tower partitions above this one.
     size_t                      wipe_tower_partitions = 0;
     coordf_t 					wipe_tower_layer_height = 0.;
+    // print_z of the wipe tower layer this layer's tool changes print on. A layer too thin to be
+    // its own tower layer joins the one below, keeping that layer's z and height.
+    coordf_t                    wipe_tower_print_z = 0.;
+    // Whether this layer finishes its wipe tower layer. Of a tower layer and the layers joined to
+    // it, that is the last one changing tools, or the last one when none does.
+    bool                        wipe_tower_layer_ends = true;
+    bool                        joins_wipe_tower_layer_below() const { return has_wipe_tower && wipe_tower_print_z != print_z; }
     // Custom G-code (color change, extruder switch, pause) to be performed before this layer starts to print.
     const CustomGCode::Item    *custom_gcode = nullptr;
 
@@ -250,6 +267,17 @@ public:
     // map (manual mode) for the given per-layer filament lists. See GCode::_do_export.
     static MultiNozzleUtils::LayeredNozzleGroupResult group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
 
+    // True when this extruder (as it appears in LayerTools::extruders - this already
+    // covers support / support-interface extruders and anything the wipe tower touches
+    // for that layer, since those are folded into LayerTools::extruders by
+    // collect_extruders()) has no later extrusion layer than the one at print_z.
+    // print_z is compared (with EPSILON) against the print_z of the extruder's last
+    // LayerTools entry, so it does not matter which object / support layer produced it.
+    // An extruder missing from m_last_layer_per_extruder is conservatively treated as
+    // NOT finished (kept heated) - it never printed anything we know about, so we must
+    // not assume it is safe to shut off.
+    bool                is_last_extrusion_layer(coordf_t print_z, unsigned int extruder_id) const;
+
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
     void 				collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches);
@@ -307,6 +335,8 @@ private:
     unsigned int               m_last_printing_extruder  = (unsigned int)-1;
     // All extruders, which extrude some material over m_layer_tools.
     std::vector<unsigned int>  m_all_printing_extruders;
+    // Map: extruder_id -> print_z of the last layer it is used on
+    std::map<unsigned int, coordf_t> m_last_layer_per_extruder;
     std::unordered_map<uint32_t, std::vector<uint8_t>> m_tool_order_cache;
     const DynamicPrintConfig*  m_print_full_config = nullptr;
     const PrintConfig*         m_print_config_ptr = nullptr;
@@ -315,7 +345,8 @@ private:
     // grouping compute can store its result. Null in the ByObject/PrintObject path (grouping is skipped
     // there anyway). See reorder_extruders_for_minimum_flush_volume().
     Print*                     m_print = nullptr;
-    bool                       m_is_BBL_printer = false;
+    // Orca #12781: Print::wipe_tower_type() == Type1 (always so on Bambu Lab printers).
+    bool                       m_wipe_tower_type1 = false;
     // Mixed filament support: pointer to manager (owned by Print) and
     // number of physical extruders.
     const MixedFilamentManager* m_mixed_mgr    = nullptr;

@@ -2,11 +2,13 @@
 #include "CoolingBuffer.hpp"
 #include "../ContourZ.hpp"
 #include "../LocalesUtils.hpp"
+#include "MinLayerTimePause.hpp"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
 #include <algorithm>
 #include <iostream>
+#include <cstring>
 #include <float.h>
 #include <string_view>
 #include <system_error>
@@ -45,6 +47,7 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_fan_speed = -1;
     m_additional_fan_speed = -1;
     m_current_fan_speed = -1;
+    m_fan_speed_unknown = false;
     m_last_layer_slowed_down = false;
 }
 
@@ -80,6 +83,8 @@ struct CoolingLine
         // its feed rate encodes the local bead height (F_seg proportional to h_seg). Such a
         // block may only ever be slowed PROPORTIONALLY - see slow_down_to_feedrate().
         TYPE_ZAA_SCALED                = 1 << 21,
+        // Edge (min_layer_time_pause): a whole park-and-return block, from its START to its END tag.
+        TYPE_MIN_LAYER_PAUSE           = 1 << 22,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -111,6 +116,8 @@ struct CoolingLine
     float   time_max;
     // If marked with the "slowdown" flag, the line has been slowed down.
     bool    slowdown;
+    // TYPE_MIN_LAYER_PAUSE: the minimum layer time in seconds.
+    float   pause_target { 0.f };
 };
 
 // Calculate the required per extruder time stretches.
@@ -168,7 +175,9 @@ struct PerExtruderAdjustments
                 assert(line.time_max >= 0.f && line.time_max < FLT_MAX);
                 line.slowdown = true;
                 line.time     = line.time_max;
-                line.feedrate = line.length / line.time;
+                // A zero time (zero cooling time) would give an infinite feedrate and "G1 F-2147483648".
+                if (line.time > 0.f)
+                    line.feedrate = line.length / line.time;
             }
             time_total += line.time;
         }
@@ -184,7 +193,8 @@ struct PerExtruderAdjustments
             if (line.adjustable(slowdown_external_perimeters)) {
                 line.slowdown = true;
                 line.time     = std::min(line.time_max, line.time * factor);
-                line.feedrate = line.length / line.time;
+                if (line.time > 0.f)
+                    line.feedrate = line.length / line.time;
             }
             time_total += line.time;
         }
@@ -394,7 +404,10 @@ std::string CoolingBuffer::process_layer(std::string &&gcode, size_t layer_id, b
                                                    return std::any_of(adj.lines.begin(), adj.lines.end(),
                                                                       [](const CoolingLine &line) { return line.slowdown; });
                                                });
+        m_last_layer_paused = false;
         out = this->apply_layer_cooldown(m_gcode, layer_id, layer_time_stretched, per_extruder_adjustments);
+        // Edge (min_layer_time_pause): a paused layer is as long as it should be; speed smoothing leaves it alone.
+        m_last_layer_slowed_down = m_last_layer_slowed_down || m_last_layer_paused;
         m_gcode.clear();
     }
     return out;
@@ -429,6 +442,10 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
     // Orca: Whether we had our first extrusion in this layer.
     // Time of any other movements before the first extrusion will be excluded from the layer time.
     bool layer_had_extrusion = false;
+    // Bambu Studio 2.9.1 (GCodeEditor.cpp:143, 216, 298-301): walls of circles under the auto circle
+    // compensation ("; Slow Down Start" .. "; Slow Down End") keep their speed, which the compensation
+    // coefficients were measured at; the layer-time slowdown leaves them alone.
+    bool not_join_cooling = false;
 
     for (; *line_start != 0; line_start = line_end) 
     {
@@ -440,6 +457,23 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         if (*line_end == '\n')
             ++ line_end;
         CoolingLine line(0, line_start - gcode.c_str(), line_end - gcode.c_str());
+        // Edge (min_layer_time_pause): the park-and-return block is one opaque line. It takes no time here (the
+        // dwell is decided from the layer time) and returns to where it started, so the position is unchanged.
+        if (boost::starts_with(sline, MinLayerTimePause::START_TAG)) {
+            const size_t end_tag = gcode.find(MinLayerTimePause::END_TAG, line_end - gcode.c_str());
+            if (end_tag != std::string::npos) {
+                line_end = gcode.c_str() + end_tag;
+                while (*line_end != '\n' && *line_end != 0)
+                    ++ line_end;
+                if (*line_end == '\n')
+                    ++ line_end;
+                line.type         = CoolingLine::TYPE_MIN_LAYER_PAUSE;
+                line.line_end     = line_end - gcode.c_str();
+                line.pause_target = float(atof_decimal_point(std::string_view(sline).substr(strlen(MinLayerTimePause::START_TAG))));
+                adjustment->lines.emplace_back(std::move(line));
+                continue;
+            }
+        }
         if (boost::starts_with(sline, "G0 "))
             line.type = CoolingLine::TYPE_G0;
         else if (boost::starts_with(sline, "G1 "))
@@ -452,6 +486,12 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_G3;
         if (line.type) {
             // G0, G1 or G92
+            // With relative E every line's E is a distance of its own: a line without an E word moves the
+            // extruder by nothing. Reset the extruder accumulator before the new position is copied from the
+            // old one, or a line with no E (the "G1 F.." that opens a path or a wipe) inherits the E of the
+            // line before it and is counted as an extruder move of that length.
+            if (m_config.use_relative_e_distances.value)
+                current_pos[3] = 0.f;
             // Parse the G-code line.
             std::vector<float> new_pos(current_pos);
             const char *c = sline.data() + 3;
@@ -500,7 +540,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             
             // ORCA: Dont slowdown external perimeters for layer time works by not marking the external perimeter as adjustable, 
             // hence the slowdown algorithm ignores it.
-            if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && ! wipe && adjust_external) {
+            if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && ! wipe && adjust_external && ! not_join_cooling) {
                 line.type |= CoolingLine::TYPE_ADJUSTABLE;
                 // ZAA (zaa_speed_scaling): this block's F encodes the segment's local bead height,
                 // so the slowdown must scale it rather than cap it. See CoolingLine::TYPE_ZAA_SCALED.
@@ -510,9 +550,6 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             }
             if ((line.type & CoolingLine::TYPE_G92) == 0) {
                 //BBS: G0, G1, G2, G3. Calculate the duration.
-                if (m_config.use_relative_e_distances.value)
-                    // Reset extruder accumulator.
-                    current_pos[3] = 0.f;
                 float dif[4];
                 for (size_t i = 0; i < 4; ++ i)
                     dif[i] = new_pos[i] - current_pos[i];
@@ -571,6 +608,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(sline.data() + m_toolchange_prefix.size(), sline.data() + sline.size(), new_extruder);
             if (std::errc::invalid_argument != ret.ec) {
+                new_extruder = filament_of_output_tool(new_extruder);
                 // Only change extruder in case the number is meaningful. User could provide an out-of-range index through custom gcodes -
                 // those shall be ignored.
                 if (new_extruder < map_extruder_to_per_extruder_adjustment.size()) {
@@ -622,6 +660,10 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 (pos_P != std::string::npos) ? atof_decimal_point(sline.c_str() + pos_P + 1) * 0.001 : 0.);
         } else if (boost::starts_with(sline, ";_FORCE_RESUME_FAN_SPEED")) {
             line.type = CoolingLine::TYPE_FORCE_RESUME_FAN;
+        } else if (boost::starts_with(sline, "; Slow Down Start")) {
+            not_join_cooling = true;
+        } else if (boost::starts_with(sline, "; Slow Down End")) {
+            not_join_cooling = false;
         }
 
         // Orca: For any movements before this layer's first ever extrusion, we exclude them from the layer time calculation.
@@ -799,6 +841,9 @@ std::string CoolingBuffer::apply_layer_cooldown(
     // Second generate the adjusted G-code.
     std::string new_gcode;
     new_gcode.reserve(gcode.size() * 2);
+    // ORCA: per-printer minimum non-zero fan PWM. Applied at every part-cooling fan emission below so any
+    // non-zero command is raised to at least this percent (0 disables the clamp).
+    const unsigned int part_cooling_fan_min_pwm = static_cast<unsigned int>(std::max(0, m_config.part_cooling_fan_min_pwm.value));
     bool overhang_fan_control= false;
     int  overhang_fan_speed   = 0;
     bool internal_bridge_fan_control= false; // ORCA: Add support for separate internal bridge fan speed control
@@ -807,7 +852,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
     int  supp_interface_fan_speed = 0;
     bool ironing_fan_control= false; // ORCA: Add support for ironing fan speed control
     int  ironing_fan_speed   = 0; // ORCA: Add support for ironing fan speed control
-    auto change_extruder_set_fan = [ this, layer_id, layer_time, &new_gcode,
+    auto change_extruder_set_fan = [ this, layer_id, layer_time, &new_gcode, part_cooling_fan_min_pwm,
         &overhang_fan_control, &overhang_fan_speed,
         &internal_bridge_fan_control, &internal_bridge_fan_speed,
         &supp_interface_fan_control, &supp_interface_fan_speed,
@@ -821,14 +866,38 @@ std::string CoolingBuffer::apply_layer_cooldown(
         int close_fan_the_first_x_layers = EXTRUDER_CONFIG(close_fan_the_first_x_layers);
         // Is the fan speed ramp enabled?
         int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);
+        // ORCA: explicit per-filament first-layer override (-1 = disabled, 0-100 = forced PWM percent on layer 0).
+        // The override is only honoured when the "No cooling for the first" gate is 0; otherwise the gate would
+        // force layers 1..N-1 to zero while the override sets layer 0 to a non-zero value, which is confusing
+        // and non-monotonic. The UI greys out and resets the value in that case, but we also guard here so
+        // legacy profiles loaded with both set are neutralised at the slicer level.
+        int initial_layer_fan_speed = EXTRUDER_CONFIG(initial_layer_fan_speed);
+        const bool has_initial_layer_override = initial_layer_fan_speed >= 0 && close_fan_the_first_x_layers <= 0;
         supp_interface_fan_speed = EXTRUDER_CONFIG(support_material_interface_fan_speed);
 
-        if (close_fan_the_first_x_layers <= 0 && full_fan_speed_layer > 0) {
-            // When ramping up fan speed from close_fan_the_first_x_layers to full_fan_speed_layer, force close_fan_the_first_x_layers above zero,
-            // so there will be a zero fan speed at least at the 1st layer.
-            close_fan_the_first_x_layers = 1;
-        }
-        if (int(layer_id) >= close_fan_the_first_x_layers) {
+        // ORCA: previously a silent override forced `close_fan_the_first_x_layers` from 0 up to 1 whenever a ramp
+        // was configured (`full_fan_speed_layer > 0`), so the first printed layer always had the fan disabled.
+        // That hid the user's literal "no cooling for the first 0 layers" setting and produced a non-zero starting
+        // factor on the ramp denominator. The override has been removed: with N=0 and M>0 the ramp now genuinely
+        // starts on layer 0 at a factor of 1/M and reaches 100% at layer M-1, matching the intent of the option.
+        //
+        // ORCA: First-layer hard override (`initial_layer_fan_speed`). When the user has set this option to a
+        // value >= 0, layer 0 emits exactly that percentage so the entire first layer
+        // is at one stable fan speed. The override wins over the `close_fan_the_first_x_layers` gate when
+        // layer_id == 0. From layer 1 onwards the regular logic resumes.
+        if (has_initial_layer_override && layer_id == 0) {
+            fan_speed_new             = initial_layer_fan_speed;
+            overhang_fan_speed        = initial_layer_fan_speed;
+            overhang_fan_control      = false;
+            internal_bridge_fan_speed   = initial_layer_fan_speed;
+            internal_bridge_fan_control = false;
+            supp_interface_fan_speed    = initial_layer_fan_speed;
+            supp_interface_fan_control  = false;
+            ironing_fan_speed           = initial_layer_fan_speed;
+            ironing_fan_control         = false;
+            // additional_fan_speed_new is left at its configured value (auxiliary fan is independent of the
+            // part-cooling override).
+        } else if (int(layer_id) >= close_fan_the_first_x_layers) {
             float   fan_max_speed             = get_value_at(m_config, m_config.fan_max_speed, ConfigFlowDomain::Filament, m_current_extruder);
             float slow_down_layer_time = float(EXTRUDER_CONFIG(slow_down_layer_time));
             float fan_cooling_layer_time      = float(EXTRUDER_CONFIG(fan_cooling_layer_time));
@@ -846,10 +915,25 @@ std::string CoolingBuffer::apply_layer_cooldown(
             //}
             overhang_fan_speed   = EXTRUDER_CONFIG(overhang_fan_speed);
             if (int(layer_id) >= close_fan_the_first_x_layers && int(layer_id) + 1 < full_fan_speed_layer) {
-                // Ramp up the fan speed from close_fan_the_first_x_layers to full_fan_speed_layer.
-                float factor = float(int(layer_id + 1) - close_fan_the_first_x_layers) / float(full_fan_speed_layer - close_fan_the_first_x_layers);
-                fan_speed_new    = std::clamp(int(float(fan_speed_new) * factor + 0.5f), 0, 255);
-                overhang_fan_speed = std::clamp(int(float(overhang_fan_speed) * factor + 0.5f), 0, 255);
+                if (has_initial_layer_override && close_fan_the_first_x_layers == 0 && full_fan_speed_layer > 1) {
+                    // ORCA: Option-B anchored ramp. When the first-layer override is configured and there's
+                    // no "no cooling" gate, the ramp interpolates linearly from `initial_layer_fan_speed` on
+                    // layer 0 up to the computed target on layer `full_fan_speed_layer - 1` instead of
+                    // scaling the target by `factor` from zero. Layer 0 itself is handled by the override
+                    // branch above; this branch only runs for layer_id >= 1, but the formula uses t = 0 at
+                    // layer 0 conceptually so the curve is continuous. Guarantees a monotonic transition
+                    // even when the override is larger than the natural 1/M starting value.
+                    const float anchor = float(initial_layer_fan_speed);
+                    const float denom  = float(full_fan_speed_layer - 1);
+                    const float t      = float(int(layer_id)) / denom;
+                    fan_speed_new      = std::clamp(int(anchor + t * (float(fan_speed_new) - anchor) + 0.5f), 0, 255);
+                    overhang_fan_speed = std::clamp(int(anchor + t * (float(overhang_fan_speed) - anchor) + 0.5f), 0, 255);
+                } else {
+                    // Ramp up the fan speed from close_fan_the_first_x_layers to full_fan_speed_layer.
+                    float factor = float(int(layer_id + 1) - close_fan_the_first_x_layers) / float(full_fan_speed_layer - close_fan_the_first_x_layers);
+                    fan_speed_new    = std::clamp(int(float(fan_speed_new) * factor + 0.5f), 0, 255);
+                    overhang_fan_speed = std::clamp(int(float(overhang_fan_speed) * factor + 0.5f), 0, 255);
+                }
             }
             supp_interface_fan_speed = EXTRUDER_CONFIG(support_material_interface_fan_speed);
             supp_interface_fan_control = supp_interface_fan_speed >= 0;
@@ -882,11 +966,18 @@ std::string CoolingBuffer::apply_layer_cooldown(
             ironing_fan_control = false; // ORCA: Add support for ironing fan speed control
             ironing_fan_speed = 0; // ORCA: Add support for ironing fan speed control
         }
-        if (fan_speed_new != m_fan_speed) {
+        // A tool change may keep the same configured base fan speed while the physical fan is
+        // still running at the previous filament's overhang speed. Restore the base speed before
+        // emitting G-code for the new tool in that case.
+        // EDGE: also when tool change G-code may have set the fan (see m_fan_speed_unknown).
+        if (fan_speed_new != m_fan_speed ||
+            (immediately_apply && (m_current_fan_speed != fan_speed_new || m_fan_speed_unknown))) {
             m_fan_speed = fan_speed_new;
             m_current_fan_speed = fan_speed_new;
-            if (immediately_apply)
-                new_gcode  += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
+            if (immediately_apply) {
+                new_gcode  += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed, part_cooling_fan_min_pwm);
+                m_fan_speed_unknown = false;
+            }
         }
         //BBS
         if (additional_fan_speed_new != m_additional_fan_speed) {
@@ -918,8 +1009,14 @@ std::string CoolingBuffer::apply_layer_cooldown(
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
             if (std::errc::invalid_argument != ret.ec) {
+                new_extruder = filament_of_output_tool(new_extruder);
                 if (new_extruder != m_current_extruder) {
                     m_current_extruder = new_extruder;
+                    // EDGE: the new filament starts at its layer speed (written just below); a role fan region of
+                    // the old one ends here, and GCode::_extrude writes a fresh START when the new one continues it.
+                    for (int type : {int(CoolingLine::TYPE_OVERHANG_FAN_START), int(CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START),
+                                     int(CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START), int(CoolingLine::TYPE_IRONING_FAN_START)})
+                        fan_speed_change_requests[type] = false;
                     change_extruder_set_fan(true);
                 }
             }
@@ -959,12 +1056,16 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START] = true;
                 need_set_fan = true;
             }
-        } else if (line->type & CoolingLine::TYPE_IRONING_FAN_END && fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]) {
-            if (ironing_fan_control) {
+        } else if (line->type & CoolingLine::TYPE_IRONING_FAN_END) {
+            if (ironing_fan_control && fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]) {
                 fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START] = false;
             }
             need_set_fan = true;
         } else if (line->type & CoolingLine::TYPE_FORCE_RESUME_FAN) {
+            // EDGE (with Orca #15158's skipping of repeated fan commands): the tool change G-code before
+            // this marker may have set the fan itself, so the next fan command must be written even when
+            // it repeats the last one CoolingBuffer wrote.
+            m_fan_speed_unknown = true;
             // check if any fan speed change request is active
             if (m_fan_speed != -1 && !std::any_of(fan_speed_change_requests.begin(), fan_speed_change_requests.end(), [](const std::pair<int, bool>& p) { return p.second; })){
                 fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = true;
@@ -975,6 +1076,29 @@ std::string CoolingBuffer::apply_layer_cooldown(
         }
         else if (line->type & CoolingLine::TYPE_EXTRUDE_END) {
             // Just remove this comment.
+        } else if (line->type & CoolingLine::TYPE_MIN_LAYER_PAUSE) {
+            // Edge (min_layer_time_pause): keep the block, with the dwell for the time the layer still lacks,
+            // or drop it when the layer is long enough.
+            const std::string dwell = MinLayerTimePause::dwell_gcode(line->pause_target, layer_time);
+            if (! dwell.empty()) {
+                std::string_view block(line_start, line_end - line_start);
+                // Without the START and END tag lines.
+                block.remove_prefix(std::min(block.size(), block.find('\n') + 1));
+                const size_t end_tag = block.rfind(MinLayerTimePause::END_TAG);
+                if (end_tag != std::string_view::npos)
+                    block = block.substr(0, end_tag);
+                const std::string dwell_line = std::string(MinLayerTimePause::DWELL_TAG) + "\n";
+                const size_t      dwell_pos  = block.find(dwell_line);
+                if (dwell_pos != std::string_view::npos) {
+                    new_gcode.append(block.data(), dwell_pos);
+                    new_gcode += dwell;
+                    new_gcode.append(block.data() + dwell_pos + dwell_line.size(), block.size() - dwell_pos - dwell_line.size());
+                    // The block's own moves set their feedrates; give the following moves theirs back.
+                    if (current_feedrate > 0)
+                        new_gcode += "G1 F" + std::to_string(current_feedrate) + "\n";
+                    m_last_layer_paused = true;
+                }
+            }
         } else if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE | CoolingLine::TYPE_HAS_F)) {
             // Find the start of a comment, or roll to the end of line.
             const char *end = line_start;
@@ -989,8 +1113,20 @@ std::string CoolingBuffer::apply_layer_cooldown(
             assert(fpos != nullptr);
             new_feedrate = line->slowdown ? int(floor(60. * line->feedrate + 0.5)) : atoi(fpos);
             if (new_feedrate == current_feedrate) {
+                // A line with an axis word is never dropped, even when it seems not to move the head: the position
+                // this pass tracks runs straight through firmware branches (the H2D tool change repeats its moves to
+                // the tower's avoid position in a power-loss-resume branch), where a move that repeats the one before
+                // it is the only one the printer runs. Only its F word is removed.
+                auto has_axis_word = [line_start, end]() {
+                    for (const char *c = line_start + 2; c < end; ++ c)
+                        if ((c[-1] == ' ' || c[-1] == '\t') &&
+                            (*c == 'X' || *c == 'Y' || *c == 'Z' || *c == 'E' || *c == 'I' || *c == 'J'))
+                            return true;
+                    return false;
+                };
                 // No need to change the F value.
-                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) || line->length == 0.)
+                if ((line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) ||
+                    (line->length == 0. && ! has_axis_word()))
                     // Feedrate does not change and this line does not move the print head. Skip the complete G-code line including the G-code comment.
                     end = line_end;
                 else
@@ -1061,27 +1197,34 @@ std::string CoolingBuffer::apply_layer_cooldown(
         }
 
         if (need_set_fan) {
+            // Orca #15158: skip a fan command for the speed the fan already runs at. EDGE: unless tool
+            // change G-code ran since the last command (m_fan_speed_unknown), which may have set the fan.
+            const auto set_fan = [&](int speed) {
+                if (m_current_fan_speed != speed || m_fan_speed_unknown) {
+                    new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, speed, part_cooling_fan_min_pwm);
+                    m_current_fan_speed = speed;
+                    m_fan_speed_unknown = false;
+                }
+            };
             if (fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, overhang_fan_speed);
-                m_current_fan_speed = overhang_fan_speed;
+                set_fan(overhang_fan_speed);
             } else if (fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]){ // ORCA: Add support for separate internal bridge fan speed control
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, internal_bridge_fan_speed);
-                m_current_fan_speed = internal_bridge_fan_speed;
+                set_fan(internal_bridge_fan_speed);
             }
             else if (fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, supp_interface_fan_speed);
-                m_current_fan_speed = supp_interface_fan_speed;
+                set_fan(supp_interface_fan_speed);
             }
             else if (fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, ironing_fan_speed);
-                m_current_fan_speed = ironing_fan_speed;
+                set_fan(ironing_fan_speed);
             }
             else if(fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_current_fan_speed);
+                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_current_fan_speed, part_cooling_fan_min_pwm);
                 fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = false;
+                m_fan_speed_unknown = false;
             }
-            else
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
+            else {
+                set_fan(m_fan_speed);
+            }
             need_set_fan = false;
         }
         pos = line_end;

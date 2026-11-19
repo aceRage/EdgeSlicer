@@ -1,14 +1,19 @@
 #include "SelectMachine.hpp"
+#include "DeviceModelCode.hpp"
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
 #include "DualNozzleState.hpp"
+#include "NozzleInfo.hpp"
 #include "BambuSendMapping.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include <chrono>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GUI.hpp"
@@ -20,6 +25,7 @@
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/StaticBox.hpp"
 #include "ConnectPrinter.hpp"
+#include "SelectMachinePop.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/PlaterWorker.hpp"
 
@@ -29,6 +35,7 @@
 #include <wx/dcgraph.h>
 #include <wx/mstream.h>
 #include <miniz.h>
+#include <boost/lexical_cast.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <set>
@@ -336,6 +343,18 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     sizer_basic_right_info->Add(m_sizer_printer, 0, wxTOP, 0);
     sizer_basic_right_info->Add(0, 0, 0, wxTOP, FromDIP(4));
     sizer_basic_right_info->Add(m_text_printer_msg, 0, wxLEFT, 0);
+
+    // The selected LAN printer refused its saved code: open its name / access code dialog.
+    m_link_access_code = new wxHyperlinkCtrl(m_basic_panel, wxID_ANY, _L("The printer refused the access code. Re-enter it"), "");
+    m_link_access_code->SetFont(::Label::Body_12);
+    m_link_access_code->Bind(wxEVT_LEFT_DOWN, [this](auto &) {
+        const std::string dev_id = m_printer_last_select;
+        CallAfter([dev_id]() { open_printer_edit_dialog(dev_id); });
+    });
+    m_link_access_code->Bind(wxEVT_ENTER_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_HAND); });
+    m_link_access_code->Bind(wxEVT_LEAVE_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_ARROW); });
+    m_link_access_code->Hide();
+    sizer_basic_right_info->Add(m_link_access_code, 0, wxLEFT, 0);
 
 
     m_basicl_sizer->Add(m_sizer_thumbnail_area, 0, wxLEFT, 0);
@@ -961,7 +980,7 @@ void SelectMachineDialog::update_select_layout(MachineObject *obj)
         }
     }
 
-    if (obj && (obj->is_support_timelapse || bbl_caps_fallback) && is_show_timelapse()) {
+    if (obj && (obj->is_support_timelapse || bbl_caps_fallback)) {
         select_timelapse->Show();
         update_timelapse_enable_status();
     } else {
@@ -1037,8 +1056,23 @@ void SelectMachineDialog::finish_mode()
 }
 
 
+// The spool holders the slot picker offers: a two-extruder printer's 254 / 255, or a nozzle rack's
+// holders 255 down to 247 (the H3C; the picker keeps those a rack nozzle is fed from).
+static std::vector<AmsTray> mapping_spools(MachineObject* obj)
+{
+    if (!obj)
+        return {};
+    if (obj->is_rack_printer())
+        return obj->vir_slots;
+    return obj->external_spools();
+}
+
 void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &result)
 {
+    bool rack_printer = false;
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            rack_printer = obj->is_rack_printer();
     if (result.empty()) {
         BOOST_LOG_TRIVIAL(trace) << "ams_mapping result is empty";
         for (auto it = m_materialList.begin(); it != m_materialList.end(); it++) {
@@ -1063,7 +1097,7 @@ void SelectMachineDialog::sync_ams_mapping_result(std::vector<FilamentInfo> &res
                 wxColour ams_col;
 
                 if (f->tray_id >= 0) {
-                    ams_id = wxGetApp().transition_tridid(f->tray_id);
+                    ams_id = wxGetApp().transition_tridid(f->tray_id, rack_printer); // "1".."9" / "N-Ext" on the H3C
                     //ams_id = wxString::Format("%02d", f->tray_id + 1);
                 } else {
                     ams_id = "-";
@@ -1189,6 +1223,17 @@ std::vector<int> SelectMachineDialog::sliced_filament_map() const
     return fil_map;
 }
 
+int SelectMachineDialog::filament_physical_extruder(int filament_id) const
+{
+    const std::vector<int> fil_map = sliced_filament_map();
+    if (filament_id < 0 || filament_id >= (int) fil_map.size())
+        return -1;
+    const int logical = fil_map[size_t(filament_id)] - 1;
+    if (logical != 0 && logical != 1)
+        return -1;
+    return BambuExtruderMap::logical_to_physical(printer_physical_extruder_map(), logical);
+}
+
 std::vector<int> SelectMachineDialog::printer_physical_extruder_map() const
 {
     if (PresetBundle* preset_bundle = wxGetApp().preset_bundle)
@@ -1230,6 +1275,11 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
             if (auto *fm = bundle->project_config.option<ConfigOptionInts>("filament_map"))
                 in.nozzle_filament_map = fm->values;
     }
+    // Never a slot the printer cannot be sent to yet (the H3C's AMS 3H): BambuSendMapping::compose
+    // leaves such an entry unmapped, whatever picked it.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            in.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     return BambuSendMapping::compose(m_ams_mapping_result, m_filaments, in, mapping_array_str, mapping_array_str2, ams_mapping_info);
 }
 
@@ -1241,6 +1291,7 @@ std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type)
     case NozzleVolumeType::nvtStandard:    return "standard_flow";
     case NozzleVolumeType::nvtHighFlow:    return "high_flow";
     case NozzleVolumeType::nvtTPUHighFlow: return "tpu_high_flow";
+    case NozzleVolumeType::nvtTPU285:      return "tpu285_flow";
     case NozzleVolumeType::nvtE3DHighFlow: return "e3d_high_flow";
     case NozzleVolumeType::nvtHybrid:      return "hybrid_flow";
     default:                               return "standard_flow";
@@ -1278,7 +1329,8 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
     if (opt_nozzle_volume_type)
         for (size_t i = 0; i < opt_nozzle_volume_type->size(); ++i)
             volume_types.push_back(opt_nozzle_volume_type->get_at(i));
-    nozzles_info = BambuSendMapping::nozzles_info(opt_nozzle_diameters->values, volume_types);
+    // Per-nozzle process P7: the sizes this project gives the nozzles, which the job was sliced for.
+    nozzles_info = BambuSendMapping::nozzles_info(preset_bundle->effective_nozzle_diameters(), volume_types);
     return true;
 }
 
@@ -1369,7 +1421,8 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
             if (nozzle.diameter.empty())
                 continue;
             try {
-                nozzle_info["dia"] = std::stod(nozzle.diameter);
+                // Upstream Orca #17079: std::stod reads "0.4" as 0 under a decimal-comma UI language.
+                nozzle_info["dia"] = boost::lexical_cast<double>(nozzle.diameter);
             } catch (...) {
                 continue;
             }
@@ -1395,7 +1448,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     // and falls back to the preset's two nozzles when the printer has not reported any.
     BambuNozzleMapping::RequestInput in;
     in.calibration              = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
-    in.extrude_cali_manual_mode = 1; // no PA-value switch in this fork: automatic, as the payload sends
+    in.extrude_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default, as the payload sends
     if (gcode_result)
         for (auto f : gcode_result->filament_change_sequence)
             in.filament_change_sequence.push_back(int(f));
@@ -1406,7 +1459,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
             for (const auto& nz : group_result->get_nozzles_for_filament(fila.id))
                 in.filament_nozzles.push_back({ fila.id, nz.extruder_id, nz.group_id, nz.diameter, nz.volume_type });
     in.physical_extruder_map = printer_physical_extruder_map();
-    in.preset_diameters      = opt_nozzle_diameters->values;
+    in.preset_diameters      = preset_bundle->effective_nozzle_diameters(); // P7: the project's nozzle sizes
     if (auto* nvt = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
         for (int v : nvt->values)
             in.preset_volumes.push_back(NozzleVolumeType(v));
@@ -1530,6 +1583,28 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         auto it = conf.trays.find(r.id);
         if (it == conf.trays.end() || !it->second.valid())
             continue;
+        if (BambuExtruderMap::is_external_spool_ams_id(it->second.ams_id)) {
+            // The external spool of the extruder this filament prints on, confirmed in the
+            // arrangement dialog: tray 254/255, slot 0, when it still holds a spool.
+            FilamentInfo ext;
+            const int    physical = BambuExtruderMap::external_spool_physical_extruder(it->second.ams_id);
+            if (r.id >= 0 && r.id < (int) fil_map.size() && BambuExtruderMap::physical_to_logical(pem, physical) != fil_map[r.id] - 1)
+                continue;
+            if (!obj_->external_spool_mapping_info(it->second.ams_id, ext))
+                continue;
+            r.tray_id        = ext.tray_id;
+            r.ams_id         = ext.ams_id;
+            r.slot_id        = ext.slot_id;
+            r.color          = ext.color;
+            r.colors         = ext.colors;
+            r.ctype          = ext.ctype;
+            r.type           = ext.type;
+            r.filament_id    = ext.filament_id;
+            r.distance       = 0;
+            r.mapping_result = 0;
+            ++applied;
+            continue;
+        }
         auto ams_it = obj_->amsList.find(std::to_string(it->second.ams_id));
         if (ams_it == obj_->amsList.end() || !ams_it->second)
             continue;
@@ -1541,7 +1616,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         if (tray_it == ams_it->second->trayList.end() || !tray_it->second || !tray_it->second->is_exists)
             continue;
         AmsTray* t = tray_it->second;
-        r.tray_id        = it->second.ams_id * 4 + it->second.slot_id;
+        r.tray_id        = obj_->tray_index_of(it->second.ams_id, it->second.slot_id); // 28 + slot on the AMS 3H
         r.ams_id         = std::to_string(it->second.ams_id);
         r.slot_id        = std::to_string(it->second.slot_id);
         r.color          = t->color;
@@ -1554,7 +1629,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         ++applied;
     }
     if (applied > 0) {
-        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog starts from the " << applied << " AMS slot(s) confirmed before slicing";
+        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog starts from the " << applied << " AMS slot(s) / external spool(s) confirmed before slicing";
         sync_ams_mapping_result(m_ams_mapping_result);
     }
 }
@@ -1827,32 +1902,40 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
             sourcet_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
             // Ultra: a printer this build has no definition for (resources/printers/<code>.json) names
             // its reported model code instead of a bare "Unknown", so it can be reported and added.
-            if (sourcet_print_name.IsEmpty() || sourcet_print_name == _L("Unknown"))
-                sourcet_print_name = wxString::Format(_L("model code %s, no printer definition in this build"), from_u8(obj_->printer_type));
+            if (obj_->printer_type.empty()) {
+                // Neither the printer's model code nor its serial number identified it: say so rather
+                // than calling it incompatible with an empty model.
+                msg_text = _L("Couldn't identify this printer: it did not report its model. Click Refresh, or wait a "
+                              "few seconds for the printer to announce itself on the network, then try again. If this "
+                              "keeps happening, use Help > Export Logs and send the ZIP file to support.");
+            } else {
+                if (sourcet_print_name.IsEmpty() || sourcet_print_name == _L("Unknown"))
+                    sourcet_print_name = wxString::Format(_L("model code %s, no printer definition in this build"), from_u8(obj_->printer_type));
 
-            //target print
-            std::string target_model_id;
-            if (m_print_type == PrintFromType::FROM_NORMAL){
-                PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-                target_model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
-            }
-            else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
-                if (m_required_data_plate_data_list.size() > 0) {
-                    target_model_id = m_required_data_plate_data_list[m_print_plate_idx]->printer_model_id;
+                //target print
+                std::string target_model_id;
+                if (m_print_type == PrintFromType::FROM_NORMAL){
+                    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+                    target_model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
                 }
+                else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
+                    if (m_required_data_plate_data_list.size() > 0) {
+                        target_model_id = m_required_data_plate_data_list[m_print_plate_idx]->printer_model_id;
+                    }
+                }
+
+                auto target_print_name = wxString(obj_->get_preset_printer_model_name(target_model_id));
+                target_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
+                if (target_print_name.IsEmpty()) {
+                    // The profile side: name the profile's printer model (or the plate's model id) rather than "()".
+                    std::string model = target_model_id;
+                    if (m_print_type == PrintFromType::FROM_NORMAL)
+                        model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
+                    target_print_name = wxString::Format(_L("%s, no printer definition in this build"), from_u8(model));
+                }
+                msg_text = wxString::Format(_L("The selected printer (%s) is incompatible with the chosen printer profile in the slicer (%s)."), sourcet_print_name, target_print_name);
             }
 
-            auto target_print_name = wxString(obj_->get_preset_printer_model_name(target_model_id));
-            target_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
-            if (target_print_name.IsEmpty()) {
-                // The profile side: name the profile's printer model (or the plate's model id) rather than "()".
-                std::string model = target_model_id;
-                if (m_print_type == PrintFromType::FROM_NORMAL)
-                    model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
-                target_print_name = wxString::Format(_L("%s, no printer definition in this build"), from_u8(model));
-            }
-            msg_text = wxString::Format(_L("The selected printer (%s) is incompatible with the chosen printer profile in the slicer (%s)."), sourcet_print_name, target_print_name);
-            
             update_print_status_msg(msg_text, true, true);
         }
         catch (...){}
@@ -1953,15 +2036,7 @@ bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
         }
     }
 
-    if (source_model != target_model) {
-        std::vector<std::string> compatible_machine = dev->get_compatible_machine(target_model);
-        vector<std::string>::iterator it = find(compatible_machine.begin(), compatible_machine.end(), source_model);
-        if (it == compatible_machine.end()) {
-            return true;
-        }
-    }
-
-    return false;
+    return !device_matches_profile_model(source_model, target_model, dev->get_compatible_machine(target_model));
 }
 
 
@@ -1970,7 +2045,7 @@ bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
  * @param tag_nozzle_diameter -- return the target nozzle_diameter but mismatch
  * @return is same or not
 /*************************************************************/
-bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) const
+bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter, float &printer_nozzle_diameter) const
 {
     DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return false;
@@ -1984,6 +2059,13 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) c
     {
         return false;
     }
+    // Per-nozzle process P7: compare the sizes the job was sliced for (the project's), not the printer preset's.
+    ConfigOptionFloats effective_diameters(preset_bundle->effective_nozzle_diameters());
+    opt_nozzle_diameters = &effective_diameters;
+
+    const std::vector<Extder>& extders = obj_->m_extder_data.extders;
+    if (extders.empty())
+        return true; // nothing reported: unknown, assume it matches (Orca #12814)
 
     try
     {
@@ -1991,7 +2073,20 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) c
         for (auto i = 0; i < extruders.size(); i++) {
             auto extruder = extruders[i] - 1;
             tag_nozzle_diameter = float(opt_nozzle_diameters->get_at(extruder));
-            if (tag_nozzle_diameter != obj_->m_extder_data.extders[0].current_nozzle_diameter) {
+            // Orca #12814 (upstream compares the used nozzle, not always the first): on a
+            // two-extruder printer each used extruder is checked against its own nozzle.
+            const Extder* used = &extders.front();
+            if (extders.size() > 1 && opt_nozzle_diameters->size() > 1) {
+                const int physical = BambuExtruderMap::logical_to_physical(printer_physical_extruder_map(), extruder);
+                for (const Extder& e : extders)
+                    if (e.id == physical)
+                        used = &e;
+            }
+            printer_nozzle_diameter = used->current_nozzle_diameter;
+            // Orca #12814: assume matching if the printer has not reported its diameter.
+            if (!NozzleInfo::diameter_known(printer_nozzle_diameter))
+                continue;
+            if (tag_nozzle_diameter != printer_nozzle_diameter) {
                 return false;
             }
         }
@@ -2006,6 +2101,11 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) c
 
 bool SelectMachineDialog::is_same_nozzle_type(const Extder& extruder, std::string& filament_type) const
 {
+    // Orca #12814: assume matching if the nozzle type is unknown (the caller already skips the
+    // check then; kept here so no other caller can compare against HRC 0).
+    if (extruder.current_nozzle_type == NozzleType::ntUndefine)
+        return true;
+
     auto printer_nozzle_hrc = Print::get_hrc_by_nozzle_type(extruder.current_nozzle_type);
 
     auto preset_bundle = wxGetApp().preset_bundle;
@@ -2105,9 +2205,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2171,9 +2272,10 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
         std::string filament_type = boost::to_upper_copy(m_ams_mapping_result[i].type);
         std::string filament_brand;
 
-        for (auto fs : m_filaments) {
+        for (const auto& fs : m_filaments) {
             if (fs.id == m_ams_mapping_result[i].id) {
-                filament_brand = m_filaments[i].brand;
+                filament_brand = fs.brand;
+                break;
             }
         }
 
@@ -2183,6 +2285,12 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         DeviceManager::check_filaments_in_blacklist(filament_brand, filament_type, in_blacklist, action, info);
         
+        // The prohibitions are about feeding through an AMS (TPU; Bambu PET-CF/PA6-CF only warn); a two-extruder
+        // job's filament on an external spool holder does not go through one (BambuStudio scopes
+        // these blacklist entries to "slot": "ams").
+        if (in_blacklist && action == "prohibition" && BambuSendMapping::is_external_spool(m_ams_mapping_result[i]))
+            in_blacklist = false;
+
         if (in_blacklist && action == "prohibition") {
             has_prohibited_filament = true;
             prohibited_error = wxString::FromUTF8(info);
@@ -2218,13 +2326,54 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
     if (obj_->m_extder_data.extders[0].current_nozzle_type != ntUndefine && (m_print_type == PrintFromType::FROM_NORMAL))
     {
         float nozzle_diameter = 0;
-        if (!is_same_nozzle_diameters(nozzle_diameter))
+        float printer_nozzle_diameter = 0;
+        // Per-nozzle process P7: a printer with a nozzle rack (H2C) swaps nozzles itself, so the mounted nozzle being
+        // another size is no mismatch - a size the printer has on none of the extruder's nozzles is, and refuses the
+        // send, as a slice for a size its rack lacks is refused (P4).
+        const bool rack_printer = obj_->has_nozzle_rack();
+        if (rack_printer) {
+            const std::vector<double> sliced = wxGetApp().preset_bundle->effective_nozzle_diameters();
+            std::vector<size_t>       used;
+            for (int e : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (e >= 1)
+                    used.push_back(size_t(e - 1));
+            const auto missing = rack_nozzle_size_mismatches(sliced, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()), used);
+            if (!missing.empty()) {
+                has_slice_warnings = true;
+                is_printing_block  = true;
+                confirm_text.push_back(ConfirmBeforeSendInfo(
+                    wxString::Format(_L("This job was sliced for nozzle sizes the printer does not have on that extruder: %s. "
+                                        "Change the nozzle sizes in the Prepare sidebar (or sync them from the printer) and slice again."),
+                                     from_u8(describe_nozzle_size_mismatches(missing))),
+                    ConfirmBeforeSendInfo::InfoLevel::Warning));
+            }
+            // Per-nozzle process P9: the rack slots the job prints with, named, against the nozzles the printer reports (read from
+            // the device state the Device page holds; nothing is requested). A slot whose size the rack lacks, or more pinned slots
+            // of a size than the rack has nozzles of it, refuses the send.
+            const DynamicPrintConfig  full = wxGetApp().preset_bundle->full_config();
+            std::vector<unsigned int> used_filaments;
+            for (int f : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (f >= 1)
+                    used_filaments.push_back(unsigned(f - 1));
+            const std::vector<RackSlotUse> uses = rack_slots_in_use(full, used_filaments);
+            if (!uses.empty()) {
+                const std::vector<std::string> problems =
+                    rack_slot_send_problems(full, uses, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()));
+                for (const std::string &problem : problems) {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P9: send refused: " << problem;
+                    has_slice_warnings = true;
+                    is_printing_block  = true;
+                    confirm_text.push_back(ConfirmBeforeSendInfo(from_u8(problem), ConfirmBeforeSendInfo::InfoLevel::Warning));
+                }
+            }
+        }
+        if (!rack_printer && !is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
         {
             has_slice_warnings = true;
             // is_printing_block  = true;  # Removed to allow nozzle overrides (to support non-standard nozzles)
-            
+
             wxString nozzle_in_preset = wxString::Format(_L("nozzle in preset: %.1f %s"),nozzle_diameter, "");
-            wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), obj_->m_extder_data.extders[0].current_nozzle_diameter, "");
+            wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), printer_nozzle_diameter, "");
 
             confirm_text.push_back(ConfirmBeforeSendInfo(_L("Your nozzle diameter in sliced file is not consistent with memorized nozzle. If you changed your nozzle lately, please go to Device > Printer Parts to change settings.") 
                 + "\n    " + nozzle_in_preset 
@@ -2530,10 +2679,13 @@ void SelectMachineDialog::on_send_print()
     else
         BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request: none for this job";
 
-    // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
-    m_print_job->extruder_cali_manual_mode = 1;
+    // No PA-mode switch in this fork: send Bambu Studio's default. Its switch "Nozzles and
+    // filaments of the same type share the same PA profile" defaults to ON, which sends 0.
+    m_print_job->extruder_cali_manual_mode = 0;
 
-    m_print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
+    m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
+    m_print_job->could_emmc_print = obj_->is_support_print_with_emmc;
 
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
@@ -2563,6 +2715,10 @@ void SelectMachineDialog::on_send_print()
 
     if (obj_->has_ams()) {
         m_print_job->task_use_ams = m_checkbox_list["use_ams"]->GetValue();
+        // A two-extruder job that prints from an external spool: BambuStudio's rule (AMS and
+        // external -> true, external only -> false). Unchanged for every other job.
+        if (obj_->is_multi_extruders() && m_print_job->task_use_ams)
+            m_print_job->task_use_ams = BambuSendMapping::use_ams(m_ams_mapping_result, true);
     } else {
         m_print_job->task_use_ams = false;
     }
@@ -2600,9 +2756,17 @@ void SelectMachineDialog::update_user_machine_list()
     if (m_agent && m_agent->is_user_login()) {
         boost::thread get_print_info_thread = Slic3r::create_thread([this, token = std::weak_ptr<int>(m_token)] {
             NetworkAgent* agent = wxGetApp().getAgent();
-            unsigned int http_code;
+            unsigned int http_code = 0;
             std::string body;
-            int result = agent->get_user_print_info(&http_code, &body);
+            // A thread body: the agent can be gone (no plug-in) and the plug-in can throw, and either
+            // would take the whole slicer down (std::terminate / null dereference).
+            int result = -1;
+            try {
+                if (agent)
+                    result = agent->get_user_print_info(&http_code, &body);
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "get_user_print_info threw";
+            }
             CallAfter([token, this, result, body] {
                 if (token.expired()) {return;}
                 if (result == 0) {
@@ -2626,6 +2790,10 @@ void SelectMachineDialog::update_user_machine_list()
 void SelectMachineDialog::on_refresh(wxCommandEvent &event)
 {
     BOOST_LOG_TRIVIAL(info) << "m_printer_last_select: on_refresh";
+    // Search the network again as well (rate-limited): the list below is rebuilt from the account's
+    // printers (fetched next) and from what discovery has heard.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        dev->restart_discovery("send dialog refresh", /* rate_limited */ true);
     show_status(PrintDialogStatus::PrintStatusRefreshingMachineList);
 
     update_user_machine_list();
@@ -2855,7 +3023,7 @@ void SelectMachineDialog::update_user_printer()
     else {
         m_printer_last_select = "";
         update_select_layout(nullptr);
-        m_comboBox_printer->SetTextLabel("");
+        m_comboBox_printer->SetValue(_L("No available printers"));
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "for send task, current printer id =  " << m_printer_last_select << std::endl;
@@ -3134,6 +3302,15 @@ void SelectMachineDialog::update_show_status()
         }
     }
     MachineObject* obj_ = dev->get_my_machine(m_printer_last_select);
+    // The selected LAN printer refused its saved access code on the last dial: offer to re-enter it.
+    if (m_link_access_code) {
+        const bool refused = obj_ && obj_->is_lan_mode_printer() && dev->lan_access_code_refused(obj_->dev_id);
+        if (refused != m_link_access_code->IsShown()) {
+            m_link_access_code->Show(refused);
+            Layout();
+            Fit();
+        }
+    }
     if (!obj_) {
         update_ams_check(nullptr);
         if (agent) {
@@ -3233,9 +3410,9 @@ void SelectMachineDialog::update_show_status()
         return;
     }
 
-    // check sdcard when if lan mode printer
+    // check sdcard when if lan mode printer (a printer that prints from internal storage needs none, as in Bambu Studio)
     if (obj_->is_lan_mode_printer()) {
-        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD) {
+        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD && !obj_->is_support_print_with_emmc) {
             show_status(PrintDialogStatus::PrintStatusLanModeNoSdcard);
             return;
         }
@@ -3411,49 +3588,6 @@ void SelectMachineDialog::update_timelapse_enable_status()
     }
 }
 
-
-bool SelectMachineDialog::is_show_timelapse()
-{
-    auto compare_version = [](const std::string &version1, const std::string &version2) -> bool {
-        int i = 0, j = 0;
-        int max_size = std::max(version1.size(), version2.size());
-        while (i < max_size || j < max_size) {
-            int v1 = 0, v2 = 0;
-            while (i < version1.size() && version1[i] != '.') v1 = 10 * v1 + (version1[i++] - '0');
-            while (j < version2.size() && version2[j] != '.') v2 = 10 * v2 + (version2[j++] - '0');
-            if (v1 > v2) return true;
-            if (v1 < v2) return false;
-            ++i;
-            ++j;
-        }
-        return false;
-    };
-
-    std::string standard_version = "2.2.0";
-    PartPlate *plate      = m_plater->get_partplate_list().get_curr_plate();
-    fs::path   gcode_path = plate->get_tmp_gcode_path();
-
-    std::string   line;
-    std::ifstream gcode_file;
-    gcode_file.open(gcode_path.string());
-    if (gcode_file.fail()) {
-    } else {
-        bool is_version = false;
-        while (gcode_file >> line) {
-            if (is_version) {
-                if (compare_version(standard_version, line)) {
-                    gcode_file.close();
-                    return false;
-                }
-                break;
-            }
-            if (line == "Snapmaker Orca")
-                is_version = true;
-        }
-    }
-    gcode_file.close();
-    return true;
-}
 
 void SelectMachineDialog::reset_ams_material()
 {
@@ -3802,7 +3936,8 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList);
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(extruder), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }
@@ -4228,7 +4363,8 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList);
+                    m_mapping_popup.update_ams_data(obj_->amsList, mapping_spools(obj_), filament_physical_extruder(fo.id), obj_->rack_bound_slots(),
+                                                    obj_->is_multi_extruders());
                     m_mapping_popup.Popup();
                 }
             }

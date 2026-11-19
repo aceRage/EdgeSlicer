@@ -69,7 +69,7 @@ enum Id : int {
 
 // True when this id needs a job_id to be meaningful. The resume/stop/ignore family carries
 // "job_id" so firmware can check the command is for the job it currently holds; sending one with
-// an empty job_id is the documented way to have it rejected, so the dialog disables those buttons
+// an empty job_id is the documented way to have it rejected, so the dialog hides those buttons
 // rather than firing a command that cannot work.
 bool print_error_action_needs_job_id(int action_id);
 
@@ -90,6 +90,28 @@ std::vector<int> generic_print_error_actions();
 
 // "2, 5, 11" - for the log line that records what a table asked for and what was drawn.
 std::string format_action_ids(const std::vector<int>& ids);
+
+// Which of a resolved button set the dialog actually shows (2026-11-05).
+//
+// The dialog used to show Stop / Resume Printing greyed whenever it had no job_id - which is every
+// refused new job (an A1 answering a send with 05024007 "filament loading/unloading not
+// completed": no table entry, so the generic Stop/Resume/OK, and no job, so two dead buttons).
+// A greyed button that can never be pressed only says "something is wrong with this dialog".
+// The rule now: a button whose command carries a job_id is shown, and pressable, exactly when the
+// printer named a job for this error and the command can go out on the current connection; any
+// other time it is hidden and `why` says which, for the tooltip. Buttons without a job_id are
+// never affected. If hiding leaves nothing to press, OK is added so the window can be closed.
+struct PrintErrorButtonLayout
+{
+    enum class Why { None, NoJobId, CannotSend };
+    std::vector<int> shown;  // in the input's order; REMOVE_CLOSE_BTN passes through as a flag
+    std::vector<int> hidden; // the job_id buttons left out
+    Why              why{Why::None};
+};
+// `job_id` is the job the printer reported with the error ("" when none). `can_send` is false when
+// the connection refuses print commands (a status-only Bambu Connect printer, or a secured printer
+// that rejects unsigned commands).
+PrintErrorButtonLayout layout_print_error_buttons(const std::vector<int>& buttons, const std::string& job_id, bool can_send);
 
 // ---- the remote surface: one action id, one verb, one label ----
 //
@@ -320,6 +342,14 @@ bool accept_command_refusal(const nlohmann::json& print_block, SentCommandTracke
 // variant are removed from the table's set, and when nothing else is left the answer is OK alone.
 std::vector<int> resolve_command_error_actions(const std::vector<int>& table_actions, bool print_action,
                                                bool& used_fallback);
+
+// The message HMSQuery::describe_error returns ends in " (0300 400C)" - the code, spelled the way
+// the Device page and the notifications show it. The error dialog shows the code on its own line
+// underneath (with a timestamp suffix, "[0300 400C 094706]"), so the sentence is shown without the
+// trailing "(code)" or the same code would appear twice. Only a trailing parenthesised group that
+// is the same code as `code` (spaces and case ignored) is removed; anything else, including text
+// that merely mentions a code, is returned unchanged.
+std::string strip_trailing_error_code(const std::string& text, const std::string& code);
 
 // ---- payload builders ----
 //

@@ -12,6 +12,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
+
+#include "libslic3r/I18N.hpp"
+#include "libslic3r/format.hpp"
 
 namespace Slic3r {
 
@@ -68,6 +73,7 @@ AdaptivePAProcessor::AdaptivePAProcessor(GCode &gcodegen, const std::vector<unsi
       m_max_next_feedrate(0.0),
       m_next_feedrate(0.0),
       m_current_feedrate(0.0),
+      m_modal_feedrate(0.0),
       m_last_extruder_id(-1),
       m_pa_change_pattern(R"(; PA_CHANGE:T(\d+) MM3MM:([0-9]*\.[0-9]+) ACCEL:(\d+) BR:(\d+) RC:(\d+) OV:(\d+))"),
       m_g1_f_pattern(R"(G1 F([0-9]+))")
@@ -95,6 +101,18 @@ AdaptivePAInterpolator* AdaptivePAProcessor::getInterpolator(unsigned int tool_i
         return it->second.get();
     }
     return nullptr;  // Handle the case where the tool_id was not found
+}
+
+// The feedrate, in mm/s, a G0/G1/G2/G3 line sets with its F word, or 0 when it has none.
+static double feedrate_word(const std::string &line)
+{
+    if (line.size() < 3 || line[0] != 'G' || line[2] != ' ' || (line[1] != '0' && line[1] != '1' && line[1] != '2' && line[1] != '3'))
+        return 0.0;
+    const std::size_t pos = line.find(" F");
+    if (pos == std::string::npos || pos + 2 >= line.size() || !std::isdigit(static_cast<unsigned char>(line[pos + 2])) ||
+        line.find(';') < pos)
+        return 0.0;
+    return std::stod(line.substr(pos + 2)) / 60.0;
 }
 
 /**
@@ -145,6 +163,10 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                 m_current_feedrate = std::stod(line.substr(pos + 1)) / 60.0; // Convert from mm/min to mm/s
             }
         }
+
+        // Every move with an F word sets the feedrate the firmware runs the following moves at, including travels and wipes.
+        if (const double feedrate = feedrate_word(line); feedrate > 0)
+            m_modal_feedrate = feedrate;
         
         // Wipe end found, continue searching for current feed rate.
         if (line.find("WIPE_END") != std::string::npos) {
@@ -182,6 +204,7 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                 std::streampos current_pos = stream.tellg();
                 std::string next_line;
                 double temp_feed_rate = 0;
+                double modal_feedrate = m_modal_feedrate;
                 bool extrude_move_found = false;
                 int line_counter = 0;
                 
@@ -194,6 +217,11 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                     if (next_line.compare(0, PA_RESET_TAG.size(), PA_RESET_TAG) == 0)
                         continue;
                     line_counter++;
+                    // Up to the first extrusion, every move with an F word (a travel, a lift, the extrusion itself) sets the
+                    // feedrate the extrusion inherits when no G1 F precedes it
+                    if (!extrude_move_found)
+                        if (const double feedrate = feedrate_word(next_line); feedrate > 0)
+                            modal_feedrate = feedrate;
                     // Found an extrude move, set extrude move found flag and move to the next line
                     if ((!extrude_move_found) && next_line.find("G1 ") == 0 &&
                         next_line.find('X') != std::string::npos &&
@@ -201,6 +229,13 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                         next_line.find('E') != std::string::npos) {
                         // Pattern matched, break the loop
                         extrude_move_found = true;
+                        // No G1 F preceded the extrusion: the cooling buffer drops a feedrate the preceding travel or wipe
+                        // already set, so the extrusion runs at that feedrate rather than at the last G1 F seen.
+                        if (temp_feed_rate == 0 && modal_feedrate > 0) {
+                            temp_feed_rate     = modal_feedrate;
+                            m_next_feedrate    = modal_feedrate;
+                            m_current_feedrate = modal_feedrate;
+                        }
                         continue;
                     }
                     
@@ -340,6 +375,65 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
     }
 
     return output.str();
+}
+
+// Orca #14198: validate an adaptive pressure advance model (one "PA,flow,acceleration" set per line).
+// Edge: spaces and tabs around the values are allowed, as AdaptivePAInterpolator reads them fine.
+std::string AdaptivePAProcessor::validate_adaptive_pa_model(const std::string &model_str)
+{
+    if (model_str.empty())
+        return {}; // Empty model is valid
+
+    std::istringstream model_stream(model_str);
+    std::string        line;
+    int                line_number = 0;
+
+    while (std::getline(model_stream, line)) {
+        ++line_number;
+
+        // Trim whitespace
+        const auto first = line.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            continue; // Skip empty lines
+        const auto last = line.find_last_not_of(" \t\r\n");
+        line = line.substr(first, last - first + 1);
+
+        // Only numbers, commas, dots and blanks are allowed (no letters or other characters)
+        for (char c : line) {
+            if (!std::isdigit(static_cast<unsigned char>(c)) && c != ',' && c != '.' && c != ' ' && c != '\t')
+                return Slic3r::format(_u8L("Line %1%: only numbers, commas and dots are allowed"), line_number);
+        }
+
+        // Exactly 3 values (PA, flow, acceleration)
+        if (std::count(line.begin(), line.end(), ',') != 2)
+            return Slic3r::format(_u8L("Line %1%: must contain exactly 3 comma-separated values (PA, flow, acceleration)"), line_number);
+
+        double values[3];
+        try {
+            std::istringstream line_stream(line);
+            std::string        value;
+            for (double &v : values) {
+                std::getline(line_stream, value, ',');
+                if (value.find_first_not_of(" \t") == std::string::npos)
+                    return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+                size_t used = 0;
+                v           = std::stod(value, &used);
+                if (value.find_first_not_of(" \t", used) != std::string::npos)
+                    return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+            }
+        } catch (const std::exception &) {
+            return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+        }
+        const double pa = values[0], flow = values[1], accel = values[2];
+        if (pa >= 2.0)
+            return Slic3r::format(_u8L("Line %1%: PA value must be less than 2"), line_number);
+        if (flow <= pa)
+            return Slic3r::format(_u8L("Line %1%: flow value must be greater than PA value"), line_number);
+        if (accel <= flow)
+            return Slic3r::format(_u8L("Line %1%: acceleration value must be greater than flow value"), line_number);
+    }
+
+    return {}; // All validations passed
 }
 
 } // namespace Slic3r

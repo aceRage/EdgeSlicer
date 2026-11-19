@@ -24,9 +24,9 @@ using namespace Slic3r;
 // Bambu Studio lets the idle nozzle of a two-extruder printer (H2D, H2D Pro, H2C, X2D) cool down
 // between uses and heats it back just in time (GCodeProcessor::PreCoolingInjector):
 //     M400
-//     M104 T<hotend> S<t> N0 ;Multi extruder pre cooling      right after its last use
+//     M104 T<hotend> S<t> N0 C ;Multi extruder pre cooling    right after its last use
 //     M632 S<filament> [N R] W
-//     M104 T<hotend> S<t> N0 ;Multi extruder pre heating      timed to finish before its next use
+//     M104 T<hotend> S<t> N0 W ;Multi extruder pre heating    timed to finish before its next use
 //     M633
 // T is the PHYSICAL hotend (physical_extruder_map; right = 0 on H2D/H2C). Only printers whose profile
 // sets enable_pre_heating get these lines; every other printer's G-code must stay as it was.
@@ -171,8 +171,9 @@ size_t count_lines(const std::string &gcode, const std::regex &re)
     return n;
 }
 
-const std::regex re_precool(R"(^M104 T(\d+) S(\d+) N0 ;Multi extruder pre cooling$)");
-const std::regex re_preheat(R"(^M104 T(\d+) S(\d+) N0 ;Multi extruder pre heating$)");
+// Bambu Studio ef8222a6c: C marks a cooling line, W a heating one.
+const std::regex re_precool(R"(^M104 T(\d+) S(\d+) N0 C ;Multi extruder pre cooling$)");
+const std::regex re_preheat(R"(^M104 T(\d+) S(\d+) N0 W ;Multi extruder pre heating$)");
 const std::regex re_any_injected(R"(;Multi extruder pre (cooling|heating))");
 const std::regex re_m632(R"(^M632 S(\d+)( N R)? W$)");
 const std::regex re_tool(R"(^T(\d+)( |$))");
@@ -189,8 +190,8 @@ struct Walk
 };
 
 // Replays the G-code body and checks what the injected lines promise:
-// - every pre-cool is "M400" + "M104 T<hotend> S<t> N0", every pre-heat is "M632 S<f> [N R] W" +
-//   "M104 T<hotend> S<t> N0" + "M633", with T a physical hotend (0/1);
+// - every pre-cool is "M400" + "M104 T<hotend> S<t> N0 C", every pre-heat is "M632 S<f> [N R] W" +
+//   "M104 T<hotend> S<t> N0 W" + "M633", with T a physical hotend (0/1);
 // - no extrusion is printed from a hotend between its pre-cool and its pre-heat;
 // - a pre-heat names the filament that hotend loads next, on that filament's hotend, at that
 //   filament's nozzle temperature (minus filament_preheat_temperature_delta at most).
@@ -310,7 +311,7 @@ void check_walk(const Walk &w)
 
 } // namespace
 
-SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool]")
+SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool][slow]")
 {
     for (const bool tower : { true, false }) {
         GIVEN(std::string("filament 1 on the left, 2 and 3 on the right, by layer, prime tower ") + (tower ? "on" : "off"))
@@ -400,7 +401,11 @@ TEST_CASE("Printers without pre-heating keep their G-code", "[BambuPreCool]")
         const std::string gcode = slice(print, model, cfg, H2D);
         CHECK_FALSE(PreCooling::pre_cooling_active(print));
         check_untouched(gcode);
-        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_(START|END)")) == 0);
+        // Bambu Studio 2.9.1 rams the outgoing filament on the tower at every extruder change whether or not the
+        // printer pre-heats (WipeTower::ramming, tests/design_bbs_tower_port.md), so the markers stay; only the
+        // pre-cooling lines inside them are gone.
+        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_START")) > 0);
+        CHECK(count_lines(gcode, std::regex("^; NOZZLE_CHANGE_START")) == count_lines(gcode, std::regex("^; NOZZLE_CHANGE_END")));
     }
     SECTION("H2D with every filament on one extruder: nothing is idle")
     {

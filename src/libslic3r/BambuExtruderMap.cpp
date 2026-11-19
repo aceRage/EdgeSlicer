@@ -21,6 +21,19 @@ bool is_ams_ht_id(int ams_id) { return ams_id >= 128 && ams_id < 153; }
 
 bool is_external_spool_ams_id(int ams_id) { return ams_id == 254 || ams_id == 255; }
 
+int external_spool_physical_extruder(int ams_id) { return ams_id == 255 ? 0 : ams_id == 254 ? 1 : -1; }
+
+int external_spool_ams_id(int physical_extruder) { return physical_extruder == 0 ? 255 : physical_extruder == 1 ? 254 : -1; }
+
+std::string tray_display_name(int ams_id, int slot_id)
+{
+    if (ams_id == 255)
+        return "Ext-R";
+    if (ams_id == 254)
+        return "Ext-L";
+    return tray_name(ams_id, slot_id);
+}
+
 std::string tray_name(int ams_id, int slot_id)
 {
     if (is_external_spool_ams_id(ams_id))
@@ -30,6 +43,26 @@ std::string tray_name(int ams_id, int slot_id)
     if (ams_id >= 0 && ams_id < 26 && slot_id >= 0 && slot_id < 9)
         return std::string(1, char('A' + ams_id)) + std::string(1, char('1' + slot_id));
     return "A1";
+}
+
+std::string rack_tray_name(int slot_id) { return std::to_string(slot_id + 1); }
+
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id, bool rack_ams)
+{
+    AmsListEntry entry;
+    int          ams  = -1;
+    int          slot = -1;
+    try {
+        ams  = std::stoi(ams_id);
+        slot = std::stoi(slot_id);
+    } catch (...) {
+        return entry;
+    }
+    if (ams < 0 || slot < 0)
+        return entry;
+    entry.key       = ams * 4 + slot;
+    entry.tray_name = rack_ams ? rack_tray_name(slot) : tray_name(ams, slot);
+    return entry;
 }
 
 std::vector<int> filaments_on_wrong_extruder(const std::vector<int>        &filament_map,

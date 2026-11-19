@@ -61,6 +61,10 @@ To mitigate this effect, OrcaSlicer allows you to specify a negative distance th
 
 ![elephant-foot-compensation](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/Precision/elephant-foot-compensation.png?raw=true)
 
+### Elephant foot layers density
+
+The elephant foot can also be reduced by printing the internal solid infill of the layers just above the first one with less material. The set density is used on the second layer; the following layers get linearly denser up to the number of elephant foot compensation layers, after which the solid infill is printed at full density again. For example 80% over 3 layers prints the second, third and fourth layers at about 80%, 87% and 93%. 100% (the default) disables it. It is not applied when the object is printed on a raft.
+
 ## Precise wall
 
 The 'Precise Wall' is a distinctive feature introduced by OrcaSlicer, aimed at improving the dimensional accuracy of prints and minimizing layer inconsistencies by slightly increasing the spacing between the outer wall and the inner wall.

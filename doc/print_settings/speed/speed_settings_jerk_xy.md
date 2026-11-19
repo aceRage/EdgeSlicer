@@ -27,6 +27,7 @@ This setting overrides firmware jerk values when different motion types need spe
   - [Infill](#infill)
   - [Top surface](#top-surface)
   - [Initial layer](#initial-layer)
+  - [First layer travel](#first-layer-travel)
   - [Travel](#travel)
 - [Junction Deviation](#junction-deviation)
 - [Useful links](#useful-links)
@@ -57,6 +58,11 @@ Jerk for top surface printing. This is usually set to a lower value than infill 
 ### Initial layer
 
 Jerk for initial layer printing. This is usually set to a lower value than top surface to improve adhesion.
+
+### First layer travel
+
+Jerk for travel moves on the first layer. If the value is expressed as a percentage (e.g. 50%), it will be calculated based on the travel jerk.  
+If this value is set to 0 (the default), first layer travels use the initial layer jerk.
 
 ### Travel
 

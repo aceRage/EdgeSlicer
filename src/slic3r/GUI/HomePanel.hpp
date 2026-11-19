@@ -25,6 +25,7 @@ namespace GUI {
 
 class WebViewPanel;
 class HomeVendors;
+class HomeVaults;
 class ModelBrowserPanel;
 
 // The Home tab: a local page (resources/web/home) with a side menu of sections - Recent (the
@@ -36,7 +37,7 @@ class ModelBrowserPanel;
 // code that still talks to it: it is built only on demand - File > Start page, EVT_LOAD_URL - and
 // then shown in place of Home with a strip to go back.
 //
-// Models (Windows, Preferences > "Model browser (beta)") is the in-app model browser
+// Models (Windows and macOS 12+, Preferences > "Model browser (beta)") is the in-app model browser
 // (ModelBrowserPanel): a native panel shown in place of the page, with its own "Home" button back.
 // It is a separate, isolated browser; nothing of it runs in this page's web view.
 class HomePanel : public wxPanel
@@ -63,6 +64,10 @@ public:
     void on_tab_changed(bool selected);
     void sys_color_changed();
 
+    // edgeslicer://connector?url=<https link>: shows Home > Vendors and starts "Import from link"
+    // with the address filled in (the user still confirms the address and then the connector).
+    void open_connector_link(const std::string& url);
+
 private:
     void ensure_browser();
     void notify_start_page(bool active);
@@ -83,6 +88,11 @@ private:
     void forget_recent(const std::string& path);
     void open_archived(const std::string& id);
     void open_archived_project(const std::string& id);
+    // A file Home > Vendors just saved (Download & Open): the same routes as the Library and the
+    // Print History, picked by the file's name (HomeTab::download_open_kind).
+    void open_downloaded(const std::string& path);
+    void ensure_vendors();
+    void ensure_vaults();
     void reveal_archived(const std::string& id);
     void delete_archived(const std::string& id);
 
@@ -132,6 +142,7 @@ private:
     std::shared_ptr<std::atomic<bool>> m_library_cancel { std::make_shared<std::atomic<bool>>(false) };
 
     std::unique_ptr<HomeVendors> m_vendors; // made when the page first asks
+    std::unique_ptr<HomeVaults>  m_vaults;  // the same
 
     // Worker threads report back through CallAfter only while this is alive.
     std::shared_ptr<bool> m_alive { std::make_shared<bool>(true) };

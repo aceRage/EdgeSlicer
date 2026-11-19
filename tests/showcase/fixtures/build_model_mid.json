@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1",
+      "name": "Golden: half-way build-up of the model (Build-up shows: Model), solid cap at the cut",
+      "plate_index": 0,
+      "source": "model",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "radial_gradient",
+        "color1": "#FFFFFF",
+        "color2": "#D9DCE1"
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "color": "#F2F2F2",
+        "shadow_strength": 0.45
+      },
+      "materials": {
+        "layer_lines": "real",
+        "toolpath_smoothness": 0.8
+      },
+      "video": {
+        "path": "static",
+        "duration": 4,
+        "hold_start": 0,
+        "hold_end": 0,
+        "loop": false,
+        "callouts": false,
+        "keyframes": [],
+        "build": {
+          "enabled": true,
+          "from": 0,
+          "to": 1,
+          "easing": "linear",
+          "source": "clip"
+        }
+      },
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      }
+    }
+  ]
+}

@@ -31,7 +31,7 @@ the wrapper bat, confirmed exit 0, and committed.
   with `-DBUILD_TESTS=ON` to add the `tests/` subdirectory (needed for
   `libslic3r_tests`/`[paintdepth]`/`[chameleon]`).
 - Wrapper bat written to
-  `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat`
+  `%TEMP%\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat`
   (vcvars64 + `cmake --build . --config Release --target ALL_BUILD`, run from inside
   the build dir — `cmake --build <dir> --target <T>` from OUTSIDE the build dir fails
   with `MSB1009: Project file does not exist` on this cmake/generator combo, so the

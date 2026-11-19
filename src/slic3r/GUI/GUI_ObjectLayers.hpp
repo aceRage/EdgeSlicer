@@ -3,10 +3,12 @@
 
 #include "GUI_ObjectSettings.hpp"
 #include "wxExtensions.hpp"
+#include "Widgets/TextInput.hpp"
 
 #ifdef __WXOSX__
 #include "libslic3r/PrintConfig.hpp"
 #endif
+#include "libslic3r/Slicing.hpp"
 
 class wxBoxSizer;
 
@@ -21,6 +23,18 @@ typedef std::pair<coordf_t, coordf_t>   t_layer_height_range;
 
 class ObjectLayers;
 
+// What typing new heights into a height range's Min Z / Max Z would do to the object's ranges.
+enum class LayerRangeEditCheck
+{
+    Ok,
+    Negative,   // it would start below the bed
+    Empty,      // it would end where it starts, or below (the slicer drops a range that thin)
+    Taken,      // another range has these heights: it would be replaced, its settings lost
+};
+// range: the range edited, a key of ranges; new_range: its heights after the edit.
+LayerRangeEditCheck check_layer_range_edit(const t_layer_config_ranges &ranges, const t_layer_height_range &range,
+                                           const t_layer_height_range &new_range);
+
 enum EditorType
 {
     etUndef         = 0,
@@ -29,7 +43,8 @@ enum EditorType
     etLayerHeight   = 4,
 };
 
-class LayerRangeEditor : public wxTextCtrl
+// ::TextInput (global): Preferences.hpp and others forward-declare a Slic3r::GUI::TextInput that would shadow it.
+class LayerRangeEditor : public ::TextInput
 {
     bool                m_enter_pressed     { false };
     bool                m_call_kill_focus   { false };
@@ -50,6 +65,8 @@ public:
 
     EditorType          type() const {return m_type;}
     void                set_focus_data() const { m_set_focus_data(m_type);}
+    void                SetValue(const wxString& value) { GetTextCtrl()->SetValue(value); }
+    wxString            GetValue() { return GetTextCtrl()->GetValue(); }
     void                msw_rescale();
 
 private:
@@ -60,6 +77,7 @@ class ObjectLayers : public OG_Settings
 {
     ScalableBitmap  m_bmp_delete;
     ScalableBitmap  m_bmp_add;
+    ScalableBitmap  m_bmp_layer;
     ModelObject*    m_object {nullptr};
 
     wxFlexGridSizer*       m_grid_sizer;

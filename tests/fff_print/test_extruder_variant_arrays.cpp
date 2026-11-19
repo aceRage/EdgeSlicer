@@ -136,3 +136,21 @@ TEST_CASE("A two-extruder grouping machine with one-entry per-extruder arrays sl
     for (int extruder : grouping->get_extruder_map(true))
         CHECK((extruder == 0 || extruder == 1));
 }
+
+TEST_CASE("Each tool of a per-variant toolchanger retracts with its own variant's values", "[ExtruderVariant][VariantNormalize]")
+{
+    // The printer preset keeps all 15 retraction values (5 tools x 3 variants); every tool on a Standard
+    // nozzle must get its own Standard value, not the first five values of the vector.
+    DynamicPrintConfig  config = variant_layout_config(5, THREE_VARIANTS, 2);
+    std::vector<double> retraction;
+    for (int e = 1; e <= 5; ++e)
+        for (int v = 0; v < 3; ++v)
+            retraction.push_back(double(e) + double(v) / 10.);
+    config.option<ConfigOptionFloats>("retraction_length")->values = retraction;
+
+    Print             print;
+    const std::string gcode = slice_two_cubes(config, print);
+    REQUIRE_FALSE(gcode.empty());
+    CHECK(print.config().retraction_length.values == std::vector<double>{ 1., 2., 3., 4., 5. });
+    CHECK(gcode.find("\n; retraction_length = 1,2,3,4,5\n") != std::string::npos);
+}

@@ -14,6 +14,8 @@ class ComboBox : public wxWindowWithItems<TextInput, wxItemContainer>
     std::vector<wxBitmap>         icons;
     std::vector<void *>           datas;
     std::vector<wxClientDataType> types;
+    std::vector<wxBitmap>         action_icons; // right-hand per-row icons (EVT_DROPDOWN_ITEM_ACTION)
+    std::vector<char>             disabled;     // header rows: shown, never selected
 
     DropDown               drop;
     bool     drop_down = false;
@@ -30,6 +32,10 @@ public:
              long            style     = 0);
 
     DropDown & GetDropDown() { return drop; }
+
+    // Opt-in, off by default: while the list is open, typing narrows it to the rows that contain the
+    // typed text; a key typed while it is closed opens it and starts the filter.
+    void EnableTypeToFilter(bool on = true) { drop.EnableTypeToFilter(on); }
 
     virtual bool SetFont(wxFont const & font) override;
 
@@ -65,6 +71,13 @@ public:
 
     wxBitmap GetItemBitmap(unsigned int n);
     void     SetItemBitmap(unsigned int n, wxBitmap const &bitmap);
+    // An icon drawn at the right of the row; a click on it sends EVT_DROPDOWN_ITEM_ACTION (GetInt() is
+    // the row) and leaves the list open. wxNullBitmap removes it. (OrcaSlicer #13946)
+    void     SetItemActionBitmap(unsigned int n, wxBitmap const &bitmap);
+    // A disabled row is drawn grey and cannot be picked with the mouse or the arrow keys.
+    void     SetItemDisabled(unsigned int n, bool disable = true);
+    bool     IsItemDisabled(unsigned int n) const { return n < disabled.size() && disabled[n]; }
+    void     CloseDropdown();
     bool     is_drop_down(){return drop_down;}
     void     DeleteOneItem(unsigned int pos) { DoDeleteOneItem(pos); }
 protected:
@@ -93,6 +106,8 @@ private:
     void mouseDown(wxMouseEvent &event);
     void mouseWheelMoved(wxMouseEvent &event);
     void keyDown(wxKeyEvent &event);
+    void charEvent(wxKeyEvent &event);
+    void openDropdown();
     void onMove(wxMoveEvent &event);
 
     DECLARE_EVENT_TABLE()

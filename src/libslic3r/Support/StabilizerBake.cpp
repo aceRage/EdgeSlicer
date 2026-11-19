@@ -170,7 +170,8 @@ ModelObject *apply_stabilizer_bake(Model &model, ModelObject &source, const Stab
 
 std::vector<std::string> objects_with_live_stabilizers(const Model &model, const DynamicPrintConfig &print_config)
 {
-    // Both are a plain on/off test: enable_support a bool, stabilizer_supports an enum whose 0 is Off.
+    // A plain on/off test: stabilizer_supports is an enum whose 0 is Off. (Enable supports does not
+    // matter: stabilizers print without it.)
     auto on = [](const ConfigOption *opt) { return opt != nullptr && (opt->type() == coBool ? opt->getBool() : opt->getInt() != 0); };
     auto resolved = [&print_config, &on](const ModelObject &obj, const char *key) {
         if (const ConfigOption *opt = obj.config.option(key); opt != nullptr)
@@ -179,7 +180,7 @@ std::vector<std::string> objects_with_live_stabilizers(const Model &model, const
     };
     std::vector<std::string> out;
     for (const ModelObject *obj : model.objects)
-        if (obj != nullptr && resolved(*obj, "stabilizer_supports") && resolved(*obj, "enable_support"))
+        if (obj != nullptr && resolved(*obj, "stabilizer_supports"))
             out.push_back(obj->name);
     return out;
 }

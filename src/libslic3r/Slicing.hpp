@@ -84,9 +84,10 @@ struct SlicingParameters
     // If the object is printed over a non-soluble raft, the first layer may be printed with a briding flow.
     bool 		first_object_layer_bridging { false };
 
-    // Soluble interface? (PLA soluble in water, HIPS soluble in lemonen)
-    // otherwise the interface must be broken off.
-    bool        soluble_interface { false };
+    // Zero-gap interface flags for top / bottom / raft contact.
+    bool        zero_gap_interface_top { false };
+    bool        zero_gap_interface_bottom { false };
+    bool        zero_gap_interface_raft { false };
     // Gap when placing object over raft.
     coordf_t    gap_raft_object { 0 };
     // Gap when placing support over object.
@@ -100,7 +101,7 @@ struct SlicingParameters
     coordf_t    raft_base_top_z { 0 };
     coordf_t    raft_interface_top_z { 0 };
     coordf_t    raft_contact_top_z { 0 };
-    // In case of a soluble interface, object_print_z_min == raft_contact_top_z, otherwise there is a gap between the raft and the 1st object layer.
+    // In case of a zero-gap raft interface, object_print_z_min == raft_contact_top_z, otherwise there is a gap between the raft and the 1st object layer.
     coordf_t 	object_print_z_min { 0 };
     // This value of maximum print Z is scaled by shrinkage compensation in the Z-axis.
     coordf_t 	object_print_z_max { 0 };
@@ -124,8 +125,9 @@ inline bool equal_layering(const SlicingParameters &sp1, const SlicingParameters
             sp1.interface_raft_layer_height         == sp2.interface_raft_layer_height          &&
             sp1.contact_raft_layer_height           == sp2.contact_raft_layer_height            &&
             sp1.layer_height                        == sp2.layer_height                         &&
-            sp1.min_layer_height                    == sp2.min_layer_height                     &&
-            sp1.max_layer_height                    == sp2.max_layer_height                     &&
+            // Orca #17000: min/max_layer_height only bound a variable layer height, and the nozzles of a
+            // per-nozzle print carry their own limits. The layers themselves are compared by layer_height
+            // above and, for variable profiles, by Print::validate() against the generated Z series.
 //            sp1.max_suport_layer_height             == sp2.max_suport_layer_height              &&
             sp1.first_print_layer_height            == sp2.first_print_layer_height             &&
             sp1.first_object_layer_height           == sp2.first_object_layer_height            &&
@@ -133,7 +135,9 @@ inline bool equal_layering(const SlicingParameters &sp1, const SlicingParameters
             // BBS: following  are not required for equal layer height.
             // Since the z-gap diff may be multiple of layer height.
 #if 0
-            sp1.soluble_interface                   == sp2.soluble_interface                    &&
+            sp1.zero_gap_interface_top              == sp2.zero_gap_interface_top               &&
+            sp1.zero_gap_interface_bottom           == sp2.zero_gap_interface_bottom            &&
+            sp1.zero_gap_interface_raft             == sp2.zero_gap_interface_raft              &&
             sp1.gap_raft_object                     == sp2.gap_raft_object                      &&
             sp1.gap_object_support                  == sp2.gap_object_support                   &&
             sp1.gap_support_object                  == sp2.gap_support_object                   &&

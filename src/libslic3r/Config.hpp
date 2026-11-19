@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <map>
 #include <climits>
+#include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -23,6 +24,7 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/format/format_fwd.hpp>
 #include <boost/functional/hash.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 
 #include <cereal/access.hpp>
@@ -39,9 +41,9 @@ namespace Slic3r {
         template<class Archive> void serialize(Archive& ar) { ar(this->value); ar(this->percent); }
     };
 
-    inline bool operator==(const FloatOrPercent& l, const FloatOrPercent& r) throw() { return l.value == r.value && l.percent == r.percent; }
+    inline bool operator==(const FloatOrPercent& l, const FloatOrPercent& r) throw() { return is_approx(l.value, r.value) && l.percent == r.percent; }
     inline bool operator!=(const FloatOrPercent& l, const FloatOrPercent& r) throw() { return !(l == r); }
-    inline bool operator< (const FloatOrPercent& l, const FloatOrPercent& r) throw() { return l.value < r.value || (l.value == r.value && int(l.percent) < int(r.percent)); }
+    inline bool operator< (const FloatOrPercent& l, const FloatOrPercent& r) throw() { return l.value < r.value || (is_approx(l.value, r.value) && int(l.percent) < int(r.percent)); }
 }
 
 namespace std {
@@ -91,6 +93,8 @@ extern std::string  escape_string_cstyle(const std::string &str);
 extern std::string  escape_strings_cstyle(const std::vector<std::string> &strs);
 extern bool         unescape_string_cstyle(const std::string &str, std::string &out);
 extern bool         unescape_strings_cstyle(const std::string &str, std::vector<std::string> &out);
+// Reads the number a float option's text starts with, the same on every platform. See Config.cpp.
+extern bool         deserialize_float_value(const std::string &str, double &value);
 
 extern std::string  escape_ampersand(const std::string& str);
 
@@ -492,8 +496,10 @@ public:
                     this->values.resize(n, static_cast<const ConfigOptionSingle<T>*>(opt_default)->value);
                 }
             } else {
-                // Resize by duplicating the last value.
-                this->values.resize(n, this->values./*back*/front());
+                // Resize by duplicating the first value. Copy it first: resize() may reallocate and
+                // invalidate the reference to values.front() while it is still being read.
+                T v = this->values./*back*/front();
+                this->values.resize(n, v);
             }
         }
     }
@@ -565,8 +571,11 @@ public:
 
         if (this->values.empty())
             this->values.resize(rhs_vec->size());
-        else
-            this->values.resize(rhs_vec->size(), this->values.front());
+        else {
+            // Copy first: resize() may reallocate and invalidate the reference to values.front().
+            T v = this->values.front();
+            this->values.resize(rhs_vec->size(), v);
+        }
 
     	bool modified = false;
         auto default_value = this->values[0];
@@ -596,8 +605,8 @@ public:
     ConfigOptionType        type()      const override { return static_type(); }
     double                  getFloat()  const override { return this->value; }
     ConfigOption*           clone()     const override { return new ConfigOptionFloat(*this); }
-    bool                    operator==(const ConfigOptionFloat &rhs) const throw() { return this->value == rhs.value; }
-    bool                    operator< (const ConfigOptionFloat &rhs) const throw() { return this->value <  rhs.value; }
+    bool                    operator==(const ConfigOptionFloat &rhs) const throw() { return is_approx(this->value, rhs.value); }
+    bool                    operator< (const ConfigOptionFloat &rhs) const throw() { return this->value < rhs.value; }
 
     std::string serialize() const override
     {
@@ -609,9 +618,19 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
+    }
+
+    bool operator==(const ConfigOption &rhs) const override
+    {
+        if (rhs.type() != this->type())
+            throw ConfigurationError("ConfigOptionFloat: Comparing incompatible types");
+        assert(dynamic_cast<const ConfigOptionFloat*>(&rhs));
+        return *this == *static_cast<const ConfigOptionFloat*>(&rhs);
     }
 
     ConfigOptionFloat& operator=(const ConfigOption *opt)
@@ -695,12 +714,10 @@ public:
         		if (NULLABLE)
         			this->values.push_back(nil_value());
         		else
-        			throw ConfigurationError("Deserializing nil into a non-nullable object");
+        			{ BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
         	} else {
-	            std::istringstream iss(item_str);
 	            double value;
-	            iss >> value;
-	            if (iss.fail())
+	            if (! deserialize_float_value(item_str, value))
 	            	return false;
 	            this->values.push_back(value);
 	        }
@@ -738,7 +755,7 @@ protected:
     		if (v1.size() != v2.size())
     			return false;
     		for (auto it1 = v1.begin(), it2 = v2.begin(); it1 != v1.end(); ++ it1, ++ it2)
-	    		if (! ((std::isnan(*it1) && std::isnan(*it2)) || *it1 == *it2))
+	    		if (! ((std::isnan(*it1) && std::isnan(*it2)) || is_approx(*it1, *it2)))
 	    			return false;
     		return true;
     	} else
@@ -791,8 +808,12 @@ public:
     {
         UNUSED(append);
         std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        int value;
+        iss >> value;
+        if (iss.fail())
+            return false;
+        this->value = value;
+        return true;
     }
 
     ConfigOptionInt& operator=(const ConfigOption *opt)
@@ -865,7 +886,7 @@ public:
         		if (NULLABLE)
         			this->values.push_back(nil_value());
         		else
-                    throw ConfigurationError("Deserializing nil into a non-nullable object");
+                    { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
         	} else {
 	            std::istringstream iss(item_str);
 	            int value;
@@ -1000,9 +1021,11 @@ public:
     {
         UNUSED(append);
         // don't try to parse the trailing % since it's optional
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1085,11 +1108,11 @@ public:
         return *this == *static_cast<const ConfigOptionFloatOrPercent*>(&rhs);
     }
     bool                        operator==(const ConfigOptionFloatOrPercent &rhs) const throw()
-        { return this->value == rhs.value && this->percent == rhs.percent; }
+        { return is_approx(this->value, rhs.value) && this->percent == rhs.percent; }
     size_t                      hash() const throw() override
         { size_t seed = std::hash<double>{}(this->value); return this->percent ? seed ^ 0x9e3779b9 : seed; }
     bool                        operator< (const ConfigOptionFloatOrPercent &rhs) const throw()
-        { return this->value < rhs.value || (this->value == rhs.value && int(this->percent) < int(rhs.percent)); }
+        { return this->value < rhs.value || (is_approx(this->value, rhs.value) && int(this->percent) < int(rhs.percent)); }
 
     double                      get_abs_value(double ratio_over) const
         { return this->percent ? (ratio_over * this->value / 100) : this->value; }
@@ -1113,10 +1136,12 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value   = value;
         this->percent = str.find_first_of("%") != std::string::npos;
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        return true;
     }
 
 private:
@@ -1189,12 +1214,12 @@ public:
                 if (NULLABLE)
                     this->values.push_back(nil_value());
                 else
-                    throw ConfigurationError("Deserializing nil into a non-nullable object");
+                    { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
             } else {
                 bool percent = item_str.find_first_of("%") != std::string::npos;
-                std::istringstream iss(item_str);
+                // Never fails: an item that is not a number reads as 0.
                 double value;
-                iss >> value;
+                deserialize_float_value(item_str, value);
                 this->values.push_back({ value, percent });
             }
         }
@@ -1279,9 +1304,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf %c", &this->value(0), &this->value(1), &dummy) == 2 ||
-               sscanf(str.data(), " %lf x %lf %c", &this->value(0), &this->value(1), &dummy) == 2;
+        char  dummy;
+        Vec2d value = Vec2d::Zero();
+        if (sscanf(str.data(), " %lf , %lf %c", &value(0), &value(1), &dummy) != 2 &&
+            sscanf(str.data(), " %lf x %lf %c", &value(0), &value(1), &dummy) != 2)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1510,9 +1539,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf , %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3 ||
-               sscanf(str.data(), " %lf x %lf x %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3;
+        char  dummy;
+        Vec3d value = Vec3d::Zero();
+        if (sscanf(str.data(), " %lf , %lf , %lf %c", &value(0), &value(1), &value(2), &dummy) != 3 &&
+            sscanf(str.data(), " %lf x %lf x %lf %c", &value(0), &value(1), &value(2), &dummy) != 3)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1627,7 +1660,7 @@ public:
         		if (NULLABLE)
                     new_value = nil_value();
         		else
-                    throw ConfigurationError("Deserializing nil into a non-nullable object");
+                    { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
         	} else if (item_str == "1") {
         		new_value = true;
         	} else if (item_str == "0") {
@@ -1892,7 +1925,7 @@ public:
                 if (NULLABLE)
                     this->values.push_back(nil_value());
                 else
-                    throw ConfigurationError("Deserializing nil into a non-nullable object");
+                    { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
             }
             else if (this->keys_map == nullptr) {
                 // Without a map only the bare ordinal form can be read back.
@@ -2114,10 +2147,11 @@ public:
     // Optional width of an input field.
     int                                 width           = -1;
     // <min, max> limit of a numeric input.
-    // If not set, the <min, max> is set to <INT_MIN, INT_MAX>
+    // If not set, the <min, max> is set to <-FLT_MAX, FLT_MAX>
     // By setting min=0, only nonnegative input is allowed.
-    int                                 min = INT_MIN;
-    int                                 max = INT_MAX;
+    float                               min = -FLT_MAX;
+    float                               max =  FLT_MAX;
+    bool                                is_value_valid(const double value, const int max_precision = 4) const;
     // To check if it's not a typo and a % is missing
     double                              max_literal = 1;
     ConfigOptionMode                    mode = comSimple;

@@ -1,16 +1,23 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "test_data.hpp"
 
 using namespace Slic3r;
+using namespace Slic3r::Test;
 using Catch::Matchers::WithinAbs;
 
 SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWriter]") {
@@ -235,13 +242,14 @@ TEST_CASE("Acceleration and velocity limit commands print their values in genera
         std::vector<std::string> present;
         std::vector<std::string> absent;
     };
-    // accel_to_decel_factor is 50%, so ACCEL_TO_DECEL is half the acceleration.
+    // accel_to_decel_factor is 50%, so ACCEL_TO_DECEL is half the acceleration and MINIMUM_CRUISE_RATIO is 0.5.
     const Case cases[] = {
         {gcfKlipper, Command::KlipperLimits, 2000000, 25. / 3., false,
-         {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
-        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
-        {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL"}},
-        {gcfKlipper, Command::Print, 3001, 0., true, {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
+         {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "MINIMUM_CRUISE_RATIO=0.5 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
+        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5 ", "MINIMUM_CRUISE_RATIO=0.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
+        {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL", "MINIMUM_CRUISE_RATIO"}},
+        {gcfKlipper, Command::Print, 3001, 0., true,
+         {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "MINIMUM_CRUISE_RATIO=0.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
         {gcfMarlinFirmware, Command::Print, 2500, 0., false, {"M204 P2500\n"}, {}},
         {gcfMarlinFirmware, Command::Travel, 7000, 0., false, {"M204 T7000\n"}, {}},
         {gcfRepRapFirmware, Command::Travel, 7000, 0., true, {"M204 T7000 ", "; adjust acceleration"}, {}},
@@ -285,10 +293,1108 @@ TEST_CASE("Acceleration and velocity limit commands print their values in genera
     }
 }
 
+// Port OrcaSlicer #15545: Klipper removed ACCEL_TO_DECEL on 2025-08-11 (deprecated 2024-03-13) in favour of
+// minimum_cruise_ratio = 1 - ACCEL_TO_DECEL / ACCEL, so accel_to_decel is sent in both forms on one line.
+TEST_CASE("Klipper acceleration commands send accel_to_decel both as ACCEL_TO_DECEL and as the cruise ratio", "[GCodeWriter][Klipper][CruiseRatio]")
+{
+    auto make_writer = [](bool enable, double factor) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfKlipper));
+        config.option<ConfigOptionBools>("accel_to_decel_enable")->values.assign(1, enable);
+        config.option<ConfigOptionPercents>("accel_to_decel_factor")->values.assign(1, factor);
+        for (const char *limit : {"machine_max_acceleration_extruding", "machine_max_acceleration_travel", "machine_max_acceleration_x",
+                                  "machine_max_acceleration_y", "machine_max_jerk_x", "machine_max_jerk_y"}) {
+            std::vector<double> &values = config.option<ConfigOptionFloats>(limit)->values;
+            std::fill(values.begin(), values.end(), 0.);
+        }
+        PrintConfig print_config;
+        print_config.apply(config, true);
+        auto writer = std::make_unique<GCodeWriter>();
+        writer->apply_print_config(print_config);
+        return writer;
+    };
+    struct CommentGuard
+    {
+        bool saved = GCodeWriter::full_gcode_comment;
+        ~CommentGuard() { GCodeWriter::full_gcode_comment = saved; }
+    } comment_guard;
+    GCodeWriter::full_gcode_comment = false;
+
+    SECTION("50% sends half the acceleration and a cruise ratio of 0.5") {
+        auto writer = make_writer(true, 50.);
+        CHECK(writer->set_print_acceleration(4000) == "SET_VELOCITY_LIMIT ACCEL=4000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0.5\n");
+        CHECK(writer->set_accel_and_jerk(6000, 0.) == "SET_VELOCITY_LIMIT ACCEL=6000 ACCEL_TO_DECEL=3000 MINIMUM_CRUISE_RATIO=0.5\n");
+    }
+    SECTION("25% gives a cruise ratio of 0.75 for every acceleration") {
+        auto writer = make_writer(true, 25.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=500 MINIMUM_CRUISE_RATIO=0.75\n");
+        CHECK(writer->set_travel_acceleration(3000) == "SET_VELOCITY_LIMIT ACCEL=3000 ACCEL_TO_DECEL=750 MINIMUM_CRUISE_RATIO=0.75\n");
+    }
+    SECTION("100% gives a cruise ratio of 0, as the input shaping calibration uses") {
+        auto writer = make_writer(true, 100.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
+    }
+    SECTION("Edge: a factor of 0 from a 3MF or the CLI sends neither") {
+        auto writer = make_writer(true, 0.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000\n");
+        CHECK(writer->set_accel_and_jerk(5000, 0.) == "SET_VELOCITY_LIMIT ACCEL=5000\n");
+    }
+    SECTION("Edge: a factor above 100% is clamped to 100%, a cruise ratio of 0") {
+        auto writer = make_writer(true, 150.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
+    }
+    SECTION("Off sends neither") {
+        auto writer = make_writer(false, 50.);
+        const std::string print  = writer->set_print_acceleration(2000);
+        const std::string limits = writer->set_accel_and_jerk(5000, 8.);
+        CHECK(print == "SET_VELOCITY_LIMIT ACCEL=2000\n");
+        for (const std::string &line : {print, limits}) {
+            INFO(line);
+            CHECK(line.find("ACCEL_TO_DECEL") == std::string::npos);
+            CHECK(line.find("MINIMUM_CRUISE_RATIO") == std::string::npos);
+        }
+    }
+}
+
 TEST_CASE("GCodeWriter append overloads emit the same line as the returning overloads", "[GCodeWriter]")
 {
     GCodeWriter writer;
     std::string appended;
     writer.set_speed(appended, 1800.);
     CHECK(appended == writer.set_speed(1800.));
+}
+
+// Port OrcaSlicer #12824 (#12244): Klipper's SET_VELOCITY_LIMIT ACCEL= limits every kind of motion, so the
+// writer must clamp to the smallest of the extruding limit and the X/Y limits, not the extruding limit alone.
+namespace {
+std::string klipper_accel_line(GCodeFlavor flavor, double extruding, double x, double y, unsigned int requested)
+{
+    PrintConfig print_config;
+    print_config.gcode_flavor.value = flavor;
+    print_config.machine_max_acceleration_extruding.values = { extruding, extruding };
+    print_config.machine_max_acceleration_x.values         = { x, x };
+    print_config.machine_max_acceleration_y.values         = { y, y };
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    return writer.set_print_acceleration(requested);
+}
+} // namespace
+
+TEST_CASE("Klipper acceleration is capped by the X and Y limits too", "[GCodeWriter][Klipper][U1]")
+{
+    SECTION("an X limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 8700., 10000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=8700") != std::string::npos);
+    }
+    SECTION("a Y limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 10000., 6000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=6000") != std::string::npos);
+    }
+    SECTION("the extruding limit still wins when it is the smallest") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 5000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=5000") != std::string::npos);
+    }
+    SECTION("equal limits (the U1 profile) change nothing") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 20000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("a zero axis limit means unset and is ignored") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 0., 0., 12000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("other flavours keep using only the extruding limit") {
+        const std::string gcode = klipper_accel_line(gcfMarlinFirmware, 10000., 8700., 8700., 12000);
+        CHECK(gcode.find("M204 P10000") != std::string::npos);
+    }
+}
+
+// Batch 2C: spiral lift (Orca #11430, #11468, #11556, #12564, #13634, #15118).
+namespace {
+
+struct SpiralLine
+{
+    std::string            cmd;
+    std::map<char, double> v;
+    bool has(char c) const { return v.count(c) != 0; }
+};
+
+std::vector<SpiralLine> parse_spiral_gcode(const std::string &gcode)
+{
+    std::vector<SpiralLine> out;
+    std::istringstream      in(gcode);
+    std::string             line;
+    while (std::getline(in, line)) {
+        const std::string  body = line.substr(0, line.find(';'));
+        std::istringstream words(body);
+        SpiralLine         l;
+        if (!(words >> l.cmd))
+            continue;
+        std::string w;
+        while (words >> w)
+            if (w.size() > 1 && std::isalpha((unsigned char) w[0]))
+                l.v[w[0]] = std::stod(w.substr(1));
+        out.push_back(std::move(l));
+    }
+    return out;
+}
+
+struct SpiralSetup
+{
+    bool                arc_fitting = false;
+    double              resolution  = 0.012;
+    Vec2d               plate_offset{0., 0.};
+    Vec2d               start{100., 100.}; // plate coordinates
+    Vec2d               target{150., 100.};
+    unsigned int        filament = 0;
+    Pointfs             bed      = {Vec2d(0, 0), Vec2d(200, 0), Vec2d(200, 200), Vec2d(0, 200)};
+    std::vector<Vec2ds> extruder_areas;
+    std::vector<int>    filament_map = {1, 1};
+};
+
+constexpr double spiral_z_hop   = 0.4;
+constexpr double spiral_layer_z = 0.2;
+
+// The writer's spiral radius for a 0.4 mm z-hop at the default 3 degree travel slope.
+double spiral_radius() { return spiral_z_hop / (2. * PI * std::atan(3. * PI / 180.)); }
+
+// Lift with LiftType::SpiralLift at `start`, then travel to `target` on the same layer.
+std::string spiral_lift_gcode(const SpiralSetup &s)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(s.arc_fitting));
+    config.set_key_value("resolution", new ConfigOptionFloat(s.resolution));
+    config.set_key_value("z_hop", new ConfigOptionFloats{spiral_z_hop, spiral_z_hop});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3., 3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0., 0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0., 0.});
+    config.set_key_value("printable_area", new ConfigOptionPoints(s.bed));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(s.extruder_areas));
+    config.set_key_value("filament_map", new ConfigOptionInts(s.filament_map));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0, 1});
+    writer.set_extruder(s.filament);
+    writer.set_xy_offset(s.plate_offset.x(), s.plate_offset.y());
+    // The writer keeps positions with the plate offset added and emits plate coordinates.
+    writer.set_position(Vec3d(s.start.x() + s.plate_offset.x(), s.start.y() + s.plate_offset.y(), spiral_layer_z));
+    writer.set_current_position_clear(true);
+
+    std::string gcode = writer.lift(LiftType::SpiralLift);
+    gcode += writer.travel_to_xyz(Vec3d(s.target.x() + s.plate_offset.x(), s.target.y() + s.plate_offset.y(), spiral_layer_z));
+    return gcode;
+}
+
+// The G1 points of an emulated spiral: XYZ moves without a feedrate (the travel after it carries one).
+std::vector<SpiralLine> spiral_points(const std::vector<SpiralLine> &lines)
+{
+    std::vector<SpiralLine> out;
+    for (const SpiralLine &l : lines)
+        if (l.cmd == "G1" && l.has('X') && l.has('Y') && l.has('Z') && !l.has('F'))
+            out.push_back(l);
+    return out;
+}
+
+size_t count_cmd(const std::vector<SpiralLine> &lines, const std::string &cmd)
+{
+    return size_t(std::count_if(lines.begin(), lines.end(), [&cmd](const SpiralLine &l) { return l.cmd == cmd; }));
+}
+
+size_t expected_spiral_segments(double radius, double resolution)
+{
+    return resolution > 0. ? std::clamp(Geometry::ArcWelder::arc_discretization_steps(radius, 2. * PI, resolution), size_t(8), size_t(128)) :
+                             size_t(128);
+}
+
+} // namespace
+
+TEST_CASE("Spiral lift without arc fitting is a circle of G1 moves in plate coordinates", "[GCodeWriter][SpiralLift]")
+{
+    // #11430: no G2/G3 when arc fitting is off. #11468: the points are in plate coordinates on every plate.
+    const Vec2d offsets[] = {Vec2d(0., 0.), Vec2d(-275.5, 12.25)};
+    for (const Vec2d &offset : offsets) {
+        DYNAMIC_SECTION("plate offset " << offset.x() << "," << offset.y()) {
+            SpiralSetup s;
+            s.plate_offset          = offset;
+            const std::string gcode = spiral_lift_gcode(s);
+            INFO(gcode);
+            const std::vector<SpiralLine> lines = parse_spiral_gcode(gcode);
+            CHECK(count_cmd(lines, "G2") == 0);
+            CHECK(count_cmd(lines, "G3") == 0);
+            CHECK(count_cmd(lines, "G17") == 0);
+
+            const double                  r      = spiral_radius();
+            const std::vector<SpiralLine> points = spiral_points(lines);
+            REQUIRE(points.size() == expected_spiral_segments(r, s.resolution));
+
+            // The travel goes along +X, so the centre is one radius to its left (+Y).
+            const Vec2d center = s.start + Vec2d(0., r);
+            double      last_z = spiral_layer_z;
+            for (const SpiralLine &p : points) {
+                CHECK_THAT((Vec2d(p.v.at('X'), p.v.at('Y')) - center).norm(), WithinAbs(r, 0.002));
+                CHECK(p.v.at('Z') > last_z);
+                last_z = p.v.at('Z');
+            }
+            CHECK_THAT(points.back().v.at('X'), WithinAbs(s.start.x(), 0.0015));
+            CHECK_THAT(points.back().v.at('Y'), WithinAbs(s.start.y(), 0.0015));
+            CHECK_THAT(points.back().v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+
+            // Then the travel itself, at the lifted height.
+            const SpiralLine &travel = lines.back();
+            CHECK(travel.cmd == "G1");
+            CHECK_THAT(travel.v.at('X'), WithinAbs(s.target.x(), 0.0015));
+            CHECK_THAT(travel.v.at('Y'), WithinAbs(s.target.y(), 0.0015));
+            CHECK_THAT(travel.v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+        }
+    }
+}
+
+TEST_CASE("Emulated spiral lift segments follow the slicing resolution", "[GCodeWriter][SpiralLift]")
+{
+    // #11556 / #12564 / #15118: no chord deviates from the arc by more than the resolution,
+    // 8 to 128 segments, and the upper bound for a resolution of 0.
+    const double resolutions[] = {0.012, 0.05, 0.001, 0.};
+    const double r             = spiral_radius();
+    for (const double resolution : resolutions) {
+        DYNAMIC_SECTION("resolution " << resolution) {
+            SpiralSetup s;
+            s.resolution                         = resolution;
+            const std::vector<SpiralLine> points = spiral_points(parse_spiral_gcode(spiral_lift_gcode(s)));
+            CHECK(points.size() == expected_spiral_segments(r, resolution));
+            CHECK(points.size() >= 8);
+            CHECK(points.size() <= 128);
+        }
+    }
+    // The profile resolution 0.012 mm gives 23 segments for this radius.
+    CHECK(expected_spiral_segments(r, 0.012) == 23);
+}
+
+TEST_CASE("Spiral lift with arc fitting is one G3 arc", "[GCodeWriter][SpiralLift]")
+{
+    SpiralSetup s;
+    s.arc_fitting           = true;
+    s.plate_offset          = Vec2d(-275.5, 12.25);
+    const std::string gcode = spiral_lift_gcode(s);
+    INFO(gcode);
+    const std::vector<SpiralLine> lines = parse_spiral_gcode(gcode);
+    CHECK(count_cmd(lines, "G17") == 1);
+    REQUIRE(count_cmd(lines, "G3") == 1);
+    CHECK(spiral_points(lines).empty());
+    const SpiralLine &arc = *std::find_if(lines.begin(), lines.end(), [](const SpiralLine &l) { return l.cmd == "G3"; });
+    CHECK_THAT(arc.v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+    CHECK_THAT(arc.v.at('I'), WithinAbs(0., 0.0015));
+    CHECK_THAT(arc.v.at('J'), WithinAbs(spiral_radius(), 0.0015));
+    CHECK(arc.v.at('P') == 1.);
+}
+
+TEST_CASE("A spiral lift that would leave the printable area is a normal lift", "[GCodeWriter][SpiralLift]")
+{
+    // #13634. The circle's centre is one radius to the left of the travel direction.
+    const double r = spiral_radius();
+    for (const bool arc_fitting : {false, true}) {
+        DYNAMIC_SECTION("arc fitting " << arc_fitting) {
+            SpiralSetup s;
+            s.arc_fitting = arc_fitting;
+            s.start       = Vec2d(0.5, 100.);
+
+            SECTION("centre outside the bed: normal lift") {
+                s.target                            = Vec2d(0.5, 150.); // +Y: the centre is at x = 0.5 - r < 0
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                CHECK(count_cmd(lines, "G3") == 0);
+                CHECK(spiral_points(lines).empty());
+                REQUIRE(lines.size() == 2);
+                CHECK_FALSE(lines.front().has('X'));
+                CHECK_THAT(lines.front().v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+            }
+            SECTION("circle inside the bed: spiral") {
+                s.target                            = Vec2d(0.5, 50.); // -Y: the centre is at x = 0.5 + r, more than r from every edge
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                if (arc_fitting)
+                    CHECK(count_cmd(lines, "G3") == 1);
+                else
+                    CHECK(spiral_points(lines).size() == expected_spiral_segments(r, s.resolution));
+            }
+            SECTION("circle crossing an edge: normal lift") {
+                s.start                             = Vec2d(100., 199.5);
+                s.target                            = Vec2d(150., 199.5); // +X: the centre is at y = 199.5 + r, beyond y = 200
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                CHECK(count_cmd(lines, "G3") == 0);
+                CHECK(spiral_points(lines).empty());
+            }
+        }
+    }
+}
+
+TEST_CASE("The spiral lift uses the printable area of the extruder the filament prints from", "[GCodeWriter][SpiralLift]")
+{
+    // #13634 on a Bambu H2D-like bed: the left extruder reaches x 0..325, the right one 25..350.
+    // Our Extruder is a filament slot, so the extruder comes from filament_map (1-based).
+    SpiralSetup s;
+    s.arc_fitting    = true;
+    s.bed            = {Vec2d(0, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(0, 320)};
+    s.extruder_areas = {Vec2ds{Vec2d(0, 0), Vec2d(325, 0), Vec2d(325, 320), Vec2d(0, 320)},
+                        Vec2ds{Vec2d(25, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(25, 320)}};
+    s.start          = Vec2d(26., 100.);
+    s.target         = Vec2d(26., 150.); // +Y: the centre is at x = 26 - r, left of the right extruder's x = 25
+    REQUIRE(26. - spiral_radius() < 25.);
+
+    SECTION("filament on the left extruder: spiral") {
+        s.filament_map = {1, 2};
+        s.filament     = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+    }
+    SECTION("filament on the right extruder: normal lift") {
+        s.filament_map = {1, 2};
+        s.filament     = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
+    SECTION("first filament mapped to the right extruder: normal lift") {
+        s.filament_map = {2, 1};
+        s.filament     = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
+    SECTION("no per-extruder areas: the bed decides") {
+        s.extruder_areas.clear();
+        s.filament_map = {1, 2};
+        s.filament     = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+    }
+    SECTION("both areas merged into one group of eight points (older projects): split per extruder") {
+        s.extruder_areas = {Vec2ds{Vec2d(0, 0), Vec2d(325, 0), Vec2d(325, 320), Vec2d(0, 320),
+                                   Vec2d(25, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(25, 320)}};
+        s.filament_map   = {1, 2};
+        s.filament       = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+        s.filament = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
+}
+
+// Orca #13516: with manual filament change on, a Bambu Lab printer must get the MANUAL_TOOL_CHANGE
+// tag like any other printer. Upstream's regression came from Bambu's "M1020 S<n>" tool change in
+// GCodeWriter::toolchange, which bypassed toolchange_prefix(); our writer never took that change,
+// so the prefix (and the CoolingBuffer / custom G-code checks that read it) already honours the
+// option. This keeps it that way.
+TEST_CASE("Manual filament change emits MANUAL_TOOL_CHANGE on Bambu Lab printers too", "[GCodeWriter][GCode]")
+{
+    const bool bbl = GENERATE(false, true);
+    CAPTURE(bbl);
+
+    GCodeWriter writer;
+    writer.set_is_bbl_machine(bbl);
+    writer.config.manual_filament_change.value = true;
+    writer.set_extruders({0, 1});
+
+    CHECK(writer.toolchange_prefix() == "; MANUAL_TOOL_CHANGE T");
+    const std::string gcode = writer.toolchange(1);
+    CHECK(gcode.find("; MANUAL_TOOL_CHANGE T1") != std::string::npos);
+    CHECK(gcode.find("M1020") == std::string::npos);
+}
+
+// Orca #11582 / #11616: power loss recovery follows the printer profile. Bambu Lab printers keep
+// the exact lines Bambu Studio writes (their profiles enable it), Marlin 2 gets M413, and
+// "printer configuration" or any other firmware gets nothing.
+TEST_CASE("Power loss recovery commands follow the mode and the firmware", "[GCodeWriter][PowerLossRecovery]")
+{
+    GCodeWriter writer;
+    SECTION("Bambu Lab") {
+        writer.set_is_bbl_machine(true);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable) == "; open powerlost recovery\nM1003 S1\n");
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable) == "; close powerlost recovery\nM1003 S0\n");
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::PrinterConfiguration).empty());
+    }
+    SECTION("Marlin 2") {
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable).rfind("M413 S1", 0) == 0);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable).rfind("M413 S0", 0) == 0);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::PrinterConfiguration).empty());
+    }
+    SECTION("Klipper and legacy Marlin get nothing") {
+        const GCodeFlavor flavor = GENERATE(gcfKlipper, gcfMarlinLegacy, gcfRepRapFirmware);
+        writer.config.gcode_flavor.value = flavor;
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable).empty());
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable).empty());
+    }
+}
+
+TEST_CASE("The first, boolean form of enable_power_loss_recovery still loads", "[PowerLossRecovery][Config]")
+{
+    DynamicPrintConfig config;
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "1"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Enable);
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "0"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Disable);
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "printer_configuration"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::PrinterConfiguration);
+    // a config without the key reads the default: nothing written
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") ==
+          PowerLossRecoveryMode::PrinterConfiguration);
+}
+
+// Edge: a project or printer preset saved before the option existed keeps what it was sliced with:
+// Bambu Lab printers had M1003 S1, everything else had nothing.
+TEST_CASE("Configs from before enable_power_loss_recovery keep their old behaviour", "[PowerLossRecovery][Config]")
+{
+    DynamicPrintConfig bbl;
+    bbl.set_deserialize_strict({{"printer_model", "Bambu Lab H2D"}});
+    CHECK(upgrade_missing_power_loss_recovery(bbl));
+    CHECK(bbl.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Enable);
+
+    DynamicPrintConfig other;
+    other.set_deserialize_strict({{"printer_model", "Creality Ender-3 V3 SE"}});
+    CHECK_FALSE(upgrade_missing_power_loss_recovery(other));
+    CHECK_FALSE(other.has("enable_power_loss_recovery"));
+
+    // a value that is there, even "printer configuration", is the user's choice and stays
+    DynamicPrintConfig chosen;
+    chosen.set_deserialize_strict({{"printer_model", "Bambu Lab X1 Carbon"}, {"enable_power_loss_recovery", "printer_configuration"}});
+    CHECK_FALSE(upgrade_missing_power_loss_recovery(chosen));
+    CHECK(chosen.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::PrinterConfiguration);
+}
+
+// Snapmaker #993: generated Z travel respects machine_max_speed_z (pure Z travel, lift/unlift, the Z component
+// of XYZ travel and of the spiral lift). Ported from the upstream tests (open PR, head 06583b935f) to this
+// tree's writer, plus the Edge adaptations: the layer-change Z is deferred through defer_z_move(), and the
+// spiral lift is slowed only as far as its Z component needs.
+namespace {
+
+// GCodeWriter::full_gcode_comment is a process-wide static (true by default, set per export), so
+// these exact-string cases switch it off and put it back, whatever ran before them.
+struct NoFullComments
+{
+    bool saved = GCodeWriter::full_gcode_comment;
+    NoFullComments() { GCodeWriter::full_gcode_comment = false; }
+    ~NoFullComments() { GCodeWriter::full_gcode_comment = saved; }
+};
+
+void setup_z_speed_writer(GCodeWriter &writer, double travel_speed, double travel_speed_z, double max_speed_z,
+                          bool arc_fitting = false, double z_hop = 1.5)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("travel_speed", new ConfigOptionFloats{travel_speed});
+    config.set_key_value("travel_speed_z", new ConfigOptionFloat(travel_speed_z));
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{max_speed_z, 5.});
+    config.set_key_value("z_hop", new ConfigOptionFloats{z_hop});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0.});
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(arc_fitting));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    writer.apply_print_config(print_config);
+    writer.set_is_first_layer(false);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+}
+
+// The highest Z velocity (mm/s) of the G1 moves in `gcode` that change Z, read from `start`.
+double max_g1_z_velocity(const std::string &gcode, const Vec3d &start, int *z_moves = nullptr)
+{
+    std::ostringstream preamble;
+    preamble << "G1 X" << start.x() << " Y" << start.y() << " Z" << start.z() << " F6000\n";
+    double      worst = 0.;
+    int         count = 0;
+    bool        first = true;
+    GCodeReader reader;
+    reader.parse_buffer(preamble.str() + gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (first) {
+            first = false;
+            return;
+        }
+        if (line.cmd_is("G1") && line.dist_Z(self) != 0.) {
+            ++count;
+            const double dz       = std::abs(line.dist_Z(self));
+            const double distance = std::hypot(line.dist_XY(self), dz);
+            worst                 = std::max(worst, line.new_F(self) / 60. * dz / distance);
+        }
+    });
+    if (z_moves != nullptr)
+        *z_moves = count;
+    return worst;
+}
+
+// Drop the F words (and the lines that only set a feedrate): what is left is the path.
+std::string without_feedrates(const std::string &gcode)
+{
+    std::istringstream in(gcode);
+    std::string        line, out;
+    while (std::getline(in, line)) {
+        std::string body = line.substr(0, line.find(';'));
+        const size_t f   = body.find(" F");
+        if (f != std::string::npos) {
+            const size_t end = body.find(' ', f + 1);
+            body.erase(f, end == std::string::npos ? std::string::npos : end - f);
+        }
+        while (!body.empty() && body.back() == ' ')
+            body.pop_back();
+        if (body != "G1")
+            out += body + "\n";
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    struct SpeedCase
+    {
+        double      travel_speed;
+        double      travel_speed_z;
+        double      max_speed_z;
+        std::string feedrate;
+        std::string restored; // the feedrate left active after an unknown-position travel, when capped
+    };
+    const SpeedCase cases[] = {
+        {100., 0., 40., " F2400", "G1 F6000\n"}, // travel speed capped
+        {30., 0., 40., " F1800", ""},            // below the limit: unchanged
+        {100., 70., 40., " F2400", "G1 F4200\n"}, // travel_speed_z capped
+        {100., 20., 40., " F1200", ""},          // travel_speed_z below the limit: unchanged
+        {100., 0., 0., " F6000", ""},            // no limit: unchanged
+    };
+    for (const SpeedCase &c : cases) {
+        CAPTURE(c.travel_speed, c.travel_speed_z, c.max_speed_z);
+        GCodeWriter writer;
+        setup_z_speed_writer(writer, c.travel_speed, c.travel_speed_z, c.max_speed_z);
+
+        CHECK(writer.travel_to_z(10.) == "G1 Z10" + c.feedrate + "\n");
+        CHECK(writer.travel_to_z(9.) == "G1 Z9" + c.feedrate + "\n");
+
+        writer.set_position(Vec3d(100., 100., 9.));
+        writer.set_current_position_clear(true);
+
+        // Normal lift: the lift and the unlift are Z travel; the travel between them is not slowed.
+        writer.lift(LiftType::NormalLift);
+        const std::string hop = writer.travel_to_xyz(Vec3d(110., 100., 9.));
+        CHECK(hop.find("G1 Z10.5" + c.feedrate + "\n") == 0);
+        CHECK(hop.find("G1 X110 Y100 Z10.5 F" + std::to_string(int(c.travel_speed * 60.)) + "\n") != std::string::npos);
+        CHECK(writer.unlift() == "G1 Z9" + c.feedrate + "\n");
+
+        // Immediate lift (spiral vase).
+        CHECK(writer.lift(LiftType::NormalLift, true) == "G1 Z10.5" + c.feedrate + "\n");
+        CHECK(writer.unlift() == "G1 Z9" + c.feedrate + "\n");
+
+        // A travel that only changes Z is a Z travel.
+        CHECK(writer.travel_to_xyz(Vec3d(110., 100., 8.)) == "G1 X110 Y100 Z8" + c.feedrate + "\n");
+
+        // Unknown position: XY first, then Z.
+        writer.set_current_position_clear(false);
+        // Edge: the follower (wipe tower or custom G-code without F words) keeps the feedrate it had before.
+        CHECK(writer.travel_to_xyz(Vec3d(120., 100., 7.)) ==
+              "G1 X120 Y100 F" + std::to_string(int(c.travel_speed * 60.)) + "\nG1 Z7" + c.feedrate + "\n" + c.restored);
+    }
+}
+
+TEST_CASE("Z travel keeps the first-layer travel speed and follows a changed limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("travel_speed", new ConfigOptionFloats{100.});
+    config.set_key_value("travel_speed_z", new ConfigOptionFloat(0.));
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{40., 40.});
+    config.set_key_value("initial_layer_travel_speed", new ConfigOptionFloatsOrPercents({FloatOrPercent{25., true}}));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    // First layer: 25 % of 100 mm/s, under the limit.
+    CHECK(writer.travel_to_z(1.) == "G1 Z1 F1500\n");
+    writer.set_is_first_layer(false);
+    CHECK(writer.travel_to_z(2.) == "G1 Z2 F2400\n");
+
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{10., 10.});
+    print_config.apply(config, true);
+    writer.apply_print_config(print_config);
+    CHECK(writer.travel_to_z(3.) == "G1 Z3 F600\n");
+    // XY travel is not touched.
+    CHECK(writer.travel_to_xy(Vec2d(10., 0.)) == "G1 X10 Y0 F6000\n");
+}
+
+TEST_CASE("Combined XYZ travel limits its Z velocity without slowing shallow moves", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 40.);
+    writer.set_current_position_clear(true);
+
+    CHECK(writer.travel_to_xyz(Vec3d(10., 0., 10.)) == "G1 X10 Y0 Z10 F3394.112\n");
+    CHECK(writer.travel_to_xyz(Vec3d(20., 0., 0.)) == "G1 X20 Y0 Z0 F3394.112\n");
+    CHECK(writer.travel_to_xyz(Vec3d(120., 0., 1.)) == "G1 X120 Y0 Z1 F6000\n");
+    CHECK(writer.travel_to_xyz(Vec3d(220., 0., 1.)) == "G1 X220 Y0 F6000\n");
+
+    setup_z_speed_writer(writer, 100., 0., 0.);
+    CHECK(writer.travel_to_xyz(Vec3d(230., 0., 11.)) == "G1 X230 Y0 Z11 F6000\n");
+
+    // Measured between the emitted (rounded) coordinates, and the feedrate rounded down.
+    setup_z_speed_writer(writer, 100., 0., 40.);
+    writer.set_position(Vec3d(0.00049, 0., 0.00049));
+    int z_moves = 0;
+    CHECK(max_g1_z_velocity(writer.travel_to_xyz(Vec3d(1.00049, 0., 1.00051)), Vec3d::Zero(), &z_moves) <= 40. + 0.0001);
+    CHECK(z_moves == 1);
+}
+
+TEST_CASE("Each Z-hop segment respects the Z velocity limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    for (LiftType type : {LiftType::NormalLift, LiftType::LazyLift, LiftType::SpiralLift}) {
+        for (double distance : {0.5, 10., 120.}) {
+            CAPTURE(int(type), distance);
+            GCodeWriter writer;
+            setup_z_speed_writer(writer, 100., 0., 40.);
+            writer.set_current_position_clear(true);
+            std::string gcode = writer.travel_to_xyz(Vec3d(50., 50., 10.));
+            writer.lift(type);
+            gcode += writer.travel_to_xyz(Vec3d(50. + distance, 50. + distance, 10.));
+            gcode += writer.unlift();
+            INFO(gcode);
+
+            int z_moves = 0;
+            CHECK(max_g1_z_velocity(gcode, Vec3d::Zero(), &z_moves) <= 40. + 0.0001);
+            CHECK(z_moves >= 3);
+            if (type == LiftType::NormalLift || distance > 10.)
+                CHECK(gcode.find(" F6000") != std::string::npos);
+            if (type == LiftType::SpiralLift) {
+                // Edge: the spiral is slowed only as far as its Z component needs (here not at all),
+                // not to the Z limit itself.
+                CHECK(gcode.find("G1 F6000\n") != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("A deferred layer change caps its travel from the previous layer's Z and keeps the hop height",
+          "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 40., false, 0.4);
+
+    SECTION("the travel climbs the layer height: capped") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.defer_z_move(0.5);
+        // Everything that reads the writer's position right after the layer change sees the new layer's Z.
+        CHECK(writer.get_position().z() == Approx(0.5));
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F3528.285\n");
+    }
+    SECTION("the head is already at that Z: full travel speed") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.5));
+        writer.set_current_position_clear(true);
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F6000\n");
+    }
+    SECTION("a lift before the layer change lifts above the new layer") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.lift();                // GCode::change_layer() retracts and lifts first ...
+        writer.defer_z_move(0.5);     // ... then moves the writer to the new layer
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true).find("G1 Z.9 F2400\n") == 0);
+        CHECK(writer.get_zhop() == Approx(0.4));
+        CHECK(writer.unlift() == "G1 Z.5 F2400\n");
+    }
+    SECTION("a Z move or a new position ends the deferral") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.defer_z_move(0.5);
+        CHECK(writer.travel_to_z(0.7) == "G1 Z.7 F2400\n");
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.7), "", true) == "G1 X167.921 Y167.804 Z.7 F6000\n");
+
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.defer_z_move(0.5);
+        writer.set_position(Vec3d(167.804, 167.985, 0.5));
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F6000\n");
+    }
+}
+
+TEST_CASE("A spiral lift at a layer change keeps its path and caps only its Z component", "[GCodeWriter][ZSpeed][SpiralLift]")
+{
+    NoFullComments no_comments;
+    // U1-like: 500 mm/s travel, 20 mm/s Z limit, 0.4 mm z-hop, 3 degree slope.
+    auto spiral_at_layer_change = [](bool arc_fitting, bool deferred) {
+        GCodeWriter writer;
+        setup_z_speed_writer(writer, 500., 0., 20., arc_fitting, 0.4);
+        writer.set_position(Vec3d(100., 100., deferred ? 0.2 : 0.4));
+        writer.set_current_position_clear(true);
+        writer.lift(LiftType::SpiralLift);
+        if (deferred)
+            writer.defer_z_move(0.4);
+        return writer.travel_to_xyz(Vec3d(150., 100., 0.4), "", true);
+    };
+
+    SECTION("emulated with G1 segments (arc fitting off)") {
+        const std::string deferred  = spiral_at_layer_change(false, true);
+        const std::string reference = spiral_at_layer_change(false, false);
+        INFO(deferred);
+        // Same path as without the layer change (the #471 geometry), only feedrates differ.
+        CHECK(without_feedrates(deferred) == without_feedrates(reference));
+        // Every segment, the first one climbing the 0.2 mm layer as well, stays within 20 mm/s in Z.
+        CHECK(max_g1_z_velocity(deferred, Vec3d(100., 100., 0.2)) <= 20. * 1.001);
+        CHECK(max_g1_z_velocity(reference, Vec3d(100., 100., 0.4)) <= 20. * 1.001);
+
+        // The first segment alone runs slower; the second restores the spiral's feedrate, which is far
+        // above the Z limit (a 3 degree spiral is mostly XY motion).
+        const std::vector<SpiralLine> lines = parse_spiral_gcode(deferred);
+        REQUIRE(lines.size() > 3);
+        REQUIRE(lines[0].has('F'));
+        REQUIRE_FALSE(lines[1].has('F'));
+        REQUIRE(lines[2].has('F'));
+        CHECK(lines[0].v.at('F') < lines[2].v.at('F'));
+        CHECK(lines[2].v.at('F') > 20. * 60. * 5.);
+        CHECK(lines[2].v.at('F') < 500. * 60.);
+        // Without a layer change, one feedrate for the whole spiral, as before.
+        const std::vector<SpiralLine> ref_lines = parse_spiral_gcode(reference);
+        CHECK(std::count_if(ref_lines.begin(), ref_lines.end(), [](const SpiralLine &l) { return l.has('F'); }) == 2);
+    }
+    SECTION("one G3 arc (arc fitting on)") {
+        const std::string deferred = spiral_at_layer_change(true, true);
+        INFO(deferred);
+        CHECK(without_feedrates(deferred) == without_feedrates(spiral_at_layer_change(true, false)));
+        const std::vector<SpiralLine> lines = parse_spiral_gcode(deferred);
+        const auto arc = std::find_if(lines.begin(), lines.end(), [](const SpiralLine &l) { return l.cmd == "G3"; });
+        REQUIRE(arc != lines.end());
+        const double dz         = arc->v.at('Z') - 0.2;
+        const double arc_length = std::hypot(2. * PI * std::hypot(arc->v.at('I'), arc->v.at('J')), dz);
+        CHECK(arc->v.at('F') / 60. * dz / arc_length <= 20. + 0.0001);
+        CHECK(arc->v.at('F') > 20. * 60. * 5.);
+        CHECK(arc->v.at('F') < 500. * 60.);
+    }
+}
+
+// OrcaSlicer #16933: a lifted nozzle travels at the hop height and descends only at the destination.
+namespace {
+
+// Counts the travels (no E) that move in X or Y while lowering Z: each drags the nozzle down over the print.
+int count_descending_travels(const std::string &gcode)
+{
+    int         descending_travels = 0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&descending_travels](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.travel() && line.dist_Z(self) < -EPSILON && (line.dist_X(self) != 0.f || line.dist_Y(self) != 0.f)) {
+            UNSCOPED_INFO(line.raw());
+            ++descending_travels;
+        }
+    });
+    return descending_travels;
+}
+
+// Counts the travels made after the nozzle came straight down, before it printed or rose again:
+// the nozzle dropped from its lift short of the destination and crosses the print low. Moves before
+// the first extrusion come down from the start G-code and are not counted.
+int count_travels_after_descent(const std::string &gcode)
+{
+    int         travels   = 0;
+    bool        printed   = false;
+    bool        descended = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&travels, &printed, &descended](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G0") && !line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+            return;
+        const bool xy = line.dist_X(self) != 0.f || line.dist_Y(self) != 0.f;
+        if (line.has(E) || line.dist_Z(self) > EPSILON) {
+            printed |= xy && line.extruding(self);
+            descended = false;
+        } else if (xy) {
+            if (descended) {
+                UNSCOPED_INFO(line.raw());
+                ++travels;
+            }
+            descended = false;
+        } else if (line.dist_Z(self) < -EPSILON) {
+            descended = printed;
+        }
+    });
+    return travels;
+}
+
+int count_g1(const std::string &gcode)
+{
+    int         n = 0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&n](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G0") || line.cmd_is("G1"))
+            ++n;
+    });
+    return n;
+}
+
+DynamicPrintConfig wipe_tower_lift_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+        {"machine_end_gcode",          ""},
+        {"wipe_tower_wall_type",       "rectangle"},
+        {"layer_height",               0.3},
+        {"initial_layer_print_height", 0.3},
+        {"gcode_flavor",               "klipper"},
+        {"enable_filament_ramming",    "1"},
+        {"enable_arc_fitting",         "0"},
+        {"retract_lift_below",         "0,0"},
+        {"retract_when_changing_layer", "1,1"},
+        {"tool_change_on_wipe_tower",  "1"},
+        {"single_extruder_multi_material_priming", "0"},
+        {"change_filament_gcode",      ""},
+    });
+    // Export copies print.config().gcode_comments into GCodeWriter::full_gcode_comment.
+    // Type2's "Travel to a Wipe Tower" is omitted unless this is on (#881).
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    return config;
+}
+
+bool is_xy_travel_line(const std::string &line)
+{
+    if (line.compare(0, 2, "G0") != 0 && line.compare(0, 2, "G1") != 0)
+        return false;
+    if (line.find('E') != std::string::npos)
+        return false;
+    return line.find('X') != std::string::npos || line.find('Y') != std::string::npos;
+}
+
+// Type1 never writes "Travel to a Wipe Tower" on a real toolchange (only is_finish_first
+// tcrs). The approach onto the tower is the last G0/G1 XY travel before each
+// "; CP TOOLCHANGE START", which is what existing BBL tests walk.
+struct Type1TowerApproach {
+    std::string line;
+    std::string window;
+};
+
+std::vector<Type1TowerApproach> type1_tower_approaches(const std::string &gcode)
+{
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(gcode);
+        for (std::string line; std::getline(in, line);)
+            lines.push_back(line);
+    }
+    std::vector<Type1TowerApproach> out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+            continue;
+        size_t travel = i;
+        while (travel > 0 && !is_xy_travel_line(lines[travel - 1]))
+            --travel;
+        if (travel == 0)
+            continue;
+        --travel;
+        Type1TowerApproach a;
+        a.line = lines[travel];
+        const size_t from = travel > 30 ? travel - 30 : 0;
+        for (size_t k = from; k < i; ++k)
+            a.window += lines[k] + "\n";
+        out.push_back(std::move(a));
+    }
+    return out;
+}
+
+std::string slice_two_cube_wipe_tower(DynamicPrintConfig config, bool bbl)
+{
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    Print print;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    first->volumes.front()->config.set("extruder", 1);
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    // #881: vendor flag before apply, apply twice so two filaments stick.
+    print.is_BBL_printer() = bbl;
+    print.apply(model, config);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.config().gcode_comments.value);
+    REQUIRE(print.has_wipe_tower());
+    const std::string out = gcode(print);
+    REQUIRE_FALSE(print.wipe_tower_data().tool_changes.empty());
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A lifted travel that ends lower descends only at its destination", "[GCodeWriter][LiftTravel]")
+{
+    // Forced: a layer change. Not forced: a destination below the layer, like a scarf seam start.
+    const bool force_z = GENERATE(false, true);
+    CAPTURE(force_z);
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 12., 0., false, 0.4);
+    writer.set_current_position_clear(true);
+
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    gcode += writer.lift(LiftType::NormalLift, true);
+    gcode += writer.travel_to_xyz(Vec3d(30.0, 30.0, 5.0));
+    REQUIRE_THAT(writer.get_position().z(), WithinAbs(5.4, EPSILON));
+
+    const double target_z = force_z ? 5.0 : 4.9;
+    gcode += writer.travel_to_xyz(Vec3d(40.0, 40.0, target_z), "", force_z);
+    INFO(gcode);
+    CHECK(count_descending_travels(gcode) == 0);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(target_z, EPSILON));
+
+    // Already above the destination, the descent is a single move.
+    writer.lift(LiftType::NormalLift, true);
+    writer.travel_to_xyz(Vec3d(50.0, 50.0, target_z));
+    CHECK(count_g1(writer.travel_to_xyz(Vec3d(50.0, 50.0, target_z), "", true)) == 1);
+}
+
+TEST_CASE("A travel that is not lifted still combines XY and Z when z_hop is off", "[GCodeWriter][LiftTravel]")
+{
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 0., false, 0.);
+    writer.set_current_position_clear(true);
+    // GCodeReader starts at (0,0,0). The first move plants it at Z=5 so the second
+    // line (G1 X40 Y40 Z4) is seen as a descent, not a climb from the origin.
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    const std::string descent = writer.travel_to_xyz(Vec3d(40.0, 40.0, 4.0), "", true);
+    gcode += descent;
+    INFO(gcode);
+    // No hop, so the force_z descent stays one XYZ move. The #16933 split is only for a lifted nozzle.
+    REQUIRE(descent.find("G1 X40 Y40 Z4") != std::string::npos);
+    CHECK(count_g1(descent) == 1);
+    CHECK(count_descending_travels(gcode) == 1);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(4.0, EPSILON));
+    CHECK(writer.get_zhop() == 0.);
+}
+
+TEST_CASE("A pending lazy lift travels at hop height without the already-lifted split", "[GCodeWriter][LiftTravel]")
+{
+    // Ordinary retract-on-layer-change calls lift() without spiral_vase, which only sets
+    // m_to_lift. travel_to_xyz then takes the pending-lift branch (hop, then XY at hop
+    // height) and never reaches descend_after_xy. Real plates with z_hop on therefore
+    // already printed lift-then-travel before #16933, so their G-code matches main.
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 12., 0., false, 0.4);
+    writer.set_current_position_clear(true);
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    CHECK(writer.lift(LiftType::NormalLift).empty());
+    CHECK(writer.get_zhop() == 0.);
+    gcode += writer.travel_to_xyz(Vec3d(40.0, 40.0, 5.0), "", true);
+    INFO(gcode);
+    CHECK(count_descending_travels(gcode) == 0);
+    CHECK(writer.get_zhop() > EPSILON);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(5.4, EPSILON));
+}
+
+TEST_CASE("A lifted nozzle reaches its target height only after the travel back to the print", "[GCodeWriter][LiftTravel][WipeTower]")
+{
+    // Two filaments on one nozzle with a prime tower: after each tool change the nozzle is
+    // lifted at the tower and travels back to the object. Type1 is the Bambu planner.
+    const int  lift = GENERATE(int(zhtNormal), int(zhtSlope), int(zhtSpiral), int(zhtAuto));
+    const bool bbl  = GENERATE(true, false);
+    CAPTURE(lift, bbl);
+    DynamicPrintConfig config = wipe_tower_lift_config();
+    config.set_deserialize_strict({
+        {"z_hop",            "0.4,0.4"},
+        {"z_hop_when_prime", "1,1"},
+        {"wipe_tower_type",  bbl ? "type1" : "type2"},
+        {"gcode_comments",   "1"},
+    });
+    config.option<ConfigOptionEnumsGeneric>("z_hop_types")->values = {lift, lift};
+
+    const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    if (bbl) {
+        // Type1 only writes "Travel to a Wipe Tower" for is_finish_first tcrs. The
+        // real toolchange approach is the last XY travel before each start marker.
+        const auto approaches = type1_tower_approaches(gcode);
+        UNSCOPED_INFO("type1 approaches=" << approaches.size());
+        if (!approaches.empty())
+            UNSCOPED_INFO(approaches.front().window);
+        REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
+        REQUIRE_FALSE(approaches.empty());
+        for (const auto &approach : approaches) {
+            UNSCOPED_INFO(approach.line);
+            CHECK(count_descending_travels(approach.window) == 0);
+        }
+    } else {
+        UNSCOPED_INFO(gcode.substr(0, 1200));
+        REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    }
+    CHECK(count_descending_travels(gcode) == 0);
+}
+
+TEST_CASE("Wipe-tower travel does not lift when z_hop is off", "[GCodeWriter][LiftTravel][WipeTower]")
+{
+    const bool bbl = GENERATE(true, false);
+    CAPTURE(bbl);
+    DynamicPrintConfig config = wipe_tower_lift_config();
+    config.set_deserialize_strict({
+        {"z_hop",            "0,0"},
+        {"z_hop_when_prime", "0,0"},
+        {"wipe_tower_type",  bbl ? "type1" : "type2"},
+        {"gcode_comments",   "1"},
+    });
+    const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    // Type2 only writes "Travel to a Wipe Tower" when travel_to_tower_now is true
+    // and travel_to() emits a G1. With z_hop off that call is often a no-op (see PR).
+    // Both planners still put the approach immediately before "; CP TOOLCHANGE START".
+    const auto approaches = type1_tower_approaches(gcode);
+    UNSCOPED_INFO("approaches=" << approaches.size() << " bbl=" << bbl);
+    if (!approaches.empty())
+        UNSCOPED_INFO(approaches.front().window);
+    REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
+    REQUIRE_FALSE(approaches.empty());
+    for (const auto &approach : approaches) {
+        UNSCOPED_INFO(approach.line);
+        CHECK(approach.window.find("lift Z") == std::string::npos);
+        CHECK(count_travels_after_descent(approach.window) == 0);
+    }
+    // z_hop 0 must not invent a hop before the tower travel. Combined XYZ layer-change
+    // descents without a lift are unchanged (those are not this PR).
+    CHECK(gcode.find("lift Z") == std::string::npos);
+    CHECK(count_travels_after_descent(gcode) == 0);
+}
+
+TEST_CASE("A lifted nozzle keeps its height over a detour around a concave part", "[GCodeWriter][LiftTravel]")
+{
+    // A layer-change lift plus avoid-crossing detours the travel to the next layer's start
+    // around the notch of the L. The nozzle must stay up over every waypoint.
+    const int lift = GENERATE(int(zhtNormal), int(zhtSlope), int(zhtSpiral));
+    CAPTURE(lift);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"z_hop",                       "0.4"},
+        {"retract_lift_below",          "0"},
+        {"retract_when_changing_layer", "1"},
+        {"reduce_crossing_wall",        1},
+        {"seam_position",               "random"},
+        {"enable_arc_fitting",          "0"},
+        {"skirt_loops",                 0},
+        {"brim_type",                   "no_brim"},
+        {"gcode_comments",              "1"},
+        {"machine_start_gcode",         ""},
+        {"machine_end_gcode",           ""},
+    });
+    config.option<ConfigOptionEnumsGeneric>("z_hop_types", true)->values = {lift};
+    Print print;
+    Model model;
+    init_print({TestMesh::L}, print, model, config);
+    print.is_BBL_printer() = true;
+    print.apply(model, config);
+
+    const std::string out = gcode(print);
+    CHECK(count_descending_travels(out) == 0);
+    CHECK(count_travels_after_descent(out) == 0);
 }

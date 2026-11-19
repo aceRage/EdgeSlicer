@@ -1,4 +1,5 @@
 #include "StatusPanel.hpp"
+#include "FilamentCommands.hpp"
 
 #include "I18N.hpp"
 #include "Widgets/Label.hpp"
@@ -197,6 +198,7 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     wxBoxSizer *bSizer_task_name = new wxBoxSizer(wxVERTICAL);
     wxBoxSizer *bSizer_task_name_hor = new wxBoxSizer(wxHORIZONTAL);
     wxPanel*    task_name_panel      = new wxPanel(parent);
+    task_name_panel->SetBackgroundColour(*wxWHITE);
 
     m_staticText_subtask_value = new wxStaticText(task_name_panel, wxID_ANY, _L("N/A"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
     m_staticText_subtask_value->SetMaxSize(wxSize(FromDIP(600), -1));
@@ -1052,7 +1054,7 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
         const std::string js_request_pip = R"(
             document.querySelector('video').requestPictureInPicture();
         )";
-        m_custom_camera_view->RunScript(js_request_pip);
+        WebView::RunScript(m_custom_camera_view, js_request_pip);
     });
     m_camera_switch_button->Hide();
 
@@ -1099,6 +1101,42 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
             toggle_builtin_camera();
         }
     });
+
+    // "New Bambu LiveView" (liveview_go2rtc, on by default): Bambu LAN cameras play through the hub's
+    // go2rtc in a web view instead of Bambu's BambuSource/live555 player. The web view is made on the
+    // first Play that uses it - never for someone who has the setting off, and the setting applies
+    // at the next Play without a restart. See tests/plan_own_camera_view.md.
+    m_media_play_ctrl->SetOwnView(
+        [this, sizer]() -> wxWebView * {
+            if (m_own_camera_view == nullptr) {
+                m_own_camera_view = WebView::CreateWebView(this, wxEmptyString);
+                if (m_own_camera_view == nullptr)
+                    return nullptr;
+                m_own_camera_view->EnableContextMenu(false);
+                m_own_camera_view->SetMinSize(wxSize(PAGE_MIN_WIDTH, FromDIP(288)));
+                m_own_camera_view->Hide();
+                // Right after the Bambu player, in the same slot.
+                int at = 0;
+                for (auto *item : sizer->GetChildren()) {
+                    ++at;
+                    if (item->GetWindow() == m_media_ctrl) break;
+                }
+                sizer->Insert(at, m_own_camera_view, 1, wxEXPAND | wxALL, 0);
+            }
+            return m_own_camera_view;
+        },
+        [this](bool own) {
+            if (m_own_camera_view == nullptr) return;
+            if (own) {
+                m_custom_camera_view->Hide();
+                m_media_ctrl->Hide();
+                m_own_camera_view->Show();
+            } else {
+                m_own_camera_view->Hide();
+                m_media_ctrl->Show();
+            }
+            Layout();
+        });
 
     sizer->Add(m_media_ctrl, 1, wxEXPAND | wxALL, 0);
     sizer->Add(m_custom_camera_view, 1, wxEXPAND | wxALL, 0);
@@ -2244,7 +2282,7 @@ void StatusPanel::show_error_message(MachineObject *obj, bool is_exist, wxString
             }
 
             // Which error and job the buttons are speaking for. This is set before the buttons
-            // are laid out, because update_title_style greys out the ones whose command needs a
+            // are laid out, because update_title_style hides the ones whose command needs a
             // job_id when the printer has not given us one.
             m_print_error_dlg->set_error_context(obj, obj ? obj->print_error : 0,
                                                  obj ? obj->job_id_ : std::string());
@@ -2604,8 +2642,9 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
     // update extruder icon
     update_extruder_status(obj);
 
-    bool is_suppt_aux_fun = obj->is_support_aux_fan;
-    bool is_suppt_cham_fun = obj->is_support_chamber_fan;
+    // An H2-series printer may list its aux / chamber fans only in device.airduct.
+    bool is_suppt_aux_fun = obj->has_aux_fan();
+    bool is_suppt_cham_fun = obj->has_chamber_fan();
 
     //update cham fan
     if (m_current_support_cham_fan != is_suppt_cham_fun) {
@@ -2748,10 +2787,11 @@ void StatusPanel::update_ams(MachineObject *obj)
     }
     if (m_filament_setting_dlg) { m_filament_setting_dlg->obj = obj; }
 
-    if (obj && (obj->last_cali_version != obj->cali_version)) {
+    // Fired by the panel on its own (extrusion_cali_get); a secured printer would reject it as unsigned.
+    if (obj && (obj->last_cali_version != obj->cali_version) && !obj->skip_auto_command_if_secured("extrusion_cali_get")) {
         last_cali_version = obj->cali_version;
         PACalibExtruderInfo cali_info;
-        cali_info.nozzle_diameter = obj->m_extder_data.extders[0].current_nozzle_diameter;
+        cali_info.nozzle_diameter = obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255
         cali_info.use_extruder_id = false;
         cali_info.use_nozzle_volume_type = false;
         CalibUtils::emit_get_PA_calib_infos(cali_info);
@@ -2763,8 +2803,10 @@ void StatusPanel::update_ams(MachineObject *obj)
 
     // Two-extruder printers (H2D, H2D Pro, H2C, X2D) get the per-extruder layout.
     m_ams_control->SetMachine(obj);
-    if (m_ams_control->IsDualMode() != obj->is_multi_extruders()) {
-        m_ams_control->SetDualMode(obj->is_multi_extruders());
+    // A printer with a rack AMS (the H3C's nine-slot AMS 3H) uses the same painted layout with one side.
+    const bool dual_layout = obj->is_multi_extruders() || obj->has_rack_ams();
+    if (m_ams_control->IsDualMode() != dual_layout) {
+        m_ams_control->SetDualMode(dual_layout);
         m_ams_control_box->Layout();
         m_ams_control_box->Fit();
         Layout();
@@ -2976,7 +3018,11 @@ void StatusPanel::update_ams(MachineObject *obj)
                 std::string tray_id     = tray_it->first;
                 int         tray_id_int = atoi(tray_id.c_str());
                 // new protocol
-                if ((obj->tray_reading_bits & (1 << (ams_id_int * 4 + tray_id_int))) != 0) {
+                // ams_id * 4 + slot for an AMS, 28 + slot for the AMS 3H (GUI::AmsTypes::tray_bit).
+                const int reading_bit = ams_it->second && ams_it->second->is_rack()
+                                            ? GUI::AmsTypes::tray_bit(ams_it->second->type, ams_id_int, tray_id_int)
+                                            : ams_id_int * 4 + tray_id_int;
+                if (MachineObject::hex_bit_set(obj->tray_reading_bits, reading_bit)) {
                     m_ams_control->PlayRridLoading(ams_id, tray_id);
                 } else {
                     m_ams_control->StopRridLoading(ams_id, tray_id);
@@ -3743,6 +3789,10 @@ void StatusPanel::on_ams_load_curr()
         std::string                            curr_ams_id = m_ams_control->GetCurentAms();
         std::string                            curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
 
+        // The H3C's AMS 3H and its rack spool holders: Bambu Studio's hotend-page load.
+        if (rack_slot_action(true, curr_ams_id, curr_can_id))
+            return;
+
 
         update_filament_step();
         //virtual tray (254; on two-extruder printers also 255, the right-hand spool)
@@ -3832,11 +3882,45 @@ void StatusPanel::on_ams_load_vams(wxCommandEvent& event) {
     }
 }
 
+// Load / unload on the H3C's AMS 3H slot or rack spool holder, as Bambu Studio's hotend filament
+// page sends them (MachineObject::command_rack_change_filament). False when the selection is not one.
+bool StatusPanel::rack_slot_action(bool load, const std::string &ams_id, const std::string &slot_id)
+{
+    if (!obj || !obj->is_rack_printer())
+        return false;
+    const int  ams    = std::atoi(ams_id.c_str());
+    const bool holder = GUI::AmsTypes::is_rack_virtual_slot(ams);
+    if (!obj->is_rack_ams_id(ams_id) && !holder)
+        return false;
+    if (!holder && slot_id.empty())
+        return true; // nothing selected in the unit
+
+    auto mid_temp = [](const AmsTray *t) {
+        return t ? GUI::FilamentCommands::tray_mid_temp(t->nozzle_temp_min, t->nozzle_temp_max) : -1;
+    };
+    const AmsTray *target = nullptr;
+    if (holder) {
+        for (const AmsTray &t : obj->vir_slots)
+            if (t.id == ams_id)
+                target = &t;
+    } else {
+        target = obj->get_ams_tray(ams_id, slot_id);
+    }
+    const int new_temp = mid_temp(target);
+    const int old_temp = mid_temp(obj->get_curr_tray());
+    BOOST_LOG_TRIVIAL(info) << (load ? "on_ams_load" : "on_ams_unload") << ": rack slot ams " << ams_id << " slot " << (holder ? "0" : slot_id);
+    obj->command_rack_change_filament(load, ams_id, holder ? "0" : slot_id, old_temp, new_temp);
+    return true;
+}
+
 void StatusPanel::on_ams_unload(SimpleEvent &event)
 {
     if (obj) {
         std::string curr_ams_id = m_ams_control->GetCurentAms();
         std::string curr_can_id = m_ams_control->GetCurrentCan(curr_ams_id);
+        // The H3C's AMS 3H and its rack spool holders: Bambu Studio's hotend-page unload.
+        if (rack_slot_action(false, curr_ams_id, curr_can_id))
+            return;
 
         if (obj->is_enable_np) {
             try {
@@ -4075,7 +4159,7 @@ void StatusPanel::on_ams_refresh_rfid(wxCommandEvent &event)
                 nullptr,
                 _L("Cannot read filament info: the filament is loaded to the tool head,please unload the filament and try again."),
                 wxEmptyString,
-                wxICON_WARNING | wxYES);
+                wxICON_WARNING | wxOK);
             msg_dlg.ShowModal();
             return;
         }
@@ -4086,6 +4170,13 @@ void StatusPanel::on_ams_refresh_rfid(wxCommandEvent &event)
             return;
         }
         std::string curr_can_id = event.GetString().ToStdString();
+        // The H3C's AMS 3H: Bambu Studio's ams_get_rfid (its spool holders have no tag to read here).
+        if (obj->is_rack_printer()) {
+            if (obj->is_rack_ams_id(curr_ams_id) && !curr_can_id.empty())
+                obj->command_ams_get_rfid(std::atoi(curr_ams_id.c_str()), std::atoi(curr_can_id.c_str()));
+            if (obj->is_rack_ams_id(curr_ams_id) || GUI::AmsTypes::is_rack_virtual_slot(std::atoi(curr_ams_id.c_str())))
+                return;
+        }
 
         std::map<std::string, Ams *>::iterator it = obj->amsList.find(curr_ams_id);
         if (it == obj->amsList.end()) {
@@ -4116,6 +4207,9 @@ void StatusPanel::on_ams_selected(wxCommandEvent &event)
             return;
         } else {
             std::string curr_can_id = event.GetString().ToStdString();
+            // Selecting an AMS 3H slot sends nothing (Bambu Studio's hotend page has no "select tray").
+            if (obj->is_rack_ams_id(curr_ams_id))
+                return;
             std::map<std::string, Ams *>::iterator it = obj->amsList.find(curr_ams_id);
             if (it == obj->amsList.end()) {
                 BOOST_LOG_TRIVIAL(trace) << "ams: find " << curr_ams_id << " failed";
@@ -4321,8 +4415,8 @@ void StatusPanel::on_nozzle_fan_switch(wxCommandEvent &event)
     m_fan_control_popup = new FanControlPopup(this);
 
     if (obj) {
-        m_fan_control_popup->show_cham_fan(obj->is_support_chamber_fan);
-        m_fan_control_popup->show_aux_fan(obj->is_support_aux_fan);
+        m_fan_control_popup->show_cham_fan(obj->has_chamber_fan());
+        m_fan_control_popup->show_aux_fan(obj->has_aux_fan());
     }
 
     auto pos = m_switch_nozzle_fan->GetScreenPosition();
@@ -4446,6 +4540,9 @@ void StatusBasePanel::toggle_custom_camera()
     const auto enabled = wxGetApp().app_config->get("camera", "enable_custom_source") == "true";
 
     if (enabled) {
+        // Spike: stop the own live view first (it hands the slot back to the Bambu player control,
+        // which is hidden right below), so a stream nobody can see does not keep the printer busy.
+        if (m_media_play_ctrl->OwnViewBusy()) m_media_play_ctrl->ultra_pause(true);
         m_custom_camera_view->Show();
         m_media_ctrl->Hide();
         m_media_play_ctrl->Hide();
@@ -4466,17 +4563,30 @@ void StatusBasePanel::remove_controls()
 {
     const std::string js_cleanup_video_element = R"(
         document.body.style.overflow='hidden';
-        const video = document.querySelector('video');
-        video.setAttribute('style', 'width: 100% !important;');
-        video.removeAttribute('controls');
-        video.addEventListener('leavepictureinpicture', () => {
-            window.wx.postMessage('leavepictureinpicture');
-        });
-        video.addEventListener('enterpictureinpicture', () => {
-            window.wx.postMessage('enterpictureinpicture');
-        });
+        (() => {
+        const cleanup = (video) => {
+            video.setAttribute('style', 'width: 100% !important;');
+            video.removeAttribute('controls');
+            video.addEventListener('leavepictureinpicture', () => {
+                window.wx.postMessage('leavepictureinpicture');
+            });
+            video.addEventListener('enterpictureinpicture', () => {
+                window.wx.postMessage('enterpictureinpicture');
+            });
+        };
+        // The page may run this before its <video> exists: do it as soon as one appears.
+        const existing = document.querySelector('video');
+        if (existing) {
+            cleanup(existing);
+        } else {
+            new MutationObserver((mutations, observer) => {
+                const found = document.querySelector('video');
+                if (found) { observer.disconnect(); cleanup(found); }
+            }).observe(document.documentElement, { childList: true, subtree: true });
+        }
+        })();
     )";
-    m_custom_camera_view->RunScript(js_cleanup_video_element);
+    WebView::RunScript(m_custom_camera_view, js_cleanup_video_element);
 }
 
 void StatusPanel::on_camera_leave(wxMouseEvent& event)

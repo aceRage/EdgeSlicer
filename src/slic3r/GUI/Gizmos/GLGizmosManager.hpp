@@ -84,6 +84,7 @@ public:
         Seam,
         FuzzySkin,
         MmSegmentation,
+        TextureDisplacement,
         Emboss,
         Svg,
         Measure,
@@ -98,6 +99,9 @@ public:
         // Exact B-rep fillet / chamfer / shell of a CAD part (GLGizmoCadFillet). Not in the
         // toolbar: opened from the part's context menu and from the Edit gizmo.
         CadFillet,
+        // Split to Fit (GLGizmoSplitToFit): cut an object into parts that each fit the printer.
+        // Appended after CadFillet so the EType values before it are unchanged.
+        SplitToFit,
         //SlaSupports,
         // BBS
         //FaceRecognition,
@@ -206,6 +210,11 @@ public:
         IC_DISTRIBUTE_Y_DARK,
         IC_DISTRIBUTE_Z,
         IC_DISTRIBUTE_Z_DARK,
+        // Edge: the quick view options button next to the view cube (light, hover, dark, dark hover)
+        IC_VIEW_OPTIONS,
+        IC_VIEW_OPTIONS_HOVER,
+        IC_VIEW_OPTIONS_DARK,
+        IC_VIEW_OPTIONS_DARK_HOVER,
         IC_NAME_COUNT,
     };
 
@@ -257,6 +266,8 @@ public:
     }
 
     bool is_enabled() const { return m_enabled; }
+    // ORCA
+    bool is_mouse_over_toolbar_icon(const Vec2d& mouse_pos) const { return get_gizmo_from_mouse(mouse_pos) != Undefined; }
     void set_enabled(bool enable) { m_enabled = enable; }
 
     void set_icon_dirty() { m_icons_texture_dirty = true; }
@@ -306,6 +317,8 @@ public:
     ClippingPlane get_clipping_plane() const;
     ClippingPlane get_assemble_view_clipping_plane() const;
     bool wants_reslice_supports_on_undo() const;
+    // Edge (Airbrush P3, A3): commit (or cancel) airbrush strokes still baking before an undo/redo.
+    void flush_pending_paint(bool commit);
 
     bool is_in_editing_mode(bool error_notification = false) const;
     bool is_hiding_instances() const;

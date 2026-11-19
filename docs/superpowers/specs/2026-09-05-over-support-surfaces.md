@@ -54,11 +54,12 @@ supported" in the soluble case, only at a non-zero gap**:
   `SupportMaterial.cpp` calls a `remove_bridges_from_contacts` that takes **no length** and drops every
   bridge it can detect from its contacts, so the feature stands down for the whole object.
 * `tree(auto)`, **organic** (the default tree style; `SupportParameters.hpp` resolves `default`, `grid`
-  and `snug` to organic for a tree type) — supported when `support_interface_top_layers > 0` and
-  `support_critical_regions_only` is off. `TreeSupport3D.cpp` runs the same length-less removal under
-  the same `bridge_no_support` gate, so the feature stands down there too. `TreeSupport::generate()`
-  hands organic trees to `TreeSupport3D` before `detect_overhangs()` runs, so the length rule below
-  never applies to them.
+  and `snug` to organic for a tree type) — **corrected 2026-10-12 (Orca #11295 port, Batch 3C):** the
+  organic tree follows the classic rule below. `TreeSupport3D`'s `generate_support_areas()` calls
+  `TreeSupport::detect_overhangs()` (its own length-less `generate_overhangs()` is compiled out), so
+  `bridge_no_support` never reached it and `max_bridge_length` did. The first version of this spec
+  said the organic tree ran the length-less removal under `bridge_no_support`; that branch was dead
+  code.
 * `tree(auto)`, **classic** (`tree_slim`, `tree_strong`, `tree_hybrid`) — same two refusals, and
   `TreeSupport.cpp` drops the *bridgeable* faces whenever `max_bridge_length > 0` (the default, 10 mm),
   not gated on `bridge_no_support`: a bottom bridge whose fill surface is shorter than
@@ -295,9 +296,9 @@ A perimeter segment is retyped `erOverSupportPerimeter` ("Wall over support") wh
    overhang segment, extended by `fw` at both ends, anchored inside the lower layer at both of those
    ends, and no longer than `max_bridge_length + 10`, is offset into a thick line and cut out of the
    generator's contacts. Nothing is printed on top of it, so it stays an overhang wall. It applies
-   for the classic tree whenever `max_bridge_length > 0` — the same `bridgeable` length section 3
-   already computes; normal(auto) and the organic tree never reach it (under `bridge_no_support` the
-   auto pass stands down, section 3). Both call sites pass
+   for every tree style (classic and, since the 2026-10-12 correction, organic) whenever
+   `max_bridge_length > 0` — the same `bridgeable` length section 3 already computes; normal(auto)
+   never reaches it (under `bridge_no_support` the auto pass stands down, section 3). Both call sites pass
    `break_bridge = false`, so a segment *longer* than `max_bridge_length` is **not** cut out, does
    get support, and is claimable.
 

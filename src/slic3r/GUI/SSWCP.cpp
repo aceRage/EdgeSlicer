@@ -1,5 +1,6 @@
 // Implementation of web communication protocol for Slicer Studio
 #include "SSWCP.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "FilamentColorUtils.hpp"
 #include "SpoolmanDialog.hpp"
 #include "GUI_App.hpp"
@@ -7,6 +8,7 @@
 #include "DownloadManager.hpp"
 #include "RemoteSnapmaker.hpp" // Ultra: the phone's own connect reuses this connect's credentials
 #include "SnapmakerLan.hpp"    // Ultra: an archived U1 send is recorded under its LAN card
+#include "U1LanRoute.hpp"      // Ultra: U1 local-first
 #include "GcodeArchive.hpp"    // Ultra: the desktop's Snapmaker send is archived when it finishes
 #include "PlatePrintHistoryRecorder.hpp" // the plate's print history
 #include "PartPlate.hpp"
@@ -1552,6 +1554,7 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                     std::string sub_type = j_value["filament_sub_type"][i].get<std::string>();
 
                     machineData.filament_type = type;
+                    machineData.filament_vendor = vendor;
 
                     std::string name = "";
 
@@ -4153,14 +4156,17 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
                 port = m_param_data["port"].get<int>();
             }
 
-            auto p_config = &(wxGetApp().preset_bundle->printers.get_edited_preset().config);
+            // A copy, as sw_mqtt_set_engine does: a connection test leaves the printer preset alone. It
+            // used to write host_type htMoonRaker into the edited preset, a value that has no key in
+            // the host_type map, so the preset could not be serialized with it.
+            DynamicPrintConfig config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
             PrintHostType type = PrintHostType::htMoonRaker;
             // todo : add cin-type
             //            
-            p_config->option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
-            p_config->set("print_host", ip + (port == -1 ? "" : std::to_string(port)));
-            std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&wxGetApp().preset_bundle->printers.get_edited_preset().config));
+            config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
+            config.set("print_host", print_host_address(ip, port));
+            std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&config));
 
             if (!host) {                
                 finish_job();
@@ -5877,6 +5883,8 @@ void SSWCP_MachineManage_Instance::process()
         sw_SwitchModel();
     } else if (m_cmd == "sw_DeleteDevices") {
         sw_DeleteDevices();
+    } else if (m_cmd == "sw_UpdateDeviceInfo") {
+        sw_UpdateDeviceInfo();
     } else {
         handle_general_fail();
     }
@@ -5957,8 +5965,10 @@ void SSWCP_MachineManage_Instance::sw_AddDevice()
 {
     {
         wxGetApp().CallAfter([] {
-            if (wxGetApp().web_device_dialog)
-                delete wxGetApp().web_device_dialog;
+            if (wxGetApp().web_device_dialog) {
+                wxGetApp().web_device_dialog->Destroy();
+                wxGetApp().web_device_dialog = nullptr;
+            }
 
             wxGetApp().web_device_dialog = new WebDeviceDialog;
             wxGetApp().web_device_dialog->run();
@@ -6065,6 +6075,228 @@ void SSWCP_MachineManage_Instance::sw_SwitchModel()
             handle_general_fail();
         }
     }
+}
+
+namespace {
+
+// The installed-printers list (m_ProfileJson, what the preset dialog installs from) learns that `model`
+// is used with `nozzle`, the way the connect flow does. True when the list changed.
+bool profile_json_add_model_nozzle(const std::string& model, const std::string& nozzle)
+{
+    if (model.empty() || nozzle.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
+    if (!m_ProfileJson.contains("model") || !m_ProfileJson["model"].is_array())
+        return false;
+
+    for (auto& entry : m_ProfileJson["model"]) {
+        if (!entry.is_object() || !entry.count("model") || !entry["model"].is_string() || entry["model"].get<std::string>() != model)
+            continue;
+        std::string selected = (entry.count("nozzle_selected") && entry["nozzle_selected"].is_string()) ?
+                                   entry["nozzle_selected"].get<std::string>() :
+                                   std::string();
+        if (selected.find(nozzle) != std::string::npos)
+            return false;
+        entry["nozzle_selected"] = selected.empty() ? nozzle : selected + ";" + nozzle;
+        return true;
+    }
+
+    json item;
+    item["vendor"]          = "Snapmaker";
+    item["model"]           = model;
+    item["nozzle_selected"] = nozzle;
+    item["nozzle_diameter"] = nozzle;
+    m_ProfileJson["model"].push_back(item);
+    return true;
+}
+
+// Some variant of `model` is enabled in the app config already.
+bool printer_model_installed(const std::string& model)
+{
+    const auto vendors = wxGetApp().app_config->vendors();
+    for (const auto& v : vendors) {
+        auto m = v.second.find(model);
+        if (m != v.second.end() && !m->second.empty())
+            return true;
+    }
+    return false;
+}
+
+bool same_device_info(const DeviceInfo& a, const DeviceInfo& b)
+{
+    return a.ip == b.ip && a.dev_name == b.dev_name && a.model_name == b.model_name && a.preset_name == b.preset_name &&
+           a.connected == b.connected && a.img == b.img && a.nozzle_sizes == b.nozzle_sizes && a.nozzle_volume_type == b.nozzle_volume_type &&
+           a.sn == b.sn && a.protocol == b.protocol && a.api_key == b.api_key && a.user == b.user && a.password == b.password &&
+           a.ca == b.ca && a.cert == b.cert && a.key == b.key && a.clientId == b.clientId && a.port == b.port &&
+           a.link_mode == b.link_mode && a.userid == b.userid && a.id == b.id;
+}
+
+} // namespace
+
+// Snapmaker #768. The Device page (flutter_web 2.3.40) pushes what it learned about its printers:
+// { "devices": [ { "dev_id": ..., any of ip / dev_name / model_name / nozzle_sizes / ... } ] }.
+// Only the fields present are merged into the stored DeviceInfo, a device that is not stored yet is
+// created, and nothing is saved or refreshed when nothing changed.
+void SSWCP_MachineManage_Instance::sw_UpdateDeviceInfo()
+{
+    if (!m_param_data.count("devices") || !m_param_data["devices"].is_array()) {
+        handle_general_fail(-1, "param [devices] is required (array)");
+        return;
+    }
+
+    // Every AppConfig access is on the UI thread: the connect flow and the other MachineManage
+    // handlers read and write the device list there.
+    wxGetApp().CallAfter([devices_json = m_param_data["devices"]]() {
+        bool any_changed = false;
+        // model + first nozzle of every device that changed, for the installed-printers list
+        std::vector<std::pair<std::string, std::string>> changed_models;
+
+        for (const auto& item : devices_json) {
+            if (!item.is_object() || !item.count("dev_id") || !item["dev_id"].is_string())
+                continue;
+
+            const std::string dev_id = item["dev_id"].get<std::string>();
+            if (dev_id.empty())
+                continue;
+
+            DeviceInfo info;
+            const bool exist = wxGetApp().app_config->get_device_info(dev_id, info);
+            if (!exist) {
+                info.dev_id    = dev_id;
+                info.connected = false;
+                info.protocol  = 0;
+                info.port      = 0;
+            }
+            const DeviceInfo before = info;
+
+            auto str = [&item](const char* key, std::string& out) {
+                if (item.count(key) && item[key].is_string())
+                    out = item[key].get<std::string>();
+            };
+
+            // Merge: only the fields that are present overwrite.
+            str("ip", info.ip);
+            str("dev_name", info.dev_name);
+
+            if (item.count("model_name") && item["model_name"].is_string()) {
+                info.model_name = item["model_name"].get<std::string>();
+
+                // The machine's cover picture, served by the page server.
+                const size_t vendor_pos = info.model_name.find_first_of(" ");
+                if (vendor_pos != std::string::npos) {
+                    const std::string vendor = info.model_name.substr(0, vendor_pos);
+                    info.img = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" + vendor + "/" +
+                               info.model_name + "_cover.png";
+                }
+            }
+
+            if (item.count("connected") && item["connected"].is_boolean())
+                info.connected = item["connected"].get<bool>();
+
+            str("sn", info.sn);
+            str("link_mode", info.link_mode);
+            str("id", info.id);
+            str("userid", info.userid);
+
+            if (item.count("protocol") && item["protocol"].is_number_integer())
+                info.protocol = item["protocol"].get<int>();
+            if (item.count("port") && item["port"].is_number_integer())
+                info.port = item["port"].get<int>();
+
+            str("user", info.user);
+            str("password", info.password);
+            str("ca", info.ca);
+            str("cert", info.cert);
+            str("key", info.key);
+            str("clientId", info.clientId);
+            str("api_key", info.api_key);
+            str("img", info.img);
+
+            // The same four sizes the connect flow accepts ("0.4" or 0.4 alike). A report with no
+            // readable size keeps the stored sizes instead of wiping them.
+            if (item.count("nozzle_sizes") && item["nozzle_sizes"].is_array()) {
+                std::vector<std::string> sizes = NozzleSync::parse_reported_nozzles(item["nozzle_sizes"]);
+                if (!sizes.empty())
+                    info.nozzle_sizes = std::move(sizes);
+            }
+
+            if (item.count("nozzle_volume_type") && item["nozzle_volume_type"].is_array()) {
+                info.nozzle_volume_type.clear();
+                for (const auto& volume_type : item["nozzle_volume_type"]) {
+                    if (!volume_type.is_string())
+                        continue;
+                    const std::string type = volume_type.get<std::string>();
+                    if (type == "standard" || type == "high_flow")
+                        info.nozzle_volume_type.push_back(type);
+                }
+            }
+
+            // "<model> (<first size> nozzle)": taken from the page when it names one, else rebuilt
+            // when the model or the sizes changed (or none was stored yet). A device that reports
+            // no size keeps its stored name.
+            const bool named = item.count("preset_name") && item["preset_name"].is_string();
+            str("preset_name", info.preset_name);
+            if (!named && !info.model_name.empty() &&
+                (info.preset_name.empty() || info.model_name != before.model_name || info.nozzle_sizes != before.nozzle_sizes))
+                info.preset_name = NozzleSync::device_preset_name(info.model_name, info.nozzle_sizes, info.preset_name);
+
+            if (info.dev_name.empty()) // a card needs a name
+                info.dev_name = !info.ip.empty() ? info.ip : dev_id;
+
+            if (exist && same_device_info(before, info))
+                continue;
+
+            wxGetApp().app_config->save_device_info(info);
+            any_changed = true;
+            if (!info.model_name.empty() && !info.nozzle_sizes.empty())
+                changed_models.emplace_back(info.model_name, NozzleSync::first_nozzle(info.nozzle_sizes));
+        }
+
+        if (!any_changed)
+            return;
+
+        bool profile_changed = false;
+        bool model_missing   = false;
+        for (const auto& mn : changed_models) {
+            profile_changed |= profile_json_add_model_nozzle(mn.first, mn.second);
+            model_missing |= !printer_model_installed(mn.first);
+        }
+
+        // Update the Home cards, the Device page's device list and the printer combo boxes.
+        const auto devices = wxGetApp().app_config->get_devices();
+
+        json param;
+        param["command"]    = "local_devices_arrived";
+        param["sequece_id"] = "10001";
+        param["data"]       = devices;
+        wxGetApp().run_script(wxString::Format("window.postMessage(%s)", param.dump()));
+
+        json data = devices;
+        wxGetApp().device_card_notify(data);
+
+        wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+
+        // Install the presets of a model or nozzle the app has not seen before. When every changed
+        // model is installed already and no nozzle was added there is nothing to apply, and a reload
+        // of all presets (which asks about unsaved changes) is not worth it (see set_engine).
+        if (!profile_changed && !model_missing)
+            return;
+
+        if (SSWCP_MqttAgent_Instance::m_dialog) {
+            SSWCP_MqttAgent_Instance::m_dialog->SaveProfile();
+            bool flag = false;
+            // Not asked for by the user: keep their modified values silently.
+            SSWCP_MqttAgent_Instance::m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater, flag,
+                                                             true);
+            wxGetApp().update_mode();
+        } else {
+            BOOST_LOG_TRIVIAL(warning) << "sw_UpdateDeviceInfo: preset dialog not available, skip preset install";
+        }
+    });
+
+    send_to_js();
+    finish_job();
 }
 
 // SSWCP_MqttAgent_Instance
@@ -6260,6 +6492,11 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         
         client->SetMessageCallback(SSWCP_MqttAgent_Instance::mqtt_msg_cb);
 
+        // Ultra: a U1 bound to the Snapmaker account is served over the LAN (its Moonraker
+        // WebSocket) whenever it answers there, the cloud as the fallback (U1WsRoute.hpp);
+        // app_config snapmaker_local_first = "0" keeps it on the cloud.
+        attach_u1_lan_route_if_cloud(client, server_address);
+
         m_res_data["type"] = type;
         m_res_data["id"]   = std::to_string(int64_t(get_current_engine().get()));
 
@@ -6290,6 +6527,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6353,6 +6596,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6427,6 +6676,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6499,6 +6754,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_unsubscribe() {
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6569,7 +6830,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
 
         config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;
 
-        config.set("print_host", ip + (port == -1 ? "" : ":" + std::to_string(port)));
+        config.set("print_host", print_host_address(ip, port));
 
         std::shared_ptr<PrintHost> tmp_host(PrintHost::get_print_host(&config));
         wxGetApp().set_connect_host(tmp_host);
@@ -6621,6 +6882,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                         host->m_sn_mtx.lock();
                         host->m_sn = m_param_data["sn"].get<std::string>();
                         host->m_sn_mtx.unlock();
+
+                        {
+                            const std::string code = m_param_data.count("code") && m_param_data["code"].is_string() ?
+                                                         m_param_data["code"].get<std::string>() : std::string();
+                            u1_route_set_device(engine, m_param_data["sn"].get<std::string>(), code);
+                        }
                     } else {
                         handle_general_fail(-1, "param [sn] is required or wrong type");
                         return;
@@ -6749,6 +7016,29 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes();
                                 });
                             });
+                            // The first request below (machine.system_info) is answered on <sn>/response.
+                            // The Device page subscribes that topic with its own sw_mqtt_subscribe, on
+                            // another worker, and sends set_engine without waiting for that SUBACK, so the
+                            // answer to the first request after picking a printer could arrive before
+                            // the subscription existed and be dropped (a 5 s timeout; seen on a U1 over
+                            // the Snapmaker cloud broker, where the page re-subscribed after a timeout
+                            // and set_engine overtook it). Wait for the page's subscription; if it has
+                            // not landed in 3 s, subscribe the same topics here (the page's own names,
+                            // <sn>/response and <sn>/notification, in both link modes; Subscribe waits
+                            // for the broker's acknowledgement). The query also asks a second time if
+                            // the first goes unanswered or is refused (a fresh session's first request
+                            // carries no synced time yet).
+                            const auto connect_t0 = std::chrono::steady_clock::now();
+                            if (!host->wait_response_subscribed(3000)) {
+                                std::string sub_msg = "success";
+                                const bool  subscribed = host->subscribe_device_topics(sub_msg);
+                                BOOST_LOG_TRIVIAL(warning) << "[SSWCP_MqttAgent_Instance] connect: the page had not subscribed the response topic after 3 s ("
+                                                           << link_mode << "); subscribed it here: " << (subscribed ? "ok" : sub_msg);
+                            } else {
+                                BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] connect: response topic subscribed "
+                                                        << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_t0).count()
+                                                        << " ms after set_engine";
+                            }
                             bool res = true;
 
                             std::string ip_port = host->get_host();
@@ -6778,7 +7068,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                 wxGetApp().get_connect_host(host);
 
                                 // set sn
-                                if (SSWCP::query_machine_info(host, machine_type, nozzle_diameters, device_name) && machine_type != "") {
+                                const bool answered = SSWCP::query_machine_info(host, machine_type, nozzle_diameters, device_name, 5, 2);
+                                BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] connect: first status (machine.system_info) "
+                                                        << (answered ? "answered " : "unanswered after ")
+                                                        << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_t0).count()
+                                                        << " ms after set_engine";
+                                if (answered && machine_type != "") {
                                     wxGetApp().CallAfter([ip, host, link_mode, machine_type, connect_params, nozzle_diameters, device_name,
                                                           id, userid, reload_device_view]() {
                                         
@@ -6830,6 +7125,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         DeviceInfo query_info;
                                         bool       exist = wxGetApp().app_config->get_device_info(info.dev_id, query_info);
                                         if (nozzle_diameters.empty()) {
+                                            BOOST_LOG_TRIVIAL(warning) << "[connect] " << machine_type << " at " << ip
+                                                                       << " reported no nozzle sizes: keeping the current preset name, no variant is chosen";
                                             if (exist) {
                                                 query_info.connected = true;
                                                 wxGetApp().app_config->save_device_info(query_info);
@@ -6850,11 +7147,14 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         } else {
 
                                             info.nozzle_sizes = nozzle_diameters;
-                                            info.preset_name  = machine_type + " (" + nozzle_diameters[0] + " nozzle)";
+                                            info.preset_name  = NozzleSync::device_preset_name(machine_type, nozzle_diameters, info.preset_name);
                                             wxGetApp().app_config->save_device_info(info);
 
                                             m_dialog->m_device_id = ip;
                                             
+                                            // Whether this connect adds anything to the installed printer
+                                            // models (the model itself, or its nozzle).
+                                            bool profile_changed = false;
                                             {
                                                 std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
                                                 int  nModel = m_ProfileJson["model"].size();
@@ -6865,10 +7165,11 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         isFind                      = true;
                                                         std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"]
                                                                                               .get<std::string>();
-                                                        std::string se_nozz_selected = nozzle_diameters[0];
-                                                        if (nozzle_selected.find(se_nozz_selected) == std::string::npos) {
+                                                        std::string se_nozz_selected = NozzleSync::first_nozzle(nozzle_diameters);
+                                                        if (!se_nozz_selected.empty() && nozzle_selected.find(se_nozz_selected) == std::string::npos) {
                                                             nozzle_selected += ";" + se_nozz_selected;
                                                             m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
+                                                            profile_changed = true;
                                                         }
 
                                                         break;
@@ -6879,17 +7180,41 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     json new_item;
                                                     new_item["vendor"]          = "Snapmaker";
                                                     new_item["model"]           = info.model_name;
-                                                    new_item["nozzle_selected"] = nozzle_diameters[0];
+                                                    new_item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_diameters);
                                                     m_ProfileJson["model"].push_back(new_item);
+                                                    profile_changed = true;
                                                 }
                                             }
 
                                             wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
-                                            m_dialog->SaveProfile();
-                                            bool flag = false;
-                                            m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater,
-                                                                flag);
+                                            // The model is installed already (some variant of it is enabled) and
+                                            // this connect added nothing: there is nothing to apply. apply_config
+                                            // compares the whole vendor and filament selection, not just this
+                                            // printer, and that comparison came out "changed" on every connect, so
+                                            // every connect reloaded all presets - and the first one of a session
+                                            // asked about unsaved changes ("Configuration package changed").
+                                            bool installed = false;
+                                            {
+                                                const auto vendors = wxGetApp().app_config->vendors();
+                                                for (const auto& v : vendors) {
+                                                    auto m = v.second.find(info.model_name);
+                                                    if (m != v.second.end() && !m->second.empty()) {
+                                                        installed = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (installed && !profile_changed) {
+                                                BOOST_LOG_TRIVIAL(info) << "[connect] " << info.model_name
+                                                                        << " is installed and this connect adds no nozzle: no preset reload";
+                                            } else {
+                                                m_dialog->SaveProfile();
+                                                bool flag = false;
+                                                // Not asked for by the user: keep their modified values silently.
+                                                m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater,
+                                                                       flag, true);
+                                            }
                                             wxGetApp().update_mode();
                                         }
                                     });
@@ -6966,7 +7291,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     if (info.nozzle_sizes.empty())
                                                         info.nozzle_sizes.push_back("0.4");
 
-                                                    info.preset_name = machine_type + " (" + info.nozzle_sizes[0] + " nozzle)";
+                                                    info.preset_name = NozzleSync::device_preset_name(machine_type, info.nozzle_sizes, info.preset_name);
 
                                                     wxGetApp().app_config->save_device_info(info);
                                                 } else {
@@ -7039,6 +7364,11 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->m_print_enable = true;
                                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
 
+                                    // The Device page: shown if the view is on another page, and loaded
+                                    // again when the connect came from another page (need_reload), since
+                                    // the Device page's own state is stale then. The preset row above
+                                    // may have asked for it too; the view loads it once
+                                    // (DevicePageLoad.hpp).
                                     if (!wxGetApp().mainframe->m_printer_view->isSnapmakerPage()) {
                                         wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                         auto     real_url = wxGetApp().get_international_url(url);
@@ -7048,7 +7378,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                             wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                             auto     real_url = wxGetApp().get_international_url(url);
 
-                                            wxGetApp().mainframe->load_printer_url(real_url);
+                                            wxGetApp().mainframe->load_printer_url(real_url, "", /*reload*/ true);
                                         }
 
                                     }
@@ -7173,6 +7503,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -7231,6 +7567,7 @@ std::unordered_map<std::string, int> SSWCP::m_tab_map = {
     {"Home", MainFrame::TabPosition::tpHome},
     {"3DEditor", MainFrame::TabPosition::tp3DEditor},
     {"Preview", MainFrame::TabPosition::tpPreview},
+    {"Showcase", MainFrame::TabPosition::tpShowcase},
     {"Monitor", MainFrame::TabPosition::tpMonitor},
     {"Stream", MainFrame::TabPosition::tpStream},
     {"MultiDevice", MainFrame::TabPosition::tpMultiDevice},
@@ -7324,7 +7661,8 @@ std::unordered_set<std::string> SSWCP::m_login_cmd_list = {"sw_UserLogin", "sw_U
                                                            FILE_VIEW, OPEN_TIMELAPSE_FOLDER, CANCEL_DOWNLOAD, DOWNLOAD_FILE_AND_OPEN, DOWN_LOAD_FILE, SUBSCRIBE_DOWNLOAD_STATE, UNSUBSCRIBE_DOWNLOAD_STATE, NOTIFY_UPLOAD_TIMELASPE, GET_FILES_FROM_DIR};
 
 std::unordered_set<std::string> SSWCP::m_machine_manage_cmd_list = {
-    "sw_GetLocalDevices", "sw_AddDevice", "sw_SubscribeLocalDevices", "sw_RenameDevice", "sw_SwitchModel", "sw_DeleteDevices"
+    "sw_GetLocalDevices", "sw_AddDevice", "sw_SubscribeLocalDevices", "sw_RenameDevice", "sw_SwitchModel", "sw_DeleteDevices",
+    "sw_UpdateDeviceInfo"
 };
 
 std::unordered_set<std::string> SSWCP::m_page_state_cmd_list = {
@@ -7850,7 +8188,7 @@ void SSWCP::clear_archived_print()
 }
 
 // query the info of the machine
-bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second)
+static bool query_machine_info_once(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second)
 {
     if (!host) return false;
 
@@ -7900,54 +8238,10 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                     out_model = product_info["machine_type"].get<std::string>();
                 }
 
-                // get diameter
-                if(product_info.contains("nozzle_diameter")){
-                    {
-                        if (product_info["nozzle_diameter"].is_array()) {
-                            for (const auto& nozzle : product_info["nozzle_diameter"]) {
-                                // todo not sure is string
-                                if (nozzle.is_number()) {
-                                    double temp = nozzle.get<double>();
-                                    if (fabs(temp - 0.2) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.2");
-                                    } else if (fabs(temp - 0.4) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.4");
-                                    } else if (fabs(temp - 0.6) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.6");
-                                    } else if (fabs(temp - 0.8) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.8");
-                                    }
-
-                                } else {
-                                    std::string temp = nozzle.get<std::string>();
-                                    if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                        out_nozzle_diameters.push_back(temp);
-                                    }
-                                }
-
-                            }
-                        } else {                            
-                            if (product_info["nozzle_diameter"].is_number()) {
-                                double temp = product_info["nozzle_diameter"].get<double>();
-                                if (fabs(temp - 0.2) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.4) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.6) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.8) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                }
-
-                            } else {
-                                std::string temp = product_info["nozzle_diameter"].get<std::string>();
-                                if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                    out_nozzle_diameters.push_back(temp);
-                                }
-                            }
-                        }
-                    }
-                }
+                // get diameter (NozzleSync: array or scalar, number or string; a scalar 0.4 / 0.6 / 0.8 used
+                // to come back as "0.2")
+                if (product_info.contains("nozzle_diameter"))
+                    out_nozzle_diameters = NozzleSync::parse_reported_nozzles(product_info["nozzle_diameter"]);
                 if (product_info.contains("device_name")) {
                     device_name = product_info["device_name"].get<std::string>();
                 }
@@ -7956,6 +8250,22 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
         }
     }
 
+    return false;
+}
+
+bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second, int attempts)
+{
+    for (int i = 1; i <= std::max(1, attempts); ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (query_machine_info_once(host, out_model, out_nozzle_diameters, device_name, timeout_second))
+            return true;
+        const long long ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (i < attempts)
+            BOOST_LOG_TRIVIAL(warning) << "[SSWCP] machine.system_info attempt " << i << " got no usable answer after " << ms
+                                       << " ms; asking again";
+        else if (attempts > 1)
+            BOOST_LOG_TRIVIAL(error) << "[SSWCP] machine.system_info: no usable answer in " << attempts << " attempts";
+    }
     return false;
 }
 

@@ -1,0 +1,21 @@
+{
+  "mapping_kind": "ams",
+  "editable": false,
+  "targets": [],
+  "filaments": [
+    {"index": 0, "type": "PLA", "color": "#E6EBE3", "grams": 58.3, "target": null, "auto": false, "problems": []},
+    {"index": 1, "type": "PETG", "color": "#F5822F", "grams": 12.1, "target": null, "auto": false, "problems": []}
+  ],
+  "problems": [
+    {"filament": -1, "code": "printer_not_connected", "text": "The PC is not connected to this printer, so its AMS is not known."}
+  ],
+  "mapping": "",
+  "policy": "",
+  "warnings": ["Check the printer to read its AMS (the PC connects to it), or send with the automatic mapping."],
+  "can_send": false,
+  "source": "none",
+  "needs_live": true,
+  "ams_age_s": 3600,
+  "options": {},
+  "unload_at_end": null
+}

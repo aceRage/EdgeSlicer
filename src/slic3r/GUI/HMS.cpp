@@ -26,10 +26,23 @@ static std::string hms_ver_string(const json& j)
     return std::string();
 }
 
+// The app's config, or null when there is no GUI_App. wxApp::GetInstance() alone is not enough:
+// slic3rutils_tests starts a plain wxApp for its window tests (dark_mode_background_tests.cpp),
+// and wxGetApp() static-casts that to GUI_App, so app_config was read from past the end of a
+// wxApp - which crashed the HMS cases whenever --order rand ran one of those tests first.
+static AppConfig* gui_app_config_or_null()
+{
+    GUI_App* app = dynamic_cast<GUI_App*>(wxApp::GetInstance());
+    return app ? app->app_config : nullptr;
+}
+
 int get_hms_info_version(std::string& version)
 {
     AppConfig* config = wxGetApp().app_config;
     if (!config)
+        return -1;
+    // Orca #11225: stealth mode never asks Bambu's HMS server anything.
+    if (config->get_stealth_mode())
         return -1;
     std::string hms_host = config->get_hms_host();
     if(hms_host.empty()) {
@@ -71,6 +84,9 @@ int HMSQuery::download_hms_related(const std::string& hms_type, const std::strin
 
     AppConfig* config = wxGetApp().app_config;
     if (!config) return -1;
+    // Orca #11225: the local copy above is all stealth mode gets (init_hms_info already stops
+    // before calling this; kept here so no other caller can reach the network).
+    if (config->get_stealth_mode()) return -1;
 
     std::string hms_host = wxGetApp().app_config->get_hms_host();
     std::string url;
@@ -238,7 +254,7 @@ int HMSQuery::save_to_local(const std::string& lang, const std::string& hms_type
 
 std::string HMSQuery::hms_language_code()
 {
-    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    AppConfig* config = gui_app_config_or_null();
     if (!config)
         // set language code to en by default
         return "en";
@@ -500,7 +516,18 @@ wxString HMSQuery::query_print_error_url_action(const std::string& dev_id, int p
 {
     char buf[32];
     ::sprintf(buf, "%08X", print_error);
-    return _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
+    const wxString url = _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
+    AppConfig* config = gui_app_config_or_null();
+    return stealth_image_url(url, config && config->get_stealth_mode());
+}
+
+wxString HMSQuery::stealth_image_url(const wxString& url, bool stealth_mode)
+{
+    // Orca #11225: the error dialog downloads this picture from Bambu's server. In stealth mode it
+    // goes without; the button actions read alongside it are local and stay.
+    if (stealth_mode && url.Contains("http"))
+        return wxEmptyString;
+    return url;
 }
 
 std::string HMSQuery::print_error_code(int print_error)
@@ -777,7 +804,93 @@ wxString HMSQuery::describe_error(const std::string& dev_id, const std::string& 
     } else {
         text = _query_error_msg(get_dev_id_type(dev_id), upper, lang_code);
     }
+    // The printer's own table has nothing to say - it has no table at all, or Bambu publishes this
+    // code with an empty description for that model (05024007 on the A1). The codes are shared
+    // across models, so another model's sentence for the same code is the printer's meaning.
+    if (text.IsEmpty()) text = find_in_other_tables(upper, lang_code);
     return format_error(text, upper);
+}
+
+// Every hms_<lang>_<series>.json in the downloaded and the shipped folder, downloaded first so a
+// newer cloud copy is read before the snapshot. The action tables and the legacy series-less file
+// are not text tables of a series and are skipped.
+static std::vector<fs::path> hms_text_tables_for_language(const std::string& lang)
+{
+    std::vector<fs::path> out;
+    const std::string     prefix = "hms_" + lang + "_";
+    for (const std::string& root : {data_dir(), resources_dir()}) {
+        if (root.empty()) continue;
+        const fs::path dir = fs::path(root) / HMS_PATH;
+        boost::system::error_code ec;
+        if (!fs::is_directory(dir, ec)) continue;
+        std::vector<fs::path> here;
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (name.size() <= prefix.size() + 5 || name.compare(0, prefix.size(), prefix) != 0) continue;
+            if (name.compare(name.size() - 5, 5, ".json") != 0) continue;
+            const std::string series = name.substr(prefix.size(), name.size() - prefix.size() - 5);
+            // A series is three letters/digits; this also keeps "hms_pt_..." from matching pt-BR.
+            if (series.empty() || series.find('_') != std::string::npos) continue;
+            here.push_back(it->path());
+        }
+        std::sort(here.begin(), here.end()); // deterministic: the same answer on every machine
+        out.insert(out.end(), here.begin(), here.end());
+    }
+    return out;
+}
+
+wxString HMSQuery::find_in_other_tables(const std::string& code, const std::string& lang_code)
+{
+    if (code.empty()) return wxEmptyString;
+    const bool is_hms = code.size() > 8;
+
+    std::unique_lock<std::mutex> lock(m_hms_mutex);
+
+    auto index_for = [this](const std::string& lang) -> const CrossIndex& {
+        auto found = m_cross_index.find(lang);
+        if (found != m_cross_index.end()) return found->second;
+        CrossIndex& idx = m_cross_index[lang];
+        for (const fs::path& path : hms_text_tables_for_language(lang)) {
+            std::ifstream file(encode_path(path.string().c_str()));
+            if (!file.is_open()) continue;
+            try {
+                const json  doc  = json::parse(file);
+                const json& data = doc.contains("data") ? doc["data"] : doc;
+                auto fold = [&](const char* table, std::unordered_map<std::string, std::string>& into) {
+                    if (!data.is_object() || !data.contains(table) || !data[table].is_object()) return;
+                    const json& list = data[table].value(lang, json());
+                    if (!list.is_array()) return;
+                    for (const auto& item : list) {
+                        if (!item.is_object()) continue;
+                        const std::string intro = item.value("intro", std::string());
+                        if (intro.empty()) continue;
+                        // First non-empty description wins; later tables never replace it.
+                        into.emplace(boost::to_upper_copy(item.value("ecode", std::string())), intro);
+                    }
+                };
+                fold("device_hms", idx.hms);
+                fold("device_error", idx.error);
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "HMS: cross-table index, cannot read " << path.string();
+            }
+        }
+        BOOST_LOG_TRIVIAL(info) << "HMS: cross-table index for " << lang << ": " << idx.hms.size() << " hms, "
+                                << idx.error.size() << " print_error codes";
+        return idx;
+    };
+
+    std::vector<std::string> langs{lang_code.empty() ? std::string("en") : lang_code};
+    if (langs.front() != "en") langs.push_back("en");
+    for (const std::string& lang : langs) {
+        const CrossIndex& idx   = index_for(lang);
+        const auto&       table = is_hms ? idx.hms : idx.error;
+        auto              hit   = table.find(code);
+        if (hit != table.end()) {
+            BOOST_LOG_TRIVIAL(info) << "hms: " << code << " answered from another model's table (" << lang << ")";
+            return wxString::FromUTF8(hit->second);
+        }
+    }
+    return wxEmptyString;
 }
 
 wxString HMSQuery::describe_print_error(const std::string& dev_id, int print_error, bool local_only)
@@ -790,6 +903,7 @@ void HMSQuery::clear_hms_info()
     std::unique_lock<std::mutex> lock(m_hms_mutex);
     m_hms_info_jsons.clear();
     m_hms_action_jsons.clear();
+    m_cross_index.clear();
     m_cloud_hms_last_update_time.clear();
 }
 
@@ -817,7 +931,7 @@ void HMSQuery::init_hms_info(const std::string& dev_id_type, const std::string& 
     // Stealth mode stops the cloud fetch and nothing else: the shipped and cached tables below
     // are read exactly as they would be otherwise. This is the whole of "offline still answers" -
     // the object now always exists (GUI_App.cpp), and only the network half is withheld.
-    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    AppConfig* config = gui_app_config_or_null();
     const bool offline_only = !config || config->get_stealth_mode();
 
     bool want_refresh = false;
@@ -872,6 +986,8 @@ std::string get_hms_wiki_url(std::string error_code)
 {
     AppConfig* config = wxGetApp().app_config;
     if (!config) return "";
+    // Orca #11225: no link to Bambu's wiki in stealth mode (the HMS panel then shows no link).
+    if (config->get_stealth_mode()) return "";
 
     std::string hms_host = wxGetApp().app_config->get_hms_host();
     std::string lang_code = HMSQuery::hms_language_code();
@@ -897,6 +1013,9 @@ std::string get_hms_wiki_url(std::string error_code)
 
 std::string get_error_message(int error_code)
 {
+    // Orca #11225: this asks Bambu's HMS server; stealth mode does not.
+    if (!wxGetApp().app_config || wxGetApp().app_config->get_stealth_mode()) return "";
+
 	char buf[64];
     std::string result_str = "";
     std::sprintf(buf,"%08X",error_code);

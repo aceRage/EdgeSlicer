@@ -90,12 +90,13 @@ std::string escape_strings_cstyle(const std::vector<std::string> &strs)
             // Separate the strings.
             (*outptr ++) = ';';
         const std::string &str = strs[j];
-        // Is the string simple or complex? Complex string contains spaces, tabs, new lines and other
-        // escapable characters. Empty string shall be quoted as well, if it is the only string in strs.
+        // Is the string simple or complex? Complex string contains spaces, tabs, semicolons (the
+        // separator), new lines and other escapable characters. Empty string shall be quoted as well,
+        // if it is the only string in strs.
         bool should_quote = strs.size() == 1 && str.empty();
         for (size_t i = 0; i < str.size(); ++ i) {
             char c = str[i];
-            if (c == ' ' || c == '\t' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
+            if (c == ' ' || c == '\t' || c == ';' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
                 should_quote = true;
                 break;
             }
@@ -220,6 +221,32 @@ bool unescape_strings_cstyle(const std::string &str, std::vector<std::string> &o
     }
 }
 
+// Reads the number the text starts with, as `std::istream >> double` does in the C locale: leading white space and a '+'
+// are skipped, and text after the number (such as the optional '%' of a percent) is ignored.
+// Unlike the stream it reads the same on every platform. libc++ fails a subnormal (strtod reports ERANGE), though it
+// stores the value, while MSVC reads it; Bambu Studio writes subnormals such as 1.04632e-311 into flush_volumes_matrix,
+// so a stream check dropped those projects' settings on macOS only. A value that underflows reads as the nearest double.
+// Fails, setting value to 0, when the text does not start with a number or is not finite: "inf", "nan", or an overflow
+// such as 1e999, which MSVC's stream fails too.
+bool deserialize_float_value(const std::string &str, double &value)
+{
+    size_t i = 0;
+    while (i < str.size() && std::isspace((unsigned char)str[i]))
+        ++ i;
+    // fast_float takes no '+'; the stream fails "+-1".
+    if (i < str.size() && str[i] == '+' && ++ i < str.size() && str[i] == '-') {
+        value = 0.;
+        return false;
+    }
+    size_t pos = 0;
+    value = string_to_double_decimal_point(std::string_view(str).substr(i), &pos);
+    if (pos == 0 || ! std::isfinite(value)) {
+        value = 0.;
+        return false;
+    }
+    return true;
+}
+
 std::string escape_ampersand(const std::string& str)
 {
     // Allocate a buffer 2 times the input string length,
@@ -327,6 +354,24 @@ void ConfigOptionDef::bind_enum_keys_map(ConfigOption *opt) const
         o->keys_map = this->enum_keys_map;
     else if (auto *o = dynamic_cast<ConfigOptionEnumsGenericNullable*>(opt); o != nullptr)
         o->keys_map = this->enum_keys_map;
+}
+
+bool ConfigOptionDef::is_value_valid(const double value, const int max_precision /*= 4*/) const
+{
+    // Special handling for the nil values
+    // The nil value is a valid one only for nullable options
+    if (std::isnan(value))
+        return this->nullable;
+
+    // Special handling of 0
+    if (this->min == 0.f && value < 0)
+        return false;
+
+    const double ep = std::pow(0.1, max_precision);
+    if (is_approx(value, (double) this->min, ep) || is_approx(value, (double) this->max, ep))
+        return true;
+
+    return this->min <= value && value <= this->max;
 }
 
 // Assignment of the serialization IDs is not thread safe. The Defs shall be initialized from the main thread!
@@ -479,7 +524,8 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                 auto other_opt = other.option(opt_key2);
                 if (my_opt2 == nullptr && other_opt) {
                     my_opt2 = dynamic_cast<ConfigOptionVectorBase *>(this->option(opt_key2, true));
-                    if (my_opt2 && my_opt2->empty()) {
+                    const auto *other_vec0 = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                    if (my_opt2 && my_opt2->empty() && !(other_vec0 != nullptr && other_vec0->empty())) {
                         my_opt2->resize(1, other_opt);
                     }
                 }
@@ -489,6 +535,11 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                         continue;
                     if (other_opt) {
                         const auto *other_vec = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                        if (other_vec != nullptr && other_vec->empty()) {
+                            // Orca #16963: an empty source list has no entry at any index to copy.
+                            my_opt2->set(other_opt);
+                            continue;
+                        }
                         if (my_opt2->empty())
                             my_opt2->resize(size_t(index) + 1, other_opt);
                         else if (size_t(index) >= my_opt2->size())
@@ -874,7 +925,9 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key, double rati
 {
     // Get stored option value.
     const ConfigOption *raw_opt = this->option(opt_key);
-    assert(raw_opt != nullptr);
+    // Mirror the single-arg overload: assert() is a no-op under NDEBUG.
+    if (raw_opt == nullptr)
+        throw ConfigurationError("ConfigBase::get_abs_value(): \"" + opt_key + "\" is not defined");
     if (raw_opt->type() != coFloatOrPercent)
         throw ConfigurationError("ConfigBase::get_abs_value(): opt_key is not of coFloatOrPercent");
     // Compute absolute value.

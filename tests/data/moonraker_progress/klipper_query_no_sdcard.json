@@ -1,0 +1,17 @@
+{
+  "result": {
+    "eventtime": 5000.0,
+    "status": {
+      "print_stats": {
+        "filename": "hand_written.gcode",
+        "total_duration": 130.0,
+        "print_duration": 120.0,
+        "filament_used": 50.0,
+        "state": "printing",
+        "message": "",
+        "info": { "total_layer": null, "current_layer": null }
+      },
+      "display_status": { "progress": 0.02, "message": null }
+    }
+  }
+}

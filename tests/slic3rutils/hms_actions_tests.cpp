@@ -27,6 +27,7 @@
 #include "slic3r/GUI/PrintErrorCommands.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -620,3 +621,87 @@ TEST_CASE("A refused command offers Stop / Resume Printing only when it was a pr
         REQUIRE_FALSE(used_fallback);
     }
 }
+
+TEST_CASE("strip_trailing_error_code drops only the duplicated trailing code", "[PrintErrorDialog]")
+{
+    // What describe_error produces, and what the dialog shows on its own line.
+    CHECK(strip_trailing_error_code("The task was canceled. (0300 400C)", "0300 400C") == "The task was canceled.");
+    // Spacing and case of either side do not matter.
+    CHECK(strip_trailing_error_code("Nozzle clogged. (0300 400c)  ", "0300400C") == "Nozzle clogged.");
+    // A 16-digit code grouped in fours.
+    CHECK(strip_trailing_error_code("Filament ran out. (0700 8000 0002 0001)", "0700 8000 0002 0001") == "Filament ran out.");
+    // A different code in the brackets is real content, not a duplicate.
+    CHECK(strip_trailing_error_code("See the guide (0300 400C)", "0500 4046") == "See the guide (0300 400C)");
+    // A parenthesis that is not a code is left alone.
+    CHECK(strip_trailing_error_code("Open the lid (and check)", "0300 400C") == "Open the lid (and check)");
+    // No trailing parenthesis, no code to compare, empty text: unchanged.
+    CHECK(strip_trailing_error_code("The task was canceled.", "0300 400C") == "The task was canceled.");
+    CHECK(strip_trailing_error_code("The task was canceled. (0300 400C)", "") == "The task was canceled. (0300 400C)");
+    CHECK(strip_trailing_error_code("", "0300 400C").empty());
+    // Only the last group is considered.
+    CHECK(strip_trailing_error_code("Part (A) failed (0300 400C)", "0300 400C") == "Part (A) failed");
+}
+
+// 2026-11-05: an A1 refused a send with 05024007 ("filament loading/unloading not completed").
+// No table has actions for that code, so a refused print action gets the generic Stop/Resume/OK,
+// and a refused new job has no job_id - so Stop and Resume were drawn greyed and only OK worked.
+TEST_CASE("Stop and Resume are shown exactly when there is a job and a way to send them", "[HmsActions][PrintErrorDialog]")
+{
+    using Why = PrintErrorButtonLayout::Why;
+    const std::vector<int> generic = generic_print_error_actions(); // {STOP, RESUME, OK}
+
+    SECTION("the owner's case: a refused new job has no job_id, so only OK, and the reason is given")
+    {
+        bool used_fallback = false;
+        const std::vector<int> buttons = resolve_command_error_actions({}, /*print_action*/ true, used_fallback);
+        REQUIRE(buttons == generic);
+
+        const PrintErrorButtonLayout l = layout_print_error_buttons(buttons, "", /*can_send*/ true);
+        CHECK(l.shown == std::vector<int>{PrintErrorAction::OK_BUTTON});
+        CHECK(l.hidden == std::vector<int>{PrintErrorAction::STOP_PRINTING, PrintErrorAction::RESUME_PRINTING});
+        CHECK(l.why == Why::NoJobId);
+    }
+
+    SECTION("with a job id and a connection that takes print commands, every button is shown")
+    {
+        const PrintErrorButtonLayout l = layout_print_error_buttons(generic, "512345678", true);
+        CHECK(l.shown == generic);
+        CHECK(l.hidden.empty());
+        CHECK(l.why == Why::None);
+    }
+
+    SECTION("a connection that cannot carry print commands hides them, with that reason")
+    {
+        const PrintErrorButtonLayout l = layout_print_error_buttons(generic, "512345678", /*can_send*/ false);
+        CHECK(l.shown == std::vector<int>{PrintErrorAction::OK_BUTTON});
+        CHECK(l.why == Why::CannotSend);
+    }
+
+    SECTION("no job outranks the connection as the reason")
+    {
+        CHECK(layout_print_error_buttons(generic, "", false).why == Why::NoJobId);
+    }
+
+    SECTION("buttons without a job_id are never hidden, and order is kept")
+    {
+        const std::vector<int> in{PrintErrorAction::REFRESH_NOZZLE, PrintErrorAction::STOP_PRINTING,
+                                  PrintErrorAction::NO_REMINDER_NEXT_TIME, PrintErrorAction::IGNORE_RESUME};
+        const PrintErrorButtonLayout l = layout_print_error_buttons(in, "", true);
+        CHECK(l.shown == std::vector<int>{PrintErrorAction::REFRESH_NOZZLE, PrintErrorAction::NO_REMINDER_NEXT_TIME});
+        CHECK(l.hidden == std::vector<int>{PrintErrorAction::STOP_PRINTING, PrintErrorAction::IGNORE_RESUME});
+    }
+
+    SECTION("hiding everything pressable still leaves OK, and the close-box flag survives")
+    {
+        const PrintErrorButtonLayout l = layout_print_error_buttons(
+            {PrintErrorAction::RESUME_PRINTING, PrintErrorAction::STOP_PRINTING, PrintErrorAction::REMOVE_CLOSE_BTN}, "", true);
+        CHECK(l.shown == std::vector<int>{PrintErrorAction::OK_BUTTON, PrintErrorAction::REMOVE_CLOSE_BTN});
+    }
+
+    SECTION("an OK already in the set is not doubled")
+    {
+        const PrintErrorButtonLayout l = layout_print_error_buttons(generic, "", true);
+        CHECK(std::count(l.shown.begin(), l.shown.end(), PrintErrorAction::OK_BUTTON) == 1);
+    }
+}
+

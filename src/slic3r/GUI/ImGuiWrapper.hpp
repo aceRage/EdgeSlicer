@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <cstdlib>
+#include <chrono>
 
 #include <imgui/imgui.h>
 
@@ -56,11 +57,15 @@ class ImGuiWrapper
     bool m_is_korean{ false };
     float m_font_size{ 18.0 };
     unsigned m_font_texture{ 0 };
+    // EDGE: set_scaling() asked for a new font while a frame was open; new_frame() rebuilds it.
+    bool m_font_rebuild_pending{ false };
     unsigned m_font_another_texture{ 0 };
     float m_style_scaling{ 1.0 };
     unsigned m_mouse_buttons{ 0 };
     bool m_disabled{ false };
     bool m_new_frame_open{ false };
+    // ORCA Start of the previous frame, see new_frame().
+    std::chrono::steady_clock::time_point m_last_frame_time{};
 #if ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
     bool m_requires_extra_frame{ false };
 #endif // ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
@@ -133,6 +138,7 @@ public:
     bool bbl_button(const wxString &label, const wxString& tooltip = {});
     bool button(const wxString& label, float width, float height);
     bool button(const wxString& label, const ImVec2 &size, bool enable); // default size = ImVec2(0.f, 0.f)
+    bool glyph_button(wchar_t icon_char, ImVec2 icon_size); // ORCA (G-code viewer, libvgcode stage 3)
     bool radio_button(const wxString &label, bool active);
     static ImVec4          to_ImVec4(const ColorRGB &color);
     bool input_double(const std::string &label, const double &value, const std::string &format = "%.3f");
@@ -154,6 +160,8 @@ public:
     void text_wrapped(const std::string &label, float wrap_width);
     void text_wrapped(const wxString &label, float wrap_width);
     void tooltip(const char *label, float wrap_width);
+    // UTF-8 text (_u8L, into_u8): without this a std::string went through wxString's locale conversion (OrcaSlicer #11078).
+    void tooltip(const std::string &label, float wrap_width);
     void tooltip(const wxString &label, float wrap_width);
 
 
@@ -306,6 +314,13 @@ public:
     bool requires_extra_frame() const { return m_requires_extra_frame; }
     void set_requires_extra_frame() { m_requires_extra_frame = true; }
     void reset_requires_extra_frame() { m_requires_extra_frame = false; }
+    // ORCA Call right after a widget with +/- buttons. ImGui repeats a held button only on new frames and the
+    // canvas renders on events only, so keep frames coming while the widget is held.
+    void request_frames_while_held()
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            set_requires_extra_frame();
+    }
 
     void disable_background_fadeout_animation();
 

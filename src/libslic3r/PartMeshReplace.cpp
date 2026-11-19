@@ -3,6 +3,7 @@
 #include "Model.hpp"
 #include "TriangleMesh.hpp"
 #include "BRep/CadBody.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 
 namespace Slic3r {
 
@@ -18,7 +19,15 @@ bool replace_part_mesh(ModelVolume &volume, TriangleMesh &&mesh, std::shared_ptr
     volume.mmu_segmentation_facets.reset();
     volume.fuzzy_skin_facets.reset();
 
+    // Edge (Airbrush P3, A4): the paint goes, but the position-keyed colour field comes back on the
+    // new mesh where it still has surface.
+    const std::shared_ptr<const TriangleMesh> old_mesh = volume.mesh_ptr();
     volume.set_mesh(std::move(mesh));
+    if (volume.airbrush_field) {
+        const TriangleSelector::TriangleSplittingData none;
+        const std::shared_ptr<const Airbrush::AirbrushField> field = volume.airbrush_field;
+        Airbrush::airbrush_carry_field(volume, *field, old_mesh->its, none, Transform3d::Identity(), &none);
+    }
     volume.calculate_convex_hull();
     volume.invalidate_convex_hull_2d();
     volume.set_new_unique_id();

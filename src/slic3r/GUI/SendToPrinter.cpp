@@ -3,6 +3,7 @@
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
@@ -696,7 +697,7 @@ void SendToPrinterDialog::on_ok(wxCommandEvent &event)
 
     if (obj_ == nullptr) {
         m_printer_last_select = "";
-        m_comboBox_printer->SetTextLabel("");
+        m_comboBox_printer->SetValue(_L("No available printers"));
         return;
     }
     assert(obj_->dev_id == m_printer_last_select);
@@ -782,7 +783,8 @@ void SendToPrinterDialog::on_ok(wxCommandEvent &event)
 
     m_send_job->connection_type     = obj_->connection_type();
     m_send_job->cloud_print_only    = true;
-    m_send_job->has_sdcard          = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    m_send_job->sdcard_state        = (int) obj_->get_sdcard_state();
+    m_send_job->has_sdcard          = bambu_storage_usable_for_lan(m_send_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
     m_send_job->set_project_name(m_current_project_name.utf8_string());
 
     enable_prepare_mode = false;
@@ -841,6 +843,10 @@ void SendToPrinterDialog::update_user_machine_list()
 void SendToPrinterDialog::on_refresh(wxCommandEvent &event)
 {
     BOOST_LOG_TRIVIAL(info) << "m_printer_last_select: on_refresh";
+    // Search the network again as well (rate-limited): the list below is rebuilt from the account's
+    // printers (fetched next) and from what discovery has heard.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        dev->restart_discovery("send dialog refresh", /* rate_limited */ true);
     show_status(PrintDialogStatus::PrintStatusRefreshingMachineList);
 
     update_user_machine_list();
@@ -952,7 +958,7 @@ void SendToPrinterDialog::update_user_printer()
     }
     else {
         m_printer_last_select = "";
-        m_comboBox_printer->SetTextLabel("");
+        m_comboBox_printer->SetValue(_L("No available printers"));
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "for send task, current printer id =  " << m_printer_last_select << std::endl;

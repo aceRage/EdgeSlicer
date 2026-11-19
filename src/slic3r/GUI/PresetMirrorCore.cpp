@@ -1,5 +1,8 @@
 #include "PresetMirrorCore.hpp"
 
+#include <cstdint>
+#include <cstdio>
+
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -10,6 +13,8 @@
 #include <atomic>
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <set>
 #include <sstream>
 
@@ -522,6 +527,145 @@ int choose_uid(const std::vector<UidCandidate>& cands, const std::string& logged
             best = (int) i;
     }
     return best;
+}
+
+// ---- change detection --------------------------------------------------------------------------
+
+namespace {
+
+// std::filesystem rather than boost: on Windows its directory_entry carries the size and write
+// time from the directory listing itself (FindNextFile), so this costs no per-file stat.
+namespace sfs = std::filesystem;
+
+// Lists the regular files of one folder as "<prefix><name>|<size>|<mtime>". False when the folder
+// exists but could not be listed completely.
+bool list_stamps(const sfs::path& dir, const std::string& prefix, std::vector<std::string>& out)
+{
+    std::error_code ec;
+    if (!sfs::is_directory(dir, ec))
+        return !ec || ec == std::errc::no_such_file_or_directory;
+    sfs::directory_iterator it(dir, ec), end;
+    if (ec)
+        return false;
+    for (; it != end; it.increment(ec)) {
+        if (ec)
+            return false;
+        const sfs::directory_entry& e = *it;
+        std::error_code fec;
+        if (!e.is_regular_file(fec) || fec)
+            continue;
+        const auto size  = e.file_size(fec);
+        if (fec)
+            return false;
+        const auto mtime = e.last_write_time(fec);
+        if (fec)
+            return false;
+        out.push_back(prefix + e.path().filename().u8string() + "|" + std::to_string(size) + "|" +
+                      std::to_string((long long) mtime.time_since_epoch().count()));
+    }
+    return !ec;
+}
+
+} // namespace
+
+std::string source_tree_fingerprint(const std::string& src_uid_dir)
+{
+    if (src_uid_dir.empty())
+        return std::string();
+    try {
+        const sfs::path root = sfs::u8path(src_uid_dir);
+        std::error_code ec;
+        if (!sfs::is_directory(root, ec))
+            return std::string();
+        std::vector<std::string> lines;
+        for (const char* typ : { "filament", "process", "machine" }) {
+            const sfs::path dir = root / typ;
+            if (!list_stamps(dir, std::string(typ) + "/", lines) || !list_stamps(dir / "base", std::string(typ) + "/base/", lines))
+                return std::string();
+        }
+        std::sort(lines.begin(), lines.end());
+        std::string fp;
+        fp.reserve(lines.size() * 64);
+        for (const std::string& l : lines) {
+            fp += l;
+            fp += '\n';
+        }
+        // A folder with no files at all still has a fingerprint (the mirror's run on it is a
+        // clean no-op too), distinct from the "could not list" empty string.
+        return fp.empty() ? std::string("<empty>\n") : fp;
+    } catch (...) {
+        return std::string();
+    }
+}
+
+std::string fingerprint_source_part(const std::string& fingerprint)
+{
+    // The first line that starts with "manifest=": source lines start with "uid=", "src=", a
+    // type folder or "<empty>", and the output-folder listing comes after the manifest line.
+    size_t pos = 0;
+    while (pos < fingerprint.size()) {
+        if (fingerprint.compare(pos, 9, "manifest=") == 0)
+            return fingerprint.substr(0, pos);
+        const size_t nl = fingerprint.find('\n', pos);
+        if (nl == std::string::npos)
+            break;
+        pos = nl + 1;
+    }
+    return fingerprint;
+}
+
+namespace {
+const char* const kMirrorGateHeader = "edgeslicer-preset-mirror-gate";
+
+std::string fingerprint_digest(const std::string& fingerprint)
+{
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : fingerprint) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
+    return std::string(buf) + "-" + std::to_string(fingerprint.size());
+}
+} // namespace
+
+std::string mirror_gate_record(const std::string& app_version, const std::string& fingerprint)
+{
+    if (fingerprint.empty())
+        return std::string();
+    return std::string(kMirrorGateHeader) + " " + std::to_string(kMirrorGateFormat) + "\nversion=" + app_version +
+           "\nfingerprint=" + fingerprint_digest(fingerprint) + "\n";
+}
+
+bool mirror_gate_record_allows_skip(const std::string& record, const std::string& app_version, const std::string& fingerprint)
+{
+    if (fingerprint.empty() || record.empty())
+        return false;
+    // Normalise line ends, then compare with what a record for this fingerprint would be.
+    std::string r;
+    r.reserve(record.size());
+    for (char c : record)
+        if (c != '\r')
+            r += c;
+    return r == mirror_gate_record(app_version, fingerprint);
+}
+
+std::string file_stamp(const std::string& path)
+{
+    try {
+        std::error_code ec;
+        const sfs::path p    = sfs::u8path(path);
+        const auto      size = sfs::file_size(p, ec);
+        if (ec)
+            return "-";
+        const auto mtime = sfs::last_write_time(p, ec);
+        if (ec)
+            return "-";
+        return std::to_string(size) + "|" + std::to_string((long long) mtime.time_since_epoch().count());
+    } catch (...) {
+        return "-";
+    }
 }
 
 }}} // namespace Slic3r::GUI::mirror

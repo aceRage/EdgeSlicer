@@ -239,7 +239,11 @@ void GLGizmoBase::render_cross_mark(const Vec3f &target, bool is_single)
 {
     const float half_length = 4.0f;
 
-    glsafe(::glLineWidth(2.0f));
+    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(2.0f));
+#endif // !SLIC3R_OPENGL_ES
 
     auto render_line = [](const Vec3f& p1, const Vec3f& p2, const ColorRGBA& color) {
         GLModel::Geometry init_data;
@@ -765,7 +769,7 @@ bool GLGizmoBase::use_grabbers(const wxMouseEvent &mouse_event) {
         }
     } else if (m_dragging) {
         // when mouse cursor leave window than finish actual dragging operation
-        bool is_leaving = mouse_event.Leaving();
+        bool is_leaving = mouse_event.Leaving() && !m_parent.has_mouse_capture(); // ORCA keep tracking mouse position while drag active and cursor not in window bounds
         if (mouse_event.Dragging()) {
             Point      mouse_coord(mouse_event.GetX(), mouse_event.GetY());
             auto       ray = m_parent.mouse_ray(mouse_coord);

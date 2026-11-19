@@ -32,6 +32,7 @@ class ConfigManipulation
     std::function<void()>                                       load_config = nullptr;
     std::function<void (const std::string&, bool toggle, int opt_index)>   cb_toggle_field = nullptr;
     std::function<void (const std::string&, bool toggle)>   cb_toggle_line = nullptr;
+    std::function<void(const std::string &, const wxString &)> cb_set_option_label = nullptr;
     // callback to propagation of changed value, if needed 
     std::function<void(const std::string&, const boost::any&)>  cb_value_change = nullptr;
     //BBS: change local config to const DynamicPrintConfig
@@ -48,10 +49,12 @@ public:
         std::function<void(const std::string&, const boost::any&)>  cb_value_change,
         //BBS: change local config to DynamicPrintConfig
         const DynamicPrintConfig* local_config = nullptr,
-        wxWindow* msg_dlg_parent  = nullptr) :
+        wxWindow* msg_dlg_parent  = nullptr,
+        std::function<void(const std::string &, const wxString &)> cb_set_option_label = nullptr) :
         load_config(load_config),
         cb_toggle_field(cb_toggle_field),
         cb_toggle_line(cb_toggle_line),
+        cb_set_option_label(cb_set_option_label),
         cb_value_change(cb_value_change),
         m_msg_dlg_parent(msg_dlg_parent),
         local_config(local_config) {}
@@ -61,6 +64,7 @@ public:
         load_config = nullptr;
         cb_toggle_field = nullptr;
         cb_toggle_line = nullptr;
+        cb_set_option_label = nullptr;
         cb_value_change = nullptr;
     }
 
@@ -70,6 +74,7 @@ public:
     t_config_option_keys const &applying_keys() const;
     void    toggle_field(const std::string& field_key, const bool toggle, int opt_index = -1);
     void    toggle_line(const std::string& field_key, const bool toggle);
+    void    set_option_label(const std::string& field_key, const wxString& label);
 
     // FFF print
     void    update_print_fff_config(DynamicPrintConfig* config, const bool is_global_config = false, const bool is_plate_config = false);
@@ -80,9 +85,20 @@ public:
     void    check_nozzle_recommended_temperature_range(DynamicPrintConfig *config);
     void    check_nozzle_temperature_range(DynamicPrintConfig* config, int variant_index = 0);
     void    check_nozzle_temperature_initial_layer_range(DynamicPrintConfig* config, int variant_index = 0);
+    void    check_adaptive_pressure_advance_model(DynamicPrintConfig* config);
     void    check_filament_max_volumetric_speed(DynamicPrintConfig *config);
     void    check_chamber_temperature(DynamicPrintConfig* config);
     void    check_chamber_minimal_temperature(DynamicPrintConfig* config);
+    // Checks "layer_height" or "initial_layer_print_height" (opt_key) against the printer's layer height limits.
+    bool    check_layer_height(DynamicPrintConfig* config, const std::string& opt_key = "layer_height");
+    bool    layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key = "layer_height",
+                                             const wxString& rack_nozzle = wxString());
+    // Where a layer height (or initial layer height) stands against the printer limits. A limit <= EPSILON is "not set".
+    // Zero: the value is 0 and a minimum is set (it is raised to the minimum without asking); TooHigh / TooLow: Adjust / Ignore dialog.
+    enum class LayerHeightCheck { InRange, Zero, TooHigh, TooLow };
+    static LayerHeightCheck classify_layer_height(double value, double min_limit, double max_limit);
+    // rack_nozzle (optional): set to the finest rack nozzle the limits come from, empty when they are the printer preset's.
+    void    layer_height_limits(double& min_layer_height, double& max_layer_height, wxString* rack_nozzle = nullptr) const;
     void    set_is_BBL_Printer(bool is_bbl_printer) { is_BBL_Printer = is_bbl_printer; };
     void    set_reference_config(const DynamicPrintConfig *reference) { m_reference_config = reference; }
     // SLA print
@@ -96,6 +112,26 @@ public:
         m_support_material_overhangs_queried = queried;
     }
     int    show_spiral_mode_settings_dialog(bool is_object_config = false);
+
+    // EdgeSlicer: called when the user switches the support interface interlock on or changes its
+    // woven layers. When the top interface layers are too few for the weave, asks once to raise
+    // them to 1 + woven layers (Yes) or to turn the interlock off (No), so it cannot ask again for
+    // the same values. Returns true when the config was changed.
+    bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
+
+    // EdgeSlicer: the interlock and support filament matching cannot run together. Called when the
+    // user changes one of them (changed_key); when both are now on, asks once whether to keep the
+    // one just turned on (Yes: the other goes off) or not (No: it is reverted). Either answer leaves
+    // only one on, so it cannot ask again. Returns true when the config was changed.
+    bool    check_support_interlock_matching(DynamicPrintConfig* config, const std::string& changed_key);
+
+    // EdgeSlicer: called when the user changes a filament selector (changed_key). When the support
+    // interface now uses a filament other than the print's and the top Z distance is above 0,
+    // offers once to set it to 0. A No is remembered for that filament pair for the session
+    // (cleared by clear_session_prompts() when a project is loaded or created). Returns true when
+    // the config was changed.
+    bool    offer_support_top_z_zero(DynamicPrintConfig* config, const std::string& changed_key);
+    static void clear_session_prompts();
 
 private:
     bool get_temperature_range(DynamicPrintConfig *config, int &range_low, int &range_high);

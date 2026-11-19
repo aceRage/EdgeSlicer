@@ -1,9 +1,15 @@
 #include "ImGuiWrapper.hpp"
+#include "ImGuiFontRanges.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 #include <cmath>
 #include <stdexcept>
+#include <set>
+#include <sstream>
+#include <string>
 
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -29,6 +35,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/Shape/TextShape.hpp"
+#include "libslic3r/StartupProfile.hpp"
 
 #include "3DScene.hpp"
 #include "GUI.hpp"
@@ -69,6 +76,8 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeIcon        , "height_range"                  },
     {ImGui::ConfirmIcon            , "confirm"                       },
     {ImGui::GapFillIcon            , "gap_fill"                      },
+    {ImGui::SpreadPaintIcon        , "spread_paint"                  }, // Edge
+    {ImGui::AirbrushPaintIcon      , "airbrush_paint"                }, // Edge
     {ImGui::FoldButtonIcon         , "im_fold"                       },
     {ImGui::UnfoldButtonIcon       , "im_unfold"                     },
     {ImGui::gCodeButtonIcon        , "im_code"                       }, //ORCA
@@ -90,6 +99,8 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeDarkIcon        , "height_range_dark"                  },
     {ImGui::ConfirmDarkIcon            , "confirm_dark"                       },
     {ImGui::GapFillDarkIcon            , "gap_fill_dark"                      },
+    {ImGui::SpreadPaintDarkIcon        , "spread_paint_dark"                  }, // Edge
+    {ImGui::AirbrushPaintDarkIcon      , "airbrush_paint_dark"                }, // Edge
     {ImGui::SphereButtonDarkIcon       , "toolbar_modifier_sphere_dark"       },
 
     {ImGui::TextSearchIcon             , "im_text_search"             },
@@ -457,7 +468,15 @@ void ImGuiWrapper::set_scaling(float font_size, float scale_style, float scale_b
     m_style_scaling = scale_style;
 
     //destroy_fonts_texture();
-    destroy_font();
+    // EDGE (core profile): GLCanvas3D::_resize() calls this from inside render(), between new_frame()
+    // and render(). Deleting the font texture there left the text already in this frame's draw
+    // lists bound to a deleted texture name, and set the atlas TexID to 0 for the text still to come:
+    // both are incomplete textures at the draw ("unit 0 GLD_TEXTURE_INDEX_2D is unloadable" on macOS,
+    // the "skipped a draw with texture 0" log line). Rebuild at the next new_frame() instead.
+    if (m_new_frame_open)
+        m_font_rebuild_pending = true;
+    else
+        destroy_font();
 }
 
 bool ImGuiWrapper::update_mouse_data(wxMouseEvent& evt)
@@ -520,8 +539,22 @@ void ImGuiWrapper::new_frame()
         return;
     }
 
-    if (m_font_texture == 0) {
+    if (m_font_texture == 0 || m_font_rebuild_pending) {
+        m_font_rebuild_pending = false;
         init_font(true);
+    }
+
+    // ORCA ImGui times button and key repeat with io.DeltaTime. At its default of 1/60 s per frame the clock
+    // counts frames, so a held +/- button repeats as fast as the canvas renders. Feed it the real frame time,
+    // capped at 1/60 s so the idle gaps of the event-driven canvas don't count as time held.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        const auto now = std::chrono::steady_clock::now();
+        if (m_last_frame_time != std::chrono::steady_clock::time_point{}) {
+            const float dt = std::chrono::duration<float>(now - m_last_frame_time).count();
+            io.DeltaTime   = std::clamp(dt, 1e-4f, 1.f / 60.f); // ImGui asserts a positive DeltaTime
+        }
+        m_last_frame_time = now;
     }
 
     ImGui::NewFrame();
@@ -531,7 +564,9 @@ void ImGuiWrapper::new_frame()
 void ImGuiWrapper::render()
 {
     ImGui::Render();
-    render_draw_data(ImGui::GetDrawData());
+    // EDGE: EDGESLICER_GL_SKIP=imgui leaves every ImGui draw out (OpenGLManager::gl_skip).
+    if (!OpenGLManager::gl_skip("imgui"))
+        render_draw_data(ImGui::GetDrawData());
     m_new_frame_open = false;
 }
 
@@ -868,6 +903,52 @@ bool ImGuiWrapper::button(const wxString& label, const ImVec2 &size, bool enable
     return (enable) ? res : false;
 }
 
+// ORCA (OrcaSlicer #12068 / #13365): a fixed-size button showing one glyph, used by the G-code viewer.
+bool ImGuiWrapper::glyph_button(wchar_t icon_char, ImVec2 icon_size)
+{
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    ImFont*     font      = ImGui::GetFont();
+    ImGuiStyle& style     = ImGui::GetStyle();
+    ImVec2      padding   = style.FramePadding;
+    float       border_w  = style.FrameBorderSize;
+    float       rounding  = style.FrameRounding;
+    std::string icon_str  = into_u8(icon_char);
+    const char* icon      = icon_str.c_str();
+    
+    float  width  = icon_size.x + (padding.x + border_w) * 2.f;
+    float  height = icon_size.y + (padding.y + border_w) * 2.f;
+    ImVec2 rc_min = ImGui::GetCursorScreenPos();
+    ImVec2 rc_max = ImVec2(rc_min.x + width, rc_min.y + height);
+
+    ImGui::Dummy(ImVec2(width, height));
+
+    ImGuiCol bg_color     = ImGuiCol_Button;
+    ImGuiCol border_color = ImGuiCol_Border;
+    bool     clicked      = false;
+
+    if (ImGui::IsMouseHoveringRect(rc_min, rc_max)) {
+        bg_color = ImGuiCol_ButtonHovered;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            bg_color     = ImGuiCol_ButtonActive;
+            border_color = ImGuiCol_BorderShadow;
+            clicked      = true;
+        }
+    }
+
+    draw_list->AddRectFilled(rc_min, rc_max, ImGui::GetColorU32(bg_color), rounding);
+
+    if (border_w > 0.f)
+        draw_list->AddRect(rc_min, rc_max, ImGui::GetColorU32(border_color), rounding, 0, border_w);
+
+    ImVec2 text_pos = ImVec2(
+        rc_min.x + (width  - font->FontSize) * .5f,
+        rc_min.y + (height - font->FontSize) * .5f
+    );
+    draw_list->AddText(font, font->FontSize, text_pos, ImGui::GetColorU32(ImGuiCol_Text), icon);
+
+    return clicked;
+}
+
 bool ImGuiWrapper::radio_button(const wxString &label, bool active)
 {
     auto label_utf8 = into_u8(label);
@@ -1021,6 +1102,11 @@ void ImGuiWrapper::tooltip(const char *label, float wrap_width)
     ImGui::PopStyleColor(1);
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
+}
+
+void ImGuiWrapper::tooltip(const std::string &label, float wrap_width)
+{
+    tooltip(label.c_str(), wrap_width);
 }
 
 void ImGuiWrapper::tooltip(const wxString &label, float wrap_width)
@@ -2662,22 +2748,29 @@ void ImGuiWrapper::pop_radio_style()
 void ImGuiWrapper::init_font(bool compress)
 {
     destroy_font();
+    // Startup round 2: one line per atlas build (they are rare: start-up, language or display scale
+    // changes), split into rasterising the fonts, the icons and the upload.
+    using build_clock = std::chrono::steady_clock;
+    const auto build_t0 = build_clock::now();
+    auto build_ms = [](build_clock::time_point a, build_clock::time_point b) {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
 
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
 
     // Create ranges of characters from m_glyph_ranges, possibly adding some OS specific special characters.
+    // OrcaSlicer #15419: every UI language also gets the common alphabetic scripts, because names drawn
+    // through the atlas do not follow the UI language (see ImGuiFontRanges.hpp). The currency symbols of the
+    // cost section's Preferences > Currency symbol stay in as well.
     ImVector<ImWchar> ranges;
-    ImVector<ImWchar> basic_ranges;
-    ImFontAtlas::GlyphRangesBuilder builder;
-    builder.AddRanges(m_glyph_ranges);
-    builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
+    const ImWchar *extra_ranges = nullptr;
 #ifdef __APPLE__
     if (m_font_cjk)
         // Apple keyboard shortcuts are only contained in the CJK fonts.
-        builder.AddRanges(ranges_keyboard_shortcuts);
+        extra_ranges = ranges_keyboard_shortcuts;
 #endif
-    builder.BuildRanges(&ranges); // Build the final result (ordered ranges with all the unique characters submitted)
+    ImGuiFonts::build_text_glyph_ranges(*io.Fonts, m_glyph_ranges, extra_ranges, ranges);
 
     io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
     ImFontConfig cfg = ImFontConfig();
@@ -2685,26 +2778,11 @@ void ImGuiWrapper::init_font(bool compress)
     //FIXME replace with io.Fonts->AddFontFromMemoryTTF(buf_decompressed_data, (int)buf_decompressed_size, m_font_size, nullptr, ranges.Data);
     //https://github.com/ocornut/imgui/issues/220
 
-    // Orca: temp fix for Korean font
-    auto font_name_regular = "HarmonyOS_Sans_SC_Regular.ttf";
-    auto font_name_bold = "HarmonyOS_Sans_SC_Bold.ttf";
-    if(m_glyph_ranges == ImGui::GetIO().Fonts->GetGlyphRangesKorean()) {
-        font_name_regular = "NanumGothic-Regular.ttf";
-        font_name_bold = "NanumGothic-Bold.ttf";
-    }
-    default_font = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_regular).c_str(), m_font_size, &cfg, ranges.Data);
-    if (default_font == nullptr) {
-        default_font = io.Fonts->AddFontDefault();
-        if (default_font == nullptr) {
-            throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
-        }
-    }
-
-    bold_font        = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_bold).c_str(), m_font_size, &cfg, ranges.Data);
-    if (bold_font == nullptr) {
-        bold_font = io.Fonts->AddFontDefault();
-        if (bold_font == nullptr) { throw Slic3r::RuntimeError("ImGui: Could not load deafult font"); }
-    }
+    // Regular and bold text fonts. The Korean font covers little besides its own script, so the default font
+    // is merged in behind it for the rest of the ranges (OrcaSlicer #15419).
+    if (!ImGuiFonts::add_text_fonts(*io.Fonts, Slic3r::resources_dir() + "/fonts", m_glyph_ranges, ranges, m_font_size, cfg,
+                                    default_font, bold_font))
+        throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
 
 #ifdef _WIN32
     // Render the text a bit larger (see GLCanvas3D::_resize() and issue #3401), but only if the scale factor
@@ -2748,6 +2826,7 @@ void ImGuiWrapper::init_font(bool compress)
     int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);   // Load as RGBA 32-bits (75% of the memory is wasted, but default font is so small) because it is more likely to be compatible with user's existing shaders. If your ImTextureId represent a higher-level concept than just a GL texture id, consider calling GetTexDataAsAlpha8() instead to save on GPU memory.
     BOOST_LOG_TRIVIAL(trace) << "Build default font texture done. width: " << width << ", height: " << height;
+    const auto build_t1 = build_clock::now();
 
     auto load_icon_from_svg = [this, &io, pixels, width, &rect_id](const std::pair<const wchar_t, std::string> icon, int icon_sz) {
         if (const ImFontAtlas::CustomRect* rect = io.Fonts->GetCustomRectByIndex(rect_id)) {
@@ -2782,6 +2861,8 @@ void ImGuiWrapper::init_font(bool compress)
         load_icon_from_svg(icon, icon_sz);
     }
 
+    const auto build_t2 = build_clock::now();
+
     // Upload texture to graphics system
     GLint last_texture;
     glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture));
@@ -2800,6 +2881,16 @@ void ImGuiWrapper::init_font(bool compress)
 
     // Restore state
     glsafe(::glBindTexture(GL_TEXTURE_2D, last_texture));
+
+    const auto build_t3 = build_clock::now();
+    std::ostringstream msg;
+    msg << "ImGui font atlas built: size=" << m_font_size << " atlas=" << width << "x" << height
+        << " glyphs=" << (default_font != nullptr ? default_font->Glyphs.Size : 0) << "+" << (bold_font != nullptr ? bold_font->Glyphs.Size : 0)
+        << " fonts_ms=" << build_ms(build_t0, build_t1) << " icons_ms=" << build_ms(build_t1, build_t2)
+        << " upload_ms=" << build_ms(build_t2, build_t3) << " ms=" << build_ms(build_t0, build_t3);
+    BOOST_LOG_TRIVIAL(info) << msg.str();
+    if (Slic3r::startup_profile_enabled())
+        Slic3r::startup_profile_log(msg.str());
 }
 
 void ImGuiWrapper::load_fonts_texture()
@@ -2976,22 +3067,42 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
 
     shader->start_using();
 
-    // We are using the OpenGL fixed pipeline to make the example code simpler to read!
-    // Setup render state: alpha-blending enabled, no face culling, no depth testing, scissor enabled, vertex/texcoord/color pointers, polygon fill.
-    GLint last_texture;          glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture));
-    GLint last_polygon_mode[2];  glsafe(::glGetIntegerv(GL_POLYGON_MODE, last_polygon_mode));
-    GLint last_viewport[4];      glsafe(::glGetIntegerv(GL_VIEWPORT, last_viewport));
-    GLint last_scissor_box[4];   glsafe(::glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box));
-    GLint last_texture_env_mode; glsafe(::glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &last_texture_env_mode));
-    glsafe(::glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TRANSFORM_BIT));
+    // Backup GL state
+    GLenum last_active_texture;       glsafe(::glGetIntegerv(GL_ACTIVE_TEXTURE, (GLint*)&last_active_texture));
+    GLuint last_program;              glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, (GLint*)&last_program));
+    GLuint last_texture;              glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, (GLint*)&last_texture));
+    GLuint last_array_buffer;         glsafe(::glGetIntegerv(GL_ARRAY_BUFFER_BINDING, (GLint*)&last_array_buffer));
+    GLuint last_vertex_array_object = 0;
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile())
+#endif // !SLIC3R_OPENGL_ES
+        glsafe(::glGetIntegerv(GL_VERTEX_ARRAY_BINDING, (GLint*)&last_vertex_array_object));
+    GLint last_viewport[4];           glsafe(::glGetIntegerv(GL_VIEWPORT, last_viewport));
+    GLint last_scissor_box[4];        glsafe(::glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box));
+    GLenum last_blend_src_rgb;        glsafe(::glGetIntegerv(GL_BLEND_SRC_RGB, (GLint*)&last_blend_src_rgb));
+    GLenum last_blend_dst_rgb;        glsafe(::glGetIntegerv(GL_BLEND_DST_RGB, (GLint*)&last_blend_dst_rgb));
+    GLenum last_blend_src_alpha;      glsafe(::glGetIntegerv(GL_BLEND_SRC_ALPHA, (GLint*)&last_blend_src_alpha));
+    GLenum last_blend_dst_alpha;      glsafe(::glGetIntegerv(GL_BLEND_DST_ALPHA, (GLint*)&last_blend_dst_alpha));
+    GLenum last_blend_equation_rgb;   glsafe(::glGetIntegerv(GL_BLEND_EQUATION_RGB, (GLint*)&last_blend_equation_rgb));
+    GLenum last_blend_equation_alpha; glsafe(::glGetIntegerv(GL_BLEND_EQUATION_ALPHA, (GLint*)&last_blend_equation_alpha));
+    GLboolean last_enable_blend        = ::glIsEnabled(GL_BLEND);
+    GLboolean last_enable_cull_face    = ::glIsEnabled(GL_CULL_FACE);
+    GLboolean last_enable_depth_test   = ::glIsEnabled(GL_DEPTH_TEST);
+    GLboolean last_enable_stencil_test = ::glIsEnabled(GL_STENCIL_TEST);
+    GLboolean last_enable_scissor_test = ::glIsEnabled(GL_SCISSOR_TEST);
+    // EDGE: GL_POLYGON_MODE is valid on both profiles; only GL_FRONT_AND_BACK may be set in a core one.
+    GLint last_polygon_mode[2] = { GL_FILL, GL_FILL }; glsafe(::glGetIntegerv(GL_POLYGON_MODE, last_polygon_mode));
+
+    // set new GL state
+    glsafe(::glActiveTexture(GL_TEXTURE0));
     glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glBlendEquation(GL_FUNC_ADD));
+    glsafe(::glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
     glsafe(::glDisable(GL_CULL_FACE));
     glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_STENCIL_TEST));
     glsafe(::glEnable(GL_SCISSOR_TEST));
-    glsafe(::glEnable(GL_TEXTURE_2D));
     glsafe(::glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
-    glsafe(::glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE));
 
     // Setup viewport, orthographic projection matrix
     // Our visible imgui space lies from draw_data->DisplayPos (top left) to draw_data->DisplayPos+data_data->DisplaySize (bottom right). DisplayPos is (0,0) for single viewport apps.
@@ -3022,6 +3133,16 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
         const ImDrawIdx* idx_buffer  = cmd_list->IdxBuffer.Data;
         const GLsizeiptr vtx_buffer_size = (GLsizeiptr)cmd_list->VtxBuffer.Size * (int)sizeof(ImDrawVert);
         const GLsizeiptr idx_buffer_size = (GLsizeiptr)cmd_list->IdxBuffer.Size * (int)sizeof(ImDrawIdx);
+
+        GLuint vao_id = 0;
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            glsafe(::glGenVertexArrays(1, &vao_id));
+            glsafe(::glBindVertexArray(vao_id));
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
 
         GLuint vbo_id;
         glsafe(::glGenBuffers(1, &vbo_id));
@@ -3064,8 +3185,25 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
                 // Apply scissor/clipping rectangle (Y is inverted in OpenGL)
                 glsafe(::glScissor((int)clip_min.x, (int)(fb_height - clip_max.y), (int)(clip_max.x - clip_min.x), (int)(clip_max.y - clip_min.y)));
 
+                // EDGE (core profile): an image whose texture was never made (id 0) has nothing to
+                // sample: an incomplete texture, black on most drivers and "unit 0 GLD_TEXTURE_INDEX_2D
+                // is unloadable" on macOS. Skip it.
+                const GLuint tex_id = (GLuint)(intptr_t)pcmd->GetTexID();
+                if (tex_id == 0) {
+                    // Named by the ImGui window that drew it, once per window (at most 20).
+                    static std::set<std::string> logged;
+                    const std::string owner = cmd_list->_OwnerName != nullptr ? cmd_list->_OwnerName : "(no window)";
+                    if (logged.size() < 20 && logged.insert(owner).second)
+                        BOOST_LOG_TRIVIAL(warning) << "ImGui: skipped a draw with texture 0 in window '" << owner << "', " << pcmd->ElemCount
+                                                   << " indices (" << ((ImTextureID)(intptr_t)0 == ImGui::GetIO().Fonts->TexID ? "the font atlas has no texture now"
+                                                                                                                                : "an image that was never loaded")
+                                                   << "); logged once per window";
+                    continue;
+                }
                 // Bind texture, Draw
-                glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->GetTexID()));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
+                if (OpenGLManager::gl_debug_enabled())
+                    OpenGLManager::check_sampled_textures(shader, "ImGui");
                 glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, (void*)(intptr_t)(pcmd->IdxOffset * sizeof(ImDrawIdx))));
             }
         }
@@ -3082,14 +3220,32 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
 
         glsafe(::glDeleteBuffers(1, &ibo_id));
         glsafe(::glDeleteBuffers(1, &vbo_id));
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            if (vao_id > 0)
+                glsafe(::glDeleteVertexArrays(1, &vao_id));
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
     }
 
-    // Restore modified state
-    glsafe(::glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, last_texture_env_mode));
-    glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture));
-    glsafe(::glPopAttrib());
-    glsafe(::glPolygonMode(GL_FRONT, (GLenum)last_polygon_mode[0]);
-    glsafe(::glPolygonMode(GL_BACK,  (GLenum)last_polygon_mode[1])));
+    // Restore modified GL state
+    glsafe(::glBindTexture(GL_TEXTURE_2D, last_texture));
+    glsafe(::glActiveTexture(last_active_texture));
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile())
+#endif // !SLIC3R_OPENGL_ES
+        glsafe(::glBindVertexArray(last_vertex_array_object));
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer));
+    glsafe(::glBlendEquationSeparate(last_blend_equation_rgb, last_blend_equation_alpha));
+    glsafe(::glBlendFuncSeparate(last_blend_src_rgb, last_blend_dst_rgb, last_blend_src_alpha, last_blend_dst_alpha));
+    if (last_enable_blend) glsafe(::glEnable(GL_BLEND)); else glsafe(::glDisable(GL_BLEND));
+    if (last_enable_cull_face) glsafe(::glEnable(GL_CULL_FACE)); else glsafe(::glDisable(GL_CULL_FACE));
+    if (last_enable_depth_test) glsafe(::glEnable(GL_DEPTH_TEST)); else glsafe(::glDisable(GL_DEPTH_TEST));
+    if (last_enable_stencil_test) glsafe(::glEnable(GL_STENCIL_TEST)); else glsafe(::glDisable(GL_STENCIL_TEST));
+    if (last_enable_scissor_test) glsafe(::glEnable(GL_SCISSOR_TEST)); else glsafe(::glDisable(GL_SCISSOR_TEST));
+    glsafe(::glPolygonMode(GL_FRONT_AND_BACK, (GLenum)last_polygon_mode[0]));
     glsafe(::glViewport(last_viewport[0], last_viewport[1], (GLsizei)last_viewport[2], (GLsizei)last_viewport[3]));
     glsafe(::glScissor(last_scissor_box[0], last_scissor_box[1], (GLsizei)last_scissor_box[2], (GLsizei)last_scissor_box[3]));
 

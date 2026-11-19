@@ -6,6 +6,10 @@
     #define NOMINMAX
     #include <Windows.h>
     #include <wchar.h>
+    // P9: local minidumps for test copies (MiniDumpWriteDump is loaded at run time, no link change).
+    #include <DbgHelp.h>
+    #include <cwctype>
+    #include <stdlib.h>
     #ifdef SLIC3R_GUI
     extern "C"
     {
@@ -22,6 +26,9 @@
 #include <cstring>
 #include <iostream>
 #include <math.h>
+#include <csignal>
+#include <atomic>
+#include <new>
 
 #include "nlohmann/json.hpp"
 using namespace nlohmann;
@@ -33,6 +40,8 @@ using namespace nlohmann;
 
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "sentry_wrapper/LocalMinidumpPolicy.hpp"
+#include <tbb/parallel_for.h>
 #include "common_func/common_func.hpp"
 
 
@@ -56,6 +65,8 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/CurvedTops.hpp"
+#include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -66,6 +77,7 @@ using namespace nlohmann;
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/ZipOpen.hpp"
 #include "libslic3r/DataDirMigration.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
@@ -74,9 +86,14 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliNamedPresets.hpp"
+#include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
+#include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 
 #include "Snapmaker_Orca.hpp"
 //BBS: add exception handler for win32
@@ -86,12 +103,25 @@ using namespace nlohmann;
 #endif
 #include "slic3r/Utils/MeshInspect.hpp"
 #include "slic3r/Utils/PaintCLI.hpp"
+#include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/ProjectConfigFill.hpp"
+#include "libslic3r/CliOutput.hpp"
+#include "libslic3r/CostEstimate.hpp"
+#include <boost/core/null_deleter.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/expressions.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/make_shared.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -109,6 +139,10 @@ using namespace nlohmann;
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
+#include <unistd.h>
+#ifdef SLIC3R_GUI
+#include "slic3r/GUI/Widgets/WebView.hpp"
+#endif
 #endif
 
 #ifdef SLIC3R_GUI
@@ -152,7 +186,7 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_ORIENT_FAILED, "An error occurred when auto-orienting object(s)."},
     {CLI_MODIFIED_PARAMS_TO_PRINTER, "Found modified parameter in printer preset in the 3mf file, which should not be changed."},
         {CLI_FILE_VERSION_NOT_SUPPORTED, "Unsupported 3MF version. Please make sure the 3MF file was created with the official version of Bambu Studio, not a beta version."},
-    {CLI_NO_SUITABLE_OBJECTS, "One of the plate is empty or has no object fully inside it. Please check that the 3mf contains no empty plate in EdgeSlicer before uploading."},
+    {CLI_NO_SUITABLE_OBJECTS, "The plate has nothing to slice: it is empty, or no object on it is both printable and fully inside the print volume."},
     {CLI_VALIDATE_ERROR, "There are some incorrect slicing parameters in the 3mf. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECTS_PARTLY_INSIDE, "Some objects are located over the boundary of the heated bed."},
     {CLI_EXPORT_CACHE_DIRECTORY_CREATE_FAILED, "Failed creating directory when exporting cache data."},
@@ -191,6 +225,12 @@ typedef struct  _sliced_plate_info{
     double filament_g{0};
     std::string gcode_path;
     std::vector<std::string> warnings;
+    // Per-filament / per-extruder usage, layers and cost (CliOutput.hpp), and the objects' bounding box
+    // in mm on the plate. Null when not available. Merged into the plate's result.json entry as new keys.
+    nlohmann::json usage;
+    nlohmann::json bounding_box;
+    // --validate: the plate passed the checks and was not sliced.
+    bool validated{false};
 }sliced_plate_info_t;
 
 // Ultra: --progress-json — JSON lines on stdout (all platforms), one object per line.
@@ -209,7 +249,8 @@ static void emit_progress(int percent, const std::string& message, bool warning 
     j["plate_count"]   = g_progress_plate_count;
     j["plate_percent"] = percent;
     if (warning) j["warning"] = message; else j["message"] = message;
-    boost::nowide::cout << j.dump() << std::endl;
+    // Status text can carry an object name from an STL/OBJ path (arbitrary bytes on Linux).
+    boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
 
 typedef struct _sliced_info {
@@ -225,8 +266,40 @@ typedef struct _sliced_info {
     // Distinct from Ultra's per-plate warnings[] strings on sliced_plate_info_t.
     nlohmann::json      warnings = nlohmann::json::array();
     bool                strict_mode {false};
+    // --validate: the run checked the plates and did not slice.
+    bool                validate_only {false};
+    // Names of the printer, process and filament presets the run used (null until known).
+    nlohmann::json      presets;
 }sliced_info_t;
-std::vector<PrintBase::SlicingStatus> g_slicing_warnings;
+
+// --quiet: log lines and the "found error" line go to stderr, so stdout carries only a command's payload.
+static bool g_cli_quiet = false;
+static std::ostream& cli_diag_stream()
+{
+    if (g_cli_quiet)
+        return boost::nowide::cerr;
+    return boost::nowide::cout;
+}
+// Replaces Boost.Log's default console sink (which writes to standard output) with one on standard error.
+// Once any sink is registered the default one is no longer used. The level filter is unchanged.
+static void cli_route_logs_to_stderr()
+{
+    namespace sinks = boost::log::sinks;
+    namespace expr  = boost::log::expressions;
+    auto backend = boost::make_shared<sinks::text_ostream_backend>();
+    backend->add_stream(boost::shared_ptr<std::ostream>(&boost::nowide::cerr, boost::null_deleter()));
+    backend->auto_flush(true);
+    auto sink = boost::make_shared<sinks::synchronous_sink<sinks::text_ostream_backend>>(backend);
+    sink->set_formatter(expr::stream << "[" << expr::attr<boost::log::trivial::severity_level>("Severity") << "] "
+                                     << expr::smessage);
+    boost::log::core::get()->add_sink(sink);
+}
+// Warnings raised through the CLI status callbacks. The callbacks run on whichever thread raises the
+// status - Print::process() runs PrintObject::generate_support_material() (and its "enable support"
+// warning) from a tbb::parallel_for over the objects - so this must be thread-safe: a plain
+// std::vector here corrupted the heap (access violation, or a hang on the heap lock).
+// Readers take() a snapshot and walk it without the lock.
+SlicingStatusCollector g_slicing_warnings;
 
 #if defined(__linux__) || defined(__LINUX__)
 #define PIPE_BUFFER_SIZE 512
@@ -285,7 +358,9 @@ typedef struct _cli_callback_mgr {
         else
             j["message"] = m_message;
 
-        std::string notify_message = j.dump();
+        // m_message can carry an object name, which may be invalid UTF-8 on Linux.
+        // This runs on the callback thread with no handler, so a throw would abort.
+        std::string notify_message = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         //notify_message = "Plate "+ std::to_string(m_plate_index) + "/" +std::to_string(m_plate_count)+  ": Percent " + std::to_string(m_progress) + ": "+m_message;
 
         char pipe_message[PIPE_BUFFER_SIZE] = {0};
@@ -355,9 +430,11 @@ typedef struct _cli_callback_mgr {
         m_message = message;
         m_warning_step = warning_step;
         m_data_ready = true;
+        // Read under the lock: update() runs on whichever thread raises the status (TBB workers).
+        const int total_progress = m_total_progress;
         lck.unlock();
         m_condition.notify_one();
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": m_total_progress="<<m_total_progress;
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": m_total_progress="<<total_progress;
         return;
     }
 
@@ -414,7 +491,7 @@ cli_callback_mgr_t g_cli_callback_mgr;
 void cli_status_callback(const PrintBase::SlicingStatus& slicing_status)
 {
     if (slicing_status.warning_step != -1) {
-        g_slicing_warnings.push_back(slicing_status);
+        g_slicing_warnings.add(slicing_status);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": percent=%1%, warning_step=%2%, message=%3%, message_type=%4%, flag=%5%")
             %slicing_status.percent %slicing_status.warning_step %slicing_status.text %(int)(slicing_status.message_type) %slicing_status.flags;
     }
@@ -426,7 +503,7 @@ void cli_status_callback(const PrintBase::SlicingStatus& slicing_status)
 void default_status_callback(const PrintBase::SlicingStatus& slicing_status)
 {
     if (slicing_status.warning_step != -1) {
-        g_slicing_warnings.push_back(slicing_status);
+        g_slicing_warnings.add(slicing_status);
     }
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": percent=%1%, warning_step=%2%, message=%3%, message_type=%4%")%slicing_status.percent %slicing_status.warning_step %slicing_status.text %(int)(slicing_status.message_type);
     emit_progress(slicing_status.percent, slicing_status.text, slicing_status.warning_step != -1);
@@ -443,7 +520,7 @@ static PrinterTechnology get_printer_technology(const DynamicConfig &config)
 
 //BBS: add flush and exit
 #if defined(__linux__) || defined(__LINUX__)
-#define flush_and_exit(ret)     { boost::nowide::cout << __FUNCTION__ << " found error, return "<<ret<<", exit..." << std::endl;\
+#define flush_and_exit(ret)     { cli_diag_stream() << __FUNCTION__ << " found error, return "<<ret<<", exit..." << std::endl;\
     g_cli_callback_mgr.stop();\
     boost::nowide::cout.flush();\
     boost::nowide::cerr.flush();\
@@ -452,7 +529,7 @@ static PrinterTechnology get_printer_technology(const DynamicConfig &config)
     }\
     return(ret);}
 #else
-#define flush_and_exit(ret)     { boost::nowide::cout << __FUNCTION__ << " found error, exit" << std::endl;\
+#define flush_and_exit(ret)     { cli_diag_stream() << __FUNCTION__ << " found error, exit" << std::endl;\
     boost::nowide::cout.flush();\
     boost::nowide::cerr.flush();\
     for (Model &model : m_models) {\
@@ -510,6 +587,14 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
             plate_json["filament_g"]   = sliced_info.sliced_plates[index].filament_g;
             plate_json["gcode"]        = sliced_info.sliced_plates[index].gcode_path;
             plate_json["warnings"]     = sliced_info.sliced_plates[index].warnings;
+            // New keys only: layers, filaments, extruders, cost (CliOutput.hpp) and the objects' bounding box.
+            if (sliced_info.sliced_plates[index].usage.is_object())
+                for (auto it = sliced_info.sliced_plates[index].usage.begin(); it != sliced_info.sliced_plates[index].usage.end(); ++it)
+                    plate_json[it.key()] = it.value();
+            if (sliced_info.sliced_plates[index].bounding_box.is_object())
+                plate_json["bounding_box"] = sliced_info.sliced_plates[index].bounding_box;
+            if (sliced_info.sliced_plates[index].validated)
+                plate_json["validated"] = true;
             j["sliced_plates"].push_back(plate_json);
         }
         for (auto& iter: key_values)
@@ -517,10 +602,21 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
 
         j["warnings"]    = sliced_info.warnings;
         j["strict_mode"] = sliced_info.strict_mode;
+        // New keys: the presets used, the totals over the sliced plates, and the --validate marker.
+        if (sliced_info.presets.is_object())
+            j["presets"] = sliced_info.presets;
+        if (j.contains("sliced_plates") && !sliced_info.validate_only)
+            j["totals"] = cli_result_totals(j["sliced_plates"]);
+        if (sliced_info.validate_only)
+            j["validate_only"] = true;
+
+        // Names can be invalid UTF-8 on Linux; write U+FFFD instead of throwing type_error.316.
+        // The catch-all below would otherwise swallow the throw and leave no result.json.
+        const std::string result_json = j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
 
         boost::nowide::ofstream c;
         c.open(result_file, std::ios::out | std::ios::trunc);
-        c << std::setw(4) << j << std::endl;
+        c << result_json << std::endl;
         c.close();
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%result_file;
@@ -528,7 +624,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         if (g_progress_json) {
             std::lock_guard<std::mutex> lock(g_progress_mutex);
             j["event"] = "result";
-            boost::nowide::cout << j.dump() << std::endl;
+            boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
         }
     }
     catch (...) {}
@@ -602,6 +698,19 @@ struct NamedPresets
         return t == Preset::TYPE_PRINTER ? b.printers : t == Preset::TYPE_PRINT ? b.prints : b.filaments;
     }
 
+    // Per-nozzle process P8: the vendor bundle that lists a system preset (its prints and printers decide which process
+    // fits which nozzle size), or nullptr.
+    PresetBundle* bundle_with(const std::string& name, Preset::Type t)
+    {
+        build_index();
+        for (const auto& kv : vendor_index)
+            if (kv.second[type_slot(t)].count(name))
+                if (PresetBundle* b = vendor_bundle(kv.first))
+                    if (collection(*b, t).find_preset(name) != nullptr)
+                        return b;
+        return nullptr;
+    }
+
     // System preset: full (inherits-flattened) config from the vendor bundle that lists the name.
     const Preset* find_system(const std::string& name, Preset::Type t)
     {
@@ -618,7 +727,7 @@ struct NamedPresets
     }
 
     // User preset: <datadir>/user/*/<type>/*.json whose "name" matches, flattened onto its parent.
-    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id)
+    bool find_user(const std::string& name, Preset::Type t, DynamicPrintConfig& out, std::string& filament_id, std::string* system_parent = nullptr)
     {
         const boost::filesystem::path root = boost::filesystem::path(data_dir()) / "user";
         if (!boost::filesystem::exists(root)) return false;
@@ -650,6 +759,7 @@ struct NamedPresets
                     out = parent->config;
                     out.apply(cfg, true);
                     if (filament_id.empty()) filament_id = parent->filament_id;
+                    if (system_parent) *system_parent = parent->name;
                 } else {
                     out = cfg;
                 }
@@ -664,20 +774,24 @@ struct NamedPresets
     std::string resolve_to_file(const std::string& name, Preset::Type t, const std::string& out_dir, int ordinal)
     {
         DynamicPrintConfig cfg;
-        std::string        filament_id;
+        std::string        filament_id, system_parent;
+        bool               is_user = false;
         if (const Preset* p = find_system(name, t)) {
             cfg         = p->config;
             filament_id = p->filament_id;
-        } else if (!find_user(name, t, cfg, filament_id)) {
+        } else if (find_user(name, t, cfg, filament_id, &system_parent)) {
+            is_user = true;
+        } else {
             return "";
         }
         cfg.erase(BBL_JSON_KEY_INHERITS);
+        const CliNamedPresetOrigin origin = cli_named_preset_origin(t == Preset::TYPE_PRINTER, is_user, system_parent);
         nlohmann::json j;
         j[BBL_JSON_KEY_TYPE]     = type_dir(t);
         j[BBL_JSON_KEY_NAME]     = name;
-        j[BBL_JSON_KEY_FROM]     = "system";
+        j[BBL_JSON_KEY_FROM]     = origin.from;
         j[BBL_JSON_KEY_VERSION]  = SLIC3R_VERSION;
-        j[BBL_JSON_KEY_INHERITS] = "";
+        j[BBL_JSON_KEY_INHERITS] = origin.inherits;
         if (t == Preset::TYPE_FILAMENT && !filament_id.empty()) j[BBL_JSON_KEY_FILAMENT_ID] = filament_id;
         for (const std::string& key : cfg.keys()) {
             const ConfigOption* opt = cfg.option(key);
@@ -688,8 +802,159 @@ struct NamedPresets
         boost::filesystem::create_directories(out_dir);
         const std::string file = out_dir + "/" + type_dir(t) + "_" + std::to_string(ordinal) + ".json";
         boost::nowide::ofstream ofs(file, std::ios::out | std::ios::trunc);
-        ofs << j.dump(2);
+        ofs << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         return file;
+    }
+
+    // The vendor (bundle file name) whose manifest lists a system preset, or "".
+    std::string vendor_of(const std::string& name, Preset::Type t)
+    {
+        build_index();
+        for (const auto& kv : vendor_index)
+            if (kv.second[type_slot(t)].count(name))
+                return kv.first;
+        return "";
+    }
+
+    static std::string string_option(const Preset& p, const char* key)
+    {
+        const ConfigOptionString* opt = p.config.option<ConfigOptionString>(key);
+        return opt ? opt->value : std::string();
+    }
+
+    // --list-presets: every system preset of resources/profiles and every user preset of the data directory,
+    // by type. With `printer_filter` (a printer preset name) the machine list holds only that printer and the
+    // process and filament lists only the presets compatible with it; then only the printer's own vendor and
+    // the shared filament library are searched, which is where compatible presets live in practice.
+    // Returns a null JSON and fills `error` when the printer is unknown.
+    nlohmann::json list_presets(const std::string& printer_filter, std::string& error)
+    {
+        build_index();
+        using Key = std::pair<std::string, std::string>; // vendor, name: the sort order of the output
+        std::array<std::map<Key, nlohmann::json>, 3> found;
+
+        // The filter printer: a system preset, or a user preset flattened onto its parent.
+        const Preset*           filter_printer = nullptr;
+        std::unique_ptr<Preset> filter_user_printer;
+        std::string             filter_vendor;
+        if (!printer_filter.empty()) {
+            if ((filter_printer = find_system(printer_filter, Preset::TYPE_PRINTER)) != nullptr) {
+                filter_vendor = vendor_of(printer_filter, Preset::TYPE_PRINTER);
+            } else {
+                DynamicPrintConfig cfg;
+                std::string        filament_id;
+                if (!find_user(printer_filter, Preset::TYPE_PRINTER, cfg, filament_id)) {
+                    error = "preset not found: " + printer_filter;
+                    return nlohmann::json();
+                }
+                filter_user_printer = std::make_unique<Preset>(Preset::TYPE_PRINTER, printer_filter);
+                filter_user_printer->config = cfg;
+                filter_printer              = filter_user_printer.get();
+                filter_vendor               = vendor_of(Preset::inherits(cfg), Preset::TYPE_PRINTER);
+            }
+        }
+        auto compatible_with_filter = [&](const Preset& p) {
+            return is_compatible_with_printer(PresetWithVendorProfile(p, p.vendor), PresetWithVendorProfile(*filter_printer, filter_printer->vendor));
+        };
+        auto describe = [&](const Preset& p, Preset::Type t, const std::string& vendor, const char* source) {
+            nlohmann::json e;
+            e["name"]    = p.name;
+            e["vendor"]  = vendor;
+            e["source"]  = source;
+            e["inherits"] = p.inherits();
+            if (t == Preset::TYPE_PRINTER) {
+                e["model"]   = string_option(p, "printer_model");
+                e["variant"] = string_option(p, "printer_variant");
+            } else {
+                const ConfigOptionStrings* printers = p.config.option<ConfigOptionStrings>("compatible_printers");
+                e["compatible_printers"]           = printers ? printers->values : std::vector<std::string>();
+                e["compatible_printers_condition"] = string_option(p, "compatible_printers_condition");
+                if (t == Preset::TYPE_FILAMENT) {
+                    e["filament_id"] = p.filament_id;
+                    const ConfigOptionStrings* type = p.config.option<ConfigOptionStrings>("filament_type");
+                    e["filament_type"] = type && !type->values.empty() ? type->values.front() : std::string();
+                }
+            }
+            if (filter_printer)
+                e["compatible"] = true;
+            return e;
+        };
+
+        // System presets: the names a vendor bundle lists. The filament library's presets also sit in the
+        // other bundles as inheritance bases, so a name is only taken from the bundle that lists it.
+        std::vector<std::string> vendors;
+        if (filter_printer) {
+            if (!filter_vendor.empty())
+                vendors.push_back(filter_vendor);
+            if (filter_vendor != PresetBundle::ORCA_FILAMENT_LIBRARY && vendor_index.count(PresetBundle::ORCA_FILAMENT_LIBRARY))
+                vendors.push_back(PresetBundle::ORCA_FILAMENT_LIBRARY);
+        } else {
+            for (const auto& kv : vendor_index)
+                vendors.push_back(kv.first);
+        }
+        for (const std::string& vendor : vendors) {
+            PresetBundle* bundle = vendor_bundle(vendor);
+            if (!bundle)
+                continue;
+            for (Preset::Type t : { Preset::TYPE_PRINTER, Preset::TYPE_PRINT, Preset::TYPE_FILAMENT }) {
+                for (const std::string& name : vendor_index[vendor][type_slot(t)]) {
+                    const Preset* p = collection(*bundle, t).find_preset(name);
+                    if (!p)
+                        continue;
+                    if (filter_printer) {
+                        if (t == Preset::TYPE_PRINTER ? name != printer_filter : !compatible_with_filter(*p))
+                            continue;
+                    }
+                    found[type_slot(t)][Key(vendor, name)] = describe(*p, t, vendor, "system");
+                }
+            }
+        }
+
+        // User presets: <datadir>/user/*/{machine,process,filament}/*.json, flattened onto the parent for the
+        // compatibility test.
+        const boost::filesystem::path root = boost::filesystem::path(data_dir()) / "user";
+        if (boost::filesystem::exists(root)) {
+            for (auto& user : boost::filesystem::directory_iterator(root)) {
+                for (Preset::Type t : { Preset::TYPE_PRINTER, Preset::TYPE_PRINT, Preset::TYPE_FILAMENT }) {
+                    const boost::filesystem::path dir = user.path() / type_dir(t);
+                    if (!boost::filesystem::is_directory(dir))
+                        continue;
+                    for (auto& entry : boost::filesystem::directory_iterator(dir)) {
+                        if (entry.path().extension() != ".json")
+                            continue;
+                        std::map<std::string, std::string> key_values;
+                        if (load_key_values_from_json(entry.path().string(), key_values) != 0 || key_values[BBL_JSON_KEY_NAME].empty())
+                            continue;
+                        const std::string  name = key_values[BBL_JSON_KEY_NAME];
+                        DynamicPrintConfig cfg;
+                        std::string        filament_id;
+                        if (!find_user(name, t, cfg, filament_id))
+                            continue; // unreadable, or its parent is not installed
+                        Preset p(t, name);
+                        p.config      = cfg;
+                        p.filament_id = filament_id;
+                        const std::string vendor = vendor_of(p.inherits(), t);
+                        if (filter_printer) {
+                            if (t == Preset::TYPE_PRINTER ? name != printer_filter : !compatible_with_filter(p))
+                                continue;
+                        }
+                        found[type_slot(t)][Key(vendor, name)] = describe(p, t, vendor, "user");
+                    }
+                }
+            }
+        }
+
+        nlohmann::json out;
+        out["datadir"] = data_dir();
+        if (filter_printer)
+            out["printer"] = printer_filter;
+        const char* const keys[3] = { "machine", "process", "filament" };
+        for (int slot = 0; slot < 3; ++slot) {
+            out[keys[slot]] = nlohmann::json::array();
+            for (auto& kv : found[slot])
+                out[keys[slot]].push_back(std::move(kv.second));
+        }
+        return out;
     }
 };
 } // namespace
@@ -1216,16 +1481,59 @@ int CLI::run(int argc, char **argv)
         volatile int* p = nullptr;
         *p = 42; // the test crash (access violation / SIGSEGV)
     }
+    // EDGESLICER_TEST_CRASH=workers is the slicing-crash shape: an access violation in several TBB worker threads at
+    // once (a parallel_for whose every item faults), which is what left 0-byte local dumps before fix/crash-dump-writer.
+    if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "workers") == 0) {
+        tbb::parallel_for(tbb::blocked_range<int>(0, 256, 1), [](const tbb::blocked_range<int>&) {
+            volatile int* p = nullptr;
+            *p = 42; // the test crash, on whichever worker runs this item
+        });
+    }
 
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
     // startup if gtk3 is used. This env var has to be set explicitly to
-    // instruct the window manager to fall back to X server mode.
+    // instruct the window manager to fall back to X server mode. Keep the
+    // always-X11 force; Orca #16385's EGL/Wayland default path does not apply.
+#ifdef SLIC3R_GUI
+    // NVIDIA's proprietary driver cannot back WebKitGTK's DMABUF renderer.
+    // Force the shared-memory transport, which keeps compositing and threaded
+    // scrolling; the second variable clears Debian/Ubuntu/openSUSE's isNVIDIA().
+    if (::access("/proc/driver/nvidia/version", F_OK) == 0 && WebView::SupportsForceSharedMemory()) {
+        ::setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", /* replace */ false);
+        ::setenv("WEBKIT_FORCE_DMABUF_RENDERER", "1", /* replace */ false);
+    }
+#endif
+
     ::setenv("GDK_BACKEND", "x11", /* replace */ true);
+
+#ifdef SLIC3R_GUI
+    // Forced X11 in a Wayland session runs through XWayland. WebKit2GTK
+    // accelerated compositing could fail silently there before 2.42.
+    {
+        const char *wayland_env = ::getenv("WAYLAND_DISPLAY");
+        if (wayland_env && *wayland_env && WebView::NeedsCompositingWorkaround())
+            ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
+    }
+#endif
 
     // Also on Linux, we need to tell Xlib that we will be using threads,
     // lest we crash when we fire up GStreamer.
     XInitThreads();
+#endif
+
+#if defined(_WIN32) && defined(SLIC3R_GUI)
+    // WebView2 152+ hides the pointer while typing and only restores it on a mouse event inside
+    // the webview, so closing one from the keyboard (Enter in a dialog, the hub, Stream, ...)
+    // leaves it hidden app-wide (WebView2Feedback#5687, Orca #16880). Must be set before the
+    // first webview is created. Append the flag when the env is already set; leave it alone
+    // when HideCursorWhileTyping is already listed.
+    {
+        const char *      cur  = boost::nowide::getenv(WebView2Args::ENV_NAME);
+        const std::string next = WebView2Args::with_hide_cursor_while_typing(cur);
+        if (cur == nullptr || next != cur)
+            boost::nowide::setenv(WebView2Args::ENV_NAME, next.c_str(), /* replace */ true);
+    }
 #endif
 
 	// Switch boost::filesystem to utf8.
@@ -1252,13 +1560,26 @@ int CLI::run(int argc, char **argv)
         return Slic3r::WinFirewall::run_fix_cli(argc, argv);
 #endif
 
+#ifdef SLIC3R_GUI
+    // Showcase S5: a Showcase video or still of a project, rendered without a window. Nothing else on
+    // the command line runs with it.
+    if (Slic3r::Showcase::is_showcase_render_cli(argc, argv))
+        return this->run_showcase_render(argc, argv);
+#endif
+
     if (!this->setup(argc, argv))
     {
         boost::nowide::cerr << "setup params error" << std::endl;
         return CLI_INVALID_PARAMS;
     }
     BOOST_LOG_TRIVIAL(info) << "finished setup params, argc="<< argc << std::endl;
-    std::string temp_path = wxFileName::GetTempDir().utf8_str().data();
+    std::string temp_path = per_user_temp_dir(wxFileName::GetTempDir().utf8_str().data(), per_user_temp_id());
+    // Some consumers write into the temp root directly, so create it up front.
+    try {
+        boost::filesystem::create_directories(temp_path);
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(warning) << "failed to create per-user temp dir " << temp_path << ": " << ex.what();
+    }
     set_temporary_dir(temp_path);
 
     // Ultra rebrand: run the first-start data-dir copy against a scratch parent and exit.
@@ -1283,6 +1604,16 @@ int CLI::run(int argc, char **argv)
                             << "MIGRATE_CONF_PATHS=" << r.conf_paths_rewritten << std::endl
                             << "MIGRATE_ERROR=" << r.error << std::endl;
         return r.error.empty() ? 0 : CLI_ENVIRONMENT_ERROR;
+    }
+
+    // Showcase S4: prove the video encoder path headless (no window, no GL) and exit.
+    if (const ConfigOptionString* video_test = m_config.opt<ConfigOptionString>("showcase_video_test");
+        video_test && !video_test->value.empty()) {
+        if (!m_actions.empty()) {
+            boost::nowide::cerr << "--showcase-video-test cannot be combined with other actions" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        return Slic3r::Showcase::run_video_selftest(video_test->value, boost::nowide::cout) == 0 ? 0 : CLI_ENVIRONMENT_ERROR;
     }
 
 #ifdef SLIC3R_GUI
@@ -1429,6 +1760,21 @@ int CLI::run(int argc, char **argv)
     sliced_info_t sliced_info;
     std::map<std::string, std::string> record_key_values;
 
+    // Headless runs only (a GUI launch keeps its own logging): --quiet sends log lines to stderr, and a
+    // missing --outputdir is created, so result.json is written even for the early failures below.
+    if (!m_actions.empty()) {
+        g_cli_quiet = m_config.opt_bool("quiet");
+        if (g_cli_quiet)
+            cli_route_logs_to_stderr();
+        if (!outfile_dir.empty()) {
+            try {
+                boost::filesystem::create_directories(boost::filesystem::path(outfile_dir));
+            } catch (const std::exception &ex) {
+                boost::nowide::cerr << "Could not create --outputdir " << outfile_dir << ": " << ex.what() << std::endl;
+            }
+        }
+    }
+
     // Ultra: agent-friendly options.
     if (auto* opt = m_config.option<ConfigOptionBool>("progress_json"))
         g_progress_json = opt->value;
@@ -1445,6 +1791,11 @@ int CLI::run(int argc, char **argv)
     bool no_thumbnails = false;
     if (auto* opt = m_config.option<ConfigOptionBool>("no_thumbnails"))
         no_thumbnails = opt->value;
+    // The GUI leaves filament prices out of G-code by default (Preferences); the CLI has no
+    // preferences and keeps writing them unless --no-filament-prices is given.
+    bool gcode_filament_prices = true;
+    if (auto* opt = m_config.option<ConfigOptionBool>("no_filament_prices"))
+        gcode_filament_prices = !opt->value;
     // Presets by name are turned into flat JSON files that join the --load-settings /
     // --load-filaments lists, so everything downstream stays as it was.
     std::vector<std::string> load_configs_all(load_configs.begin(), load_configs.end());
@@ -1459,7 +1810,11 @@ int CLI::run(int argc, char **argv)
         std::vector<std::string> filament_names;
         if (auto* opt = m_config.option<ConfigOptionStrings>("filament_presets"))
             filament_names = opt->values;
-        if (!printer_name.empty() || !process_name.empty() || !filament_names.empty()) {
+        // --list-presets reads --printer-preset as a filter and resolves it itself.
+        const bool listing_presets = std::find(m_actions.begin(), m_actions.end(), "list_presets") != m_actions.end();
+        if (!listing_presets && (!printer_name.empty() || !process_name.empty() || !filament_names.empty())) {
+            // The vendor bundles below drop keys that presets deliberately do not hold; report them once.
+            Preset::ForeignKeyReportScope foreign_key_scope;
             NamedPresets presets;
             const std::string preset_dir = (boost::filesystem::path(temporary_dir()) / ("ultra_cli_presets_" + std::to_string(get_current_pid()))).string();
             auto resolve = [&](const std::string& name, Preset::Type t, int ordinal, std::vector<std::string>& into) -> bool {
@@ -1629,6 +1984,59 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    // --list-presets and --list-exit-codes only print a list and exit: nothing else may come along, or it
+    // would be skipped without notice. (--printer-preset, --datadir, --quiet and --debug are not actions.)
+    if (std::find(m_actions.begin(), m_actions.end(), "list_presets") != m_actions.end() ||
+        std::find(m_actions.begin(), m_actions.end(), "list_exit_codes") != m_actions.end()) {
+        static const std::set<std::string> list_compatible = { "list_presets", "list_exit_codes" };
+        for (const std::string &action : m_actions) {
+            if (list_compatible.count(action) == 0) {
+                std::string flag = action;
+                std::replace(flag.begin(), flag.end(), '_', '-');
+                boost::nowide::cerr << "--list-presets / --list-exit-codes cannot be combined with --" << flag << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        }
+        if (!m_transforms.empty() || !m_input_files.empty() || g_progress_json) {
+            boost::nowide::cerr << "--list-presets / --list-exit-codes take no input files, transforms or --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
+    // --validate checks and exits without slicing, so an action that writes a file would be skipped
+    // without notice. --slice N is allowed: it picks the plate to check.
+    const bool validate_only_run = std::find(m_actions.begin(), m_actions.end(), "validate") != m_actions.end();
+    if (validate_only_run) {
+        static const std::set<std::string> validate_compatible = { "validate", "slice", "uptodate", "load_defaultfila", "min_save",
+                                                                   "mtcpp", "mstpp", "no_check", "strict", "normative_check", "pipe" };
+        for (const std::string &action : m_actions) {
+            if (validate_compatible.count(action) == 0) {
+                std::string flag = action;
+                std::replace(flag.begin(), flag.end(), '_', '-');
+                boost::nowide::cerr << "--validate cannot be combined with --" << flag << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        }
+        sliced_info.validate_only = true;
+    }
+
+    // --export-gcode names the files of a slice, so there must be one.
+    if (std::find(m_actions.begin(), m_actions.end(), "export_gcode") != m_actions.end()) {
+        if (std::find(m_actions.begin(), m_actions.end(), "slice") == m_actions.end()) {
+            boost::nowide::cerr << "--export-gcode needs --slice" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (m_config.opt_string("export_gcode").empty()) {
+            boost::nowide::cerr << "--export-gcode needs a file name" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
         BOOST_LOG_TRIVIAL(info) << "no action, start gui directly" << std::endl;
@@ -1652,6 +2060,8 @@ int CLI::run(int argc, char **argv)
         params.load_configs = load_configs;
         params.extra_config = std::move(m_extra_config);
         params.start_hidden = m_config.opt_bool("hidden");
+        params.no_hub_flag   = m_config.opt_bool("no_hub");
+        params.take_hub_flag = m_config.opt_bool("take_hub");
 
         std::vector<std::string>    gcode_files;
         std::vector<std::string>    non_gcode_files;
@@ -1693,6 +2103,31 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    // --list-exit-codes: the exit code table, as a table or (with --quiet) JSON. Prints and exits; no result.json.
+    if (std::find(m_actions.begin(), m_actions.end(), "list_exit_codes") != m_actions.end()) {
+        if (g_cli_quiet)
+            boost::nowide::cout << cli_exit_codes_json(cli_errors).dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
+        else
+            boost::nowide::cout << cli_exit_codes_text(cli_errors);
+        boost::nowide::cout.flush();
+        return CLI_SUCCESS;
+    }
+
+    // --list-presets: system and user presets as JSON. Prints and exits; no result.json.
+    if (std::find(m_actions.begin(), m_actions.end(), "list_presets") != m_actions.end()) {
+        Preset::ForeignKeyReportScope foreign_key_scope;
+        NamedPresets presets;
+        std::string  error;
+        const nlohmann::json listing = presets.list_presets(m_config.opt_string("printer_preset", true), error);
+        if (listing.is_null()) {
+            boost::nowide::cerr << error << std::endl;
+            return CLI_CONFIG_FILE_ERROR;
+        }
+        boost::nowide::cout << listing.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
+        boost::nowide::cout.flush();
+        return CLI_SUCCESS;
+    }
+
     // CLI-only: vendor bundles for the missing-key fill. Not constructed on a GUI launch (S8).
     std::optional<NamedPresets> named_presets_store;
     auto named_presets = [&named_presets_store]() -> NamedPresets & {
@@ -1709,7 +2144,7 @@ int CLI::run(int argc, char **argv)
     std::vector<plate_obj_size_info_t> plate_obj_size_infos;
     int plate_to_slice = 0, filament_count = 0, duplicate_count = 0, real_duplicate_count = 0;
     bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false;
-    bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
+    bool allow_rotations = false, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
     Semver file_version;
     std::map<size_t, bool> orients_requirement;
     std::vector<Preset*> project_presets;
@@ -1731,6 +2166,15 @@ int CLI::run(int argc, char **argv)
         flush_and_exit(CLI_INVALID_PARAMS);
     }
 
+    for (const std::string& input_file : m_input_files) {
+        if (is_zip_archive_path(input_file)) {
+            boost::nowide::cerr << "ZIP archives cannot be sliced from the command line. Open the ZIP in " SLIC3R_APP_NAME ", or extract it first."
+                                << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
     // Read input file(s) if any.
     BOOST_LOG_TRIVIAL(info) << "Will start to read model file now, file count :" << m_input_files.size() << "\n";
     ConfigOptionInt* slice_option = m_config.option<ConfigOptionInt>("slice");
@@ -1740,6 +2184,21 @@ int CLI::run(int argc, char **argv)
     ConfigOptionBool* normative_check_option = m_config.option<ConfigOptionBool>("normative_check");
     if (normative_check_option)
         normative_check = normative_check_option->value;
+
+    // EdgeSlicer, curved tops P3: the CLI has no Developer mode; --curved-tops-dev-overrides stands in
+    // for it. Off unless given, so a project's curved_tops_dev_* values are ignored by default.
+    {
+        const ConfigOptionBool *dev_option = m_config.option<ConfigOptionBool>("curved_tops_dev_overrides");
+        Slic3r::set_curved_tops_developer_mode(dev_option != nullptr && dev_option->value);
+        if (dev_option != nullptr && dev_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops developer overrides are allowed for this run (--curved-tops-dev-overrides)";
+        // Curved tops on any printer: the CLI's stand-in for the app's one-time acceptance of head values no curved
+        // print has checked. Never a preset or project key: a downloaded 3MF cannot carry it.
+        const ConfigOptionBool *accept_option = m_config.option<ConfigOptionBool>("curved_tops_accept_unverified");
+        Slic3r::set_curved_tops_accept_unverified(accept_option != nullptr && accept_option->value);
+        if (accept_option != nullptr && accept_option->value)
+            BOOST_LOG_TRIVIAL(warning) << "Curved tops may run on unverified print head values for this run (--curved-tops-accept-unverified)";
+    }
 
     ConfigOptionBool* uptodate_option = m_config.option<ConfigOptionBool>("uptodate");
     if (uptodate_option)
@@ -2184,7 +2643,7 @@ int CLI::run(int argc, char **argv)
             }
         }
         catch (std::exception& e) {
-            boost::nowide::cerr << construct_assemble_list << ": " << e.what() << std::endl;
+            boost::nowide::cerr << "construct_assemble_list: " << e.what() << std::endl;
             record_exit_reson(outfile_dir, CLI_DATA_FILE_ERROR, 0, cli_errors[CLI_DATA_FILE_ERROR], sliced_info);
             flush_and_exit(CLI_DATA_FILE_ERROR);
         }
@@ -2320,14 +2779,8 @@ int CLI::run(int argc, char **argv)
                 flush_and_exit(CLI_CONFIG_FILE_ERROR);
             }
             new_printer_name = config_name;
-            if (config_from == "system") {
-                new_printer_system_name = new_printer_name;
-                new_printer_config_is_system = true;
-            }
-            else {
-                new_printer_system_name = config.option<ConfigOptionString>("inherits", true)->value;
-                new_printer_config_is_system = false;
-            }
+            new_printer_system_name = cli_config_system_name(config_from, new_printer_name, config.option<ConfigOptionString>("inherits", true)->value);
+            new_printer_config_is_system = config_from == "system";
             config.set("printer_settings_id", new_printer_name, true);
 
             //get printer_model_id
@@ -2489,8 +2942,7 @@ int CLI::run(int argc, char **argv)
         }
     }
 
-    if (filament_count == 0)
-        filament_count = load_filament_count;
+    filament_count = cli_filament_slot_count(filament_count, load_filament_count);
 
     if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
     {
@@ -2998,8 +3450,8 @@ int CLI::run(int argc, char **argv)
 
     std::vector<std::string>& different_settings = m_print_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values;
     std::vector<std::string>& inherits_group = m_print_config.option<ConfigOptionStrings>("inherits_group", true)->values;
-    inherits_group.resize(filament_count + 2, std::string());
-    different_settings.resize(filament_count + 2, std::string());
+    resize_cli_preset_slots(inherits_group, filament_count);
+    resize_cli_preset_slots(different_settings, filament_count);
     if (!is_bbl_3mf && !different_process_setting.empty()) {
         different_settings[0] = different_process_setting;
     }
@@ -3215,6 +3667,11 @@ int CLI::run(int argc, char **argv)
     //set the filament settings into print config
     if ((load_filament_count > 0) || (up_config_to_date))
     {
+        // The project's lists one value per filament, the one each filament reads, so that a preset's value written
+        // below at the filament's index is the one read for it (a project saved by the application keeps a
+        // filament's flow variants side by side).
+        if (!load_filaments_config.empty())
+            cli_flatten_filament_flow_variants(m_print_config, size_t(filament_count));
         for (int index = 0; index < load_filaments_config.size(); index++) {
             DynamicPrintConfig&  config = load_filaments_config[index];
             int filament_index = load_filaments_index[index];
@@ -3318,9 +3775,10 @@ int CLI::run(int argc, char **argv)
                         record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
                         flush_and_exit(CLI_CONFIG_FILE_ERROR);
                     }
-                    ConfigOptionVectorBase* opt_vec_dst = static_cast<ConfigOptionVectorBase*>(opt);
-                    const ConfigOptionVectorBase* opt_vec_src = static_cast<const ConfigOptionVectorBase*>(source_opt);
-                    opt_vec_dst->set_at(opt_vec_src, filament_index-1, 0);
+                    // The preset's value for the filament's flow type (filament_volume_type), the list cut to the
+                    // filament count. Taking entry 0 printed a high-flow filament at its standard values, and a
+                    // project's longer list kept its old values past the filaments.
+                    cli_set_filament_preset_value(m_print_config, opt_key, config, size_t(filament_index - 1), size_t(filament_count));
                 }
             }
 
@@ -3405,7 +3863,16 @@ int CLI::run(int argc, char **argv)
             }
 
             //computing
-            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support", true);
+            // Standalone filament presets may leave out the per-filament options read here, and option defaults are
+            // only applied further down: fill in the default for each filament.
+            for (const char *key : {"filament_diameter", "filament_is_support"}) {
+                if (!m_print_config.has(key)) {
+                    ConfigOption *option = print_config_def.get(key)->create_default_option();
+                    static_cast<ConfigOptionVectorBase *>(option)->resize(project_filament_count);
+                    m_print_config.set_key_value(key, option);
+                }
+            }
+            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support");
             std::vector<double>& flush_vol_matrix = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values;
             //std::vector<float>& flush_vol_vector = m_print_config.option<ConfigOptionFloats>("flush_volumes_vector", true)->values;
             flush_vol_matrix.resize(project_filament_count*project_filament_count, 0.f);
@@ -3577,8 +4044,149 @@ int CLI::run(int argc, char **argv)
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     m_print_config.apply(m_extra_config, true);
+    // A project the CLI exports must say these values differ from the presets, or the GUI puts
+    // them back to the system preset's on open (record_cli_overrides_as_different).
+    {
+        const size_t recorded = record_cli_overrides_as_different(m_print_config, m_extra_config, Preset::print_options(),
+                                                                  Preset::filament_options(), Preset::printer_options());
+        if (recorded > 0)
+            BOOST_LOG_TRIVIAL(info) << "command line settings recorded as different from the presets: " << recorded;
+    }
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
+
+    // Per-nozzle process P1: --nozzle-process-presets "A;B" (or a project's nozzle_process_presets) names the
+    // process each physical extruder takes its speeds, accelerations and jerk from. Copy them into the
+    // extruders' slots of the process keys, as the GUI's full_config() does. A name that cannot be found
+    // leaves that extruder as the project / plate has it (a project already carries the copied values).
+    //
+    // Per-nozzle process P8: every tool takes its whole profile (speeds, widths, region settings) from its own process: the
+    // one named for it, else the plate's when that is made for the tool's nozzle size (or for no size), else the system
+    // process of that size picked automatically (as the GUI does). The project's per-tool changes (nozzle_process_edits) go
+    // on top. A tool with no fitting process is listed in nozzle_process_missing, which Print::validate refuses.
+    if (supports_nozzle_processes(m_print_config)) {
+        const std::vector<double> nozzles = effective_nozzle_diameters(m_print_config);
+        std::vector<std::string>  names;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("nozzle_process_presets"))
+            names = opt->values;
+        names.resize(nozzles.size());
+        const NozzleProcessEdits edits = nozzle_process_edits(m_print_config);
+
+        // The plate's process: the size it is made for, and the vendor bundle to pick other sizes' processes from.
+        std::string plate_name = m_config.opt_string("process_preset", true);
+        auto config_string = [this](const char *key) {
+            const auto *opt = m_print_config.option<ConfigOptionString>(key);
+            return opt != nullptr ? opt->value : std::string();
+        };
+        if (plate_name.empty())
+            plate_name = config_string("print_settings_id");
+        PresetBundle *plate_bundle = nullptr;
+        double        plate_claim  = 0.;
+        std::string   system_name  = plate_name;
+        {
+            if (named_presets().find_system(system_name, Preset::TYPE_PRINT) == nullptr) {
+                // A user process: the system process it inherits.
+                DynamicPrintConfig user;
+                std::string        filament_id_unused;
+                system_name.clear();
+                if (!plate_name.empty() && named_presets().find_user(plate_name, Preset::TYPE_PRINT, user, filament_id_unused))
+                    if (const auto *inherits = user.option<ConfigOptionString>("inherits"))
+                        system_name = inherits->value;
+            }
+            if (!system_name.empty())
+                if (const Preset *sys = named_presets().find_system(system_name, Preset::TYPE_PRINT))
+                    if ((plate_bundle = named_presets().bundle_with(system_name, Preset::TYPE_PRINT)) != nullptr)
+                        plate_claim = PresetBundle::process_nozzle_claim(*sys, plate_bundle->prints, plate_bundle->printers);
+        }
+        const double plate_lh = m_print_config.option<ConfigOptionFloat>("layer_height") != nullptr ? m_print_config.opt_float("layer_height") : 0.;
+
+        // One tool's effective process into `store` (P9: an extruder "T2" or a rack slot "T2.3"); false when no process fits it.
+        auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
+            DynamicPrintConfig base;
+            bool               has_base = false;
+            const bool         chosen   = !name.empty(); // named in the project / on the command line, not picked for its size
+            std::string        filament_id_unused;
+            if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
+                name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
+                                                           diameter, plate_lh, system_name.empty() ? plate_name : system_name);
+                if (name.empty()) {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits " << id << " (" << diameter << " mm)";
+                    boost::nowide::cerr << "per-nozzle process: no process fits " << id << " (" << diameter << " mm)" << std::endl;
+                    return false;
+                }
+                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << id << " (" << diameter << " mm) uses '" << name << "' (picked)";
+                boost::nowide::cout << "per-nozzle process: " << id << " (" << diameter << " mm) uses '" << name << "', picked for its size" << std::endl;
+            }
+            if (!name.empty()) {
+                if (const Preset *preset = named_presets().find_system(name, Preset::TYPE_PRINT)) {
+                    base     = preset->config;
+                    has_base = true;
+                } else if (named_presets().find_user(name, Preset::TYPE_PRINT, base, filament_id_unused)) {
+                    has_base = true;
+                } else {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << name << "' for " << id << " not found";
+                    boost::nowide::cerr << "per-nozzle process: preset not found: " << name << std::endl;
+                }
+            }
+            const auto it = edits.find(id);
+            store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate, as in the GUI.
+            if (chosen && has_base)
+                set_nozzle_tool_layer_height(store, base);
+            return true;
+        };
+
+        std::vector<DynamicPrintConfig>         nozzle_process_store(nozzles.size());
+        std::vector<const DynamicPrintConfig *> nozzle_process_sources(nozzles.size(), nullptr);
+        std::vector<int>                        missing;
+        for (size_t e = 0; e < nozzles.size(); ++e) {
+            if (!resolve_tool(nozzle_tool_id(e), nozzles[e], names[e], nozzle_process_store[e])) {
+                missing.push_back(int(e) + 1);
+                continue;
+            }
+            if (!nozzle_process_diff(nozzle_process_store[e], m_print_config).empty())
+                nozzle_process_sources[e] = &nozzle_process_store[e];
+        }
+        m_print_config.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
+
+        // Per-nozzle process P9: the rack slots of an extruder whose rack lists two or more nozzles each have a process of their
+        // own (chosen in nozzle_slot_process_presets, else the plate's or the one picked for the slot's size), and each filament
+        // on such an extruder prints with its slot's.
+        const std::vector<NozzleToolEntry> slot_tools = nozzle_slot_tools(m_print_config);
+        std::vector<const DynamicPrintConfig *> filament_sources;
+        std::vector<DynamicPrintConfig>         slot_store(slot_tools.size());
+        if (!slot_tools.empty()) {
+            const std::map<std::string, std::string> slot_names = nozzle_slot_process_names(m_print_config);
+            std::vector<const DynamicPrintConfig *>  slot_sources(slot_tools.size(), nullptr);
+            std::vector<std::string>                 slot_missing;
+            for (size_t i = 0; i < slot_tools.size(); ++i) {
+                const std::string id   = nozzle_tool_entry_id(slot_tools[i]);
+                const auto        name = slot_names.find(id);
+                if (!resolve_tool(id, slot_tools[i].diameter, name != slot_names.end() ? name->second : std::string(), slot_store[i])) {
+                    slot_missing.push_back(id);
+                    continue;
+                }
+                if (!nozzle_process_diff(slot_store[i], m_print_config).empty())
+                    slot_sources[i] = &slot_store[i];
+            }
+            m_print_config.set_key_value("nozzle_slot_process_missing", new ConfigOptionStrings(slot_missing));
+            const auto  *filament_opt = dynamic_cast<const ConfigOptionVectorBase *>(m_print_config.option("filament_diameter"));
+            const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
+            filament_sources.assign(filaments, nullptr);
+            for (size_t f = 0; f < filaments; ++f) {
+                const size_t      e  = nozzle_for_filament(m_print_config, unsigned(f + 1));
+                const std::string id = nozzle_filament_group_id(m_print_config, unsigned(f + 1)); // its rack size's tool
+                filament_sources[f] = e < nozzle_process_sources.size() ? nozzle_process_sources[e] : nullptr;
+                for (size_t i = 0; !id.empty() && i < slot_tools.size(); ++i)
+                    if (nozzle_tool_entry_id(slot_tools[i]) == id) {
+                        filament_sources[f] = slot_sources[i];
+                        break;
+                    }
+            }
+        }
+        if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources, slot_tools.empty() ? nullptr : &filament_sources))
+            BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filled the extruder slots of the process keys";
+    }
 
     m_print_config.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology", true)->value = printer_technology;
 
@@ -3991,6 +4599,12 @@ int CLI::run(int argc, char **argv)
             plate_list.reset_size(current_printable_width, current_printable_depth, current_printable_height, true, true);
         }
     };
+    if (plate_data_src.size() > MAX_PLATE_COUNT)
+    {
+        BOOST_LOG_TRIVIAL(error) << boost::format("the project has %1% plates, the limit is %2%") % plate_data_src.size() % MAX_PLATE_COUNT;
+        record_exit_reson(outfile_dir, CLI_DATA_FILE_ERROR, 0, cli_errors[CLI_DATA_FILE_ERROR], sliced_info);
+        flush_and_exit(CLI_DATA_FILE_ERROR);
+    }
     if (plate_data_src.size() > 0)
     {
         partplate_list.load_from_3mf_structure(plate_data_src);
@@ -4504,6 +5118,7 @@ int CLI::run(int argc, char **argv)
 
     BOOST_LOG_TRIVIAL(info) << "finished model pre-process commands\n";
     bool oriented_or_arranged = false;
+    bool arranged_without_rotations = false;
     //BBS: add orient and arrange logic here
     for (auto& model : m_models)
     {
@@ -4733,6 +5348,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -4762,6 +5382,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start plate %1%'s arranging...") % (i + 1);
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 //arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished plate %1%'s arranging") % (i + 1);
 
                 //step-4: postprocess the bed index and result
@@ -5165,6 +5786,11 @@ int CLI::run(int argc, char **argv)
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
                     arrange_cfg.align_to_y_axis = (printer_structure_opt->value == PrinterStructure::psI3);
                 }
+                // Arrange towards the printer's preferred spot, as the application's Arrange does
+                // (ArrangeJob.cpp init_arrange_params). Left unset, align_center kept the bed's middle,
+                // whatever best_object_pos says (the H2D family's 0.3x0.5, the A1 mini's 0.7x0.5).
+                if (const auto *best_object_pos = m_print_config.option<ConfigOptionPoint>("best_object_pos"))
+                    arrange_cfg.align_center = best_object_pos->value;
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
@@ -5194,6 +5820,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start %1% th arranging...")%arrange_count;
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished %1% th arranging...")%arrange_count;
 
                 //Step-4:postprocess by partplate list&&apply the result
@@ -5486,6 +6113,10 @@ int CLI::run(int argc, char **argv)
             this->print_help(true, ptSLA);
         } else if (opt_key == "pipe") {
             //already processed before
+        } else if (opt_key == "export_gcode") {
+            // read in the slice branch below, when each plate's file name is chosen
+        } else if (opt_key == "slice" && validate_only_run) {
+            // --validate checks the plates itself; --slice N only picks the plate (read there)
         } else if (opt_key == "load_slicedata") {
             load_slicedata = true;
             load_slice_data_dir = m_config.opt_string(opt_key);
@@ -5657,10 +6288,13 @@ int CLI::run(int argc, char **argv)
                 record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
                 flush_and_exit(CLI_INVALID_PARAMS);
             }
-        } else if (opt_key == "slice") {
+        } else if (opt_key == "slice" || opt_key == "validate") {
+            // --validate: the same loading and per-plate checks as --slice, then exit without slicing.
+            const bool validate_only = (opt_key == "validate");
             //BBS: slice 0 means all plates, i means plate i;
             plate_to_slice = m_config.option<ConfigOptionInt>("slice")->value;
-            sliced_plate = plate_to_slice;
+            if (!validate_only)
+                sliced_plate = plate_to_slice;
             bool pre_check = (plate_to_slice == 0)?true:false;
             bool finished = false;
 
@@ -5711,10 +6345,17 @@ int CLI::run(int argc, char **argv)
                             continue;
                         // An empty estimate is a plate that prints no tower (one filament and
                         // neither smooth timelapse, wrapping detection nor a raft).
-                        Vec3d wt_pos, wt_size;
-                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size);
+                        Vec3d                            wt_pos, wt_size;
+                        Slic3r::GUI::WipeTowerRelocation relocation;
+                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size, 0, false, &relocation);
                         if (wt_size(0) < EPSILON || wt_size(1) < EPSILON)
                             continue;
+                        // Orca #16728: a re-placed tower moves clear of the plate's objects where there is room.
+                        if (relocation.moved)
+                            BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1%: the wipe tower no longer fits at its saved position {%2%, %3%} and was moved %4%")
+                                % (index + 1) % m_print_config.option<ConfigOptionFloats>("wipe_tower_x", true)->get_at(index)
+                                % m_print_config.option<ConfigOptionFloats>("wipe_tower_y", true)->get_at(index)
+                                % (relocation.overlaps_objects ? "onto an object, as no free space is left" : "to free space");
                         // That clamp only knows the bed edges. A tower left on bed_exclude_area fails
                         // validation ("Prime Tower is too close to exclusion area", -64; Qidi Q1 Pro:
                         // the raw default y = 220 reaches the y 240-245 strip), where the GUI never puts
@@ -5800,7 +6441,15 @@ int CLI::run(int argc, char **argv)
 
                         if (count == 0) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else if ((plate_to_slice != 0) || pre_check) {
@@ -5955,8 +6604,15 @@ int CLI::run(int argc, char **argv)
                         }
                         (dynamic_cast<Print*>(print))->is_BBL_printer() = is_bbl_vendor_preset;
 
-                        StringObjectException warning;
-                        auto err = print->validate(&warning);
+                        // ORCA #14112: validate() now returns every warning; the status text joins them.
+                        std::vector<StringObjectException> warnings;
+                        auto err = print->validate(&warnings);
+                        std::string warning_text;
+                        for (const auto& w : warnings) {
+                            if (!warning_text.empty())
+                                warning_text += "\n";
+                            warning_text += w.string;
+                        }
                         if (!err.string.empty()) {
                             if ((STRING_EXCEPT_LAYER_HEIGHT_EXCEEDS_LIMIT == err.type) && no_check) {
                                 BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< err.string << std::endl;
@@ -5990,16 +6646,63 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(validate_error);
                             }
                         }
-                        else if (!warning.string.empty()) {
-                            BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< warning.string << std::endl;
+                        else if (!warnings.empty()) {
+                            for (const auto& w : warnings)
+                                BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< w.string << std::endl;
                         }
 
                         if (print->empty()) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume after apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else {
+                            // The objects' bounding box in mm, relative to this plate's origin (result.json "bounding_box").
+                            {
+                                const BoundingBoxf3 objects_box = part_plate->get_objects_bounding_box();
+                                if (objects_box.defined) {
+                                    const Vec3d origin = part_plate->get_origin();
+                                    const Vec3d lo = objects_box.min - origin, hi = objects_box.max - origin, size = hi - lo;
+                                    auto round3 = [](double v) { return std::round(v * 1000.) / 1000.; };
+                                    nlohmann::json box;
+                                    box["min"]  = { round3(lo.x()), round3(lo.y()), round3(lo.z()) };
+                                    box["max"]  = { round3(hi.x()), round3(hi.y()), round3(hi.z()) };
+                                    box["size"] = { round3(size.x()), round3(size.y()), round3(size.z()) };
+                                    sliced_plate_info.bounding_box = std::move(box);
+                                }
+                            }
+                            // The presets used (result.json "presets"), the same for every plate.
+                            if (!sliced_info.presets.is_object()) {
+                                nlohmann::json used;
+                                used["printer"] = new_print_config.opt_string("printer_settings_id", true);
+                                used["process"] = new_print_config.opt_string("print_settings_id", true);
+                                const ConfigOptionStrings *filament_ids = new_print_config.option<ConfigOptionStrings>("filament_settings_id");
+                                used["filaments"] = filament_ids ? filament_ids->values : std::vector<std::string>();
+                                sliced_info.presets = std::move(used);
+                            }
+                            if (validate_only) {
+                                // --validate: this plate passed every check above. Note it and go on to the next
+                                // one; nothing is processed or exported.
+                                BOOST_LOG_TRIVIAL(info) << "plate " << index + 1 << ": validated, not sliced";
+                                sliced_plate_info.validated      = true;
+                                sliced_plate_info.triangle_count = plate_triangle_counts[index];
+                                for (const auto& w : warnings) {
+                                    sliced_plate_info.warnings.push_back(w.string);
+                                    sliced_plate_info.warning_message = w.string;
+                                    cli_record_warning(sliced_info, "validation_warning",
+                                                       nlohmann::json{{"plate_id", index + 1}, {"text", w.string}});
+                                }
+                                sliced_info.sliced_plates.push_back(sliced_plate_info);
+                                continue;
+                            }
                             if (pre_check && (partplate_list.get_plate_count() > 1)) //continue to next plate directly
                                 continue;
                             try {
@@ -6011,8 +6714,8 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "set print's callback to cli_status_callback.";
                                     print->set_status_callback(cli_status_callback);
                                     g_cli_callback_mgr.set_plate_info(index+1, (plate_to_slice== 0)?partplate_list.get_plate_count():1);
-                                    if (!warning.string.empty()) {
-                                        PrintBase::SlicingStatus slicing_status{4, warning.string, 0, 0};
+                                    if (!warning_text.empty()) {
+                                        PrintBase::SlicingStatus slicing_status{4, warning_text, 0, 0};
                                         cli_status_callback(slicing_status);
                                     }
                                     else {
@@ -6030,7 +6733,7 @@ int CLI::run(int argc, char **argv)
 #endif
                                 g_progress_plate_index = index + 1;
                                 g_progress_plate_count = (plate_to_slice == 0) ? partplate_list.get_plate_count() : 1;
-                                emit_progress(4, warning.string.empty() ? std::string("Slicing begins") : warning.string, !warning.string.empty());
+                                emit_progress(4, warning_text.empty() ? std::string("Slicing begins") : warning_text, !warning_text.empty());
 
                                 //update information for brim
                                 const PrintConfig& print_config = print_fff->config();
@@ -6069,11 +6772,13 @@ int CLI::run(int argc, char **argv)
                                     }
 
                                     //check the warnings
-                                    if (!g_slicing_warnings.empty())
+                                    // take() empties the shared list, which is what the old clear() at the end did.
+                                    std::vector<PrintBase::SlicingStatus> pending_warnings = g_slicing_warnings.take();
+                                    if (!pending_warnings.empty())
                                     {
-                                        for (unsigned int i = 0; i < g_slicing_warnings.size(); i++)
+                                        for (unsigned int i = 0; i < pending_warnings.size(); i++)
                                         {
-                                            PrintBase::SlicingStatus& status = g_slicing_warnings[i];
+                                            PrintBase::SlicingStatus& status = pending_warnings[i];
                                             if ((status.warning_step != -1) && (status.message_type != PrintStateBase::SlicingDefaultNotification))
                                             {
                                                 sliced_plate_info.warning_message = status.text;
@@ -6106,13 +6811,25 @@ int CLI::run(int argc, char **argv)
                                                 }
                                             }
                                         }
-                                        g_slicing_warnings.clear();
                                     }
                                     sliced_plate_info.triangle_count = plate_triangle_counts[index];
 
                                     // The outfile is processed by a PlaceholderParser.
                                     //outfile = part_plate->get_tmp_gcode_path();
-                                    if (outfile_dir.empty()) {
+                                    if (std::find(m_actions.begin(), m_actions.end(), "export_gcode") != m_actions.end()) {
+                                        // --export-gcode <name>: the user's file name, placed under --outputdir when relative.
+                                        const int plates_written = (plate_to_slice == 0) ? partplate_list.get_plate_count() : 1;
+                                        outfile = cli_join_output_path(outfile_dir, cli_gcode_file_name(m_config.opt_string("export_gcode"), index + 1, plates_written));
+                                        try {
+                                            const boost::filesystem::path parent = boost::filesystem::path(outfile).parent_path();
+                                            if (!parent.empty())
+                                                boost::filesystem::create_directories(parent);
+                                        } catch (const std::exception &ex) {
+                                            boost::nowide::cerr << "Could not create the folder of " << outfile << ": " << ex.what() << std::endl;
+                                        }
+                                        part_plate->set_tmp_gcode_path(outfile);
+                                    }
+                                    else if (outfile_dir.empty()) {
                                         outfile = part_plate->get_tmp_gcode_path();
                                     }
                                     else {
@@ -6121,6 +6838,7 @@ int CLI::run(int argc, char **argv)
                                     }
                                     BOOST_LOG_TRIVIAL(info) << "process finished, will export gcode temporily to " << outfile << std::endl;
                                     temp_time = (long long)Slic3r::Utils::get_current_time_utc();
+                                    print_fff->set_gcode_filament_prices(gcode_filament_prices);
                                     outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
                                     time_using_cache = time_using_cache + ((long long)Slic3r::Utils::get_current_time_utc() - temp_time);
                                     BOOST_LOG_TRIVIAL(info) << "export_gcode finished: time_using_cache update to " << time_using_cache << " secs.";
@@ -6140,13 +6858,15 @@ int CLI::run(int argc, char **argv)
                                     // statuses (invalid print speed among them) must stay. Drop
                                     // only the Precise Seam entries we just recorded, or a later
                                     // plate's pre-export sweep would re-emit them under plate N+1.
-                                    for (unsigned int i = 0; i < g_slicing_warnings.size(); ) {
-                                        PrintBase::SlicingStatus& status = g_slicing_warnings[i];
+                                    std::vector<PrintBase::SlicingStatus> post_export_warnings = g_slicing_warnings.take();
+                                    for (unsigned int i = 0; i < post_export_warnings.size(); ) {
+                                        PrintBase::SlicingStatus& status = post_export_warnings[i];
                                         if (status.warning_step == -1) {
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter || status.message_type == PrintStateBase::SlicingHeadCollision ||
+                                            status.message_type == PrintStateBase::SlicingCurvedTopsHeadCheck) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -6157,7 +6877,7 @@ int CLI::run(int argc, char **argv)
                                                 record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
                                                 flush_and_exit(CLI_SLICING_ERROR);
                                             }
-                                            g_slicing_warnings.erase(g_slicing_warnings.begin() + i);
+                                            post_export_warnings.erase(post_export_warnings.begin() + i);
                                             continue;
                                         }
                                         if (status.message_type != PrintStateBase::SlicingInvalidPrintSpeed) {
@@ -6177,6 +6897,8 @@ int CLI::run(int argc, char **argv)
                                         record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
                                         flush_and_exit(CLI_SLICING_ERROR);
                                     }
+                                    // Whatever the loop above did not consume stays queued, as before.
+                                    g_slicing_warnings.restore_front(std::move(post_export_warnings));
                                     // Ultra: estimates for result.json
                                     sliced_plate_info.gcode_path = outfile;
                                     if (gcode_result) {
@@ -6191,6 +6913,25 @@ int CLI::run(int argc, char **argv)
                                         sliced_plate_info.filament_g = ps.total_weight;
                                         if (sliced_plate_info.filament_mm3 <= 0)
                                             sliced_plate_info.filament_mm3 = ps.total_extruded_volume;
+                                    }
+                                    // New result.json keys: layers, per-filament and per-extruder usage, cost.
+                                    if (gcode_result) {
+                                        const ConfigOptionStrings *ids     = new_print_config.option<ConfigOptionStrings>("filament_settings_id");
+                                        const ConfigOptionStrings *types   = new_print_config.option<ConfigOptionStrings>("filament_type");
+                                        const ConfigOptionStrings *colours = new_print_config.option<ConfigOptionStrings>("filament_colour");
+                                        const ConfigOptionInts    *map     = new_print_config.option<ConfigOptionInts>("filament_map");
+                                        size_t slot_count = 0;
+                                        for (const ConfigOptionStrings *opt : { ids, types, colours })
+                                            if (opt)
+                                                slot_count = std::max(slot_count, opt->values.size());
+                                        std::vector<CliFilamentSlot> slots(slot_count);
+                                        for (size_t slot = 0; slot < slot_count; ++slot) {
+                                            if (ids && slot < ids->values.size())         slots[slot].preset = ids->values[slot];
+                                            if (types && slot < types->values.size())     slots[slot].type   = types->values[slot];
+                                            if (colours && slot < colours->values.size()) slots[slot].colour = colours->values[slot];
+                                            if (map && slot < map->values.size() && map->values[slot] > 0) slots[slot].extruder = map->values[slot];
+                                        }
+                                        sliced_plate_info.usage = cli_plate_usage_json(*gcode_result, slots);
                                     }
                                     emit_progress(100, "Slicing finished");
 
@@ -6258,7 +6999,9 @@ int CLI::run(int argc, char **argv)
                             }
                         }
                     }
-                    if (pre_check&& (partplate_list.get_plate_count() > 1))
+                    if (validate_only)
+                        finished = true; // one pass is all --validate needs
+                    else if (pre_check&& (partplate_list.get_plate_count() > 1))
                         pre_check = false;
                     else
                         finished = true;
@@ -6338,8 +7081,14 @@ int CLI::run(int argc, char **argv)
             }
         }
 
-        if (!outfile_dir.empty()) {
-            export_3mf_file = outfile_dir + "/"+export_3mf_file;
+        // A relative name goes under --outputdir; an absolute one is used as given (it used to be appended).
+        export_3mf_file = cli_join_output_path(outfile_dir, export_3mf_file);
+        try {
+            const boost::filesystem::path parent = boost::filesystem::path(export_3mf_file).parent_path();
+            if (!parent.empty())
+                boost::filesystem::create_directories(parent);
+        } catch (const std::exception &ex) {
+            boost::nowide::cerr << "Could not create the folder of " << export_3mf_file << ": " << ex.what() << std::endl;
         }
 
 #if defined(__linux__) || defined(__LINUX__)
@@ -6357,11 +7106,10 @@ int CLI::run(int argc, char **argv)
         // get type and color for platedata
         auto* filament_types = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_type"));
         const ConfigOptionStrings* filament_color = dynamic_cast<const ConfigOptionStrings *>(m_print_config.option("filament_colour"));
-        auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_ids"));
         const ConfigOptionFloats* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
         if (nozzle_diameter_option)
-            nozzle_diameter_str = nozzle_diameter_option->serialize();
+            nozzle_diameter_str = ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).serialize(); // P7: overridden sizes
 
         for (int i = 0; i < plate_data_list.size(); i++) {
             PlateData *plate_data = plate_data_list[i];
@@ -6376,8 +7124,10 @@ int CLI::run(int argc, char **argv)
             for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
                 std::string display_filament_type;
                 it->type  = m_print_config.get_filament_type(display_filament_type, it->id);
-                it->color = filament_color ? filament_color->get_at(it->id) : "#FFFFFF";
-                it->filament_id = filament_id?filament_id->get_at(it->id):"";
+                // A project need not carry every per-filament list (a Bambu project written by
+                // another tool may leave filament_ids out).
+                it->color       = m_print_config.filament_string_at("filament_colour", it->id, "#FFFFFF");
+                it->filament_id = m_print_config.filament_string_at("filament_ids", it->id, "");
             }
 
             if (!plate_data->plate_thumbnail.is_valid()) {
@@ -6473,9 +7223,9 @@ int CLI::run(int argc, char **argv)
                 colors_out[color_idx] = ColorRGBA(float(rgb_color[0]) / 255.f, float(rgb_color[1]) / 255.f, float(rgb_color[2]) / 255.f, float(rgb_color[3]) / 255.f);
             }
 
-            int gl_major, gl_minor, gl_verbos;
-            glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
-            BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
+            int glfw_major, glfw_minor, glfw_revision;
+            glfwGetVersion(&glfw_major, &glfw_minor, &glfw_revision);
+            BOOST_LOG_TRIVIAL(info) << boost::format("GLFW version %1%.%2%.%3%") % glfw_major % glfw_minor % glfw_revision;
 
             glfwSetErrorCallback(glfw_callback);
             int ret = glfwInit();
@@ -6485,8 +7235,11 @@ int CLI::run(int argc, char **argv)
             }
             else {
                 BOOST_LOG_TRIVIAL(info) << "glfwInit Success."<< std::endl;
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, gl_major);
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, gl_minor);
+                // Request the minimum OpenGL version we render with, independently of the GLFW library
+                // version (this used to pass GLFW's own version as the GL version; OrcaSlicer did the same
+                // fix). macOS gets a forward-compatible core profile below, as the GUI does.
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
                 glfwWindowHint(GLFW_RED_BITS, 8);
                 glfwWindowHint(GLFW_GREEN_BITS, 8);
                 glfwWindowHint(GLFW_BLUE_BITS, 8);
@@ -6506,6 +7259,16 @@ int CLI::run(int argc, char **argv)
 #endif
 
                 GLFWwindow* window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
+#ifndef __WXMAC__
+                if (window == NULL) {
+                    // Some drivers (e.g. older Mesa) only expose a 3.0 compatibility profile; take whatever they offer.
+                    BOOST_LOG_TRIVIAL(warning) << "Failed to create an OpenGL 3.3 compatibility context, retrying with the driver default" << std::endl;
+                    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 1);
+                    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+                    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+                    window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
+                }
+#endif
                 if (window == NULL)
                 {
                     BOOST_LOG_TRIVIAL(error) << "Failed to create GLFW window" << std::endl;
@@ -6931,7 +7694,7 @@ int CLI::run(int argc, char **argv)
             // get nozzle diameter
             auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
             if (opt_nozzle_diameters != nullptr)
-                plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
+                plate_bbox->nozzle_diameter = float(ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).get_at(plate_bbox->first_extruder)); // P7
 
             auto objects = print->objects();
             auto orig = part_plate->get_origin();
@@ -6950,18 +7713,14 @@ int CLI::run(int argc, char **argv)
             }
             // add wipe tower bounding box
             if (print->has_wipe_tower()) {
-                BBoxData data;
                 auto   wt_corners = print->first_layer_wipe_tower_corners();
                 // when loading gcode.3mf, wipe tower info may not be correct
                 if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
-                    bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    // Numbered by the plate being exported (the current plate is not it here), its
+                    // area and layer height set rather than left as the stack held them.
+                    BBoxData data = wipe_tower_first_layer_bbox_data(wt_corners, orig2d, part_plate->get_index(),
+                                                                     float(print->config().initial_layer_print_height.value));
+                    bbox_all.merge(BoundingBoxf(Vec2d(data.bbox[0], data.bbox[1]), Vec2d(data.bbox[2], data.bbox[3])));
                     id_bboxes.emplace_back(std::move(data));
                 }
             }
@@ -7066,6 +7825,122 @@ int CLI::run(int argc, char **argv)
 
     return 0;
 }
+
+
+#ifdef SLIC3R_GUI
+int CLI::run_showcase_render(int argc, char **argv)
+{
+    using namespace Slic3r::Showcase;
+    namespace fs = boost::filesystem;
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i)
+        args.emplace_back(argv[i] != nullptr ? argv[i] : "");
+    RenderRequest req;
+    std::string   error;
+    if (!parse_render_args(args, req, error)) {
+        boost::nowide::cerr << "error: " << error << std::endl << std::endl << render_usage();
+        return RENDER_USAGE;
+    }
+    if (req.help) {
+        boost::nowide::cout << render_usage();
+        return RENDER_OK;
+    }
+    // Absolute paths: the GUI is free to change the working folder.
+    auto absolute = [](std::string &p) {
+        if (!p.empty()) {
+            boost::system::error_code ec;
+            const fs::path a = fs::absolute(fs::path(p));
+            p                = a.lexically_normal().string();
+        }
+    };
+    absolute(req.project);
+    absolute(req.path);
+    absolute(req.out);
+    absolute(req.report);
+    // A report even for what fails before the render starts.
+    auto early = [&req](int code, const std::vector<std::string> &errors, const std::vector<std::string> &warnings = {}) {
+        for (const std::string &w : warnings)
+            boost::nowide::cerr << "warning: " << w << std::endl;
+        for (const std::string &e : errors)
+            boost::nowide::cerr << "error: " << e << std::endl;
+        if (!req.report.empty()) {
+            RenderReport rep;
+            rep.ok        = false;
+            rep.exit_code = code;
+            rep.project   = req.project;
+            rep.path      = req.path;
+            rep.out       = req.out;
+            rep.plate     = req.plate;
+            rep.still     = req.still;
+            rep.errors    = errors;
+            rep.warnings  = warnings;
+            boost::nowide::ofstream f(req.report, std::ios::binary | std::ios::trunc);
+            const std::string        text = render_report_json(rep) + "\n";
+            if (f)
+                f.write(text.data(), std::streamsize(text.size()));
+        }
+        boost::nowide::cout << "SHOWCASE_RENDER_FAILED exit=" << code << std::endl;
+        return code;
+    };
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(req.project), ec))
+        return early(RENDER_PROJECT_ERROR, { "the project does not exist: " + req.project });
+    if (!req.path.empty()) {
+        // The path file is checked here, before anything starts: its syntax and every value. Whether its
+        // objects, filaments and views exist is checked against the project in the render.
+        boost::nowide::ifstream f(req.path, std::ios::binary);
+        if (!f)
+            return early(RENDER_INVALID_PATH, { "the path file does not exist or cannot be read: " + req.path });
+        std::stringstream ss;
+        ss << f.rdbuf();
+        PathDocument doc;
+        PathIssues   issues;
+        if (!parse_path(ss.str(), doc, issues)) {
+            std::vector<std::string> errors, warnings;
+            for (const PathIssue &i : issues.items())
+                (i.error ? errors : warnings).push_back((i.where.empty() ? "" : i.where + ": ") + i.message);
+            return early(RENDER_INVALID_PATH, errors, warnings);
+        }
+    }
+    if (!req.out.empty()) {
+        const fs::path parent = fs::path(req.out).parent_path();
+        if (!parent.empty() && !fs::is_directory(parent, ec))
+            return early(RENDER_USAGE, { "the folder for --out does not exist: " + parent.string() });
+    }
+
+    // The data folder and the log, as a normal start with only --datadir would set them up.
+    std::vector<std::string> setup_args = { argc > 0 && argv[0] != nullptr ? std::string(argv[0]) : std::string("EdgeSlicer") };
+    if (!req.datadir.empty()) {
+        setup_args.emplace_back("--datadir");
+        setup_args.emplace_back(req.datadir);
+    }
+    std::vector<char *> setup_argv;
+    for (std::string &a : setup_args)
+        setup_argv.push_back(a.data());
+    setup_argv.push_back(nullptr);
+    if (!this->setup(int(setup_args.size()), setup_argv.data()))
+        return early(RENDER_USAGE, { "the data folder could not be set up" });
+    {
+        std::string temp_path = per_user_temp_dir(wxFileName::GetTempDir().utf8_str().data(), per_user_temp_id());
+        try {
+            boost::filesystem::create_directories(temp_path);
+        } catch (const std::exception &) {}
+        set_temporary_dir(temp_path);
+    }
+    BOOST_LOG_TRIVIAL(warning) << "showcase-render: " << req.project << (req.path.empty() ? std::string() : " with " + req.path) << " -> " << req.out;
+    boost::nowide::cout << "showcase-render: loading " << req.project << std::endl;
+
+    Slic3r::GUI::GUI_InitParams params;
+    params.argc            = int(setup_args.size());
+    params.argv            = setup_argv.data();
+    params.input_files     = { req.project };
+    params.start_hidden    = true;
+    params.showcase_render = std::make_shared<RenderRequest>(req);
+    const int r = Slic3r::GUI::GUI_Run(params);
+    // The job ends the process itself; coming back here means the hidden instance never got to it.
+    return early(RENDER_FAILED, { "the hidden instance stopped before rendering (GUI exit code " + std::to_string(r) + "; see the log)" });
+}
+#endif // SLIC3R_GUI
 
 bool CLI::setup(int argc, char **argv)
 {
@@ -7176,6 +8051,19 @@ void attach_console_on_demand(){
 #ifdef _WIN32
     static bool console_attached = false;
 
+    // A GUI-subsystem process has no console of its own. When the caller redirected a stream to a file
+    // or a pipe the process already owns a valid handle for it (and the CRT writes to that), so that
+    // stream must be left alone: pointing it at the console would send --help (and the usage text of a
+    // bad option) to the screen and leave the redirected file empty.
+    auto std_handle_redirected = [](DWORD which) {
+        HANDLE h = GetStdHandle(which);
+        return h != nullptr && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    };
+    const bool out_redirected = std_handle_redirected(STD_OUTPUT_HANDLE);
+    const bool err_redirected = std_handle_redirected(STD_ERROR_HANDLE);
+    if (out_redirected && err_redirected)
+        return; // nothing to attach: no console window should be created for a scripted call
+
     if (!console_attached) {
         // Try attaching to the parent console first
         if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -7193,10 +8081,10 @@ void attach_console_on_demand(){
         if (console_attached) {
             FILE* fp = nullptr;
             // Redirect standard C streams to the console
-            if (freopen_s(&fp, "CONOUT$", "w", stdout) == 0) {
+            if (!out_redirected && freopen_s(&fp, "CONOUT$", "w", stdout) == 0) {
                 setvbuf(stdout, NULL, _IONBF, 0); // Optional: Disable buffering
             }
-            if (freopen_s(&fp, "CONOUT$", "w", stderr) == 0) {
+            if (!err_redirected && freopen_s(&fp, "CONOUT$", "w", stderr) == 0) {
                 setvbuf(stderr, NULL, _IONBF, 0); // Optional: Disable buffering
             }
             if (freopen_s(&fp, "CONIN$", "r", stdin) == 0) {
@@ -7222,7 +8110,7 @@ void CLI::print_help(bool include_print_options, PrinterTechnology printer_techn
     boost::nowide::cout
         << SLIC3R_APP_KEY <<"-"<< SLIC3R_VERSION << ":"
         << std::endl
-        << "Usage: snapmaker-orca [ OPTIONS ] [ file.3mf/file.stl ... ]" << std::endl
+        << "Usage: EdgeSlicer [ OPTIONS ] [ file.3mf/file.stl ... ]" << std::endl
         << std::endl
         << "OPTIONS:" << std::endl;
     cli_misc_config_def.print_cli_help(boost::nowide::cout, false);
@@ -7318,6 +8206,9 @@ bool CLI::export_project(Model *model, std::string& path, PlateDataPtrs &partpla
     store_params.export_plate_idx = plate_to_export;
     if (minimum_save)
         store_params.strategy = store_params.strategy | SaveStrategy::SkipModel;
+    // --no-filament-prices leaves the prices out of the 3MF's settings as well as out of its G-code.
+    if (const ConfigOptionBool *opt = m_config.option<ConfigOptionBool>("no_filament_prices"); opt != nullptr && opt->value)
+        store_params.strip_filament_prices = true;
     BambuExport::Report bambu_report;
     if (const ConfigOptionBool *opt = m_config.option<ConfigOptionBool>("export_bambu_3mf"); opt != nullptr && opt->value) {
         store_params.bambu_compat = true;
@@ -7384,13 +8275,9 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
         default: assert(false); break;
     };
     // use --outputdir when available
-    file_name = object.name.empty()?object.input_file:object.name;
-    file_name = "obj_"+std::to_string(index)+"_"+file_name;
-    size_t pos = file_name.find_last_of(ext), ext_pos = file_name.size() - 1;
-    if (pos != ext_pos)
-        file_name += ext;
+    file_name = cli_object_file_name(object.name.empty() ? object.input_file : object.name, index, ext);
 
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name<< ", pos = "<<pos<<", ext_pos="<<ext_pos;
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": dir = "<< path_dir<<", file_name="<<file_name;
     if (path_dir.empty()) {
         std::string cmdline_param = m_config.opt_string("outputdir");
         if (! cmdline_param.empty()) {
@@ -7411,9 +8298,253 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
 
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
+// Guards against a failed allocation inside the dump re-entering the new-handler.
+static std::atomic<bool> g_dump_in_progress{false};
+
+// ---- Local minidumps for test copies (per-nozzle process P9, owner crash report 2026-11-02) ------------------------------
+// Opt-in, Windows, no network: when EDGESLICER_LOCAL_MINIDUMP=1, or when the exe runs from a C:/Dev/EdgeSlicerTest test copy, an
+// unhandled crash (access violation, abort, std::terminate, pure call, invalid CRT parameter) writes
+// <exe folder>/crash/EdgeSlicer_<pid>_<time>.dmp, to open with cdb / Visual Studio and the build tree's PDBs. Release builds
+// that do not opt in are unchanged.
+//
+// How it runs (fix/crash-dump-writer, 2026-11-07: every dump of a slicing crash used to come out 0 bytes):
+//  - A crash in parallel slicing usually faults several TBB workers at once. The first one claims the dump; the others used
+//    to fall straight through to crashpad (or Windows Error Reporting), which terminated the process while the first was
+//    still inside MiniDumpWriteDump - so the file had been created but nothing was written. Later crashing threads now wait
+//    (bounded) until the dump is finished before they hand on.
+//  - The dump is written by a helper thread started here, as MiniDumpWriteDump's documentation recommends: the crashing
+//    thread's stack may be exhausted or corrupt, and dbghelp is loaded up front, not under a crash.
+//  - A failed write leaves no empty .dmp: the file is removed and <name>.failed.txt records the error instead.
+//  - The folder keeps at most local_minidump::kMaxFiles of these files (pruned at startup, oldest first; 0-byte leftovers go).
+//
+// With Sentry: the exe starts crashpad (initSentry) before it calls into this DLL, so this filter is installed on top of
+// crashpad's and runs FIRST. It writes the local dump, then hands the same exception to crashpad's filter, which writes its
+// own dump under <datadir>/SentryData/reports (or %LOCALAPPDATA%) and ends the process. abort() is chained the same way to
+// crashpad's SIGABRT handler. Heap corruption is the one case crashpad takes alone (its vectored handler runs before any
+// unhandled-exception filter), so it has no local dump. Without Sentry (or with it built out) the local dump is the only one,
+// and Windows Error Reporting ends the process afterwards.
+namespace {
+using Slic3r::local_minidump::kMaxFiles;
+
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+                                          PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+
+// How long a crashing thread waits for the dump before it gives up and lets the crash go on.
+constexpr DWORD kDumpWaitMs = 120 * 1000;
+
+std::wstring                 g_local_dump_dir;
+MiniDumpWriteDumpFn          g_minidump_write   = nullptr;
+HANDLE                       g_dump_request     = nullptr; // auto-reset: the crashing thread asks the helper for a dump
+HANDLE                       g_dump_finished    = nullptr; // manual-reset: the dump is written (or failed); stays set
+HANDLE                       g_dump_thread      = nullptr;
+std::atomic<DWORD>           g_dump_owner{0};             // id of the thread whose crash is being dumped; 0 = none yet
+EXCEPTION_POINTERS          *g_dump_pointers    = nullptr;
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter  = nullptr;
+void (*g_previous_abort_handler)(int)           = SIG_DFL;
+
+// Plain C: __try below cannot sit in a function that unwinds C++ objects.
+BOOL call_minidump_write(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *info, DWORD *error)
+{
+    BOOL ok = FALSE;
+    __try {
+        ok = g_minidump_write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, info, nullptr, nullptr);
+        *error = ok ? 0 : ::GetLastError();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok     = FALSE;
+        *error = GetExceptionCode();
+    }
+    return ok;
+}
+
+void write_failure_note(const wchar_t *dump_path, DWORD error)
+{
+    wchar_t note[MAX_PATH + 32];
+    if (swprintf(note, MAX_PATH + 32, L"%ls.failed.txt", dump_path) < 0)
+        return;
+    HANDLE file = ::CreateFileW(note, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    char  text[96];
+    const int n = std::snprintf(text, sizeof(text), "MiniDumpWriteDump failed: 0x%08lX\r\n", static_cast<unsigned long>(error));
+    DWORD written = 0;
+    if (n > 0)
+        ::WriteFile(file, text, DWORD(n), &written, nullptr);
+    ::CloseHandle(file);
+}
+
+// Runs on the helper thread. Writes the dump of the thread recorded in g_dump_owner / g_dump_pointers.
+void write_dump_now()
+{
+    ::CreateDirectoryW(g_local_dump_dir.c_str(), nullptr);
+    SYSTEMTIME t;
+    ::GetLocalTime(&t);
+    wchar_t name[96];
+    if (Slic3r::local_minidump::format_name(name, 96, ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                                            t.wSecond) == 0)
+        return;
+    wchar_t path[MAX_PATH];
+    if (swprintf(path, MAX_PATH, L"%ls\\%ls", g_local_dump_dir.c_str(), name) < 0)
+        return;
+    HANDLE file = ::CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    MINIDUMP_EXCEPTION_INFORMATION info;
+    info.ThreadId          = g_dump_owner.load();
+    info.ExceptionPointers = g_dump_pointers;
+    info.ClientPointers    = FALSE;
+    MINIDUMP_EXCEPTION_INFORMATION *pinfo = g_dump_pointers != nullptr ? &info : nullptr;
+    DWORD error = 0;
+    BOOL  ok    = call_minidump_write(file, MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs |
+                                                          MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                          MiniDumpWithHandleData),
+                                      pinfo, &error);
+    if (!ok) {
+        // Retry with the smallest useful dump (stacks, registers, modules) before giving up.
+        ::SetFilePointer(file, 0, nullptr, FILE_BEGIN);
+        ::SetEndOfFile(file);
+        DWORD error2 = 0;
+        ok = call_minidump_write(file, MiniDumpNormal, pinfo, &error2);
+    }
+    ::CloseHandle(file);
+    if (!ok) {
+        ::DeleteFileW(path);
+        write_failure_note(path, error);
+    }
+}
+
+DWORD WINAPI dump_thread_main(LPVOID)
+{
+    for (;;) {
+        if (::WaitForSingleObject(g_dump_request, INFINITE) != WAIT_OBJECT_0)
+            return 0;
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
+}
+
+void write_local_minidump(EXCEPTION_POINTERS *pointers)
+{
+    if (g_local_dump_dir.empty() || g_minidump_write == nullptr)
+        return;
+    const DWORD self  = ::GetCurrentThreadId();
+    DWORD       owner = 0;
+    if (!g_dump_owner.compare_exchange_strong(owner, self)) {
+        // Already dumped (or dumping) this thread's own crash, e.g. terminate -> abort: never wait on ourselves.
+        if (owner == self || self == ::GetThreadId(g_dump_thread))
+            return;
+        // Another thread crashed first and its dump is being written: do not let this crash end the process under it.
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+        return;
+    }
+    g_dump_pointers = pointers;
+    if (g_dump_thread != nullptr && ::SetEvent(g_dump_request)) {
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+    } else {
+        // No helper thread: write from here, the way the first version did.
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
+}
+
+LONG WINAPI local_minidump_filter(EXCEPTION_POINTERS *pointers)
+{
+    write_local_minidump(pointers);
+    return g_previous_filter != nullptr ? g_previous_filter(pointers) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+// abort / terminate / pure call / invalid parameter have no exception record: raise one so the dump carries a usable context.
+void dump_without_exception()
+{
+    __try {
+        ::RaiseException(0xE0D0D0D0, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    } __except (write_local_minidump(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void local_abort_handler(int sig)
+{
+    dump_without_exception();
+    // Hand abort() on to crashpad's handler (it dumps and ends the process) when Sentry installed one.
+    void (*previous)(int) = g_previous_abort_handler;
+    if (previous != SIG_DFL && previous != SIG_IGN && previous != SIG_ERR && previous != nullptr && previous != local_abort_handler)
+        previous(sig);
+}
+
+// Startup: drop empty dumps and keep the newest kMaxFiles - 1, so this run's dump still fits. Each file is deleted by its
+// own full path; nothing but our EdgeSlicer_*.dmp / *.dmp.failed.txt files is touched.
+void prune_local_minidumps(const std::wstring &dir)
+{
+    std::vector<Slic3r::local_minidump::FileEntry> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = ::FindFirstFileW((dir + L"\\EdgeSlicer_*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            continue;
+        Slic3r::local_minidump::FileEntry e;
+        e.name  = fd.cFileName;
+        e.size  = (std::uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        e.mtime = (std::uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        files.push_back(std::move(e));
+    } while (::FindNextFileW(find, &fd));
+    ::FindClose(find);
+    for (const std::wstring &name : Slic3r::local_minidump::files_to_remove(std::move(files), kMaxFiles - 1))
+        ::DeleteFileW((dir + L"\\" + name).c_str());
+}
+
+void install_local_minidumps()
+{
+    wchar_t exe[MAX_PATH] = {};
+    ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring folder(exe);
+    if (const size_t slash = folder.find_last_of(L"\\/"); slash != std::wstring::npos)
+        folder.resize(slash);
+    std::wstring lower = folder;
+    for (wchar_t &c : lower)
+        c = (c == L'\\') ? L'/' : wchar_t(::towlower(c));
+    const char *env       = std::getenv("EDGESLICER_LOCAL_MINIDUMP");
+    const bool  opted_in  = env != nullptr && std::strcmp(env, "1") == 0;
+    const bool  test_copy = lower.find(L"/dev/edgeslicertest/") != std::wstring::npos;
+    if ((!opted_in && !test_copy) || (env != nullptr && std::strcmp(env, "0") == 0))
+        return;
+    // Load dbghelp now, not in a crashing process (where the loader lock may be held).
+    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr)
+        return;
+    g_minidump_write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (g_minidump_write == nullptr)
+        return;
+    g_dump_request  = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_dump_finished = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_dump_request == nullptr || g_dump_finished == nullptr)
+        return;
+    // Small stack: it only waits, then calls MiniDumpWriteDump. If it cannot start, the crashing thread writes the dump itself.
+    g_dump_thread = ::CreateThread(nullptr, 256 * 1024, dump_thread_main, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    g_local_dump_dir = folder + L"\\crash";
+    prune_local_minidumps(g_local_dump_dir);
+    g_previous_filter = ::SetUnhandledExceptionFilter(local_minidump_filter);
+    std::set_terminate([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    g_previous_abort_handler = std::signal(SIGABRT, local_abort_handler);
+    _set_purecall_handler([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    _set_invalid_parameter_handler([](const wchar_t *, const wchar_t *, const wchar_t *, unsigned int, uintptr_t) {
+        dump_without_exception();
+        std::abort();
+    });
+}
+} // namespace
+
 extern "C" {
     __declspec(dllexport) int __stdcall Snapmaker_Orca_main(int argc, wchar_t **argv)
     {
+        // Per-nozzle process P9: local crash dumps for test copies (opt-in, see install_local_minidumps).
+        install_local_minidumps();
         // Convert wchar_t arguments to UTF8.
         std::vector<std::string> 	argv_narrow;
         std::vector<char*>			argv_ptrs(argc + 1, nullptr);
@@ -7422,10 +8553,24 @@ extern "C" {
         for (size_t i = 0; i < argc; ++ i)
             argv_ptrs[i] = argv_narrow[i].data();
 
+        // Dump before unwinding, while the stack still names what asked for the memory. Throwing
+        // std::bad_alloc is standard-permitted here and is what reaches generic_exception_handle()
+        // (GUI: "running out of memory" dialog), or std::terminate -> abort -> the Sentry crash handler.
+        // The old null write crashed here with a stack that only named the handler.
         std::set_new_handler([]() {
-            int *a = nullptr;
-            *a     = 0;
-            });
+            if (!g_dump_in_progress.exchange(true)) {
+                try {
+                    // A null EXCEPTION_POINTERS walks the calling thread as it stands.
+                    CBaseException base(GetCurrentProcess(), GetCurrentProcessId(), NULL, nullptr);
+                    base.ShowCallstack();
+                } catch (...) {
+                    // A failed dump must not displace the std::bad_alloc owed to the caller.
+                }
+                // ObjParser recovers from std::bad_alloc, so let a later one dump again.
+                g_dump_in_progress = false;
+            }
+            throw std::bad_alloc();
+        });
         // Call the UTF8 main.
         return CLI().run(argc, argv_ptrs.data());
     }
@@ -7433,6 +8578,11 @@ extern "C" {
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+#ifndef _WIN32
+    // Ignore SIGPIPE so a write to a closed socket (e.g. a dropped printer network connection)
+    // returns EPIPE to the caller instead of terminating the whole process.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     // Before initSentry(): it reads the crash-report preference from the EdgeSlicer.conf that
     // --datadir points at.
     // A relaunch waits for the instance it replaces first (see common_func.hpp).

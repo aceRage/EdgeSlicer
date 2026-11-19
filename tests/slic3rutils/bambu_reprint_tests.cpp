@@ -686,3 +686,160 @@ TEST_CASE("the mapping preview proposes, flags and accepts overrides", "[BambuRe
         CHECK(BambuReprint::evaluate(rack, h2c, req, all_on(), automatic).nozzle_mapping_request.empty());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// External spools on a two-extruder printer (2026-10-09): an X2D with an AMS HT on its left
+// extruder and a spool on the RIGHT extruder's external holder. The printer reports the holders in
+// print.vir_slot[] ("255" = main/right, "254" = deputy/left); the fixture below is that shape,
+// made up (no real serials). BambuStudio sends such a job with ams_mapping -1 for the external
+// filament, ams_mapping2 {ams_id 255, slot_id 0}, ams_mapping_info "ams" 255 and use_ams true.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct FakeX2D
+{
+    MachineObject obj { nullptr, "fake-x2d", "FAKEX2D0001", "127.0.0.1" };
+    FakeX2D(bool right_spool_loaded = true)
+    {
+        obj.printer_type                      = "N6";
+        obj.m_extder_data.total_extder_count = 2;
+        Ams* ht = new Ams("128", 1, 1); // AMS HT on physical 1 = the left extruder
+        ht->is_exists = true;
+        AmsTray* t   = new AmsTray("0");
+        t->type      = "PLA";
+        t->color     = "CBC6B8FF";
+        t->is_exists = true;
+        t->setting_id = "GFA00";
+        ht->trayList[t->id] = t;
+        obj.amsList["128"] = ht;
+
+        AmsTray right("255");
+        if (right_spool_loaded) {
+            right.type       = "PLA";
+            right.color      = "C12E1FFF";
+            right.setting_id = "GFA00";
+            right.is_exists  = true;
+        }
+        AmsTray left("254"); // reported, empty
+        obj.vir_slots = { right, left };
+    }
+};
+
+FilamentInfo job_filament(int id, const std::string& colour)
+{
+    FilamentInfo f;
+    f.id          = id;
+    f.type        = "PLA";
+    f.color       = colour;
+    f.filament_id = "GFA00";
+    f.tray_id     = -1;
+    return f;
+}
+
+const std::vector<int> X2D_MAP { 1, 0 };
+
+} // namespace
+
+TEST_CASE("an extruder without an AMS maps its filaments to its own external spool", "[BambuSendMapping][ExternalSpool]")
+{
+    FakeX2D x2d;
+    const std::vector<FilamentInfo> job { job_filament(0, "#CBC6B8FF"), job_filament(1, "#C12E1FFF") };
+    // The user's slice: filament 1 on the left extruder, filament 2 on the right (filament_map 1 2).
+    std::vector<FilamentInfo> result;
+    const int rc = BambuSendMapping::auto_map(&x2d.obj, job, { 1, 2 }, X2D_MAP, result);
+    CHECK(rc == 0);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].ams_id == "128");
+    CHECK(result[0].slot_id == "0");
+    CHECK(result[1].id == 1);
+    CHECK(result[1].tray_id == 255);
+    CHECK(result[1].ams_id == "255");
+    CHECK(result[1].slot_id == "0");
+    CHECK(BambuSendMapping::is_external_spool(result[1]));
+    CHECK_FALSE(BambuSendMapping::is_external_spool(result[0]));
+    // Valid (it used to be thrown away as "AMS 63"), and on the extruder it was sliced for.
+    CHECK(x2d.obj.is_valid_mapping_result(result));
+    int exceed = -1;
+    CHECK_FALSE(x2d.obj.is_mapping_exceed_filament(result, exceed));
+    CHECK(BambuSendMapping::wrong_extruder(&x2d.obj, result, { 1, 2 }, X2D_MAP).empty());
+
+    // The left external spool feeds the left extruder only.
+    std::vector<FilamentInfo> swapped = result;
+    swapped[1].tray_id = 254;
+    swapped[1].ams_id  = "254";
+    CHECK(BambuSendMapping::wrong_extruder(&x2d.obj, swapped, { 1, 2 }, X2D_MAP) == std::vector<int>{ 1 });
+
+    // The three strings, as BambuStudio's get_ams_mapping_result writes them.
+    BambuSendMapping::ComposeInput in;
+    in.project_filament_count = 2;
+    in.filament_ids           = { "GFA00", "GFA00" };
+    in.nozzle_filament_map    = { 1, 2 };
+    std::string v0, v1, info;
+    REQUIRE(BambuSendMapping::compose(result, job, in, v0, v1, info));
+    CHECK(json::parse(v0) == json::parse("[512, -1]"));
+    const json j1 = json::parse(v1);
+    REQUIRE(j1.size() == 2);
+    CHECK(j1[0] == json({ { "ams_id", 128 }, { "slot_id", 0 } }));
+    CHECK(j1[1] == json({ { "ams_id", 255 }, { "slot_id", 0 } }));
+    const json ji = json::parse(info);
+    REQUIRE(ji.size() == 2);
+    CHECK(ji[1]["ams"] == 255);
+    CHECK(ji[1]["nozzleId"] == 0); // right, in the task's numbering
+    CHECK(ji[1]["targetColor"] == "C12E1FFF");
+
+    // use_ams: AMS and external spool -> true; external spool only -> false.
+    CHECK(BambuSendMapping::use_ams(result, true));
+    CHECK_FALSE(BambuSendMapping::use_ams({ result[1] }, true));
+}
+
+TEST_CASE("an extruder that has an AMS does not get its external spool automatically", "[BambuSendMapping][ExternalSpool]")
+{
+    FakeX2D x2d;
+    x2d.obj.vir_slots[1].type  = "PLA"; // a spool on the LEFT holder too, the very colour of filament 2
+    x2d.obj.vir_slots[1].color = "00AE42FF";
+    const std::vector<FilamentInfo> job { job_filament(0, "#CBC6B8FF"), job_filament(1, "#00AE42FF") };
+    // Both filaments on the left extruder, which has the AMS HT: BambuStudio maps that side
+    // against its AMS only.
+    std::vector<FilamentInfo> result;
+    BambuSendMapping::auto_map(&x2d.obj, job, { 1, 1 }, X2D_MAP, result);
+    REQUIRE(result.size() == 2);
+    CHECK(result[0].ams_id == "128");
+    CHECK_FALSE(BambuSendMapping::is_external_spool(result[1]));
+    CHECK(result[1].ams_id != "255");
+}
+
+TEST_CASE("an empty external spool holder is never mapped", "[BambuSendMapping][ExternalSpool]")
+{
+    FakeX2D x2d(false);
+    const std::vector<FilamentInfo> job { job_filament(0, "#CBC6B8FF"), job_filament(1, "#C12E1FFF") };
+    std::vector<FilamentInfo> result;
+    BambuSendMapping::auto_map(&x2d.obj, job, { 1, 2 }, X2D_MAP, result);
+    REQUIRE(result.size() == 2);
+    CHECK(result[1].tray_id == -1);
+}
+
+TEST_CASE("a mapping without an external spool keeps its use_ams and its strings", "[BambuSendMapping][ExternalSpool]")
+{
+    FakeX2D x2d;
+    // A one-extruder style call (no filament_map): every AMS, never an external spool holder.
+    const std::vector<FilamentInfo> job { job_filament(0, "#CBC6B8FF") };
+    std::vector<FilamentInfo> result;
+    BambuSendMapping::auto_map(&x2d.obj, job, {}, X2D_MAP, result);
+    REQUIRE(result.size() == 1);
+    CHECK(result[0].ams_id == "128");
+    CHECK(BambuSendMapping::use_ams(result, true));
+    CHECK_FALSE(BambuSendMapping::use_ams(result, false));
+
+    // A one-extruder printer reports no external spool holders for the two-extruder paths.
+    FakeX2D single;
+    single.obj.m_extder_data.total_extder_count = 1;
+    CHECK(single.obj.external_spools().empty());
+    FilamentInfo ext;
+    CHECK_FALSE(single.obj.external_spool_mapping_info(255, ext));
+    CHECK(x2d.obj.external_spool_mapping_info(255, ext));
+    CHECK(ext.tray_id == 255);
+    CHECK(ext.ams_id == "255");
+    CHECK(ext.slot_id == "0");
+    CHECK_FALSE(x2d.obj.external_spool_mapping_info(254, ext)); // empty holder
+}

@@ -3,6 +3,8 @@
 
 #include <memory>
 #include <exception>
+#include <optional>
+#include <vector>
 
 #include <libslic3r/TriangleMesh.hpp>
 #include <Eigen/Geometry>
@@ -70,6 +72,16 @@ TriangleMesh merge(std::vector<TriangleMesh> meshes);
 
 bool does_bound_a_volume(const CGALMesh &mesh);
 bool empty(const CGALMesh &mesh);
+
+// Real UV unwrap of an open mesh patch via CGAL's LSCM (Least Squares Conformal Maps) surface
+// parameterization. Returns one UV coordinate per input vertex (same indexing as `mesh.vertices`),
+// or nullopt if `mesh` isn't a single topological disk.
+std::optional<std::vector<Vec2f>> parameterize_lscm(const indexed_triangle_set &mesh);
+
+// Isotropic remeshing (CGAL) - see upstream OrcaSlicer PR #14662 for the full rationale.
+indexed_triangle_set remesh_isotropic(const indexed_triangle_set &mesh, double target_edge_length,
+                                      unsigned n_iterations = 3, double sharp_angle_deg = 40.0,
+                                      unsigned n_relaxation_steps = 1);
 }
 
 namespace mcut {
@@ -103,14 +115,34 @@ namespace mfd {
 
 // boolean_opts: "UNION" / "A_NOT_B" / "INTERSECTION" (same contract as mcut).
 // Returns false and leaves dst_mesh untouched when an input is not a valid
-// manifold or the operation is unknown; true otherwise (dst may legitimately be
-// empty, e.g. a void intersection).
+// manifold, the boolean fails part way or the operation is unknown; true otherwise
+// (dst may legitimately be empty, e.g. a void intersection).
 bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, std::vector<TriangleMesh> &dst_mesh, const std::string &boolean_opts);
 
 // The union of many closed meshes in one go (Manifold::BatchBoolean), into `out`. False, with `out`
 // untouched, when any input is not a valid manifold or Manifold throws.
 bool union_all(const std::vector<indexed_triangle_set> &meshes, indexed_triangle_set &out);
 } // namespace mfd
+
+// What a boolean through the Manifold-then-mcut chain came to.
+enum class BooleanOutcome {
+    Done,   // dst holds the result
+    Empty,  // the boolean was done and nothing is left: an intersection of parts that do not meet,
+            // a difference whose tool covers the whole source
+    Failed, // neither backend could do it
+};
+
+// Manifold first; mcut when Manifold refuses the inputs or fails part way. dst is only written on
+// Done. An empty mcut result counts as Failed: mcut does not say whether it did the boolean.
+BooleanOutcome make_boolean_with_fallback(const TriangleMesh &a, const TriangleMesh &b, const std::string &op,
+                                          std::vector<TriangleMesh> &dst, const char *log_tag = "MeshBoolean");
+
+// The boolean chain the Cut tool's generated geometry uses (Flexi joints, push-fit pins):
+// Manifold first, mcut as the fallback - the same order as the Mesh Boolean gizmo. The pieces of
+// the result are merged into `out`. False, with `out` untouched, when both backends fail or the
+// result is empty. `log_tag` names the caller in the log.
+bool make_boolean_chain(const TriangleMesh &a, const TriangleMesh &b, const std::string &op, TriangleMesh &out,
+                        const char *log_tag = "MeshBoolean");
 
 } // namespace MeshBoolean
 } // namespace Slic3r

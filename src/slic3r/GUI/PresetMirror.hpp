@@ -30,6 +30,33 @@ namespace Slic3r { namespace GUI {
 // (0 = nothing new — caller can skip a preset reload).
 int mirror_bambu_user_presets(const std::string& logged_in_uid);
 
+// The same run, also saying whether it was clean: the source was listed completely and every
+// write (preset, sidecar, manifest) landed. Only a clean run may be remembered as "nothing to do
+// until the source changes" (see mirror_change_fingerprint). Runs of this function and of
+// repull_mirrored_presets() are serialised, so a worker-thread run and a Preferences "Sync now"
+// never write the manifest at the same time. Safe to call off the UI thread: it touches only the
+// file system, data_dir() and the static print_config_def.
+struct MirrorRunResult {
+    int  copied = 0;
+    bool clean  = false;
+};
+MirrorRunResult mirror_bambu_user_presets_ex(const std::string& logged_in_uid);
+
+// Cheap change detector for the printer-switch path and startup: the logged-in uid, the Bambu
+// Studio user dir the mirror would pick, a listing (name/size/mtime, no reads) of its preset
+// folders, the manifest's size/mtime and a listing of the mirror's output folder (user/default).
+// Equal fingerprints before and after a clean run mean a new run would copy nothing. Empty when
+// the source or the output folder could not be listed (then: run).
+std::string mirror_change_fingerprint(const std::string& logged_in_uid);
+
+// The gate kept across restarts (<data_dir>/cache/preset_mirror_gate.txt; see
+// mirror_gate_record() in PresetMirrorCore.hpp). True when the record says a run on
+// `fingerprint` would do nothing. Never throws.
+bool mirror_startup_can_skip(const std::string& fingerprint);
+// Keeps `last_clean_fingerprint` as the record (atomic write), or removes the record when it is
+// empty (the last run was not clean, or the gate was invalidated). Never throws.
+void mirror_persist_gate(const std::string& last_clean_fingerprint);
+
 // Recovery: clear every "deleted" flag in the manifest so the next sync re-pulls anything that
 // was removed here but that Bambu Studio still has. Returns the number of flags cleared. Used by
 // the "Re-pull all" button next to "Sync now" in Preferences > Ultra.

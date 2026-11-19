@@ -6,11 +6,12 @@
     "setting_id": "GFSL9811",
     "inherits": "Snapmaker PLA-CF @U1 base",
     "compatible_printers": [
-        "Snapmaker U1 (0.4 nozzle)"
+        "Snapmaker U1 (0.4 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)"
     ],
     "enable_pressure_advance": [
-        "1",
-        "1"
+        "0",
+        "0"
     ],
     "filament_multitool_ramming": [
         "1",
@@ -102,5 +103,7 @@
     "filament_flow_support": [
         "standard",
         "high_flow"
-    ]
+    ],
+    "graphic_effect_plate_temp": ["0"],
+    "graphic_effect_plate_temp_initial_layer": ["0"]
 }

@@ -197,6 +197,27 @@ bool create_desktop_file(const std::string& path, const std::string& data)
     BOOST_LOG_TRIVIAL(debug) << "Desktop file NOT created.";
     return false;
 }
+// Builds before this fix wrote the slicer entry as Snapmaker_Orca<suffix>.desktop while recording
+// EdgeSlicer<suffix>.desktop, so is_integrated() never found it and undo never removed it. Remove
+// that leftover, but only when it is ours: the official Snapmaker Orca app uses the same file name.
+void remove_legacy_desktop_file(const std::string& edgeslicer_desktop_path)
+{
+    boost::filesystem::path p(edgeslicer_desktop_path);
+    const std::string name = p.filename().string();
+    const std::string prefix = "EdgeSlicer";
+    if (name.compare(0, prefix.size(), prefix) != 0)
+        return;
+    const std::string legacy = (p.parent_path() / ("Snapmaker_Orca" + name.substr(prefix.size()))).string();
+    std::ifstream in(legacy);
+    if (!in.good())
+        return;
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (content.find("StartupWMClass=EdgeSlicer") == std::string::npos)
+        return;
+    BOOST_LOG_TRIVIAL(debug) << "removing the legacy desktop file " << legacy;
+    std::remove(legacy.c_str());
+}
 } // namespace integratec_desktop_internal
 
 // methods that actually do / undo desktop integration. Static to be accesible from anywhere.
@@ -209,7 +230,7 @@ bool DesktopIntegrationDialog::is_integrated()
     if (path.empty())
         return false;
 
-    // confirmation that Snapmaker_Orca.desktop exists
+    // confirmation that EdgeSlicer.desktop exists
     struct stat buffer;   
     return (stat (path.c_str(), &buffer) == 0);
 }
@@ -294,7 +315,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         if (contains_path_dir(target_candidates[i], "images")) {
             target_dir_icons = target_candidates[i];
             std::string icon_path = GUI::format("%1%/images/Snapmaker_Orca.png",resources_dir());
-            std::string dest_path = GUI::format("%1%/images/%2%Snapmaker_Orca%3%.png", target_dir_icons, icon_theme_path, version_suffix);
+            std::string dest_path = GUI::format("%1%/images/%2%EdgeSlicer%3%.png", target_dir_icons, icon_theme_path, version_suffix);
             if (copy_icon(icon_path, dest_path))
                 break; // success
             else
@@ -306,7 +327,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 // copy icon
                 target_dir_icons = GUI::format("%1%/.local/share",wxFileName::GetHomeDir());
                 std::string icon_path = GUI::format("%1%/images/Snapmaker_Orca.png",resources_dir());
-                std::string dest_path = GUI::format("%1%/images/%2%Snapmaker_Orca%3%.png", target_dir_icons, icon_theme_path, version_suffix);
+                std::string dest_path = GUI::format("%1%/images/%2%EdgeSlicer%3%.png", target_dir_icons, icon_theme_path, version_suffix);
                 if (!contains_path_dir(target_dir_icons, "images") 
                     || !copy_icon(icon_path, dest_path)) {
                 	// every attempt failed - icon wont be present
@@ -316,10 +337,10 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         }
     }
     if(target_dir_icons.empty()) {
-        BOOST_LOG_TRIVIAL(error) << "Copying Snapmaker_Orca icon to icons directory failed.";
+        BOOST_LOG_TRIVIAL(error) << "Copying EdgeSlicer icon to icons directory failed.";
     } else 
     	// save path to icon
-        app_config->set("desktop_integration_icon_slicer_path", GUI::format("%1%/images/%2%Snapmaker_Orca%3%.png", target_dir_icons, icon_theme_path, version_suffix));
+        app_config->set("desktop_integration_icon_slicer_path", GUI::format("%1%/images/%2%EdgeSlicer%3%.png", target_dir_icons, icon_theme_path, version_suffix));
 
     // desktop file
     // iterate thru target_candidates to find applications folder
@@ -330,9 +351,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             // Write slicer desktop file
             std::string desktop_file = GUI::format(
                 "[Desktop Entry]\n"
-                "Name=Snapmaker_Orca%1%\n"
+                "Name=EdgeSlicer%1%\n"
                 "GenericName=3D Printing Software\n"
-                "Icon=Snapmaker_Orca%2%\n"
+                "Icon=EdgeSlicer%2%\n"
                 "Exec=\"%3%\" %%F\n"
                 "Terminal=false\n"
                 "Type=Application\n"
@@ -342,13 +363,13 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 "StartupNotify=false\n"
                 "StartupWMClass=EdgeSlicer\n", name_suffix, version_suffix, excutable_path);
 
-            std::string path = GUI::format("%1%/applications/Snapmaker_Orca%2%.desktop", target_dir_desktop, version_suffix);
+            std::string path = GUI::format("%1%/applications/EdgeSlicer%2%.desktop", target_dir_desktop, version_suffix);
             if (create_desktop_file(path, desktop_file)){
-                BOOST_LOG_TRIVIAL(debug) << "Snapmaker_Orca.desktop file installation success.";
+                BOOST_LOG_TRIVIAL(debug) << "EdgeSlicer.desktop file installation success.";
                 break;
             } else {
             	// write failed - try another path
-                BOOST_LOG_TRIVIAL(debug) << "Attempt to Snapmaker_Orca.desktop file installation failed. failed path: " << target_candidates[i];
+                BOOST_LOG_TRIVIAL(debug) << "Attempt to EdgeSlicer.desktop file installation failed. failed path: " << target_candidates[i];
                 target_dir_desktop.clear(); 
             }
             // if all failed - try creating default home folder
@@ -357,7 +378,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
                 // create desktop file
                 target_dir_desktop = GUI::format("%1%/.local/share",wxFileName::GetHomeDir());
-                std::string path = GUI::format("%1%/applications/Snapmaker_Orca%2%.desktop", target_dir_desktop, version_suffix);
+                std::string path = GUI::format("%1%/applications/EdgeSlicer%2%.desktop", target_dir_desktop, version_suffix);
                 if (contains_path_dir(target_dir_desktop, "applications")) {
                     if (!create_desktop_file(path, desktop_file)) {    
                         // Desktop file not written - end desktop integration
@@ -380,6 +401,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     }
     // save path to desktop file
     app_config->set("desktop_integration_app_path", GUI::format("%1%/applications/EdgeSlicer%2%.desktop", target_dir_desktop, version_suffix));
+    remove_legacy_desktop_file(app_config->get("desktop_integration_app_path"));
 
     // Repeat for Gcode viewer - use same paths as for slicer files
     // Do NOT add gcode viewer desktop file on ChromeOS
@@ -430,6 +452,7 @@ void DesktopIntegrationDialog::undo_desktop_intgration()
     if (!path.empty()) {
     	BOOST_LOG_TRIVIAL(debug) << "removing " << path;
         std::remove(path.c_str());  
+        remove_legacy_desktop_file(path);
     }
     // slicer icon
     path = std::string(app_config->get("desktop_integration_icon_slicer_path"));
@@ -531,7 +554,7 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration(std::strin
 
     std::string desktop_file_downloader = GUI::format(
         "[Desktop Entry]\n"
-        "Name=Snapmaker_Orca URL Protocol %1% %2%\n"
+        "Name=EdgeSlicer URL Protocol %1% %2%\n"
         "Exec=%3% %%u\n"
         "Terminal=false\n"
         "Type=Application\n"

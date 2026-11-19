@@ -22,6 +22,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsMappingPopup.hpp
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
+    GUI/AmsFilamentOrder.hpp
+    GUI/FavoriteFilaments.hpp
+    GUI/FavoritePresets.hpp
+    GUI/FavoriteFilamentsUI.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -58,6 +62,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/BitmapComboBox.hpp
     GUI/BonjourDialog.cpp
     GUI/BonjourDialog.hpp
+    GUI/CrealityDiscoveryDialog.cpp
+    GUI/CrealityDiscoveryDialog.hpp
     GUI/calib_dlg.cpp
     GUI/calib_dlg.hpp
     GUI/Calibration.cpp
@@ -88,6 +94,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
     GUI/FillBedDialog.hpp
+    GUI/HeightPatternDialog.cpp
+    GUI/HeightPatternDialog.hpp
+    GUI/StartupSoundDialog.cpp
+    GUI/StartupSoundDialog.hpp
+    GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
     GUI/RoundDialog.cpp
@@ -106,6 +117,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/CodeEmbossDialog.hpp
     GUI/SimpleShapeDialog.cpp
     GUI/SimpleShapeDialog.hpp
+    GUI/ImageTraceDialog.cpp
+    GUI/ImageTraceDialog.hpp
+    GUI/SvgSplitDialog.cpp
+    GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
     GUI/ConfigManipulation.hpp
     GUI/ConfigWizard.cpp
@@ -125,8 +140,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
     GUI/Downloader.hpp
-    GUI/DownloadProgressDialog.cpp
-    GUI/DownloadProgressDialog.hpp
     GUI/DragCanvas.cpp
     GUI/DragCanvas.hpp
     GUI/EditGCodeDialog.cpp
@@ -147,12 +160,16 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
     GUI/FlowTypeHelper.hpp
+    GUI/ExtruderSettingsDialog.cpp
+    GUI/ExtruderSettingsDialog.hpp
     GUI/FlowVariantEdit.cpp
     GUI/FlowVariantEdit.hpp
     GUI/HighFlowCompat.cpp
     GUI/HighFlowCompat.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/ZipCleanup.cpp
+    GUI/ZipCleanup.hpp
     GUI/filamentsync/FilamentColorMapBox.cpp
     GUI/filamentsync/FilamentColorMapBox.hpp
     GUI/filamentsync/FilamentColorMapBoxGroup.cpp
@@ -188,6 +205,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/EmbossFaceList.hpp
     GUI/Gizmos/EmbossInsert.cpp
     GUI/Gizmos/EmbossInsert.hpp
+    GUI/Gizmos/EmbossTransformHandles.cpp
+    GUI/Gizmos/EmbossTransformHandles.hpp
     #GUI/Gizmos/GLGizmoFaceDetector.cpp
     #GUI/Gizmos/GLGizmoFaceDetector.hpp
     GUI/Gizmos/GLGizmoFdmSupports.cpp
@@ -200,10 +219,12 @@ set(SLIC3R_GUI_SOURCES
     #GUI/Gizmos/GLGizmoHollow.hpp
     GUI/Gizmos/GLGizmoMeasure.cpp
     GUI/Gizmos/GLGizmoMeasure.hpp
+    GUI/Gizmos/GizmoVolumeRefs.hpp
     GUI/Gizmos/GLGizmoMeshBoolean.cpp
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
+    GUI/Gizmos/GLGizmoMmuSegmentationAirbrush.cpp
     GUI/Gizmos/GLGizmoAlignment.cpp
     GUI/Gizmos/GLGizmoAlignment.hpp
     GUI/Gizmos/GLGizmoMove.cpp
@@ -224,6 +245,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
+    GUI/Gizmos/GLGizmoSplitToFit.cpp
+    GUI/Gizmos/GLGizmoSplitToFit.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
     GUI/Gizmos/GLGizmoSculpt.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
@@ -234,6 +257,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmosManager.hpp
     GUI/Gizmos/GLGizmoSVG.cpp
     GUI/Gizmos/GLGizmoSVG.hpp
+    GUI/Gizmos/GLGizmoTextureDisplacement.cpp
+    GUI/Gizmos/GLGizmoTextureDisplacement.hpp
+    GUI/Gizmos/GLGizmoUtils.cpp
+    GUI/Gizmos/GLGizmoUtils.hpp
     #GUI/Gizmos/GLGizmoText.cpp
     #GUI/Gizmos/GLGizmoText.hpp
     GUI/GLCanvas3D.cpp
@@ -280,6 +307,26 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectTableSettings.hpp
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
+    GUI/MainTabs.hpp
+    GUI/ProjectSessions.hpp
+    GUI/ProjectStrip.cpp
+    GUI/ProjectStrip.hpp
+    GUI/Showcase/ShowcaseBlenderExport.cpp
+    GUI/Showcase/ShowcaseCallouts.cpp
+    GUI/Showcase/ShowcaseCallouts.hpp
+    GUI/Showcase/ShowcaseHdriDialog.cpp
+    GUI/Showcase/ShowcaseHdriDialog.hpp
+    GUI/Showcase/ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseRenderer.hpp
+    GUI/Showcase/ShowcaseTextures.cpp
+    GUI/Showcase/ShowcaseTextures.hpp
+    GUI/Showcase/ShowcaseView.cpp
+    GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseViewVideo.cpp
+    GUI/Showcase/ShowcaseViewPath.cpp
+    GUI/Showcase/ShowcaseVideoSinks.hpp
+    GUI/Showcase/ShowcaseWatermark.cpp
+    GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
     GUI/GUI_Utils.hpp
     GUI/HintNotification.cpp
@@ -292,6 +339,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsDualLayout.hpp
     GUI/AmsDrying.cpp
     GUI/AmsDrying.hpp
+    GUI/AmsTypes.hpp
     GUI/AMSDryCtrlDialog.cpp
     GUI/AMSDryCtrlDialog.hpp
     GUI/AmsUiPreview.cpp
@@ -312,6 +360,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IconManager.hpp
     GUI/ImageGrid.cpp
     GUI/ImageGrid.h
+    GUI/ImGuiFontRanges.cpp
+    GUI/ImGuiFontRanges.hpp
     GUI/ImGuiWrapper.cpp
     GUI/ImGuiWrapper.hpp
     GUI/IMSlider.cpp
@@ -335,6 +385,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SliceBakeJob.hpp
     GUI/Jobs/StabilizerBakeJob.cpp
     GUI/Jobs/StabilizerBakeJob.hpp
+    GUI/Jobs/SplitToFitJob.cpp
+    GUI/Jobs/SplitToFitJob.hpp
     GUI/Jobs/SeamAutoPaintJob.cpp
     GUI/Jobs/SeamAutoPaintJob.hpp
     GUI/Jobs/QuadRemeshJob.cpp
@@ -365,12 +417,20 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SLAImportDialog.hpp
     GUI/Jobs/SLAImportJob.cpp
     GUI/Jobs/SLAImportJob.hpp
+    GUI/Jobs/TextureDisplacementBakeJob.cpp
+    GUI/Jobs/TextureDisplacementBakeJob.hpp
+    GUI/Jobs/TextureDisplacementPrepareJob.cpp
+    GUI/Jobs/TextureDisplacementPrepareJob.hpp
+    GUI/Jobs/TextureDisplacementDebugJob.cpp
+    GUI/Jobs/TextureDisplacementDebugJob.hpp
+    GUI/Jobs/TextureDisplacementPreviewJob.cpp
+    GUI/Jobs/TextureDisplacementPreviewJob.hpp
     GUI/Jobs/ThreadSafeQueue.hpp
-    GUI/Jobs/UpgradeNetworkJob.cpp
-    GUI/Jobs/UpgradeNetworkJob.hpp
     GUI/Jobs/Worker.hpp
     GUI/KBShortcutsDialog.cpp
     GUI/KBShortcutsDialog.hpp
+    GUI/LibVGCode/LibVGCodeWrapper.cpp
+    GUI/LibVGCode/LibVGCodeWrapper.hpp
     GUI/MainFrame.cpp
     GUI/MainFrame.hpp
     GUI/PrintSelectKeys.hpp
@@ -443,10 +503,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/MixedFilamentColorMapPanel.cpp
     GUI/MixedFilamentBadge.cpp
     GUI/MixedFilamentBadge.hpp
+    GUI/MixedSublayerUi.cpp
+    GUI/MixedSublayerUi.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp
     GUI/FilamentColorDialog.hpp
+    GUI/FilamentColourPicker.cpp
+    GUI/FilamentColourPicker.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
     GUI/OG_CustomCtrl.cpp
@@ -461,6 +525,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp
+    GUI/BedTexturePool.hpp
+    GUI/PlateRecentre.hpp
     GUI/PhysicalPrinterDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
     GUI/Plater.cpp
@@ -485,10 +551,19 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterCloudAuthDialog.hpp
     GUI/Printer/PrinterFileSystem.cpp
     GUI/Printer/PrinterFileSystem.h
+    GUI/Printer/IFileGridModel.h
+    GUI/Printer/RemoteFileGridModel.cpp
+    GUI/Printer/RemoteFileGridModel.h
+    GUI/PrinterStoragePanel.cpp
+    GUI/PrinterStoragePanel.hpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
+    GUI/PrintersPanel.cpp
+    GUI/PrinterRowsBridge.cpp
+    GUI/PrinterRowsBridge.hpp
+    GUI/PrintersPanel.hpp
     GUI/HomePanel.cpp
     GUI/ModelBrowserPanel.cpp
     GUI/Theme.cpp
@@ -501,17 +576,36 @@ set(SLIC3R_GUI_SOURCES
     GUI/ModelBrowserPanel.hpp
     GUI/HomeVendors.cpp
     GUI/HomeVendors.hpp
+    GUI/HomeVaults.cpp
+    GUI/HomeVaults.hpp
+    GUI/HomeDownload.cpp
+    GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
+    GUI/ElegooCamRelay.cpp
+    GUI/ElegooCamRelay.hpp
     GUI/RemoteAccess.cpp
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/LanAccessCodeWatch.hpp
+    GUI/PopupRowIcons.hpp
+    GUI/BambuCloudWatch.hpp
+    GUI/FirstRequestGate.hpp
+    GUI/SsdpConnectType.hpp
+    GUI/BambuNetInfo.hpp
+    GUI/BindListRefresh.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
+    GUI/RemoteSliceV1.cpp
+    GUI/RemoteSliceV1.hpp
+    GUI/AmsMatch.cpp
+    GUI/AmsMatch.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp
@@ -525,6 +619,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSnapmaker.cpp
     GUI/RemoteSnapmaker.hpp
     GUI/SnapmakerLan.cpp
+    GUI/U1LanRoute.cpp
+    GUI/U1LanRoute.hpp
+    GUI/U1WsRoute.cpp
+    GUI/U1WsRoute.hpp
     GUI/SnapmakerTaskConfig.hpp
     GUI/SnapmakerTaskConfig.cpp
     GUI/WizardNetworking.hpp
@@ -535,14 +633,17 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuSendDiagnosis.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
+    GUI/BambuFans.hpp
     GUI/ChamberLights.hpp
     GUI/FilamentCommands.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
     GUI/HubEventDedupe.hpp
+    GUI/LoginTicketGate.hpp
     GUI/HubPushOwner.hpp
     GUI/RemoteNotify.cpp
     GUI/RemoteNotify.hpp
@@ -557,10 +658,18 @@ set(SLIC3R_GUI_SOURCES
     GUI/HostedProvider.cpp
     GUI/PushIds.cpp
     GUI/PushIds.hpp
+    GUI/LiveActivityPush.cpp
+    GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/ElegooCanvasUI.cpp
+    GUI/ElegooCanvasUI.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
+    GUI/CostsDialog.cpp
+    GUI/CostsDialog.hpp
+    GUI/FilamentNozzleValuesDialog.cpp
+    GUI/FilamentNozzleValuesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -690,12 +799,17 @@ set(SLIC3R_GUI_SOURCES
     GUI/RecenterDialog.hpp
     GUI/ReleaseNote.cpp
     GUI/ReleaseNote.hpp
+    GUI/BindDetectGuard.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
     GUI/SavePresetDialog.hpp
     GUI/ScaleToVolumeDialog.cpp
     GUI/ScaleToVolumeDialog.hpp
+    GUI/EmbossPicking.cpp
+    GUI/EmbossPicking.hpp
+    GUI/EmbossFreeTransform.cpp
+    GUI/EmbossFreeTransform.hpp
     GUI/SceneRaycaster.cpp
     GUI/SceneRaycaster.hpp
     GUI/Search.cpp
@@ -737,6 +851,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/TextLines.cpp
     GUI/TextLines.hpp
     GUI/ThumbnailView.hpp
+    GUI/TextureLibrary.cpp
+    GUI/TextureLibrary.hpp
+    GUI/TextureProjectorFrame.cpp
+    GUI/TextureProjectorFrame.hpp
     GUI/TickCode.cpp
     GUI/TickCode.hpp
     GUI/UnsavedChangesDialog.cpp
@@ -749,8 +867,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/UserManager.hpp
     GUI/UserNotification.cpp
     GUI/UserNotification.hpp
-    GUI/WebDownPluginDlg.cpp
-    GUI/WebDownPluginDlg.hpp
+    GUI/UVEditorCanvas.cpp
+    GUI/UVEditorCanvas.hpp
     GUI/WebGuideDialog.cpp
     GUI/WebGuideDialog.hpp
     GUI/WebUserLoginDialog.cpp
@@ -803,6 +921,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/ScrolledWindow.hpp
     GUI/Widgets/SegmentedToggle.cpp
     GUI/Widgets/SegmentedToggle.hpp
+    GUI/Widgets/NozzleStrip.cpp
+    GUI/Widgets/NozzleStrip.hpp
     GUI/Widgets/SideButton.cpp
     GUI/Widgets/SideButton.hpp
     GUI/Widgets/SideMenuPopup.cpp
@@ -865,6 +985,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
+    Utils/BambuConnect.cpp
+    Utils/BambuConnect.hpp
+    Utils/BambuConnectStatus.cpp
+    Utils/BambuConnectStatus.hpp
     Utils/BambuStudioLauncher.cpp
     Utils/BambuStudioLauncher.hpp
     Utils/BlenderLauncher.cpp
@@ -888,13 +1012,30 @@ set(SLIC3R_GUI_SOURCES
     Utils/ColorSpaceConvert.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
+    Utils/CrealityHostDiscovery.cpp
+    Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
     Utils/ElegooCanvas.hpp
+    Utils/ElegooCanvasMapping.cpp
+    Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
+    Utils/ElegooCc2.cpp
+    Utils/ElegooCc2.hpp
+    Utils/ElegooCc2Net.cpp
+    Utils/ElegooCc2Monitor.cpp
+    Utils/ElegooCc2Monitor.hpp
+    Utils/ElegooCc2Status.cpp
+    Utils/ElegooCc2Status.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
+    Utils/ElegooSdcp.cpp
+    Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpFiles.cpp
+    Utils/ElegooSdcpFiles.hpp
+    Utils/ElegooSdcpMonitor.cpp
+    Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp
@@ -926,7 +1067,14 @@ set(SLIC3R_GUI_SOURCES
     Utils/LoginUserAgent.hpp
     Utils/HubHomeLogic.cpp
     Utils/HubHomeLogic.hpp
+    Utils/HubMosaic.cpp
+    Utils/HubMosaic.hpp
+    Utils/PrintersMonitor.cpp
+    Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
+    Utils/HubQuit.hpp
+    Utils/WebLoadRetry.hpp
+    Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
@@ -939,14 +1087,19 @@ set(SLIC3R_GUI_SOURCES
     Utils/StepMesh.hpp
     Utils/VendorConnector.cpp
     Utils/VendorConnector.hpp
+    Utils/VaultProvider.cpp
+    Utils/VaultProvider.hpp
     Utils/MainThreadGate.cpp
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp
     Utils/ServerLifetime.hpp
+    Utils/LoopbackAcceptLoop.cpp
+    Utils/LoopbackAcceptLoop.hpp
     Utils/SnapmakerSilentLogin.cpp
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp
     Utils/BambuSyncPolicy.hpp
+    Utils/PresetSyncPolicy.hpp
     Utils/AccountProviders.cpp
     Utils/AccountProviders.hpp
     Utils/json_diff.cpp
@@ -957,18 +1110,26 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/NetworkAgent.cpp
     Utils/NetworkAgent.hpp
+    Utils/PluginLoadDiagnostics.cpp
+    Utils/PluginLoadDiagnostics.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
     Utils/OctoPrint.hpp
     Utils/PresetUpdater.cpp
     Utils/PresetUpdater.hpp
+    Utils/VendorInstallStamp.cpp
+    Utils/VendorInstallStamp.hpp
     Utils/PrintHost.cpp
     Utils/PrintHost.hpp
     Utils/PrintHostDevices.cpp
     Utils/PrintHostDevices.hpp
     Utils/PrintHostDeviceStatus.cpp
     Utils/PrintHostDeviceStatus.hpp
+    Utils/MoonrakerProgress.cpp
+    Utils/MoonrakerProgress.hpp
+    Utils/PrinterStorage.cpp
+    Utils/PrinterStorage.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp
@@ -987,6 +1148,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SimplyPrint.hpp
     Utils/TCPConsole.cpp
     Utils/TCPConsole.hpp
+    Utils/TeardownJoin.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
     Utils/WebSocketClient.hpp
@@ -995,6 +1157,13 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.hpp
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
+    Utils/MqttLogRedact.hpp
+    Utils/U1LocalFirst.cpp
+    Utils/U1LocalFirst.hpp
+    Utils/U1MoonrakerProbe.cpp
+    Utils/U1MoonrakerProbe.hpp
+    Utils/MoonrakerWs.cpp
+    Utils/MoonrakerWs.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
@@ -1004,6 +1173,22 @@ set(SLIC3R_GUI_SOURCES
     Utils/WinFirewall.hpp
     Utils/BambuSetupNotice.cpp
     Utils/BambuSetupNotice.hpp
+    # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
+    # and HomeVendors.cpp share file-local names and must not land in one batch).
+    GUI/FavoriteFilamentsUI.cpp
+    GUI/ThirdPartyFilamentMap.cpp
+    GUI/ThirdPartyFilamentMap.hpp
+    GUI/ThirdPartyFilamentMapPanel.cpp
+    GUI/ThirdPartyFilamentMapPanel.hpp
+    GUI/LayerlingPanel.cpp
+    GUI/LayerlingPanel.hpp
+    GUI/LayerlingBrowser.hpp
+    GUI/LayerlingBrowserWin.cpp
+    GUI/LayerlingBrowserGtk.cpp
+    GUI/LayerlingServer.cpp
+    GUI/LayerlingServer.hpp
+    GUI/PresetManagerDialog.cpp
+    GUI/PresetManagerDialog.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1022,14 +1207,18 @@ if (APPLE)
     list(APPEND SLIC3R_GUI_SOURCES
             Utils/RetinaHelperImpl.mm
             Utils/MacDarkMode.mm
+            Utils/BambuConnectMac.mm
             GUI/RemovableDriveManagerMM.mm
             GUI/RemovableDriveManagerMM.h
             GUI/Mouse3DHandlerMac.mm
             GUI/InstanceCheckMac.mm
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
+            GUI/ModelBrowserPanelMac.mm
+            GUI/LayerlingBrowserMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
+            GUI/Showcase/ShowcaseVideoMac.mm
         )
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)
 else ()
@@ -1081,6 +1270,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Gizmos/GLGizmoMeshBoolean.cpp             # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/CodeEmbossDialog.cpp                      # CFG_SECTION also in other dialogs
     GUI/SimpleShapeDialog.cpp                     # filament_label() also in CodeEmbossDialog.cpp
+    GUI/ImageTraceDialog.cpp                      # file-local preview helpers with common names
     GUI/Gizmos/GLGizmoSVG.cpp                     # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
@@ -1113,12 +1303,17 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
+    GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
     GUI/UntrustedSettingsGuard.cpp                # namespace-scope using namespace Slic3r::untrusted
     GUI/CustomModelsMenu.cpp                      # file-local helpers with generic names (menu_label, add_item, ...)
     GUI/ModelBrowserPanel.cpp                     # WRL/WebView2 COM headers; namespace-scope using-directive
+    GUI/LayerlingBrowserWin.cpp                   # WRL/WebView2 COM headers; namespace-scope using-declarations
+    GUI/LayerlingBrowserGtk.cpp                   # declares WebKitGTK functions itself, as Widgets/WebView.cpp does
+    GUI/LayerlingPanel.cpp                        # file-local helpers with generic names (cfg, downloads_folder, ...)
+    GUI/LayerlingServer.cpp                       # file-local helpers with generic names (utf8_of, path_of, handle)
     GUI/Jobs/CreateFontStyleImagesJob.cpp         # namespace-scope using namespace Emboss
     GUI/Jobs/EmbossJob.cpp                        # namespace-scope using namespace Emboss
     GUI/TextLines.cpp                             # namespace-scope using namespace Emboss
@@ -1146,6 +1341,13 @@ slic3r_unity_build(libslic3r_gui SKIP
     Utils/StepMesh.cpp                            # OCCT's Handle() macro breaks CGAL headers in neighbours
     GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
+    GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
+    GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
+    GUI/Showcase/ShowcaseHdriDialog.cpp           # file-local hdri_* helpers; Http (curl) next to wx headers
+    GUI/Showcase/ShowcaseBlenderExport.cpp        # file-local sbx_* helpers; wx image streams next to GL headers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
@@ -1155,18 +1357,21 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/FirewallCheckDialog.cpp                   # Windows shell headers; ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/BambuSetupNoticeDialog.cpp                # ::CheckBox vs GUI::CheckBox (Field.hpp)
     Utils/WinFirewall.cpp                         # windows.h + netfw.h (COM) ahead of neighbours' headers
+    GUI/ZipCleanup.cpp                            # <windows.h> for the background thread priority
     GUI/wxMediaCtrl2.cpp                          # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/MediaPlayCtrl.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/ParamsPanel.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Preferences.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Tab.cpp                                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/AMSMaterialsSetting.cpp                   # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/AmsMappingPopup.cpp                       # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/ThirdPartyFilamentMapPanel.cpp            # includes AmsMappingPopup.hpp (::CheckBox vs GUI::CheckBox)
     GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
 )
@@ -1176,6 +1381,8 @@ if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD)
     # (the linker's /OPT:REF drops them from the binaries anyway). Together they keep this /Z7
     # library under the 4 GB static-library limit, so it stays cacheable: 4.3 GB without /Zc:inline,
     # 3.9 GB with it at 8 sources per batch, 3.4 GB at -DSLIC3R_UNITY_BUILD_BATCH_SIZE=16 (use that).
+    # By 2026-10-24 the code had grown it back to 4.09 GB (LNK1248), so the end of this file also
+    # splits the library in two (libslic3r_gui_part2) for this configuration.
     target_compile_options(libslic3r_gui PRIVATE /Zc:inline)
 elseif (MSVC AND SLIC3R_MSVC_Z7)
     # With /Z7 the debug info embedded in this library pushes it past the 4 GB static-library limit
@@ -1202,7 +1409,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
 encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
-target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo glad OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)
@@ -1220,7 +1427,9 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CURL_LIBRARIES}
     )
 elseif (APPLE)
-    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY} "-framework Security")
+    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY} "-framework Security"
+        # Showcase S4: the Mac's video encoder (ShowcaseVideoMac.mm).
+        "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
 endif()
 
 if (SLIC3R_STATIC)
@@ -1314,3 +1523,82 @@ if (SLIC3R_SENTRY)
     target_compile_definitions(libslic3r_gui PUBLIC SLIC3R_SENTRY)
     target_link_libraries(libslic3r_gui sentry::sentry)
 endif()
+
+# /Z7 unity builds without the PCH (the compiler-cache configuration of the agent build VM; CI,
+# release and Visual Studio builds use /Zi and never take this branch): the debug info embedded in
+# every object put libslic3r_gui.lib over the 4 GB static-library limit (LNK1248, 4.09 GB on
+# 2026-10-24). Move the second half of the C++ sources into a second static library. The split
+# point is a unity-batch boundary, so every batch keeps exactly the neighbours it has in
+# the one-library build. The part copies libslic3r_gui's include directories, definitions and
+# options, and the two link each other (a static-library cycle, which CMake repeats on the link
+# line), so consumers still link only libslic3r_gui. This must stay the last libslic3r_gui setting.
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD AND NOT SLIC3R_PCH)
+    get_target_property(_gui_all libslic3r_gui SOURCES)
+    # Balance the two libraries by estimated size: a source with its own translation unit (a SKIP
+    # source) weighs 8, a batched source 1 (on 2026-10-24 an own-TU object averaged 26 MB, a 16-source
+    # batch 52 MB). The split goes at the first batch boundary that reaches half the total weight.
+    set(_gui_total 0)
+    foreach (_s IN LISTS _gui_all)
+        if (_s MATCHES "\\.cpp$")
+            get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+            if (_skip)
+                math(EXPR _gui_total "${_gui_total} + 8")
+            else ()
+                math(EXPR _gui_total "${_gui_total} + 1")
+            endif ()
+        endif ()
+    endforeach ()
+    set(_gui_split -1)
+    set(_gui_weight 0)
+    set(_gui_seen 0)
+    foreach (_s IN LISTS _gui_all)
+        if (NOT _s MATCHES "\\.cpp$")
+            continue ()
+        endif ()
+        get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+        if (_skip)
+            math(EXPR _gui_weight "${_gui_weight} + 8")
+        else ()
+            math(EXPR _gui_at_boundary "${_gui_seen} % ${SLIC3R_UNITY_BUILD_BATCH_SIZE}")
+            math(EXPR _gui_twice "${_gui_weight} * 2")
+            if (_gui_split LESS 0 AND _gui_at_boundary EQUAL 0 AND _gui_seen GREATER 0 AND NOT _gui_twice LESS _gui_total)
+                set(_gui_split ${_gui_seen})
+            endif ()
+            math(EXPR _gui_weight "${_gui_weight} + 1")
+            math(EXPR _gui_seen "${_gui_seen} + 1")
+        endif ()
+    endforeach ()
+    if (_gui_split LESS 0)
+        set(_gui_split ${_gui_seen})
+    endif ()
+    set(_gui_keep "")
+    set(_gui_part2 "")
+    set(_gui_seen 0)
+    foreach (_s IN LISTS _gui_all)
+        if (NOT _s MATCHES "\\.cpp$")
+            list(APPEND _gui_keep "${_s}")
+            continue ()
+        endif ()
+        if (_gui_seen LESS _gui_split)
+            list(APPEND _gui_keep "${_s}")
+        else ()
+            list(APPEND _gui_part2 "${_s}")
+        endif ()
+        get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+        if (NOT _skip)
+            math(EXPR _gui_seen "${_gui_seen} + 1")
+        endif ()
+    endforeach ()
+    list(LENGTH _gui_part2 _gui_part2_n)
+endif ()
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD AND NOT SLIC3R_PCH AND _gui_part2_n GREATER 0)
+    message(STATUS "libslic3r_gui: /Z7 unity build, ${_gui_part2_n} sources moved to libslic3r_gui_part2 (4 GB .lib limit)")
+    set_property(TARGET libslic3r_gui PROPERTY SOURCES ${_gui_keep})
+    add_library(libslic3r_gui_part2 STATIC ${_gui_part2})
+    slic3r_unity_build(libslic3r_gui_part2)
+    target_include_directories(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_DEFINITIONS>)
+    target_compile_options(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_OPTIONS>)
+    target_link_libraries(libslic3r_gui_part2 libslic3r_gui)
+    target_link_libraries(libslic3r_gui libslic3r_gui_part2)
+endif ()

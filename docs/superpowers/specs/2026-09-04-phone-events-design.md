@@ -22,7 +22,7 @@ Branch `feat/phone-events`, cut from `feat/ultra-preferences` at `b29202e160`.
 
 ```json
 { "id": 7, "time": 1757001234567, "instance": 21044,
-  "printer": { "id": "sm:8110025111600047BIY2", "name": "U1", "kind": "snapmaker" },
+  "printer": { "id": "sm:811002500000000001AA", "name": "U1", "kind": "snapmaker" },
   "kind": "started", "severity": "info",
   "title": "U1 started printing", "text": "U1 started a print • cube.gcode.",
   "code": "0300020003", "job": "cube.gcode" }

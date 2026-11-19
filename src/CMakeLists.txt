@@ -39,12 +39,12 @@ if (SLIC3R_GUI)
     if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set (wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
         if (SLIC3R_WX_STABLE)
-            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl aui net media webview)
+            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl aui net media webview stc)
         else ()
-            find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core adv html gl aui net media webview)
+            find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core adv html gl aui net media webview stc)
         endif ()
     else ()
-        find_package(wxWidgets 3.1 REQUIRED COMPONENTS html adv gl core base webview aui net media)
+        find_package(wxWidgets 3.1 REQUIRED COMPONENTS stc html adv gl core base webview aui net media)
     endif ()
 
     if(UNIX)
@@ -54,6 +54,18 @@ if (SLIC3R_GUI)
     include(${wxWidgets_USE_FILE})
 
     find_package(JPEG QUIET)
+
+    if (WIN32 AND NOT wxWidgets_LIBRARIES MATCHES "scintilla")
+        # wx 3.1+ splits Scintilla into its own static lib that wxmsw*_stc depends on.
+        # FindwxWidgets does not add it, so link it after stc explicitly.
+        find_library(WX_SCINTILLA_LIBRARY NAMES wxscintilla wxscintillad
+                     HINTS ${wxWidgets_LIB_DIR} NO_DEFAULT_PATH)
+        if (WX_SCINTILLA_LIBRARY)
+            list(APPEND wxWidgets_LIBRARIES ${WX_SCINTILLA_LIBRARY})
+        else ()
+            message(WARNING "wxscintilla library not found in ${wxWidgets_LIB_DIR}")
+        endif ()
+    endif ()
 
     string(REGEX MATCH "wxpng" WX_PNG_BUILTIN ${wxWidgets_LIBRARIES})
     if (PNG_FOUND AND NOT WX_PNG_BUILTIN)
@@ -87,6 +99,10 @@ if (SLIC3R_GUI)
 #    list(REMOVE_ITEM wxWidgets_LIBRARIES oleacc)
     message(STATUS "wx libs: ${wxWidgets_LIBRARIES}")
 
+    # libvgcode (PrusaSlicer 2.8 G-code viewer, AGPL-3.0; via OrcaSlicer #10735). Spike: built
+    # and linked, fed by GUI/LibVGCode/EdgeVGCodeInput; the legacy GCodeViewer still renders.
+    add_subdirectory(libvgcode)
+
     add_subdirectory(slic3r)
 endif()
 
@@ -99,10 +115,10 @@ endif()
 if(ORCA_TOOLS)
     # Snapmaker_Orca_profile_validator
     if(APPLE)
-        add_executable(Snapmaker_Orca_profile_validator MACOSX_BUNDLE dev-utils/Snapmaker_Orca_profile_validator.cpp)
+        add_executable(Snapmaker_Orca_profile_validator MACOSX_BUNDLE dev-utils/Snapmaker_Orca_profile_validator.cpp dev-utils/nanosvg_impl.cpp)
         set_target_properties(Snapmaker_Orca_profile_validator PROPERTIES
             MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "Snapmaker_Orca Profile Validator"
+            MACOSX_BUNDLE_BUNDLE_NAME "EdgeSlicer Profile Validator"
             MACOSX_BUNDLE_BUNDLE_VERSION "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_IDENTIFIER "io.github.acerage.EdgeSlicer.profile-validator"
@@ -110,7 +126,7 @@ if(ORCA_TOOLS)
             MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.acerage.EdgeSlicer.profile-validator"
         )
     else()
-        add_executable(Snapmaker_Orca_profile_validator dev-utils/Snapmaker_Orca_profile_validator.cpp)
+        add_executable(Snapmaker_Orca_profile_validator dev-utils/Snapmaker_Orca_profile_validator.cpp dev-utils/nanosvg_impl.cpp)
     endif()
     target_link_libraries(Snapmaker_Orca_profile_validator libslic3r boost_headeronly libcurl OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(Snapmaker_Orca_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)

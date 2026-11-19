@@ -1,6 +1,8 @@
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
+#include <algorithm>
+#include <array>
 #include <deque>
 #include <set>
 #include <string>
@@ -8,6 +10,7 @@
 #include <unordered_set>
 #include <functional>
 #include <mutex>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 
@@ -62,13 +65,20 @@
 #define BBL_JSON_KEY_FAMILY                     "family"
 #define BBL_JSON_KEY_BED_MODEL                  "bed_model"
 #define BBL_JSON_KEY_BED_TEXTURE                "bed_texture"
+#define BBL_JSON_KEY_DEFAULT_BED_TYPE           "default_bed_type"
 #define BBL_JSON_KEY_HOTEND_MODEL               "hotend_model"
 #define BBL_JSON_KEY_DEFAULT_MATERIALS          "default_materials"
 #define BBL_JSON_KEY_MODEL_ID                   "model_id"
+// Placement of the built-in Bambu plate art on the bed (Bambu Studio: PartPlateList::init_bed_type_info).
+#define BBL_JSON_KEY_BOTTOM_TEXTURE_END_NAME    "bottom_texture_end_name"
+#define BBL_JSON_KEY_BOTTOM_TEXTURE_RECT        "bottom_texture_rect"
+#define BBL_JSON_KEY_MIDDLE_TEXTURE_RECT        "middle_texture_rect"
 
 // Orca extension
 #define ORCA_JSON_KEY_RENAMED_FROM              "renamed_from"
 
+
+static constexpr const char* GENERIC_PREFIX = "Generic ";
 
 namespace Slic3r {
 
@@ -125,7 +135,16 @@ public:
         // Vendor & Printer Model specific print bed model & texture.
         std::string 			 	bed_model;
         std::string 				bed_texture;
+        // The plate a machine of this model starts on, as Bambu Studio keeps it in the machine model file
+        // ("Textured PEI Plate"). Read by Preset::get_default_bed_type for Bambu machines.
+        std::string                 default_bed_type;
         std::string                 hotend_model;
+        // Where a Bambu machine puts the per-bed-type plate art, in mm of the bed ("x,y,w,h"), and the
+        // suffix of its own bottom tab art ("n" -> bbl_bed_pte_bottom_n.svg). Empty when the machine
+        // uses the defaults. Only the X2D sets the rects today (and the P2S the suffix).
+        std::string                 bottom_texture_end_name;
+        std::string                 bottom_texture_rect;
+        std::string                 middle_texture_rect;
 
         PrinterVariant*       variant(const std::string &name) {
             for (auto &v : this->variants)
@@ -163,10 +182,15 @@ class Preset;
 // Helper to hold a profile with its vendor definition, where the vendor definition may have been extracted from a parent system preset.
 // The parent preset is only accessible through PresetCollection, therefore to allow definition of the various is_compatible_with methods
 // outside of the PresetCollection, this composite is returned by PresetCollection::get_preset_with_vendor_profile() when needed.
+class PresetCollection;
+
 struct PresetWithVendorProfile {
-	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor) : preset(preset), vendor(vendor) {}
+	PresetWithVendorProfile(const Preset &preset, const VendorProfile *vendor, const PresetCollection *collection = nullptr) :
+		preset(preset), vendor(vendor), collection(collection) {}
 	const Preset 		&preset;
 	const VendorProfile *vendor;
+	// The collection of `preset`, to follow its "inherits" past its parent (is_compatible_with_printer); may be null.
+	const PresetCollection *collection;
 };
 
 // Note: it is imporant that map is used here rather than unordered_map,
@@ -307,6 +331,9 @@ public:
     }
     const std::string&  compatible_printers_condition() const { return const_cast<Preset*>(this)->compatible_printers_condition(); }
 
+    // Ultra: no printer list and no printer condition, i.e. listed for every printer.
+    static bool         fits_every_printer(const DynamicPrintConfig &cfg);
+
     // Return a printer technology, return ptFFF if the printer technology is not set.
     static PrinterTechnology printer_technology(const DynamicPrintConfig &cfg) {
         auto *opt = cfg.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology");
@@ -368,7 +395,29 @@ public:
     static std::string                      remove_suffix_modified(const std::string& name);
     static void                             normalize(DynamicPrintConfig &config);
     // Report configuration fields, which are misplaced into a wrong group, remove them from the config.
+    // Returns the comma separated keys that are genuinely unknown (callers log those as errors).
+    // Keys listed in PrintConfigDef::unsupported_foreign_key() are removed too, but silently: they are
+    // only counted, see log_ignored_foreign_keys().
     static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config);
+    // Writes one info line per origin with the number of occurrences dropped since the last call, for
+    // keys not reported before in this session; keys already reported are logged at debug level.
+    // Safe to call from any thread; does nothing when nothing new was dropped, or while a
+    // ForeignKeyReportScope is open (the scope reports when the outermost one closes).
+    static void                             log_ignored_foreign_keys();
+    // Brackets a bulk load (all vendor bundles at startup, a CLI preset lookup) so the dropped foreign
+    // keys are reported once for the whole load, not once per vendor or per file. Nests; thread safe.
+    class ForeignKeyReportScope
+    {
+    public:
+        ForeignKeyReportScope();
+        ~ForeignKeyReportScope();
+        ForeignKeyReportScope(const ForeignKeyReportScope &) = delete;
+        ForeignKeyReportScope &operator=(const ForeignKeyReportScope &) = delete;
+    };
+    // Occurrences of one foreign key dropped so far this session (reported or not).
+    static size_t                           ignored_foreign_key_count(const std::string &key);
+    // Forget all counts and reports (unit tests).
+    static void                             reset_ignored_foreign_keys();
 
     // BBS: move constructor to public
     Preset(Type type, const std::string &name, bool is_default = false) : type(type), is_default(is_default), name(name) {}
@@ -403,6 +452,18 @@ bool filament_preset_fits_slot(const Preset &filament_preset, const PresetCollec
 
 
 
+// Ultra: which printers a preset saved to the project is listed for. Chosen in the Save Preset
+// dialog ("Use for every printer", next to "Preset Inside Project"); stored in the 3MF as the
+// preset's own compatible_printers / compatible_printers_condition, so no format change.
+enum class ProjectPresetPrinters {
+    // Leave the preset's printer list as it is (no choice was offered, e.g. saving without the dialog).
+    Keep,
+    // The printers its parent profile covers - the upstream rule.
+    FollowParent,
+    // Every printer: no list, no condition. It stays listed and selected across printer switches.
+    EveryPrinter,
+};
+
 enum class PresetSelectCompatibleType {
 	// Never select a compatible preset if the newly selected profile is not compatible.
 	Never,
@@ -435,6 +496,21 @@ struct PresetConfigSubstitutions {
 // Substitutions having been performed during parsing a set of configuration files, for example when starting up
 // PrusaSlicer and reading the user Print / Filament / Printer profiles.
 using PresetsConfigSubstitutions = std::vector<PresetConfigSubstitutions>;
+
+// A user filament preset made against an older release that no longer shows on printers its system parent
+// listed then, and those printers. Migrating it writes them into the preset's own compatible_printers.
+// (OrcaSlicer #16367.)
+struct LegacyUserFilamentPreset {
+    std::string              preset;
+    std::string              parent;
+    // The parent's name as the preset file states it: the name the older release knew it by.
+    std::string              inherits;
+    // The printers the preset lost: what the prompt lists.
+    std::vector<std::string> printers;
+    std::string              file;
+    // The list the file gets: the parent's current printers plus the lost ones.
+    std::vector<std::string> compatible_printers;
+};
 
 // Collections of presets of the same type (one of the Print, Filament or Printer type).
 class PresetCollection
@@ -493,6 +569,18 @@ public:
     void            save_user_presets(const std::string& dir_path, const std::string& type, std::vector<std::string>& need_to_delete_list);
     bool            load_user_preset(std::string name, std::map<std::string, std::string> preset_values, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule);
     void            update_after_user_presets_loaded();
+    // User presets store only their diff, so a user preset inherits its system parent's compatible_printers
+    // and disappears from a printer once a profile update narrows that list. Lists the user presets whose
+    // files do not set compatible_printers, and the printers their parent covered in an older release but
+    // no longer lists. printers_by_parent is keyed by the parent's name in that release, which is the name
+    // the preset file's inherits still holds. (OrcaSlicer #16367.)
+    std::vector<LegacyUserFilamentPreset> legacy_user_filament_presets(const std::map<std::string, std::vector<std::string>> &printers_by_parent);
+    // Writes legacy.compatible_printers into the preset's file and keeps every other key. The caller holds the
+    // user presets lock. False if the file has gained a compatible_printers key or another parent since the
+    // preset was found, or could not be written.
+    static bool     write_legacy_user_filament_preset(const LegacyUserFilamentPreset &legacy);
+    // Gives the loaded presets the lists their files were just given, and marks cloud copies for upload.
+    void            apply_legacy_user_filament_presets(const std::vector<LegacyUserFilamentPreset> &written);
     //BBS: get user presets
     int  get_user_presets(PresetBundle *preset_bundle, std::vector<Preset> &result_presets);
     void set_sync_info_and_save(std::string name, std::string setting_id, std::string syncinfo, long long update_time);
@@ -514,7 +602,15 @@ public:
     Preset&         load_preset(const std::string &path, const std::string &name, const DynamicPrintConfig &config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
     Preset&         load_preset(const std::string &path, const std::string &name, DynamicPrintConfig &&config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
 
+    // A new user preset `name` that inherits `parent` (a system preset), with `overrides` applied on top
+    // and saved as a difference against the parent. The selection is left alone. Returns the preset,
+    // or nullptr when `name` is taken or the parent is not a system preset. Used for a third-party
+    // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
+    const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
+    // The name clone_presets_for_printer() gives the copy of a preset named template_name for printer:
+    // the name up to the first " @" ("/" written "-"), then " @" and the printer's name.
+    static std::string name_for_printer_clone(const std::string &template_name, const std::string &printer);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
     bool clone_presets_for_filament(Preset const *const &     preset,
@@ -558,7 +654,11 @@ public:
     // a new preset is stored into the list of presets.
     // All presets are marked as not modified and the new preset is activated.
     //BBS: add project embedded preset logic
-    void            save_current_preset(const std::string &new_name, bool detach = false, bool save_to_project = false, Preset* _curr_preset = nullptr, const Preset* _current_printer = nullptr);
+    void            save_current_preset(const std::string &new_name, bool detach = false, bool save_to_project = false, Preset* _curr_preset = nullptr, const Preset* _current_printer = nullptr,
+                                        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep);
+    // Ultra: set the printers a project preset is listed for (see ProjectPresetPrinters). No-op for
+    // printer presets and for presets that are not project presets.
+    void            set_project_preset_printers(Preset &preset, ProjectPresetPrinters project_printers);
 
     // Delete the current preset, activate the first visible preset.
     // returns true if the preset was deleted successfully.
@@ -566,6 +666,21 @@ public:
     // Delete the current preset, activate the first visible preset.
     // returns true if the preset was deleted successfully.
     bool            delete_preset(const std::string& name);
+    // Renames a user preset (not a system, default, external or project preset): the preset keeps its
+    // config, filament_id, inherits and base_id; its file moves to the new name in the same folder (the
+    // old .json / .info go); the collection stays sorted; user presets that inherit it point at the new
+    // name and are saved; the selection (and the edited copy, edits kept) follows when it was selected.
+    // false, with the reason in *error, when the preset is not a user preset, the new name is taken or
+    // the file cannot be written; nothing changes then.
+    bool            rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error = nullptr);
+    // The user presets whose "inherits" names the preset.
+    std::vector<std::string> user_presets_inheriting(const std::string &name) const;
+    // The user presets made for one printer alone, as clone_presets_for_printer() makes them: every entry
+    // of their compatible_printers is that printer. These are counted and deleted with that printer when
+    // it is a stand-alone user printer. A system preset, a preset that also lists another printer, and one
+    // not limited by printer name (an empty list, or a compatible_printers_condition only) are kept, and so
+    // is every preset that a kept preset inherits from (a preset whose parent is gone does not load).
+    std::vector<Preset const *> get_user_presets_for_printer(const std::string &printer_name) const;
 
     // Enable / disable the "- default -" preset.
     void            set_default_suppressed(bool default_suppressed);
@@ -598,11 +713,22 @@ public:
 	// where the "inherits" profile name is searched for in both m_presets and m_map_system_profile_renamed.
 	const Preset*	get_preset_parent(const Preset& child) const;
 	const Preset*	get_preset_base(const Preset& child) const;
+	// Orca #15173: the parent a preset saved from `selected` would have, which "Detach from parent" in the
+	// Save preset dialog drops: the system preset itself for a copy of a system preset, else the preset's own
+	// parent. Empty for a preset with no parent (nothing to detach from).
+	static std::string detach_parent_name(const Preset &selected) { return selected.is_system ? selected.name : selected.inherits(); }
 	// Return the selected preset including the user modifications.
     Preset&         get_edited_preset()         { return m_edited_preset; }
     const Preset&   get_edited_preset() const   { return m_edited_preset; }
 
-    const Preset& get_selected_preset_base() const { return *get_preset_base(m_presets[m_idx_selected]); }
+    // The root of the selected preset's inherits chain, or the selected preset itself when
+    // the chain names a preset that is not loaded (e.g. a vendor that is not installed).
+    const Preset& get_selected_preset_base() const
+    {
+        const Preset &selected = m_presets[m_idx_selected];
+        const Preset *base     = get_preset_base(selected);
+        return base ? *base : selected;
+    }
 
     // Return the last saved preset.
 //  const Preset&   get_saved_preset() const { return m_saved_preset; }
@@ -612,9 +738,16 @@ public:
     PresetWithVendorProfile get_edited_preset_with_vendor_profile() const { return this->get_preset_with_vendor_profile(this->get_edited_preset()); }
 
     const std::string& 		get_preset_name_by_alias(const std::string& alias) const;
+    // Same, but only a preset `accept` takes. Several presets can share one alias when a machine is
+    // compatible with more than one nozzle variant of a filament (the U1 0.4+0.6): the plain lookup returns
+    // the first one registered, so a slot that needs the 0.6 variant would get the 0.4. Falls back to the
+    // plain lookup when `accept` takes none.
+    std::string 				get_preset_name_by_alias(const std::string& alias, const std::function<bool(const Preset&)>& accept) const;
 	const std::string*		get_preset_name_renamed(const std::string &old_name) const;
     bool                    is_alias_exist(const std::string &alias, Preset* preset = nullptr);
     void                    set_printer_hold_alias(const std::string &alias, Preset &preset);
+    // One info line per printer that saw repeated aliases, with the count; clears the counters.
+    void                    log_printer_alias_duplicates();
 
 	// used to update preset_choice from Tab
 	const std::deque<Preset>&	get_presets() const	{ return m_presets; }
@@ -716,23 +849,29 @@ public:
 
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return true if they differ.
     bool                        current_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &this->get_selected_preset()); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &this->get_selected_preset()) : !this->current_dirty_options().empty(); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_dirty_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare)); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_different_from_parent_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare)); }
     std::vector<std::string>    current_flow_variant_dirty_options(ConfigFlowDomain domain,
                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys)); }
     std::vector<std::string>    current_flow_variant_different_from_parent_options(ConfigFlowDomain domain,
                                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys)); }
+
+    // Per-nozzle process P8: keys the dirty / modified comparisons above leave out. While the Process tab shows a tool's
+    // profile, its plate-wide keys hold the Plate's shared values; they are not changes to the tool's profile.
+    void                        set_dirty_ignore(std::set<std::string> keys) { m_dirty_ignore = std::move(keys); }
+    const std::set<std::string>& dirty_ignore() const { return m_dirty_ignore; }
 
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return true if they differ.
     bool                        saved_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &m_saved_preset); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &m_saved_preset) :
+                                          !without_dirty_ignored(dirty_options(&this->get_edited_preset(), &m_saved_preset)).empty(); }
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return the list of keys where they differ.
 //    std::vector<std::string>    saved_dirty_options() const
 //        { return dirty_options(&this->get_edited_preset(), &this->get_saved_preset(), /* deep_compare */ false); }
@@ -795,9 +934,35 @@ private:
     // The "-- default -- " preset is always the first, so it needs
     // to be handled differently.
     // If a preset does not exist, an iterator is returned indicating where to insert a preset with the same name.
+    // Comparator that sorts "Generic " prefixed presets before others, then alphabetically within each group.
+    static bool filament_preset_less(const Preset &a, const Preset &b) {
+        bool a_generic = boost::starts_with(a.name, GENERIC_PREFIX);
+        bool b_generic = boost::starts_with(b.name, GENERIC_PREFIX);
+        if (a_generic != b_generic)
+            return a_generic; // generics first
+        return a.name < b.name;
+    }
+
+    // Sort presets: filament presets use generic-first ordering, others sort alphabetically.
+    void sort_presets() {
+        if (m_type == Preset::TYPE_FILAMENT)
+            std::sort(m_presets.begin() + m_num_default_presets, m_presets.end(), filament_preset_less);
+        else
+            std::sort(m_presets.begin() + m_num_default_presets, m_presets.end());
+    }
+
     std::deque<Preset>::iterator find_preset_internal(const std::string &name, bool from_orca_lib_only = false)
     {
-        auto it = Slic3r::lower_bound_by_predicate(m_presets.begin() + m_num_default_presets, m_presets.end(), [&name](const auto& l) { return l.name < name;  });
+        auto it = Slic3r::lower_bound_by_predicate(m_presets.begin() + m_num_default_presets, m_presets.end(),
+            [&name, this](const auto& l) {
+                if (m_type == Preset::TYPE_FILAMENT) {
+                    bool l_generic = boost::starts_with(l.name, GENERIC_PREFIX);
+                    bool name_generic = boost::starts_with(name, GENERIC_PREFIX);
+                    if (l_generic && !name_generic) return true;
+                    if (!l_generic && name_generic) return false;
+                }
+                return l.name < name;
+            });
         if (it == m_presets.end() || it->name != name) {
             // Preset has not been not found in the sorted list of non-default presets. Try the defaults.
             for (size_t i = 0; i < m_num_default_presets; ++ i)
@@ -838,12 +1003,22 @@ private:
     // System profiles may have aliases. Map to the full profile name.
     std::map<std::string, std::vector<std::string>> m_map_alias_to_profile_name;
     std::unordered_map<std::string, std::unordered_set<std::string>> m_printer_hold_alias;
+    // printer name -> how many presets repeated an alias the printer already held (summarised once, not logged per preset)
+    std::map<std::string, size_t> m_printer_alias_duplicates;
     // Map from old system profile name to a current system profile name.
     std::map<std::string, std::string> m_map_system_profile_renamed;
     // Initially this preset contains a copy of the selected preset. Later on, this copy may be modified by the user.
     Preset                  m_edited_preset;
     // Contains a copy of the last saved selected preset.
     Preset                  m_saved_preset;
+    // Per-nozzle process P8: keys the dirty comparisons leave out (set_dirty_ignore).
+    std::set<std::string>   m_dirty_ignore;
+    std::vector<std::string> without_dirty_ignored(std::vector<std::string> keys) const
+    {
+        if (!m_dirty_ignore.empty())
+            keys.erase(std::remove_if(keys.begin(), keys.end(), [this](const std::string &key) { return m_dirty_ignore.count(key) > 0; }), keys.end());
+        return keys;
+    }
 
     // Selected preset.
     size_t                  m_idx_selected;
@@ -866,6 +1041,40 @@ private:
     // Orca: used for validation only
     int m_errors = 0;
 };
+
+// The rules a preset name must follow, shared by the Save preset dialog and the preset managers' rename
+// (GUI-free; the GUI turns the issue into its message).
+struct PresetNameCheck
+{
+    enum class Level { Ok, Warning, Invalid };
+    enum class Issue {
+        None,
+        IllegalCharacters,  // one of preset_name_illegal_characters()
+        IllegalSuffix,      // contains "(modified)"
+        Reserved,           // "Default Setting" / "Default Filament" / "Default Printer"
+        SystemExists,       // a system or default preset has the name
+        Exists,             // a preset (compatible with the current printer) has the name
+        ExistsIncompatible, // a preset that is not compatible with the current printer has the name
+        Empty,
+        LeadingSpace,
+        TrailingSpace,
+        AliasName,          // the name of a system preset alias
+        PrinterSuffix,      // rename of a filament " @printer" variant: the edited part contains "@"
+    };
+    Level level = Level::Ok;
+    Issue issue = Issue::None;
+    bool  ok() const { return level != Level::Invalid; }
+};
+enum class PresetNameUse {
+    Save,   // saving: an existing user preset of that name is a warning (it is overwritten)
+    Rename, // renaming: no preset may have the name already (nothing is overwritten by a rename)
+};
+// "<>[]:/\|?*" and the double quote
+const char *preset_name_illegal_characters();
+// The checks of the Save preset dialog, in its order. current_name: the preset being saved or renamed
+// (its own name is not "taken").
+PresetNameCheck validate_preset_name(const PresetCollection &presets, const std::string &name, const std::string &current_name,
+                                     PresetNameUse use = PresetNameUse::Save);
 
 // Printer supports the FFF and SLA technologies, with different set of configuration values,
 // therefore this PresetCollection needs to handle two defaults.
@@ -895,6 +1104,10 @@ namespace PresetUtils {
     std::string system_printer_bed_model(const Preset& preset);
     std::string system_printer_bed_texture(const Preset& preset);
     std::string system_printer_hotend_model(const Preset& preset);
+    // A machine model's texture rect, "x,y,w,h" in mm of the bed (spaces allowed), as Bambu Studio reads
+    // bottom_texture_rect / middle_texture_rect. False (and `rect` untouched) unless there are exactly four
+    // numbers and the width and height are positive.
+    bool parse_bed_texture_rect(const std::string &str, std::array<float, 4> &rect);
 } // namespace PresetUtils
 
 

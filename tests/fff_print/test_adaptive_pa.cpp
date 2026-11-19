@@ -218,7 +218,7 @@ void check_plate(bool bbl)
 
 } // namespace
 
-TEST_CASE("Adaptive PA around tool changes does not depend on pipeline timing", "[GCode][AdaptivePA]")
+TEST_CASE("Adaptive PA around tool changes does not depend on pipeline timing", "[GCode][AdaptivePA][slow]")
 {
     SECTION("generic printer") { check_plate(false); }
     SECTION("BBL printer") { check_plate(true); }

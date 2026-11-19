@@ -727,3 +727,55 @@ TEST_CASE("ZAA speed scaling survives the layer-time cooling slowdown", "[Contou
         REQUIRE(t_cooled == Approx(t_plain * factor));
     }
 }
+
+TEST_CASE("ZAA segment-rate cap: minimum segment length", "[ContourZ]")
+{
+    CHECK(contour_z_min_segment_length(200.0, 400.0) == Approx(0.5));
+    CHECK(contour_z_min_segment_length(200.0, 0.0) == 0.0);
+    CHECK(contour_z_min_segment_length(0.0, 400.0) == 0.0);
+}
+
+TEST_CASE("ZAA segment-rate cap: thinning keeps corners and the last sample", "[ContourZ]")
+{
+    // Two 1 mm legs sampled every 0.1 mm, the corner at (1, 0) is an original point.
+    std::vector<Vec2d>  xy;
+    std::vector<double> d;
+    std::vector<char>   orig;
+    for (int i = 0; i <= 10; ++i) {
+        xy.emplace_back(0.1 * i, 0.0);
+        d.push_back(0.01 * i);
+        orig.push_back(i == 0 || i == 10);
+    }
+    for (int i = 1; i <= 10; ++i) {
+        xy.emplace_back(1.0, 0.1 * i);
+        d.push_back(0.1 - 0.01 * i);
+        orig.push_back(0);
+    }
+
+    SECTION("no cap leaves the profile alone")
+    {
+        auto xy2 = xy;
+        auto d2 = d;
+        auto o2 = orig;
+        contour_z_thin_samples(xy2, d2, o2, 0.0);
+        CHECK(xy2.size() == xy.size());
+    }
+
+    SECTION("0.25 mm minimum")
+    {
+        contour_z_thin_samples(xy, d, orig, 0.25);
+        REQUIRE(xy.size() == d.size());
+        REQUIRE(xy.size() == orig.size());
+        // First leg: 0, 0.3, 0.6, 0.9, corner 1.0; second leg: 0.3, 0.6, 0.9, last 1.0.
+        CHECK(xy.size() == 9);
+        CHECK(xy.front().isApprox(Vec2d(0.0, 0.0)));
+        CHECK(xy.back().isApprox(Vec2d(1.0, 1.0)));
+        CHECK(d.back() == Approx(0.0));
+        const bool has_corner = std::any_of(xy.begin(), xy.end(), [](const Vec2d &p) { return p.isApprox(Vec2d(1.0, 0.0)); });
+        CHECK(has_corner);
+        // Every segment that starts at an added sample is at least the minimum, except into a kept point.
+        for (size_t k = 1; k + 1 < xy.size(); ++k)
+            if (!orig[k])
+                CHECK((xy[k] - xy[k - 1]).norm() >= 0.25 - 1e-9);
+    }
+}

@@ -58,7 +58,6 @@
     ],
     "inherits": "Generic ABS @System",
     "instantiation": "true",
-    "is_custom_defined": "0",
     "name": "Flashforge ASA-GF @FF C5P",
     "nozzle_temperature": [
         "270"
@@ -84,5 +83,5 @@
     "textured_plate_temp_initial_layer": [
         "110"
     ],
-    "version": "2.3.0.3"
+    "type": "filament"
 }

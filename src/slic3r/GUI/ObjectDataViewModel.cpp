@@ -73,6 +73,7 @@ const std::map<InfoItemType, InfoItemAtributes> INFO_ITEMS{
             //{ InfoItemType::Sinking,             {L("Sinking"),                 "objlist_sinking"}, },
             { InfoItemType::CutConnectors,       {L("Cut connectors"),          "cut_connectors" },    },
             { InfoItemType::FuzzySkin,           {L("Paint-on fuzzy skin"),     "objlist_fuzzy_skin_paint" }, },
+            { InfoItemType::HeightPattern,       {L("Color Pattern"),   "height_range_modifier" }, },
 };
 
 ObjectDataViewModelNode::ObjectDataViewModelNode(ObjectDataViewModelNode*   parent,
@@ -337,6 +338,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_visibility_icon << variant;
         return true;
     case colName: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_bmp = data.GetBitmap();
@@ -350,6 +353,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_name = text;
         return true; }
     case colFilament: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_extruder_bmp = data.GetBitmap();
@@ -758,6 +763,58 @@ wxDataViewItem ObjectDataViewModel::AddInfoChild(const wxDataViewItem &parent_it
     const wxDataViewItem child((void*)node);
     ItemAdded(parent_item, child);
     return child;
+}
+
+wxDataViewItem ObjectDataViewModel::AddHeightPatternChild(const wxDataViewItem &parent_item, int pattern_id, const wxString &label)
+{
+    ObjectDataViewModelNode *root = static_cast<ObjectDataViewModelNode*>(parent_item.GetID());
+    if (!root) return wxDataViewItem(0);
+
+    const auto node = new ObjectDataViewModelNode(root, InfoItemType::HeightPattern);
+    node->m_pattern_id = pattern_id;
+    node->SetName(label);
+    node->SetBitmap(m_info_bmps.at(InfoItemType::HeightPattern));
+
+    // After every other child (settings, layers, infos, earlier patterns), so the pattern rows
+    // keep their creation order and never shift the Height ranges row.
+    root->m_container = true;
+    root->Insert(node, root->GetChildCount());
+    const wxDataViewItem child((void*)node);
+    ItemAdded(parent_item, child);
+    return child;
+}
+
+int ObjectDataViewModel::GetHeightPatternId(const wxDataViewItem &item) const
+{
+    if (!item.IsOk())
+        return 0;
+    const ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    return node->m_type == itInfo && node->m_info_item_type == InfoItemType::HeightPattern ? node->m_pattern_id : 0;
+}
+
+wxDataViewItem ObjectDataViewModel::GetHeightPatternItem(const wxDataViewItem &obj_item, int pattern_id) const
+{
+    if (!obj_item.IsOk())
+        return wxDataViewItem(0);
+    ObjectDataViewModelNode *obj = static_cast<ObjectDataViewModelNode*>(obj_item.GetID());
+    for (size_t i = 0; i < obj->GetChildCount(); ++i) {
+        ObjectDataViewModelNode *child = obj->GetNthChild(i);
+        if (child->m_type == itInfo && child->m_info_item_type == InfoItemType::HeightPattern && child->m_pattern_id == pattern_id)
+            return wxDataViewItem((void*)child);
+    }
+    return wxDataViewItem(0);
+}
+
+void ObjectDataViewModel::DeleteHeightPatternItems(const wxDataViewItem &obj_item)
+{
+    if (!obj_item.IsOk())
+        return;
+    ObjectDataViewModelNode *obj = static_cast<ObjectDataViewModelNode*>(obj_item.GetID());
+    for (int i = int(obj->GetChildCount()) - 1; i >= 0; --i) {
+        ObjectDataViewModelNode *child = obj->GetNthChild(size_t(i));
+        if (child->m_type == itInfo && child->m_info_item_type == InfoItemType::HeightPattern)
+            Delete(wxDataViewItem((void*)child));
+    }
 }
 
 wxDataViewItem ObjectDataViewModel::AddSettingsChild(const wxDataViewItem &parent_item)
@@ -2280,6 +2337,19 @@ void ObjectDataViewModel::SetVolumeType(const wxDataViewItem &item, const Slic3r
     else if (node->GetExtruder().IsEmpty())
         node->SetExtruder("default");   // show extruder ans set it to default
     node->UpdateExtruderAndColorIcon();
+    ItemChanged(item);
+}
+
+void ObjectDataViewModel::SetVolumeTextSvg(const wxDataViewItem &item, bool is_text, bool is_svg)
+{
+    if (!item.IsOk() || GetItemType(item) != itVolume)
+        return;
+
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    if (node->is_text_volume() == is_text && node->is_svg_volume() == is_svg)
+        return;
+    node->SetTextSvgVolume(is_text, is_svg);
+    UpdateBitmapForNode(node);
     ItemChanged(item);
 }
 

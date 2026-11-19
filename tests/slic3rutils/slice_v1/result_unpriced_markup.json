@@ -1,0 +1,19 @@
+{
+  "index": 2,
+  "result_id": 7,
+  "time_s": 3600,
+  "prepare_time_s": 0,
+  "filaments": [
+    {"index": 0, "preset": "Generic PLA", "type": "PLA", "color": "#FFFFFF",
+     "grams": 12.4, "meters": 4.16, "cost": 0.0, "price_per_kg": 0.0,
+     "model_g": 12.4, "support_g": 0.0, "flush_g": 0.0, "tower_g": 0.0}
+  ],
+  "total": {"grams": 12.4, "meters": 4.16, "cost": 1.5, "material_cost": 0.0, "machine_cost": 1.5,
+            "flush_grams": 0.0, "filament_changes": 0},
+  "cost": {"prices_known": false, "machine_rate_known": true, "machine_rate_per_h": 1.5,
+           "material": 0.0, "machine": 1.5, "fees": 2.5, "total_cost": 4.0, "markup": 1.0,
+           "selling_price": 5.0, "has_markup": true},
+  "warnings": [
+    {"code": "toolpath_outside", "severity": "error", "text": "A G-code path goes beyond the plate boundaries."}
+  ]
+}

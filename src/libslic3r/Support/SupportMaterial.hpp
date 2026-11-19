@@ -30,13 +30,18 @@ public:
 	bool 		has_support()				const { return m_object_config->enable_support.value || m_object_config->enforce_support_layers; }
 	bool 		build_plate_only() 			const { return this->has_support() && m_object_config->support_on_build_plate_only.value; }
 	// BBS
-	bool 		synchronize_layers()		const { return /*m_slicing_params.soluble_interface && */!m_print_config->independent_support_layer_height.value; }
+	bool 		synchronize_layers()		const { return /*m_slicing_params.zero_gap_interface_top && */!m_print_config->independent_support_layer_height.value; }
 	bool 		has_contact_loops() 		const { return m_object_config->support_interface_loop_pattern.value; }
 
 	// Generate support material for the object.
 	// New support layers will be added to the object,
 	// with extrusion paths and islands filled in for each support layer.
 	void 		generate(PrintObject &object);
+
+	// Edge (support highlight, phase 5): only the top contact detection generate() starts with,
+	// so the object's Layer::support_overhangs hold what this generator would support. Nothing
+	// else is generated and no support layers are added.
+	void 		detect_overhangs_only(const PrintObject &object);
 
 private:
 	std::vector<Polygons> buildplate_covered(const PrintObject &object) const;

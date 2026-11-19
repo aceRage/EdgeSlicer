@@ -7,6 +7,7 @@
 #include "GLToolbar.hpp"
 #include "Event.hpp"
 #include "I18N.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "MainFrame.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
@@ -49,9 +50,9 @@ std::vector<int> preset_physical_extruder_map()
 
 std::vector<double> preset_nozzle_diameters()
 {
+    // Per-nozzle process P7: the sizes this project gives the nozzles (the printer preset's when not overridden).
     if (PresetBundle *pb = wxGetApp().preset_bundle)
-        if (const auto *d = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
-            return d->values;
+        return pb->effective_nozzle_diameters();
     return {};
 }
 
@@ -72,12 +73,36 @@ bool machine_matches_preset(MachineObject *obj)
 
 static std::string diameter_string(float d)
 {
-    char buf[16];
-    std::snprintf(buf, sizeof buf, "%.2f", d);
-    std::string s(buf);
+    // A decimal point in any UI language: the result is the printer's nozzle diameter that NozzleOverride and the
+    // nozzle mapping parse back (upstream Orca #17079); snprintf gave "0,40" under German.
+    std::string s = float_to_string_decimal_point(double(d), 2);
     while (!s.empty() && s.back() == '0') s.pop_back();
     if (!s.empty() && s.back() == '.') s.pop_back();
     return s;
+}
+
+// The nozzles obj reports: mounted ones (pos 0/1) and rack slots (0x10 + n).
+void add_reported_nozzles(DualNozzleSync::PrinterState &s, const MachineObject *obj)
+{
+    for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
+        DualNozzleSync::PrinterNozzle pn;
+        pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
+        // H3C: a rack nozzle names its rack position (addr_id, Bambu Studio DevNozzle::GetNozzlePosId), and one whose
+        // "exist" bit is clear is an empty position (DevNozzle::IsEmpty). Racks without addr_id (H2C) read as before.
+        if (n.on_rack() && n.addr_id >= 0 && n.addr_id < 0x10) {
+            if (!n.exist)
+                continue;
+            pn.pos  = 0x10 + n.addr_id;
+            pn.addr = n.addr_id;
+        }
+        pn.diameter = diameter_string(n.diameter);
+        pn.volume   = n.volume_exact;
+        pn.normal   = n.is_normal();
+        pn.wear     = n.wear;
+        pn.fila_id  = n.fila_id;
+        pn.color    = n.color_m;
+        s.nozzles.push_back(pn);
+    }
 }
 
 DualNozzleSync::PrinterState printer_state(MachineObject *obj)
@@ -121,17 +146,43 @@ DualNozzleSync::PrinterState printer_state(MachineObject *obj)
         s.ams.push_back(unit);
     }
 
-    for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
-        DualNozzleSync::PrinterNozzle pn;
-        pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
-        pn.diameter = diameter_string(n.diameter);
-        pn.volume   = n.volume_exact;
-        pn.normal   = n.is_normal();
-        pn.wear     = n.wear;
-        pn.fila_id  = n.fila_id;
-        pn.color    = n.color_m;
-        s.nozzles.push_back(pn);
+    // Each extruder's external spool holder (vir_slot 255 = right/main, 254 = left/deputy): a
+    // source for that extruder's filaments when it holds an identified spool.
+    for (AmsTray ext : obj->external_spools()) {
+        int ams_id = -1;
+        try { ams_id = std::stoi(ext.id); } catch (...) { continue; }
+        if (!BambuExtruderMap::is_external_spool_ams_id(ams_id))
+            continue;
+        DualNozzleSync::AmsUnit unit;
+        unit.ams_id            = ams_id;
+        unit.physical_extruder = BambuExtruderMap::external_spool_physical_extruder(ams_id);
+        unit.slot_count        = 1;
+        if (ext.is_tray_info_ready()) {
+            DualNozzleSync::Tray tray;
+            tray.ams_id      = ams_id;
+            tray.slot_id     = 0;
+            tray.color       = ext.color;
+            tray.type        = ext.get_filament_type();
+            tray.filament_id = ext.setting_id;
+            unit.trays.push_back(tray);
+        }
+        s.ams.push_back(unit);
     }
+
+    add_reported_nozzles(s, obj);
+    return s;
+}
+
+DualNozzleSync::PrinterState nozzle_report_state(MachineObject *obj)
+{
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = preset_physical_extruder_map();
+    if (!obj)
+        return s;
+    s.dev_id       = obj->dev_id;
+    s.dev_name     = obj->dev_name;
+    s.printer_type = obj->printer_type;
+    add_reported_nozzles(s, obj);
     return s;
 }
 
@@ -414,7 +465,7 @@ bool confirm_before_slice(Plater *plater, bool slice_all)
 
         std::string trays;
         for (const auto &kv : arr.trays)
-            trays += "F" + std::to_string(kv.first + 1) + "->" + BambuExtruderMap::tray_name(kv.second.ams_id, kv.second.slot_id) + " ";
+            trays += "F" + std::to_string(kv.first + 1) + "->" + BambuExtruderMap::tray_display_name(kv.second.ams_id, kv.second.slot_id) + " ";
         BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << idx + 1 << " confirmed"
                                    << (c.synced ? " (synced with " + c.dev_id + ")" : std::string(" (not synced)"))
                                    << ": filament_map " << join_map(arr.filament_map) << "trays " << trays;
@@ -439,7 +490,8 @@ Watcher::~Watcher() { m_timer.Stop(); }
 
 void Watcher::check()
 {
-    if (!m_plater || !preset_is_dual_nozzle_bambu())
+    // Project strip P4: the presets are the shown project's; a hidden project's plates are checked when it is shown.
+    if (!m_plater || !m_plater->is_active_project() || !preset_is_dual_nozzle_bambu())
         return;
     MachineObject *obj   = selected_machine();
     const bool     other = obj && !machine_matches_preset(obj);

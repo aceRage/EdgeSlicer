@@ -17,6 +17,7 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 
@@ -84,7 +85,8 @@ static std::vector<double> parse_diameters(const std::string& text)
     boost::split(parts, text, boost::is_any_of(", "), boost::token_compress_on);
     for (const std::string& p : parts) {
         if (p.empty()) continue;
-        try { out.push_back(std::stod(p)); } catch (...) { return {}; }
+        // A 3MF writes "0.4"; std::stod reads it as 0 under a decimal-comma UI language.
+        try { out.push_back(boost::lexical_cast<double>(p)); } catch (...) { return {}; }
     }
     return out;
 }
@@ -237,6 +239,10 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
     std::vector<Tray> out;
     if (!obj) return out;
     const bool dual = obj->is_multi_extruders();
+    // A nozzle rack's printer (H3C): only the slots a rack nozzle is fed from (rack_bound_slots).
+    const bool rack_printer = obj->is_rack_printer();
+    const std::vector<std::pair<int, int>> rack_bound = rack_printer ? obj->rack_bound_slots() : std::vector<std::pair<int, int>>();
+    auto bound = [&rack_bound](int ams, int slot) { return std::find(rack_bound.begin(), rack_bound.end(), std::make_pair(ams, slot)) != rack_bound.end(); };
     for (const auto& kv : obj->amsList) {
         const Ams* a = kv.second;
         if (!a) continue;
@@ -249,10 +255,11 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
             Tray tr;
             tr.ams_id = ams_id;
             try { tr.slot_id = std::stoi(tk.first); } catch (...) { continue; }
-            tr.tray_id           = ams_id * 4 + tr.slot_id;
+            if (a->is_rack() && !bound(ams_id, tr.slot_id)) continue;
+            tr.tray_id           = GUI::AmsTypes::mapping_tray_index(a->type, ams_id, tr.slot_id); // 28 + slot on the AMS 3H
             tr.physical_extruder = a->nozzle;
             tr.extruder          = dual ? BambuExtruderMap::physical_to_logical(physical_extruder_map, a->nozzle) : -1;
-            tr.name              = BambuExtruderMap::tray_name(ams_id, tr.slot_id);
+            tr.name              = a->is_rack() ? BambuExtruderMap::rack_tray_name(tr.slot_id) : BambuExtruderMap::tray_name(ams_id, tr.slot_id);
             tr.exists            = t->is_exists;
             tr.ready             = t->is_exists && t->is_tray_info_ready();
             if (tr.ready) {
@@ -262,6 +269,59 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
                 tr.colors       = t->cols;
                 tr.ctype        = t->ctype;
                 tr.filament_id  = t->setting_id;
+            }
+            out.push_back(tr);
+        }
+    }
+    // A two-extruder printer's external spool holders (tray 254 = left, 255 = right), each for
+    // its own extruder's filaments - what the automatic mapping picks for an extruder without an
+    // AMS, so the phone can send that proposal back and choose it by hand.
+    if (dual) {
+        for (AmsTray ext : obj->external_spools()) {
+            const int ext_id = atoi(ext.id.c_str());
+            if (!BambuExtruderMap::is_external_spool_ams_id(ext_id)) continue;
+            Tray tr;
+            tr.ams_id            = ext_id;
+            tr.slot_id           = 0;
+            tr.tray_id           = ext_id;
+            tr.physical_extruder = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+            tr.extruder          = BambuExtruderMap::physical_to_logical(physical_extruder_map, tr.physical_extruder);
+            tr.name              = BambuExtruderMap::tray_display_name(ext_id, 0);
+            tr.ready             = ext.is_tray_info_ready();
+            tr.exists            = tr.ready;
+            if (tr.ready) {
+                tr.type         = ext.get_filament_type();
+                tr.display_type = ext.get_display_filament_type();
+                tr.color        = ext.color;
+                tr.colors       = ext.cols;
+                tr.ctype        = ext.ctype;
+                tr.filament_id  = ext.setting_id;
+            }
+            out.push_back(tr);
+        }
+    }
+    // A nozzle rack's spool holders (255 down to 247), those a rack nozzle is fed from: named by
+    // their own id, as the send dialog maps them.
+    if (rack_printer) {
+        for (AmsTray ext : obj->vir_slots) {
+            const int ext_id = atoi(ext.id.c_str());
+            if (!GUI::AmsTypes::is_rack_virtual_slot(ext_id) || !bound(ext_id, 0)) continue;
+            Tray tr;
+            tr.ams_id            = ext_id;
+            tr.slot_id           = 0;
+            tr.tray_id           = ext_id;
+            tr.physical_extruder = 0;
+            tr.extruder          = -1;
+            tr.name              = GUI::AmsTypes::rack_ext_label(ext_id);
+            tr.ready             = ext.is_tray_info_ready();
+            tr.exists            = tr.ready;
+            if (tr.ready) {
+                tr.type         = ext.get_filament_type();
+                tr.display_type = ext.get_display_filament_type();
+                tr.color        = ext.color;
+                tr.colors       = ext.cols;
+                tr.ctype        = ext.ctype;
+                tr.filament_id  = ext.setting_id;
             }
             out.push_back(tr);
         }
@@ -547,6 +607,7 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         in.project_filament_count = job.project_filament_count;
         in.filament_ids           = job.filament_ids;
         if (job.dual()) in.nozzle_filament_map = job.filament_map;
+        in.blocked_ams_ids = pr.blocked_ams_ids;
         if (problems.empty())
             BambuSendMapping::compose(ev.result, filaments, in, ev.ams_mapping, ev.ams_mapping2, ev.ams_mapping_info);
     } else if (!ev.use_ams && !filaments.empty()) {
@@ -571,7 +632,7 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         if (problems.empty() && BambuNozzleMapping::query_applies(qc)) {
             BambuNozzleMapping::RequestInput rin;
             rin.calibration              = ev.flow_cali ? 1 : 0;
-            rin.extrude_cali_manual_mode = 1;
+            rin.extrude_cali_manual_mode = 0; // Bambu Studio's default PA mode
             rin.filament_change_sequence = job.filament_change_sequence;
             for (const FilamentInfo& r : ev.result)
                 rin.mapped.push_back({ r.id, r.ams_id, r.slot_id, r.tray_id, r.filament_id, r.color });
@@ -728,6 +789,7 @@ Printer snapshot(MachineObject* obj, const Job& job)
         pr.nozzle_hrc.push_back(hrc);
     }
     pr.trays   = trays_of(obj, job.physical_extruder_map);
+    pr.blocked_ams_ids = obj->mapping_blocked_ams_ids();
     pr.nozzles = DualNozzle::printer_state(obj).nozzles;
     return pr;
 }

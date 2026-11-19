@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <vector>
 #include <string>
 #include <regex>
@@ -40,6 +41,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "BedTexturePool.hpp"
 #include "PlatePrintSlots.hpp"
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
@@ -350,7 +352,7 @@ void PartPlate::set_spiral_vase_mode(bool spiral_mode, bool as_global)
 	}
 }
 
-bool PartPlate::valid_instance(int obj_id, int instance_id)
+bool PartPlate::valid_instance(int obj_id, int instance_id) const
 {
 	if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
 	{
@@ -407,6 +409,10 @@ void PartPlate::calc_exclude_triangles(const ExPolygon &poly)
 {
     m_exclude_triangles.reset();
 
+    // A plate with no excluded area (most printers) has nothing to draw: that is the normal state, not a failure.
+    // Only a real polygon that cannot be triangulated is an error.
+    if (poly.empty())
+        return;
     if (!init_model_from_poly(m_exclude_triangles, poly, GROUND_Z))
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":Unable to create exclude triangles\n";
 }
@@ -598,7 +604,9 @@ void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int ind
     poly.contour.append({ scale_(p(0) + width), scale_(p(1) + height) });
     poly.contour.append({ scale_(p(0)        ), scale_(p(1) + height) });
 
-    if (!init_model_from_poly(model.model, poly, GROUND_Z))
+    // A plate that has no bed shape yet (a new project's Plater before its printer's bed is applied) gives a zero-size
+    // icon that cannot be triangulated; the icon is rebuilt once the shape is set. Only a failure with a shape is an error.
+    if (!init_model_from_poly(model.model, poly, GROUND_Z) && icon_sz > 0.f)
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 
     init_raycaster_from_model(model);
@@ -682,6 +690,17 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 	if (logo_texture.unsent_compressed_data_available()) {
 		// sends to gpu the already available compressed levels of the main texture
 		logo_texture.send_compressed_data_to_gpu();
+	}
+
+	// EDGE (core profile): the bed type and logo textures are compressed in the background and drawn
+	// from the frame that creates them; until level 0 arrives there is no image to sample (macOS:
+	// "unit 0 GLD_TEXTURE_INDEX_2D is unloadable"). Skip those few frames instead of drawing black.
+	if (!logo_texture.ready_to_sample()) {
+		if (logo_texture.get_id() != 0) {
+			if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D(); canvas != nullptr)
+				canvas->request_extra_frame();
+		}
+		return;
 	}
 
 	if (logo_buffer.is_initialized()) {
@@ -959,13 +978,8 @@ void PartPlate::render_exclude_area(bool force_default_color) {
 	// draw exclude area
 	glsafe(::glDepthMask(GL_FALSE));
 
-	if (m_selected) {
-		glsafe(::glColor4fv(select_color.data()));
-	}
-	else {
-		glsafe(::glColor4fv(unselect_color.data()));
-	}
-
+	// EDGE (core profile): no glColor4fv() - fixed-function colour is gone from core profiles and the
+	// shader takes the colour from set_color() below anyway.
 	m_exclude_triangles.set_color(m_selected ? select_color : unselect_color);
     m_exclude_triangles.render();
 	glsafe(::glDepthMask(GL_TRUE));
@@ -984,10 +998,33 @@ void PartPlate::render_exclude_area(bool force_default_color) {
 	glsafe(::glDepthMask(GL_TRUE));
 }*/
 
-void PartPlate::render_grid(bool bottom) {
+void PartPlate::render_grid(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix) {
 	//glsafe(::glEnable(GL_MULTISAMPLE));
 	// draw grid
-	glsafe(::glLineWidth(1.0f * m_scale_factor));
+
+    // ORCA: OpenGL Core Profile support
+    // FIXME: ideally, we'd use the same shader for both the thin and thick lines, but for some reason setting the uniforms has no effect
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr) {
+        return;
+    }
+
+    shader->start_using();
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    // EDGE: the matrices render() was given (not the plater camera), and the viewport actually bound,
+    // so an off-screen pass (thumbnails, phone capture) draws the grid with its own camera.
+    std::array<GLint, 4> viewport = { 0, 0, 1, 1 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, viewport.data()));
+
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
 
     ColorRGBA color;
 	if (bottom)
@@ -1001,9 +1038,41 @@ void PartPlate::render_grid(bool bottom) {
     m_gridlines.set_color(color);
     m_gridlines.render();
 
-	glsafe(::glLineWidth(2.0f * m_scale_factor));
+    shader->stop_using();
+
+    // ORCA: OpenGL Core Profile support
+#if SLIC3R_OPENGL_ES
+    shader = wxGetApp().get_shader("dashed_lines");
+#else
+    shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
+    if (shader == nullptr) {
+        return;
+    }
+    shader->start_using();
+
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+        shader->set_uniform("width", 0.25f);
+        // EDGE: uniforms keep their last value per program; the selection rectangle leaves dashes set.
+        shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+    } else {
+        glsafe(::glLineWidth(2.0f * m_scale_factor));
+    }
+#endif // !SLIC3R_OPENGL_ES
+
     m_gridlines_bolder.set_color(color);
     m_gridlines_bolder.render();
+    // EDGE: render() used to disable blending after the grid; the grid now draws after that point.
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->stop_using();
 }
 
 void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
@@ -1017,20 +1086,32 @@ void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
 	if (relevant_for_print_mode && mode != HEIGHT_LIMIT_NONE)
 	{
 		// draw lower limit
-		glsafe(::glLineWidth(3.0f * m_scale_factor));
+	    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+	    if (!OpenGLManager::get_gl_info().is_core_profile())
+	        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
         m_height_limit_common.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
         m_height_limit_common.render();
 
 		if ((mode == HEIGHT_LIMIT_BOTTOM) || (mode == HEIGHT_LIMIT_BOTH)) {
-			glsafe(::glLineWidth(3.0f * m_scale_factor));
-            m_height_limit_bottom.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
+		    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+		    if (!OpenGLManager::get_gl_info().is_core_profile())
+		        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
+		    m_height_limit_bottom.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
             m_height_limit_bottom.render();
 		}
 
 		// draw upper limit
 		if ((mode == HEIGHT_LIMIT_TOP) || (mode == HEIGHT_LIMIT_BOTH)){
-            glsafe(::glLineWidth(3.0f * m_scale_factor));
-            m_height_limit_top.set_color(HEIGHT_LIMIT_TOP_COLOR);
+		    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+		    if (!OpenGLManager::get_gl_info().is_core_profile())
+		        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
+		    m_height_limit_top.set_color(HEIGHT_LIMIT_TOP_COLOR);
             m_height_limit_top.render();
 		}
 	}
@@ -1038,6 +1119,9 @@ void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
 
 void PartPlate::render_icon_texture(GLModel &buffer, GLTexture &texture)
 {
+	// EDGE (core profile): an icon that failed to load (id 0) has nothing to sample.
+	if (!texture.ready_to_sample())
+		return;
 	GLuint tex_id = (GLuint)texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
     buffer.render();
@@ -1048,6 +1132,9 @@ void PartPlate::render_plate_name_texture()
 {
 	if (m_name_texture.get_id() == 0)
 		generate_plate_name_texture();
+	// EDGE (core profile): still no texture (the text could not be rendered): nothing to sample.
+	if (m_name_texture.get_id() == 0)
+		return;
 
 	GLuint tex_id = (GLuint)m_name_texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
@@ -1563,7 +1650,26 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, const Dynam
 	auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
 	plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
 
+	if (wxApp::GetInstance() != nullptr) {
 		expand_plate_extruders(plate_extruders);
+	} else {
+		// ImageMap Phase 5a: the CLI has no wxApp, so expand_plate_extruders() is a no-op there and
+		// a mixed (virtual) id - an image row, say - stayed ONE id. estimate_wipe_tower_footprint()
+		// then sized the CLI's tower for one filament instead of the row's three or four. Expand it
+		// from the project's own mixed_filament_definitions, as get_extruders_under_cli() does.
+		// Physical ids are unchanged by this, so a plate with no mixed rows comes out the same.
+		std::vector<std::string> physical_colors;
+		if (const auto *color_opt = project_config.option<ConfigOptionStrings>("filament_colour"))
+			physical_colors = color_opt->values;
+		if (!physical_colors.empty()) {
+			MixedFilamentManager mixed_mgr;
+			populate_cli_mixed_filament_manager(mixed_mgr, project_config, &glb_config, physical_colors, physical_colors.size());
+			mixed_mgr.expand_virtual_extruder_ids(plate_extruders, physical_colors.size());
+			std::sort(plate_extruders.begin(), plate_extruders.end());
+			it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
+			plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+		}
+	}
 
 
 	return plate_extruders;
@@ -1674,7 +1780,7 @@ std::vector<int> PartPlate::get_extruders_without_support(bool conside_custom_gc
 	const DynamicPrintConfig& glb_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
 
 	for (int obj_idx = 0; obj_idx < m_model->objects.size(); obj_idx++) {
-		if (!contain_instance_totally(obj_idx, 0))
+		if (!contain_any_instance_totally(obj_idx))
 			continue;
 
 		ModelObject* mo = m_model->objects[obj_idx];
@@ -1792,7 +1898,143 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
     return estimate_wipe_tower_polygon(config, plate_index, wt_pos, wt_size, plate_extruder_size, use_global_objects);
 }
 
-arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects) const
+bool wipe_tower_rotation_supported()
+{
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), plus the printer's
+    // wipe_tower_type (Orca #12781): only WipeTower2 (Type 2) rotates.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    return bundle != nullptr && !bundle->is_bbl_vendor() &&
+           resolve_wipe_tower_type(bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
+}
+
+double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
+{
+    // Config only: PartPlate also runs in the CLI, where there is no GUI_App to ask
+    // (printer_model names Bambu Lab printers, which is what the CLI's Print keys on too).
+    return wipe_tower_rotation_deg(config);
+}
+
+// Plate-local box the prime tower may occupy: the whole plate, or on a dual-nozzle printer (H2D / H2C / X2D)
+// the part both nozzles reach, since every nozzle purges into the tower. Bambu Studio limits the tower to that
+// shared part as well, which is why its default tower sits at X 40 and not in the strip one nozzle owns.
+// Printers without per-nozzle areas (single nozzle, the U1, the Creator 5) get the whole plate.
+static BoundingBoxf prime_tower_placement_box(const DynamicPrintConfig &config, int plate_width, int plate_depth)
+{
+	BoundingBoxf box(Vec2d(0., 0.), Vec2d(double(plate_width), double(plate_depth)));
+	// Orca #15146: plate-local coordinates are printable_area's, so a bed that does not start at 0/0 (the
+	// delta profiles, centred on the origin) has its box there. Every bed starting at 0/0 keeps the box above.
+	if (const auto *area = config.option<ConfigOptionPoints>("printable_area"); area != nullptr && area->values.size() >= 3) {
+		const BoundingBoxf bed(area->values);
+		if (bed.defined && (std::abs(bed.min.x()) > EPSILON || std::abs(bed.min.y()) > EPSILON)) {
+			box.min += bed.min;
+			box.max += bed.min;
+		}
+	}
+	const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+	if (nozzles == nullptr || nozzles->values.size() < 2)
+		return box;
+	const ExtruderAreas areas = extruder_areas_from_config(config);
+	if (!areas.multi() || !areas.has_exclusive_regions() || areas.shared.empty())
+		return box;
+	const BoundingBox shared = get_extents(areas.shared);
+	const Vec2d lo(std::max(box.min.x(), unscaled(shared.min.x())), std::max(box.min.y(), unscaled(shared.min.y())));
+	const Vec2d hi(std::min(box.max.x(), unscaled(shared.max.x())), std::min(box.max.y(), unscaled(shared.max.y())));
+	if (lo.x() < hi.x() && lo.y() < hi.y())
+		return BoundingBoxf(lo, hi);
+	return box;
+}
+
+// Orca #15146: the real outline behind prime_tower_placement_box(), scaled. `bed` is the printable outline and
+// `areas` the extruder areas, both in one frame; on a dual-nozzle printer the outline is cut to the shared part.
+static Polygons prime_tower_placement_outline(const Polygon &bed, const ExtruderAreas &areas, const Point &areas_shift)
+{
+	Polygons outline;
+	if (bed.size() < 3)
+		return outline;
+	outline.push_back(bed);
+	if (areas.multi() && areas.has_exclusive_regions() && !areas.shared.empty()) {
+		Polygons shared = areas.shared;
+		for (Polygon &p : shared)
+			p.translate(areas_shift);
+		Polygons cut = intersection(outline, shared);
+		if (!cut.empty())
+			outline = std::move(cut);
+	}
+	return outline;
+}
+
+static Polygons prime_tower_placement_outline(const DynamicPrintConfig &config)
+{
+	const auto *area = config.option<ConfigOptionPoints>("printable_area");
+	if (area == nullptr || area->values.size() < 3)
+		return {};
+	const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+	const ExtruderAreas areas = (nozzles != nullptr && nozzles->values.size() >= 2) ? extruder_areas_from_config(config) : ExtruderAreas();
+	return prime_tower_placement_outline(Polygon::new_scale(area->values), areas, Point(0, 0));
+}
+
+// Orca #15146: after the bounding-box clamps, pull a tower anchored at (x, y) onto a bed that does not fill its
+// bounding box (delta, circular or custom), where the box still allows corners the bed does not have. The box
+// tested is the turned footprint with its brim (wipe_tower_rotated_extents), `margin` mm inside the outline.
+// Rectangular beds return untouched, so their placement stays byte-identical.
+static void fit_prime_tower_onto_bed(const DynamicPrintConfig &config, float &x, float &y, float w, float depth, float brim, double angle, double margin)
+{
+	const Polygons bed = prime_tower_placement_outline(config);
+	if (bed.empty() || WipeTower::outline_fills_bounding_box(bed))
+		return;
+	const BoundingBoxf ext = wipe_tower_rotated_extents(w, depth, brim, angle);
+	const BoundingBox  tower(Point::new_scale(x + ext.min.x(), y + ext.min.y()), Point::new_scale(x + ext.max.x(), y + ext.max.y()));
+	const Vec2f        move = WipeTower::move_box_inside_polygon(tower, bed, scaled<coord_t>(margin));
+	x += move.x();
+	y += move.y();
+}
+
+Vec2d PartPlate::wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const
+{
+	if (m_partplate_list == nullptr)
+		return Vec2d::Zero();
+	// m_shape is in world coordinates (the plate's position added); the extruder areas are plate-local.
+	const Polygons bed = prime_tower_placement_outline(Polygon::new_scale(m_shape), m_partplate_list->get_extruder_areas(),
+	                                                   Point::new_scale(m_origin.x(), m_origin.y()));
+	if (bed.empty() || WipeTower::outline_fills_bounding_box(bed))
+		return Vec2d::Zero();
+	const BoundingBox tower(Point::new_scale(tower_world.min.x(), tower_world.min.y()), Point::new_scale(tower_world.max.x(), tower_world.max.y()));
+	return WipeTower::move_box_inside_polygon(tower, bed, scaled<coord_t>(margin)).cast<double>();
+}
+
+Polygons PartPlate::wipe_tower_obstacles(const DynamicPrintConfig &config) const
+{
+	Polygons obstacles;
+	if (m_model == nullptr)
+		return obstacles;
+	for (const auto &[obj_id, instance_id] : obj_to_instance_set) {
+		if (!valid_instance(obj_id, instance_id))
+			continue;
+		const ModelObject   *object   = m_model->objects[obj_id];
+		const ModelInstance *instance = object->instances[instance_id];
+		if (!instance->printable)
+			continue;
+		// A sinking object counts its whole outline, the part below the bed included.
+		Polygon hull = object->convex_hull_2d(instance->get_matrix());
+		if (hull.size() < 3)
+			continue;
+		hull.translate(-scaled(m_origin.x()), -scaled(m_origin.y()));
+		// An object's own setting wins over the print preset's.
+		auto option_of = [&object, &config](const char *key) {
+			const ConfigOption *opt = object->config.option(key);
+			return opt != nullptr ? opt : config.option(key);
+		};
+		// An auto brim is only sized while slicing, so it is taken at the brim width option too.
+		const ConfigOption *brim_type  = option_of("brim_type");
+		const ConfigOption *brim_width = option_of("brim_width");
+		const double brim = brim_type != nullptr && brim_width != nullptr && brim_type->getInt() != static_cast<int>(btNoBrim) ? brim_width->getFloat() : 0.;
+		append(obstacles, offset(hull, static_cast<float>(scaled(brim + WIPE_TOWER_MARGIN))));
+	}
+	return obstacles;
+}
+
+arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects,
+                                                            WipeTowerRelocation *relocation) const
 {
 	float x = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_x"))->get_at(plate_index);
 	float y = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_y"))->get_at(plate_index);
@@ -1812,23 +2054,77 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 	// A position valid by WIPE_TOWER_MARGIN is the user's choice and stays untouched; an
 	// invalid one is re-placed with the comfort margin (falling back to the validity bounds
 	// on cramped plates). std::clamp is UB if lo > hi, so keep every hi >= lo.
-	const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
-	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
-	const float x_hi   = std::max(margin, (float) plate_width - w - margin);
-	const float y_hi   = std::max(margin, (float) plate_depth - depth - margin);
-	const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
-	float x_lo_c = margin_c, x_hi_c = (float) plate_width - w - margin_c;
-	if (x_lo_c > x_hi_c) { x_lo_c = margin; x_hi_c = x_hi; }
-	float y_lo_c = margin_c, y_hi_c = (float) plate_depth - depth - margin_c;
-	if (y_lo_c > y_hi_c) { y_lo_c = margin; y_hi_c = y_hi; }
-	// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
-	// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
-	// of bounds — snap it onto the bound; only far-out positions get the comfort re-place.
-	const float tol = 5.f;
-	if (x < margin - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
-	else                                    x = std::clamp(x, margin, x_hi);
-	if (y < margin - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
-	else                                    y = std::clamp(y, margin, y_hi);
+		// On a dual-nozzle printer the tower must also sit where both nozzles reach, so the box the
+		// tower may occupy is the shared part of the plate (Bambu Studio keeps it there too).
+		const BoundingBoxf box = prime_tower_placement_box(config, plate_width, plate_depth);
+		const float bx0 = (float) box.min.x(), bx1 = (float) box.max.x();
+		const float by0 = (float) box.min.y(), by1 = (float) box.max.y();
+		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
+		const double angle = gui_wipe_tower_rotation_deg(config);
+		float x_lo, y_lo, x_hi, y_hi, x_lo_c, x_hi_c, y_lo_c, y_hi_c;
+		if (std::abs(angle) <= EPSILON) {
+			const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
+			x_lo   = bx0 + margin;
+			y_lo   = by0 + margin;
+			x_hi   = std::max(x_lo, bx1 - w - margin);
+			y_hi   = std::max(y_lo, by1 - depth - margin);
+			const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
+			x_lo_c = bx0 + margin_c; x_hi_c = bx1 - w - margin_c;
+			y_lo_c = by0 + margin_c; y_hi_c = by1 - depth - margin_c;
+		} else {
+			// The tower turns about its anchor (x, y), so the room it needs on each side is the
+			// turned box's extent around the anchor, not the width/depth box.
+			const BoundingBoxf ext = wipe_tower_rotated_extents(w, depth, wp_brim_width, angle);
+			x_lo   = bx0 + float(WIPE_TOWER_MARGIN - ext.min.x());
+			y_lo   = by0 + float(WIPE_TOWER_MARGIN - ext.min.y());
+			x_hi   = std::max(x_lo, bx1 - float(WIPE_TOWER_MARGIN + ext.max.x()));
+			y_hi   = std::max(y_lo, by1 - float(WIPE_TOWER_MARGIN + ext.max.y()));
+			x_lo_c = bx0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.x()); x_hi_c = bx1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.x());
+			y_lo_c = by0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.y()); y_hi_c = by1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.y());
+		}
+		if (x_lo_c > x_hi_c) { x_lo_c = x_lo; x_hi_c = x_hi; }
+		if (y_lo_c > y_hi_c) { y_lo_c = y_lo; y_hi_c = y_hi; }
+		// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
+		// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
+		// of bounds - snap it onto the bound; only far-out positions get the comfort re-place.
+		const float tol = 5.f;
+		const float saved_x = x, saved_y = y;
+		const bool  replace_x = x < x_lo - tol || x > x_hi + tol;
+		const bool  replace_y = y < y_lo - tol || y > y_hi + tol;
+		x = replace_x ? std::clamp(x, x_lo_c, x_hi_c) : std::clamp(x, x_lo, x_hi);
+		y = replace_y ? std::clamp(y, y_lo_c, y_hi_c) : std::clamp(y, y_lo, y_hi);
+		// Orca #16728: a re-placed tower keeps clear of every object and its brim where the plate has
+		// room. The re-placed spot stands when it is clear; otherwise the clear spot nearest the saved
+		// position, keeping the comfort margin where the plate leaves room for it. A tower snapped
+		// back onto the bound it was dropped past is the user's own placement and is not moved.
+		if (relocation != nullptr && (replace_x || replace_y)) {
+			relocation->moved = true;
+			// The footprint turns about its anchor as the tower does.
+			Polygon tower({ {scaled(-wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(depth + wp_brim_width)},
+			                {scaled(-wp_brim_width), scaled(depth + wp_brim_width)} });
+			if (std::abs(angle) > EPSILON)
+				tower.rotate(Geometry::deg2rad(angle));
+			const Polygons objects = wipe_tower_obstacles(config);
+			const Point    placed(scaled(x), scaled(y));
+			if (!nearest_clear_wipe_tower_anchor(BoundingBox(placed, placed), tower, objects, placed)) {
+				const Point saved(scaled(saved_x), scaled(saved_y));
+				std::optional<Point> clear = nearest_clear_wipe_tower_anchor(
+					BoundingBox(Point(scaled(x_lo_c), scaled(y_lo_c)), Point(scaled(x_hi_c), scaled(y_hi_c))), tower, objects, saved);
+				if (!clear)
+					clear = nearest_clear_wipe_tower_anchor(BoundingBox(Point(scaled(x_lo), scaled(y_lo)), Point(scaled(x_hi), scaled(y_hi))),
+					                                        tower, objects, saved);
+				if (clear) {
+					x = float(unscaled(clear->x()));
+					y = float(unscaled(clear->y()));
+				} else {
+					relocation->overlaps_objects = true;
+				}
+			}
+		}
+		// Orca #15146: the box clamps above still allow a corner a delta or hexagonal bed does not have.
+		fit_prime_tower_onto_bed(config, x, y, w, depth, wp_brim_width, angle, WIPE_TOWER_MARGIN);
     wt_pos(0) = x;
     wt_pos(1) = y;
     wt_pos(2) = 0.f;
@@ -1840,6 +2136,9 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		{scaled(x + w + wp_brim_width), scaled(y + depth + wp_brim_width)},
 		{scaled(x - wp_brim_width), scaled(y + depth + wp_brim_width)}
 		});
+	// Arrange and the object/tower overlap checks see the turned footprint, as Print::validate does.
+	if (std::abs(angle) > EPSILON)
+		ap.rotate(Geometry::deg2rad(angle), Point(scaled(x), scaled(y)));
 	wipe_tower_ap.bed_idx = plate_index;
 	wipe_tower_ap.setter = NULL; // do not move wipe tower
 
@@ -1906,6 +2205,9 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, int height
 		for (std::set<std::pair<int, int>>::iterator it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); ++it) {
 			int obj_id = it->first;
 			int instance_id = it->second;
+			if (!valid_instance(obj_id, instance_id))
+				continue;
+
 			ModelObject* object = m_model->objects[obj_id];
 			ModelInstance* instance = object->instances[instance_id];
 
@@ -1970,6 +2272,12 @@ void PartPlate::generate_plate_name_texture()
 	auto canvas = (m_partplate_list != nullptr && m_partplate_list->m_plater != nullptr) ? m_partplate_list->m_plater->get_view3D_canvas3D() : nullptr;
 	if (canvas == nullptr)
 		return;
+	// EDGE: set_shape() runs before the 3D canvas has initialised OpenGL (the bed is set while the main
+	// window is built); the texture cannot be made yet and render_plate_name_texture() makes it on the
+	// first frame. Without this the "failed" error was logged at every start and the icon geometry was
+	// built from a 0 x 0 texture (a 0/0 aspect ratio).
+	if (glGenTextures == nullptr)
+		return;
 
     m_plate_name_icon.reset();
 
@@ -2027,6 +2335,32 @@ void PartPlate::invalidate_plate_name_texture()
 	}
 }
 
+// True if a G-code template uses {plate_name}. filename_format is skipped: the file name is
+// built from the current plate name at export time, so it never needs a new export.
+static bool uses_plate_name(const DynamicPrintConfig& config)
+{
+    for (const std::string& key : config.keys()) {
+        if (key == "filename_format")
+            continue;
+        const ConfigOption* opt = config.option(key);
+        if ((opt->type() == coString || opt->type() == coStrings) && opt->serialize().find("plate_name") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+void PartPlate::sync_plate_name_to_print()
+{
+    if (m_print == nullptr || m_print->get_plate_name() == m_name)
+        return;
+    // The G-code may hold the old name. Invalidate first so a running export stops.
+    if (!(m_plater && m_plater->is_loading_project()) && uses_plate_name(m_print->full_print_config())) {
+        m_print->set_gcode_file_invalidated();
+        update_slice_result_valid_state(false);
+    }
+    m_print->set_plate_name(m_name);
+}
+
 void PartPlate::set_plate_name(const std::string& name) 
 { 
 	// compare if name equal to m_name, case sensitive
@@ -2034,8 +2368,7 @@ void PartPlate::set_plate_name(const std::string& name)
         return;
 
 	m_name = name;
-    if (m_print != nullptr)
-        m_print->set_plate_name(name);
+    sync_plate_name_to_print();
 
 	invalidate_plate_name_texture();
 }
@@ -2067,6 +2400,8 @@ void PartPlate::set_print(PrintBase* print, GCodeResult* result, int index)
 		m_print_index = index;
 
 	m_print->set_plate_origin(m_origin);
+    // Undo/redo reattaches Prints that may still carry another name.
+    sync_plate_name_to_print();
 
 	return;
 }
@@ -2395,7 +2730,7 @@ void PartPlate::duplicate_all_instance(unsigned int dup_count, bool need_skip, s
         int obj_id = it->first;
         int instance_id = it->second;
 
-        if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
+        if (valid_instance(obj_id, instance_id))
         {
             ModelObject* object = m_model->objects[obj_id];
             ModelInstance* instance = object->instances[instance_id];
@@ -2428,7 +2763,7 @@ void PartPlate::duplicate_all_instance(unsigned int dup_count, bool need_skip, s
         int obj_id = it->first;
         int instance_id = it->second;
 
-        if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
+        if (valid_instance(obj_id, instance_id))
         {
             ModelObject* object = m_model->objects[obj_id];
             ModelInstance* instance = object->instances[instance_id];
@@ -2519,10 +2854,14 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	new_conf.set_key_value("enable_support", new ConfigOptionBool(false));
 	new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
 	new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
+	new_conf.set_key_value("fine_detail", new ConfigOptionEnum<FineDetailLevel>(FineDetailLevel::Off));
 	new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
 	new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 	new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
-	auto applying_keys = global_config->diff(new_conf);
+	// Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
+	if (global_config->has("stabilizer_supports"))
+		new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+	const auto applying_keys = global_config->diff(new_conf);
 
 	for (ModelObject* object : obj_ptrs) {
 		ModelConfigObject& config = object->config;
@@ -2531,10 +2870,9 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 			config.set_key_value(opt_key, new_conf.option(opt_key)->clone());
 		}
 
-		applying_keys = config.get().diff(new_conf);
-		for (auto opt_key : applying_keys) {
+		const t_config_option_keys object_keys = config.get().diff(new_conf);
+		for (const auto &opt_key : object_keys)
 			config.set_key_value(opt_key, new_conf.option(opt_key)->clone());
-		}
 	}
 	//wxGetApp().obj_list()->update_selections();
 }
@@ -2546,8 +2884,8 @@ int PartPlate::printable_instance_size()
         int obj_id      = it->first;
         int instance_id = it->second;
 
-        if (obj_id >= m_model->objects.size())
-			continue;
+        if (!valid_instance(obj_id, instance_id))
+            continue;
 
         ModelObject *  object   = m_model->objects[obj_id];
         ModelInstance *instance = object->instances[instance_id];
@@ -2569,7 +2907,7 @@ bool PartPlate::has_printable_instances()
 		int obj_id = it->first;
 		int instance_id = it->second;
 
-		if (obj_id >= m_model->objects.size())
+		if (!valid_instance(obj_id, instance_id))
 			continue;
 
 		ModelObject* object = m_model->objects[obj_id];
@@ -2593,7 +2931,8 @@ bool PartPlate::is_all_instances_unprintable()
         int obj_id      = it->first;
         int instance_id = it->second;
 
-        if (obj_id >= m_model->objects.size()) continue;
+        if (!valid_instance(obj_id, instance_id))
+            continue;
 
         ModelObject *  object   = m_model->objects[obj_id];
         ModelInstance *instance = object->instances[instance_id];
@@ -2896,9 +3235,6 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
             render_extruder_only_areas(force_background_color);
         }
 
-        if (show_grid)
-            render_grid(bottom);
-
         render_height_limit(mode);
 
         glsafe(::glDisable(GL_BLEND));
@@ -2910,17 +3246,25 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         shader->stop_using();
     }
 
+    if (show_grid)
+        render_grid(bottom, view_matrix, projection_matrix);
+
     if (!bottom && m_selected && !force_background_color) {
-        if (m_partplate_list)
-            render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
-        else
-            render_logo(bottom);
+        // EDGE: EDGESLICER_GL_SKIP=plate_logo / plate_icons (OpenGLManager::gl_skip).
+        if (!OpenGLManager::gl_skip("plate_logo")) {
+            if (m_partplate_list)
+                render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
+            else
+                render_logo(bottom);
+        }
         render_extruder_only_labels(bottom);
     }
 
-    render_icons(bottom, only_body, hover_id);
-    if (!force_background_color) {
-        render_only_numbers(bottom);
+    if (!OpenGLManager::gl_skip("plate_icons")) {
+        render_icons(bottom, only_body, hover_id);
+        if (!force_background_color) {
+            render_only_numbers(bottom);
+        }
     }
 
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -3054,6 +3398,9 @@ int PartPlate::load_gcode_from_file(const std::string& filename)
 		assert(m_tmp_gcode_path.empty());
 		m_tmp_gcode_path = filename;
 		m_gcode_result->filename = filename;
+		// The G-code is taken as it is in the 3MF: match the filament prices switch to the current
+		// preference first, so the next apply does not throw the loaded G-code away over it.
+		m_print->set_gcode_filament_prices(wxGetApp().app_config->get_bool("gcode_include_filament_prices"));
 		m_print->set_gcode_file_ready();
 
 		update_slice_result_valid_state(true);
@@ -3367,6 +3714,21 @@ void PartPlate::clear_manual_filament_map()
     clear_filament_map();
 }
 
+bool PartPlate::reset_filament_routing()
+{
+    bool changed = m_config.has("filament_map") || !m_dual_nozzle_confirm.empty();
+    // getInt(): a mode loaded from a 3MF is a ConfigOptionEnumGeneric.
+    if (const ConfigOption *mode = m_config.option("filament_map_mode");
+        mode != nullptr && (mode->getInt() == int(FilamentMapMode::fmmManual) || mode->getInt() == int(FilamentMapMode::fmmNozzleManual))) {
+        m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
+        changed = true;
+    }
+    clear_filament_map();
+    m_dual_nozzle_confirm.clear();
+    clear_dual_nozzle_sliced_for();
+    return changed;
+}
+
 std::vector<int> PartPlate::get_manual_filament_map() const
 {
     // getInt(): a plate config filled by apply() (3MF load) holds the mode as ConfigOptionEnumGeneric.
@@ -3446,7 +3808,10 @@ void PartPlate::on_filament_deleted(int filament_count, int filament_id)
 {
     if (m_config.has("filament_map")) {
         std::vector<int>& filament_maps = m_config.option<ConfigOptionInts>("filament_map")->values;
-        filament_maps.erase(filament_maps.begin() + filament_id);
+        // Orca #14055: the per-plate filament_map can be out of sync with the global filament
+        // count after a profile switch; erasing at/past end() is an out-of-bounds memmove.
+        if (filament_id >= 0 && filament_id < (int) filament_maps.size())
+            filament_maps.erase(filament_maps.begin() + filament_id);
     }
     update_first_layer_print_sequence_when_delete_filament(filament_id);
 }
@@ -3801,9 +4166,11 @@ void PartPlateList::release_icon_textures()
 			if (part.texture) {
 				part.texture->reset();
 				delete part.texture;
+				part.texture = nullptr; // load_bedtype_textures() keeps live textures across re-layouts
 			}
 			if (part.buffer) {
 				delete part.buffer;
+				part.buffer = nullptr;
 			}
 		}
 	}
@@ -3834,8 +4201,14 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx)
         const float margin     = float(WIPE_TOWER_AUTO_MARGIN) + brim_width;
         const float w          = float(footprint.width);
         const float d          = float(footprint.depth);
-        x = std::clamp(x, margin, std::max(margin, float(m_plate_width) - w - margin));
-        y = std::clamp(y, margin, std::max(margin, float(m_plate_depth) - d - margin));
+        // Dual-nozzle printers: the tower goes where both nozzles reach, like in Bambu Studio.
+        const BoundingBoxf box = prime_tower_placement_box(full_config, m_plate_width, m_plate_depth);
+        const float x_lo = float(box.min.x()) + margin, y_lo = float(box.min.y()) + margin;
+        x = std::clamp(x, x_lo, std::max(x_lo, float(box.max.x()) - w - margin));
+        y = std::clamp(y, y_lo, std::max(y_lo, float(box.max.y()) - d - margin));
+        // Orca #15146: the box still allows a corner a delta or hexagonal bed does not have, and the prime
+        // tower is validated against the real outline - pull it onto the bed before storing.
+        fit_prime_tower_onto_bed(full_config, x, y, w, d, brim_width, 0., WIPE_TOWER_AUTO_MARGIN);
     }
 
     ConfigOptionFloat wt_x_opt(x);
@@ -4020,6 +4393,9 @@ int PartPlateList::create_plate(bool adjust_position)
 		return -1;
 	int cols = compute_colum_count(new_index + 1);
 	int old_cols = compute_colum_count(new_index);
+	// Orca #14850: rebuild plate membership before the grid reflow moves instances with their plates
+	if (adjust_position && old_cols != cols)
+		reload_all_objects();
 
 	origin = compute_origin(new_index, cols);
 	plate = new PartPlate(this, origin, m_plate_width, m_plate_depth, m_plate_height, m_plater, m_model, true, printer_technology);
@@ -4091,8 +4467,12 @@ int PartPlateList::create_plate(bool adjust_position)
 
 int PartPlateList::duplicate_plate(int index)
 {
-    // create a new plate
+    if (index < 0 || index >= int(m_plate_list.size()))
+        return -1;
+    // create a new plate (none when the plate count is at its maximum)
     int new_plate_index = create_plate(true);
+    if (new_plate_index < 0)
+        return -1;
     PartPlate* old_plate = NULL;
     PartPlate* new_plate = NULL;
     old_plate = get_plate(index);
@@ -4101,21 +4481,30 @@ int PartPlateList::duplicate_plate(int index)
     // get the offset between plate centers
     Vec3d plate_to_plate_offset = new_plate->m_origin - old_plate->m_origin;
 
-    // iterate over all the objects in this plate
-    ModelObjectPtrs obj_ptrs = old_plate->get_objects_on_this_plate();
-    for (ModelObject* object : obj_ptrs){
+    // The plate holds (object, instance) pairs: group them per object, so that each object is
+    // copied once, keeping only the instances on this plate. Its instances on other plates are
+    // neither copied nor moved.
+    std::map<int, std::set<int>> instances_per_object;
+    for (const std::pair<int, int>& obj_inst : old_plate->obj_to_instance_set)
+        instances_per_object[obj_inst.first].insert(obj_inst.second);
+    for (const auto& [obj_id, instance_ids] : instances_per_object) {
         // copy and move the object to the same relative position in the new plate
-        ModelObject* object_copy = m_model->add_object(*object);
-        int new_obj_id = new_plate->m_model->objects.size() - 1;
+        ModelObject* object_copy = m_model->add_object(*m_model->objects[obj_id]);
+        for (int instance_id = int(object_copy->instances.size()) - 1; instance_id >= 0; --instance_id)
+            if (instance_ids.count(instance_id) == 0)
+                object_copy->delete_instance(instance_id);
+        int new_obj_id = m_model->objects.size() - 1;
         // go over the instances and pair with the object
         for (size_t new_instance_id = 0; new_instance_id < object_copy->instances.size(); new_instance_id++){
+            ModelInstance* instance = object_copy->instances[new_instance_id];
+            instance->set_offset(instance->get_offset() + plate_to_plate_offset);
             new_plate->obj_to_instance_set.emplace(std::pair(new_obj_id, new_instance_id));
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": duplicate object into plate: index_pair [%1%,%2%], obj_id %3%") % new_obj_id % new_instance_id % object_copy->id().id;
         }
     }
-    new_plate->translate_all_instance(plate_to_plate_offset);
     // update the plates
-    wxGetApp().obj_list()->reload_all_plates();
+    if (m_plater)
+        wxGetApp().obj_list()->reload_all_plates();
     return new_plate_index;
 }
 
@@ -4280,6 +4669,24 @@ void PartPlateList::delete_selected_plate()
 }
 
 //get a plate pointer by index
+bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType>& cur_bed_types)
+{
+    const std::string bed_type_key = "curr_bed_type";
+    bool              is_ok        = true;
+    for (PartPlate *plate : m_plate_list) {
+        if (plate == nullptr || !plate->config() || !plate->config()->has(bed_type_key))
+            continue;
+        const BedType bed_type = plate->config()->opt_enum<BedType>(bed_type_key);
+        if (bed_type == BedType::btDefault)
+            continue;
+        if (std::find(cur_bed_types.begin(), cur_bed_types.end(), bed_type) == cur_bed_types.end()) {
+            plate->set_bed_type(BedType::btDefault);
+            is_ok = false;
+        }
+    }
+    return is_ok;
+}
+
 PartPlate* PartPlateList::get_plate(int index)
 {
 	PartPlate* plate = NULL;
@@ -4501,6 +4908,9 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 		return -1;
 	}
 
+	// Orca #14850: rebuild plate membership before the plates (and their instances) are moved
+	reload_all_objects();
+
 	if (old_index < new_index)
 	{
 		delta = 1;
@@ -4709,6 +5119,11 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 
 	auto is_object_config_compatible_with_spiral_vase = [](ModelObject* object) {
 		const DynamicPrintConfig& config = object->config.get();
+		// The object's own stabilizer mode, else the process preset's.
+		const DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+		const DynamicPrintConfig& stabilizer_src = config.has("stabilizer_supports") ? config : global_config;
+		if (stabilizer_src.has("stabilizer_supports") && stabilizer_src.opt_enum<StabilizerMode>("stabilizer_supports") != smOff)
+			return false;
 		if (config.has("wall_loops") && config.opt_int("wall_loops") == 1 &&
 			config.has("top_shell_layers") && config.opt_int("top_shell_layers") == 0 &&
 			config.has("sparse_infill_density") && config.option<ConfigOptionPercent>("sparse_infill_density")->value == 0 &&
@@ -4799,6 +5214,19 @@ int PartPlateList::notify_instance_removed(int obj_id, int instance_id)
 	}
 
 	if (instance_id == -1) {
+		// The object's other instances go with it, and may sit on other plates: left in place,
+		// update_object_index below would renumber them onto the previous object.
+		std::set<int> other_instances;
+		for (PartPlate* p : m_plate_list)
+			for (const std::pair<int, int>& obj_inst : p->obj_to_instance_set)
+				if (obj_inst.first == obj_id)
+					other_instances.insert(obj_inst.second);
+		for (const std::pair<int, int>& obj_inst : unprintable_plate.obj_to_instance_set)
+			if (obj_inst.first == obj_id)
+				other_instances.insert(obj_inst.second);
+		for (int other_instance : other_instances)
+			notify_instance_removed(obj_id, other_instance);
+
 		//update all the obj_ids which is bigger
 		for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 		{
@@ -5224,7 +5652,7 @@ void PartPlateList::postprocess_bed_index_for_unselected(arrangement::ArrangePol
 }
 
 //postprocess an arrangement::ArrangePolygon, other instances are under locked states
-void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon)
+void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::ArrangePolygon& arrange_polygon, int plates_before)
 {
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": bed_idx %1%, locked_plate %2%, translation(x) %3%, (y) %4%") % arrange_polygon.bed_idx % arrange_polygon.locked_plate % unscale<double>(arrange_polygon.translation(X)) % unscale<double>(arrange_polygon.translation(Y));
 
@@ -5235,8 +5663,18 @@ void PartPlateList::postprocess_bed_index_for_current_plate(arrangement::Arrange
 	}
 	else if (arrange_polygon.bed_idx == 0)
 		arrange_polygon.bed_idx += m_current_plate;
-	else
+	else if (plates_before < 0)
 		arrange_polygon.bed_idx = m_plate_list.size();
+	else
+	{
+		// What did not fit the plate comes back on beds 1, 2, ..., each object at its place on its own bed.
+		// One plate per bed, after the existing ones: put on one place, the beds' objects lay on top of each other.
+		const int plate_index = plates_before + arrange_polygon.bed_idx - 1;
+		while ((int)m_plate_list.size() <= plate_index && create_plate(false) >= 0)
+			;
+		// Past the plate limit: beside the last plate, as before.
+		arrange_polygon.bed_idx = std::min(plate_index, (int)m_plate_list.size());
+	}
 
 	return;
 }
@@ -5764,15 +6202,16 @@ int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool ex
 	{
 		for (unsigned int i = (unsigned int)m_plate_list.size() - 1; i > 0; --i)
 		{
-			if (m_plate_list[i]->empty()
+			// A locked plate is left as it is, empty or not.
+			if (m_plate_list[i]->is_locked()) {
+				continue;
+			}
+			else if (m_plate_list[i]->empty()
 				|| !m_plate_list[i]->has_printable_instances())
 			{
 				//delete it
 				BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":delete plate %1% for empty") % i;
 				delete_plate(i);
-			}
-			else if (m_plate_list[i]->is_locked()) {
-				continue;
 			}
 			else
 			{
@@ -5856,6 +6295,8 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 						}
 						plate_data_item->is_support_used = print->is_support_used();
 						plate_data_item->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
+						// AdaptiveLayerMerge step 5: the 3MF writer derives Bambu's multi_nozzle_diameter_mode from it.
+						plate_data_item->uses_multiple_nozzle_diameters = print->uses_multiple_nozzle_diameters();
 					} else {
 						BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("print is null!");
 					}
@@ -5884,12 +6325,9 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							// for all of them told the printer every filament lived in the first nozzle
 							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
 							// live config and the emitted G-code are untouched.
-							const std::vector<int> identity_map =
-								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
+							const DynamicPrintConfig &full_config = print->full_print_config();
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								int group = 0;
-								if (info.id >= 0 && size_t(info.id) < identity_map.size())
-									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								const int group = identity_filament_group(full_config, info.id);
 								info.group_id = { group };
 								const size_t nozzle_idx = size_t(group);
 								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());
@@ -5951,6 +6389,11 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		if (index < 0) {
+			// create_plate() stops at MAX_PLATES_COUNT. The objects of the remaining plates stay in the model, off the plates.
+			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": the project has %1% plates, only %2% can be loaded") % plate_data_list.size() % MAX_PLATES_COUNT;
+			break;
+		}
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
@@ -6079,6 +6522,10 @@ void PartPlateList::print() const
 	return;
 }
 
+// ODR-used by boost::format in load_from_3mf_structure(); in-class
+// initialization of a static const integral is not a definition.
+const unsigned int PartPlateList::MAX_PLATES_COUNT;
+
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_cali_texture = false;
 
@@ -6159,11 +6606,52 @@ void PartPlateList::init_bed_type_info()
 	bed_texture_info[btPTE].parts.push_back(pte_part1);
 	bed_texture_info[btPTE].parts.push_back(pte_part2);
 
+	// The machine model's own art placement (Bambu Studio's bottom_texture_end_name / bottom_texture_rect /
+	// middle_texture_rect). The X2D sets all three: its 256 x 256 plate has a short front lip, so the dual-nozzle
+	// default tab below (45, -14.5, drawn for the H2D's deeper lip) hung off the front edge of its bed model.
+	std::string          bottom_end_name;
+	std::array<float, 4> bottom_rect{}, middle_rect{};
+	bool                 has_bottom_rect = false, has_middle_rect = false;
+	if (const PresetBundle *bundle = wxGetApp().preset_bundle) {
+		const Preset *printer = &bundle->printers.get_selected_preset();
+		if (!printer->is_system)
+			if (const Preset *parent = bundle->printers.get_preset_parent(*printer))
+				printer = parent;
+		if (const VendorProfile::PrinterModel *pm = PresetUtils::system_printer_model(*printer)) {
+			bottom_end_name = pm->bottom_texture_end_name;
+			has_bottom_rect = PresetUtils::parse_bed_texture_rect(pm->bottom_texture_rect, bottom_rect);
+			has_middle_rect = PresetUtils::parse_bed_texture_rect(pm->middle_texture_rect, middle_rect);
+		}
+	}
+	// "bbl_bed_pte_bottom" + "n" -> "bbl_bed_pte_bottom_n.svg", or "" when that art is not shipped (Bambu has no
+	// Cool Plate variant; the X2D does not take that plate).
+	auto bottom_art = [&bottom_end_name](const std::string &base) -> std::string {
+		if (bottom_end_name.empty())
+			return std::string();
+		const std::string name = base + "_" + bottom_end_name + ".svg";
+		boost::system::error_code ec;
+		return boost::filesystem::exists(boost::filesystem::path(resources_dir()) / "images" / name, ec) ? name : std::string();
+	};
+	struct BottomBase { BedType type; const char *base; };
+	const BottomBase bottom_bases[] = {
+		{ btSuperTack, "bbl_bed_st_bottom" }, { btPC, "bbl_bed_pc_bottom" }, { btPCT, "bbl_bed_pc_bottom" },
+		{ btEP, "bbl_bed_ep_bottom" },       { btPEI, "bbl_bed_pei_bottom" }, { btPTE, "bbl_bed_pte_bottom" },
+	};
+
 	auto  bed_ext     = get_extents(m_shape);
 	int   bed_width   = bed_ext.size()(0);
 	int   bed_height  = bed_ext.size()(1);
 	float base_width  = 256;
 	float base_height = 256;
+
+	if (!(m_extruder_areas.multi() && m_extruder_areas.has_exclusive_regions()) && !bottom_end_name.empty()) {
+		// Single-nozzle machine with its own bottom tab art (the P2S): same place, other file.
+		for (const BottomBase &b : bottom_bases) {
+			const std::string art = bottom_art(b.base);
+			if (!art.empty() && bed_texture_info[b.type].parts.size() > 1)
+				bed_texture_info[b.type].parts[1].filename = art;
+		}
+	}
 
 	// Dual-nozzle (H2D / H2C / X2D): the single-nozzle layout runs the plate name sideways down the left edge,
 	// straight over the left-nozzle-only strip and its label. Bambu Studio's dual-nozzle layout puts the name
@@ -6198,8 +6686,23 @@ void PartPlateList::init_bed_type_info()
 		for (const DualTextures &d : dual) {
 			bed_texture_info[d.type].reset();
 			bed_texture_info[d.type].parts.clear();
-			bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(middle_x, middle_y, middle_w, middle_h, d.middle));
-			bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(45, -14.5f, d.left_bottom_w, 8, d.left_bottom));
+			if (has_middle_rect)
+				bed_texture_info[d.type].parts.push_back(
+					BedTextureInfo::TexturePart(middle_rect[0], middle_rect[1], middle_rect[2], middle_rect[3], d.middle));
+			else
+				bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(middle_x, middle_y, middle_w, middle_h, d.middle));
+			if (!bottom_end_name.empty() && has_bottom_rect) {
+				// Bambu Studio (BedTextureInfo::apply_bottom_texture): the machine's own tab art at its own rect;
+				// none when that plate has no such art.
+				std::string art;
+				for (const BottomBase &b : bottom_bases)
+					if (b.type == d.type)
+						art = bottom_art(b.base);
+				if (!art.empty())
+					bed_texture_info[d.type].parts.push_back(
+						BedTextureInfo::TexturePart(bottom_rect[0], bottom_rect[1], bottom_rect[2], bottom_rect[3], art));
+			} else
+				bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(45, -14.5f, d.left_bottom_w, 8, d.left_bottom));
 		}
 		base_width  = float(bed_width);
 		base_height = float(bed_height);
@@ -6221,11 +6724,33 @@ void PartPlateList::load_bedtype_textures()
 {
 	if (PartPlateList::is_load_bedtype_textures) return;
 
-	init_bed_type_info();
 	GLint max_tex_size = OpenGLManager::get_gl_info().get_max_tex_size();
 	GLint logo_tex_size = (max_tex_size < 2048) ? max_tex_size : 2048;
+
+	// Ultra: a re-layout (bed size, plate shapes, extruder areas: every printer switch) only moves and
+	// scales the art; the rasters depend on nothing but the SVG file and logo_tex_size. Keep the loaded
+	// textures and hand each back to a new part that shows the same file, so only art that is new to
+	// this layout (dual-nozzle or machine-specific files) is rasterised. A texture that failed to load
+	// is not kept, so it is tried again.
+	BedTexturePool<GLTexture> kept;
+	for (int i = 0; i < (int) btCount; ++i)
+		for (auto &part : bed_texture_info[i].parts) {
+			if (part.texture != nullptr && part.texture->get_id() != 0 && m_bedtype_tex_size == logo_tex_size) {
+				kept.put(part.filename, part.texture);
+				part.texture = nullptr; // init_bed_type_info() resets the parts; this one is not deleted
+			}
+		}
+
+	init_bed_type_info();
+	int reused = 0, rasterised = 0;
 	for (int i = 0; i < (unsigned int)btCount; ++i) {
 		for (int j = 0; j < bed_texture_info[i].parts.size(); j++) {
+			if (GLTexture *tex = kept.take(bed_texture_info[i].parts[j].filename)) {
+				bed_texture_info[i].parts[j].texture = tex;
+				++reused;
+				continue;
+			}
+			++rasterised;
 			std::string filename = resources_dir() + "/images/" + bed_texture_info[i].parts[j].filename;
 			if (boost::filesystem::exists(filename)) {
 				PartPlateList::bed_texture_info[i].parts[j].texture = new GLTexture();
@@ -6237,6 +6762,13 @@ void PartPlateList::load_bedtype_textures()
 			}
 		}
 	}
+	// Art the new layout no longer shows.
+	for (GLTexture *tex : kept.drain()) {
+		tex->reset();
+		delete tex;
+	}
+	m_bedtype_tex_size = logo_tex_size;
+	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": bed-type textures reused " << reused << ", rasterised " << rasterised;
 	PartPlateList::is_load_bedtype_textures = true;
 }
 

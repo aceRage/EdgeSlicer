@@ -28,8 +28,6 @@
 
 // Enable rendering of objects using environment map
 #define ENABLE_ENVIRONMENT_MAP 0
-// Enable smoothing of objects normals
-#define ENABLE_SMOOTH_NORMALS 0
 // Enable rendering markers for options in preview as fixed screen size points
 #define ENABLE_FIXED_SCREEN_SIZE_POINT_MARKERS 1
 
@@ -61,6 +59,11 @@
 #define ENABLE_ENHANCED_PRINT_VOLUME_FIT (1 && ENABLE_2_4_0_BETA2)
 // Enable picking using raytracing
 #define ENABLE_RAYCAST_PICKING_DEBUG 0
+
+// Enable imgui debug dialog for new gcode viewer (using libvgcode, OrcaSlicer #10735)
+#define ENABLE_NEW_GCODE_VIEWER_DEBUG 0
+// Enable extension of tool position imgui dialog to show actual speed profile
+#define ENABLE_ACTUAL_SPEED_DEBUG 1
 
 
 #endif // _prusaslicer_technologies_h_

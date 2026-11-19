@@ -76,10 +76,10 @@
     "80"
   ],
   "cool_plate_temp": [
-    "0"
+    "35"
   ],
   "cool_plate_temp_initial_layer": [
-    "0"
+    "35"
   ],
   "default_filament_colour": [
     ""
@@ -94,7 +94,7 @@
     "1"
   ],
   "enable_pressure_advance": [
-    "1"
+    "0"
   ],
   "eng_plate_temp": [
     "0"
@@ -304,7 +304,7 @@
     "-1"
   ],
   "temperature_vitrification": [
-    "65"
+    "45"
   ],
   "textured_cool_plate_temp": [
     "40"

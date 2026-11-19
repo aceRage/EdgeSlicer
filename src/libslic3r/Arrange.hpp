@@ -4,6 +4,7 @@
 #include "ExPolygon.hpp"
 #include "PrintConfig.hpp"
 #include "Print.hpp"
+#include "ExtruderAreas.hpp"
 
 #define BED_SHRINK_SEQ_PRINT 5
 
@@ -136,6 +137,10 @@ struct ArrangeParams {
     float object_skirt_offset = 0;
     float nozzle_height = 0;
     float printable_height = 256.0;
+    // Orca: how far (scaled) the polygon of a prime tower compacted by "No sparse layers" was grown
+    // past the tower itself, or negative when the tower is not compacted.
+    coord_t compacted_tower_growth = -1;
+    float   clearance_dist_to_rod  = 0;
     Vec2d align_center{ 0.5,0.5 };
 
     ArrangePolygons excluded_regions;   // regions cant't be used
@@ -207,6 +212,21 @@ extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excl
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const CircleBed &bed, const ArrangeParams &params);
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const Polygon &bed, const ArrangeParams &params);
 extern template void arrange(ArrangePolygons &items, const ArrangePolygons &excludes, const InfiniteBed &bed, const ArrangeParams &params);
+
+// EdgeSlicer "Avoid nozzle reach zones": the strips of the bed only one nozzle reaches
+// (ExtruderAreas::only, from extruder_printable_area; H2D, H2C, X2D) as fixed virtual items on beds
+// 0 .. num_beds - 1, in the same form as PartPlateList::preprocess_exclude_areas() gives the bed
+// exclusion areas, so the arranged objects stay in the area every nozzle reaches. Empty for a
+// printer with fewer than two nozzle areas or no strip of its own.
+ArrangePolygons nozzle_reach_blockers(const ExtruderAreas &areas, int num_beds, coord_t inflation = 0);
+
+// The same option done by shrinking the bed instead: `bed` becomes its part every nozzle reaches
+// (ExtruderAreas::shared) when that is one polygon, which is how the H2D / H2C / X2D strips are,
+// and the packer then fills and centres on exactly that part as it does on a whole bed. As fixed
+// items the strips switch the packer to growing the pile around the bed centre, which left a
+// column short of the free width with a single stray object in it. Returns false, and leaves `bed`
+// as it is, when there is nothing to clip or the result is not one polygon (use the blockers then).
+bool clip_bed_to_nozzle_reach(Points &bed, const ExtruderAreas &areas);
 
 inline void arrange(ArrangePolygons &items, const Points &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }
 inline void arrange(ArrangePolygons &items, const BoundingBox &bed, const ArrangeParams &params = {}) { arrange(items, {}, bed, params); }

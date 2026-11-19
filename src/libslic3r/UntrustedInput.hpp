@@ -48,8 +48,13 @@ bool parse_url(const std::string &url, Url &out);
 // "printables.com.evil.tld" and "evilprintables.com" do not match "printables.com".
 bool host_is_or_under(const std::string &host, const std::string &domain);
 
-// IPv4 dotted quad (also the short and hex forms browsers accept), IPv6 literal, or a
-// localhost / *.localhost / *.local / *.lan / *.home.arpa / *.internal name.
+// Suffixes that mean the host is on this computer, the LAN, or a Tailscale tailnet.
+// Matched with host_is_or_under(): "home" matches "nas.home" but not "home.arpa".
+// is_local_or_ip_host() is the predicate; this list is the suffix half of it.
+const std::vector<std::string> &local_host_suffixes();
+
+// IPv4 dotted quad (also the short and hex forms browsers accept), IPv6 literal,
+// a single-label name, or a host under one of local_host_suffixes().
 bool is_local_or_ip_host(const std::string &host);
 
 // Page links on the model sites (the model page, not the file). http or https, no userinfo.
@@ -128,6 +133,15 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
 
 // The domains (each matching itself and its subdomains) check_model_download() allows.
 const std::vector<std::string> &download_allowlist();
+
+// Where a download that was already checked and allowed actually ended up. Redirects are followed
+// by curl, and the checks above only ever see the link they were given, so the address a transfer
+// ends on gets the same two refusals that do not need to know the intended site: it has to be
+// https, and it has to be a public host (not localhost, a LAN name or an IP address).
+// Returns "" when the target is acceptable, else the reason to refuse. Call it only on a URL that
+// has already been through check_model_download(); it does not look at the host allowlist or the
+// file extension, which a redirect target legitimately differs on (a CDN, a signed storage URL).
+std::string redirect_target_refusal(const std::string &url);
 
 // Model files a download may be saved as and opened: .3mf .stl .step .stp .obj .zip.
 bool has_model_extension(const std::string &file_name);
@@ -236,6 +250,11 @@ std::string archive_entry_leaf(const std::string &normalized);
 // (extraction into that directory is allowed). A symlink at the candidate's last component is
 // not followed, so a dest-file symlink can be replaced rather than written through.
 bool is_path_within_root(const boost::filesystem::path &root, const boost::filesystem::path &candidate);
+
+// For a name that will be appended to `root` (a preset name becoming <dir>/<name>.json): true if
+// it is non-empty, relative (no leading '/' or '\\', no drive prefix), has no ".." component
+// split on either separator, and root / rel_name still resolves inside root (Orca #15608).
+bool is_relative_name_within_root(const std::string &rel_name, const boost::filesystem::path &root);
 
 // expat's XML_GetBuffer / XML_ParseBuffer take an int length. An archive entry larger than
 // INT_MAX cannot be handed to those APIs without truncating the size (Orca #15958).

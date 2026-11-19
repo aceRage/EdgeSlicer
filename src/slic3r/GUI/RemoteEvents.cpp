@@ -128,6 +128,29 @@ static Event make_event(const PrinterState& p, const char* kind, const char* sev
     return e;
 }
 
+// A failure with a code and no text used to read "X stopped with a failure." and give the owner
+// nothing to act on, so the code is named when that is all there is. `was` is the printer as it
+// was while it printed (the job the sentence names); `cur` is what it says now (the reason).
+static Event failed_event(const PrinterState& cur, const PrinterState& was, const std::string& name)
+{
+    const std::string why = !cur.error_text.empty() ? ": " + cur.error_text
+                            : !cur.error_code.empty() ? " (error " + HMSQuery::pretty_code(cur.error_code) + ")."
+                                                      : ".";
+    Event e = make_event(cur, "failed", "error", name + " failed", name + " stopped with a failure" + job_phrase(was) + why);
+    e.code  = cur.error_code;
+    if (e.job.empty()) e.job = was.job; // the printer may already have dropped it
+    return e;
+}
+
+// A print the person stopped. Info, not a warning: they did it, so it is the quiet kind (it breaks
+// through to a phone only where that phone asked for cancels by name).
+static Event cancelled_event(const PrinterState& cur, const PrinterState& was, const std::string& name)
+{
+    Event e = make_event(cur, "cancelled", "info", name + " was stopped", "The print on " + name + " was cancelled" + job_phrase(was) + ".");
+    if (e.job.empty()) e.job = was.job;
+    return e;
+}
+
 static Event started_event(const PrinterState& p, const std::string& name)
 {
     Event e = make_event(p, "started", "info", name + " started printing", name + " started a print" + job_phrase(p) + ".");
@@ -204,6 +227,58 @@ static bool start_is_new(JobMemory& jm, const std::string& job, const std::strin
     return true;
 }
 
+// ---- how the job ended (the "ended" field) ----
+
+// Is this the job the cancel ended? Ids decide where both sides have one; otherwise the name; with
+// neither to compare the answer is yes (a printer that blanks its job name after a stop is still
+// on the stopped job - a new print takes the printer out of FAILED/idle, which clears it anyway).
+static bool is_ended_job(const JobMemory& jm, const std::string& job, const std::string& job_id)
+{
+    if (real_job_id(job_id) && real_job_id(jm.ended_job_id)) return job_id == jm.ended_job_id;
+    if (!job.empty() && !jm.ended_job.empty()) return job_key(job) == job_key(jm.ended_job);
+    return true;
+}
+
+// Called for every poll in which the printer can be seen. `cancel_event` is true when this poll
+// produced a "cancelled" for it (the hold that resolves into a cancel included). The stop is also
+// recognised straight from the printer's own FAILED + user-cancel code, so a watcher that first
+// saw the printer already stopped, or whose cancel event was a seeding poll, still remembers it.
+static void track_end(JobMemory& jm, const PrinterState& cur, bool cancel_event)
+{
+    if (jm.ended_cancel) {
+        if (busy_state(cur.state) || cur.state == "finished")
+            jm.ended_cancel = false; // a new print, or one that ran to the end
+        else if (!is_ended_job(jm, cur.job, cur.job_id))
+            jm.ended_cancel = false; // another job without passing through a busy state
+        else if (cur.state == "failed" && !cur.error_code.empty() && !cur.error_is_hms && !is_user_cancel_code(cur.error_code))
+            jm.ended_cancel = false; // the printer now names a real error for it
+    }
+    const bool stopped = cancel_event || cur.state == "cancelled" || (cur.state == "failed" && is_user_cancel_code(cur.error_code));
+    if (!stopped) return;
+    if (!jm.ended_cancel) {
+        jm.ended_cancel = true;
+        jm.ended_job    = cur.job;
+        jm.ended_job_id = real_job_id(cur.job_id) ? cur.job_id : std::string();
+    } else {
+        // The same stop seen again: fill in what the first sight lacked.
+        if (jm.ended_job.empty()) jm.ended_job = cur.job;
+        if (jm.ended_job_id.empty() && real_job_id(cur.job_id)) jm.ended_job_id = cur.job_id;
+    }
+}
+
+std::string ended_of(const Memory& mem, const std::string& printer_id, const std::string& state, const std::string& job,
+                     const std::string& job_id, const std::string& error_code)
+{
+    if (busy_state(state) || state == "finished") return std::string();
+    // The printer says so itself right now: no memory needed.
+    if (state == "failed" && is_user_cancel_code(error_code)) return "cancelled";
+    auto it = mem.jobs.find(printer_id);
+    if (it == mem.jobs.end() || !it->second.ended_cancel) return std::string();
+    if (!is_ended_job(it->second, job, job_id)) return std::string();
+    if (state == "failed" && !error_code.empty()) return std::string(); // a different, real print_error
+    return "cancelled";
+}
+
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
 {
     return step(mem, now, cooldown_ms, nullptr);
@@ -264,7 +339,9 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
                     it->second = now.at; // just went missing
                 ++it;
             }
-            error_is_new = !cur.error_code.empty() && held.count(cur.error_code) == 0;
+            // A cancel is not an error: the person did it. Its code is held like any other (so it
+            // cannot be announced later either) but it never gets an "error" event.
+            error_is_new = !cur.error_code.empty() && held.count(cur.error_code) == 0 && !is_user_cancel_code(cur.error_code);
             for (const std::string& c : present) held[c] = 0;
         }
         auto                prev_it = mem.last.printers.find(kv.first);
@@ -276,12 +353,40 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         // The job memory is deliberately NOT touched here: "I cannot see it" must leave what the
         // printer was last known to be doing exactly as it was, or a printer that blinks offline
         // and comes back mid-print announces its start a second time.
-        if (no_information(cur) || prev_it == mem.last.printers.end()) continue;
+        if (no_information(cur)) continue;
+        if (prev_it == mem.last.printers.end() || no_information(prev_it->second)) {
+            // Only seeding, no event - but how a stop ended is remembered from the first sight.
+            track_end(mem.jobs[kv.first], cur, false);
+            continue;
+        }
         const PrinterState& prev = prev_it->second;
-        if (no_information(prev)) continue;
 
         const std::string name = cur.name.empty() ? cur.id : cur.name;
         JobMemory&        jm   = mem.jobs[kv.first];
+        const size_t      out_before = out.size();
+
+        // A failure that was held back for its reason (error_may_follow): the reason has come, or
+        // the window is over, or the printer has moved on - say what happened now.
+        //
+        // The reason is the printer's print_error. An HMS fault on its own (error_is_hms) is not
+        // it: a stop raises one a few seconds before the "task was canceled" print_error, so a
+        // code of that kind keeps the hold going exactly like no code at all.
+        auto hold_it = mem.holds.find(kv.first);
+        if (hold_it != mem.holds.end()) {
+            const bool still_failed = cur.state == "failed";
+            if (still_failed && (cur.error_code.empty() || (cur.error_may_follow && cur.error_is_hms)) &&
+                now.at - hold_it->second.at < FAIL_SETTLE_MS) {
+                // Still no reason, still inside the window: keep waiting.
+            } else {
+                PrinterState was = prev;
+                was.job          = hold_it->second.job;
+                mem.holds.erase(hold_it);
+                if (still_failed && is_user_cancel_code(cur.error_code))
+                    out.push_back(cancelled_event(cur, was, name));
+                else
+                    out.push_back(failed_event(cur, was, name));
+            }
+        }
 
         // A printer error, whatever the print state is doing: a new code, or a code where there was
         // none. Bambu's HMS text and Klipper's own message both arrive here as error_text.
@@ -289,7 +394,13 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         // Once per occurrence: a code that is already held - still up, or back within
         // ERROR_CLEAR_MS of going missing - is the same occurrence, however many times the printer
         // re-sends it or another code takes the top spot in between.
-        if (error_is_new) {
+        //
+        // Not while the failure itself is waiting for its reason (an HMS fault is all there is so
+        // far): that fault is what the failure will carry if it turns out to be one, and if the
+        // reason is a cancel it is the tail of the stop and not news.
+        const bool failure_pending = cur.state == "failed" && cur.error_may_follow && cur.error_is_hms &&
+                                     (mem.holds.count(kv.first) != 0 || prev.state != "failed");
+        if (error_is_new && !failure_pending) {
             // error_text already carries the code when the text is unknown (describe_error), so the
             // bare-code spelling is only reached by a source that supplies neither - a relayed hub
             // or a Klipper printer that named a code and said nothing about it.
@@ -320,17 +431,22 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
             } else if (cur.state == "finished" && busy_state(prev.state)) {
                 out.push_back(make_event(cur, "finished", "info", name + " finished", name + " finished the print" + job_phrase(prev) + "."));
             } else if (cur.state == "failed") {
-                // A failure with a code and no text used to read "X stopped with a failure." and
-                // give the owner nothing to act on, so the code is named when that is all there is.
-                const std::string why = !cur.error_text.empty() ? ": " + cur.error_text
-                                        : !cur.error_code.empty() ? " (error " + HMSQuery::pretty_code(cur.error_code) + ")."
-                                                                  : ".";
-                Event e = make_event(cur, "failed", "error", name + " failed",
-                                     name + " stopped with a failure" + job_phrase(prev) + why);
-                e.code  = cur.error_code;
-                out.push_back(e);
+                if (is_user_cancel_code(cur.error_code)) {
+                    // gcode_state FAILED with the printer's "task was cancelled" code: the person
+                    // stopped it. A cancel, and never a failure.
+                    if (busy_state(prev.state)) out.push_back(cancelled_event(cur, prev, name));
+                } else if (jm.terminal == "cancelled" && now.at - jm.terminal_at < CANCEL_TAIL_MS && !busy_state(prev.state)) {
+                    // The tail of a stop already announced as a cancel (the printer flickered
+                    // through idle and said FAILED again): not a second event.
+                } else if (cur.error_may_follow && (cur.error_code.empty() || cur.error_is_hms)) {
+                    // FAILED with no reason yet (or only an HMS fault, which is not the reason).
+                    // The reason follows in a later push; wait for it.
+                    mem.holds[kv.first] = { now.at, prev.job };
+                } else {
+                    out.push_back(failed_event(cur, prev, name));
+                }
             } else if (cur.state == "cancelled" && busy_state(prev.state)) {
-                out.push_back(make_event(cur, "cancelled", "warning", name + " was stopped", "The print on " + name + " was cancelled" + job_phrase(prev) + "."));
+                out.push_back(cancelled_event(cur, prev, name));
             }
         } else if (cur.state == "printing" && !cur.job.empty() && cur.job != prev.job) {
             // Straight from one job into the next without passing through an idle state. Only when
@@ -348,6 +464,18 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
             jm.terminal_at = now.at;
             jm.announced   = false;
         }
+        // A stop is remembered as a cancel, whatever word the printer used for it (Bambu says
+        // FAILED), so a failed that trails it is told from a print that really failed.
+        bool cancel_event = false;
+        for (size_t i = out_before; i < out.size(); ++i)
+            if (out[i].kind == "cancelled") {
+                jm.terminal    = "cancelled";
+                jm.terminal_at = now.at;
+                jm.announced   = false;
+                cancel_event   = true;
+            }
+        // How the job ended, for the "ended" field: kept after the printer drops its print_error.
+        track_end(jm, cur, cancel_event);
     }
 
     // A printer that fails usually sets its error code in the same breath, and the failure event
@@ -392,6 +520,8 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         it = now.printers.count(it->first) ? std::next(it) : mem.last_raw.erase(it);
     for (auto it = mem.codes.begin(); it != mem.codes.end();)
         it = now.printers.count(it->first) ? std::next(it) : mem.codes.erase(it);
+    for (auto it = mem.holds.begin(); it != mem.holds.end();)
+        it = now.printers.count(it->first) ? std::next(it) : mem.holds.erase(it);
     mem.last = now;
     return kept;
 }
@@ -416,6 +546,8 @@ static PrinterState state_of_json(const json& j)
     p.error_code = j.value("error_code", std::string());
     p.error_text = j.value("error_text", std::string());
     p.job_id     = j.value("job_id", std::string());
+    p.error_may_follow = j.value("error_may_follow", false);
+    p.error_is_hms     = j.value("error_is_hms", false);
     for (const json& c : j.value("active_codes", json::array()))
         if (c.is_string()) p.active_codes.push_back(c.get<std::string>());
     // A snapshot that names a code but no text gets the printer's own sentence, filled in exactly
@@ -484,7 +616,7 @@ static std::string klipper_state(const std::string& s)
     if (s == "paused") return "paused";
     if (s == "complete") return "finished";
     if (s == "error") return "failed";
-    if (s == "cancelled") return "cancelled";
+    if (s == "cancelled" || s == "canceled") return "cancelled";
     if (s == "standby") return "idle";
     if (s.empty()) return "";
     return "idle";
@@ -555,6 +687,9 @@ static void snapshot_bambu(Snapshot& s)
         p.job       = m->subtask_name;
         p.stage_curr = m->stage_curr;
         p.job_id     = m->job_id_;
+        // gcode_state FAILED and the print_error behind it travel in separate pushes; a stop the
+        // person asked for shows as the first and then, seconds later, the second.
+        p.error_may_follow = p.state == "failed" && m->print_error == 0;
         try {
             p.stage = m->get_curr_stage().ToUTF8().data();
         } catch (...) {}
@@ -572,7 +707,8 @@ static void snapshot_bambu(Snapshot& s)
             // a notification. HMS_COMMON and HMS_INFO are the printer's chatter and stay off.
             for (HMSItem& item : m->hms_list) {
                 if (item.msg_level != HMS_FATAL && item.msg_level != HMS_SERIOUS) continue;
-                p.error_code = item.get_long_error_code();
+                p.error_code   = item.get_long_error_code();
+                p.error_is_hms = true; // not the print_error: a stop's reason may still follow
                 if (HMSQuery* q = wxGetApp().get_hms_query())
                     p.error_text = q->describe_error(m->dev_id, p.error_code).ToUTF8().data();
                 break;
@@ -704,8 +840,18 @@ static void snapshot_hosts(Snapshot& s, const std::vector<RemoteControl::HostTar
     try {
         for (const SnapmakerLan::Device& d : SnapmakerLan::devices()) lan.push_back(SnapmakerLan::base_url(d));
     } catch (...) {}
+    // An Elegoo printer the preset's print host points at is usually also one of the devices (ph:):
+    // one printer, one event, under the device's stable id.
+    std::vector<std::string> elegoo_devices;
     for (const RemoteControl::HostTarget& t : targets_in)
-        if (std::find(lan.begin(), lan.end(), t.base) == lan.end()) targets.push_back(t);
+        if (t.host_type == "elegoolink" && t.id.compare(0, 3, "ph:") == 0) elegoo_devices.push_back(t.base);
+    for (const RemoteControl::HostTarget& t : targets_in) {
+        if (std::find(lan.begin(), lan.end(), t.base) != lan.end()) continue;
+        if (t.host_type == "elegoolink" && t.id == "host" &&
+            std::find(elegoo_devices.begin(), elegoo_devices.end(), t.base) != elegoo_devices.end())
+            continue;
+        targets.push_back(t);
+    }
     if (targets.empty()) return;
     json printers = json::array();
     for (const RemoteControl::HostTarget& t : targets) printers.push_back(json { { "id", t.id } });
@@ -718,11 +864,14 @@ static void snapshot_hosts(Snapshot& s, const std::vector<RemoteControl::HostTar
         const json&  e = printers[i];
         PrinterState p;
         p.id   = targets[i].id;
-        p.name = targets[i].base.empty() ? targets[i].id : targets[i].base;
+        p.name = !targets[i].name.empty() ? targets[i].name : (targets[i].base.empty() ? targets[i].id : targets[i].base);
         p.kind = targets[i].id == "connect" ? "connect" : "printhost";
         p.raw_state = e.value("print_status", std::string());
         p.state     = klipper_state(p.raw_state);
-        p.job       = e.value("stage", std::string()); // fill_from_print_stats puts the file name there
+        // fill_from_print_stats puts the file name in `stage`; an Elegoo row has it in `task` and its
+        // step ("Preheating") in `stage`.
+        p.job       = e.value("task", std::string());
+        if (p.job.empty()) p.job = e.value("stage", std::string());
         // describe_hosts leaves print_status off entirely for an address that did not answer as a
         // Moonraker printer, and that is exactly the case where nothing may be inferred.
         p.online    = e.contains("print_status");
@@ -792,6 +941,15 @@ json recent(int since)
     }
     out["watcher"] = w;
     return out;
+}
+
+std::string ended_bambu(const std::string& printer_id, const std::string& print_status, const std::string& job,
+                        const std::string& job_id, const std::string& error_code)
+{
+    // The watcher's memory lives under the same lock the worker steps it under. The caller is the
+    // GUI thread building a status row; the lock is held for a map lookup.
+    std::lock_guard<std::mutex> lock(s_mutex);
+    return ended_of(s_memory, printer_id, bambu_state(print_status), job, job_id, error_code);
 }
 
 void stop() { s_stop = true; }

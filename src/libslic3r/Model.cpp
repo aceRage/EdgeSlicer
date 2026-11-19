@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/GLTF.hpp"
@@ -26,6 +27,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#ifdef _WIN32
+#include <boost/nowide/convert.hpp>
+#endif
 #include <boost/nowide/iostream.hpp>
 
 #include "SVG.hpp"
@@ -48,6 +52,18 @@
 #define _L(s) Slic3r::I18N::translate(s)
 
 namespace Slic3r {
+bool CutConnectorAttributes::operator==(const CutConnectorAttributes& other) const
+{
+    return type == other.type && style == other.style && shape == other.shape;
+}
+
+bool CutConnector::operator==(const CutConnector& other) const
+{
+    return pos == other.pos && rotation_m.matrix() == other.rotation_m.matrix() && radius == other.radius && height == other.height &&
+           radius_tolerance == other.radius_tolerance && height_tolerance == other.height_tolerance && z_angle == other.z_angle &&
+           attribs == other.attribs && flexi == other.flexi && pushfit == other.pushfit && tac_joint == other.tac_joint;
+}
+
 const std::vector<std::string> CONST_FILAMENTS = {
     "", "4", "8", "0C", "1C", "2C", "3C", "4C", "5C", "6C", "7C", "8C", "9C", "AC", "BC", "CC", "DC",
 }; // 5                           10                            15    16
@@ -94,6 +110,7 @@ Model& Model::assign_copy(const Model &rhs)
     // BBS: for design info
     this->design_info = rhs.design_info;
     this->model_info = rhs.model_info;
+    this->pricing = rhs.pricing;
     this->stl_design_id = rhs.stl_design_id;
     this->stl_design_country = rhs.stl_design_country;
     this->profile_info = rhs.profile_info;
@@ -105,6 +122,7 @@ Model& Model::assign_copy(const Model &rhs)
 
     // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
     this->image_assets = rhs.image_assets;
+    this->showcase     = rhs.showcase;
 
     return *this;
 }
@@ -145,6 +163,7 @@ Model& Model::assign_copy(Model &&rhs)
     this->next_object_backup_id = rhs.next_object_backup_id;
     this->design_info = rhs.design_info;
     rhs.design_info.reset();
+    this->pricing = std::move(rhs.pricing);
     this->model_info = rhs.model_info;
     rhs.model_info.reset();
     this->profile_info = rhs.profile_info;
@@ -152,6 +171,8 @@ Model& Model::assign_copy(Model &&rhs)
     // Image Fill (Phase 2): move the image store with everything else.
     this->image_assets = std::move(rhs.image_assets);
     rhs.image_assets.clear();
+    this->showcase = std::move(rhs.showcase);
+    rhs.showcase.clear();
     return *this;
 }
 
@@ -279,6 +300,23 @@ Model Model::read_from_file(const std::string&                                  
     else if (boost::algorithm::iends_with(input_file, ".obj")) {
         ObjInfo                 obj_info;
         result = load_obj(input_file.c_str(), &model, obj_info, message);
+        // Keep the model's own UV channel on the volume, whatever the colour import then does with
+        // the mesh: it is what TextureProjectionMethod::ModelUV maps a texture-displacement layer
+        // through, so a model that arrives with a UV layout is textured on that layout instead of on
+        // a fresh unwrap. load_obj() fills obj_info.uvs per face of the mesh it built, in the same
+        // order (and only when every face named a known material, hence the size check). V is flipped
+        // on the way in, to the convention DecodedHeightTexture samples in.
+        if (result && !obj_info.uvs.empty() && !model.objects.empty() && !model.objects.back()->volumes.empty()) {
+            ModelVolume                &volume = *model.objects.back()->volumes[0];
+            const indexed_triangle_set &its    = volume.mesh().its;
+            if (obj_info.uvs.size() == its.indices.size()) {
+                volume.texture_uv.resize(its.indices.size() * 3);
+                for (size_t fi = 0; fi < obj_info.uvs.size(); ++fi)
+                    for (int k = 0; k < 3; ++k)
+                        volume.texture_uv[fi * 3 + size_t(k)] =
+                            Vec2f(obj_info.uvs[fi][size_t(k)].x(), 1.f - obj_info.uvs[fi][size_t(k)].y());
+            }
+        }
         if (result){
             unsigned char first_extruder_id;
             if (obj_info.vertex_colors.size() > 0) {
@@ -297,13 +335,38 @@ Model Model::read_from_file(const std::string&                                  
                         result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
                     }
                 }
-            } /*else if (obj_info.has_uv_png && obj_info.uvs.size() > 0) {
-                boost::filesystem::path full_path(input_file);
-                std::string             obj_directory = full_path.parent_path().string();
-                obj_info.obj_dircetory = obj_directory;
-                result = false;
-                message = _L("Importing obj with png function is developing.");
-            }*/
+            } else if (obj_info.has_uv_png && objFn && !model.objects.empty() &&
+                       model.objects.back()->volumes.size() == 1 &&
+                       obj_info.uvs.size() == model.objects.back()->volumes[0]->mesh().its.indices.size() &&
+                       obj_info.face_colors.size() == obj_info.uvs.size()) {
+                // ImageMap phase 5d: a textured OBJ (an mtl map_Kd image). Sample the image per
+                // triangle and per sub-facet through the OBJ's own UVs, then take the path a glTF
+                // base colour texture takes: the colour dialog picks the filaments, and the
+                // ImageFill service decides each sub-facet among them.
+                std::vector<std::string> face_texture(obj_info.uvs.size());
+                for (const auto &[face, png] : obj_info.uv_map_pngs)
+                    if (face >= 0 && size_t(face) < face_texture.size())
+                        face_texture[size_t(face)] = png;
+                const int         depth = 2;   // 16 samples a triangle, as for glTF
+                std::vector<RGBA> face_colors, sub_face_colors;
+                std::string       texture_warning;
+                const bool sampled = sample_obj_textures(boost::filesystem::path(input_file).parent_path().string(),
+                                                         face_texture, obj_info.uvs, obj_info.face_colors, depth,
+                                                         face_colors, sub_face_colors, texture_warning);
+                if (!texture_warning.empty() && import_warning != nullptr)
+                    *import_warning = texture_warning;
+                if (!sampled)
+                    face_colors = obj_info.face_colors;   // the materials' own colours, as before
+                std::vector<unsigned char> face_filament_ids;
+                objFn(face_colors, obj_info.is_single_mtl && !sampled, face_filament_ids, first_extruder_id);
+                if (!face_filament_ids.empty()) {
+                    result = sampled && Model::import_multi_volume_face_color_deal(face_filament_ids, face_colors,
+                                                                                   sub_face_colors, depth,
+                                                                                   first_extruder_id, &model);
+                    if (!result)
+                        result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
+                }
+            }
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".svg"))
@@ -430,7 +493,7 @@ Model Model::read_from_file(const std::string&                                  
 // BBS: backup & restore
 // Loading model from a file (3MF or AMF), not from a simple geometry file (STL or OBJ).
 Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, En3mfType& out_file_type, LoadStrategy options,
-        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project)
+        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project, bool *is_bambu_studio)
 {
     assert(config != nullptr);
     assert(config_substitutions != nullptr);
@@ -448,7 +511,7 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
         } else {
             // BBS: add part plate related logic
             // BBS: backup & restore
-            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project);
+            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project, 0, is_bambu_studio);
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".zip.amf"))
@@ -917,6 +980,68 @@ void Model::duplicate_objects_grid(size_t x, size_t y, coordf_t dist)
     }
 }
 
+void Model::rotate_and_center_objects(double angle_z)
+{
+    // The common center of the placed objects, taken before anything changes. Objects without instances lie in the
+    // file's coordinates and turn around its origin.
+    BoundingBoxf3 placed_bb;
+    for (const ModelObject *object : this->objects)
+        for (size_t i = 0; i < object->instances.size(); ++i)
+            placed_bb.merge(object->instance_bounding_box(i));
+    const Vec3d center = placed_bb.defined ? Vec3d(placed_bb.center().x(), placed_bb.center().y(), 0.) : Vec3d::Zero();
+
+    if (angle_z != 0.) {
+        const Transform3d turn          = Geometry::rotation_transform(angle_z * Vec3d::UnitZ());
+        const Matrix3d    rotation      = turn.linear();
+        const Transform3d around_center = Geometry::translation_transform(center) * turn * Geometry::translation_transform(-center);
+        for (ModelObject *object : this->objects) {
+            // The volumes are shared by all instances, so they can take the rotation only if it commutes with the
+            // linear part (rotation, scale, mirror) of every instance; otherwise the instances take it.
+            // The tolerance only absorbs rounding: the instances' path is exact, so doubtful cases go there.
+            const auto commutes_with_turn = [&rotation](const ModelInstance *instance) {
+                const Matrix3d linear   = instance->get_matrix_no_offset().linear();
+                const double   residual = (linear * rotation - rotation * linear).cwiseAbs().maxCoeff();
+                return residual <= 1e-9 * std::max(1., linear.cwiseAbs().maxCoeff());
+            };
+            const bool commutes = std::all_of(object->instances.begin(), object->instances.end(), commutes_with_turn);
+            if (commutes) {
+                // Each volume turns around the object's origin together with its offset, so a multi-part object keeps
+                // its shape.
+                for (ModelVolume *volume : object->volumes)
+                    volume->set_transformation(turn * volume->get_matrix());
+                for (ModelInstance *instance : object->instances)
+                    instance->set_offset(center + rotation * (instance->get_offset() - center));
+            } else {
+                for (ModelInstance *instance : object->instances)
+                    instance->set_transformation(Geometry::Transformation(around_center * instance->get_matrix()));
+            }
+            object->invalidate_bounding_box();
+        }
+    }
+
+    for (ModelObject *object : this->objects) {
+        const BoundingBoxf3 bb = object->full_raw_mesh_bounding_box();
+        if (!bb.defined)
+            continue;
+        Vec3d shift = -bb.center();
+        if (object->instances.empty()) {
+            // Not placed yet: the shift is recorded for the parts merging and export, as center_around_origin() does.
+            // Z stays for the multi-part check, and the object is centered in full when it is placed.
+            shift.z() = 0.;
+            object->translate(shift);
+            object->origin_translation += shift;
+        } else {
+            object->translate(shift);
+            // The instances take the opposite shift, so the object stays where it is. origin_translation records only
+            // centering the instances do not compensate, so it does not change.
+            for (ModelInstance *instance : object->instances)
+                instance->set_offset(instance->get_offset() - instance->get_matrix_no_offset().linear() * shift);
+        }
+        object->invalidate_bounding_box();
+    }
+}
+
+
 bool Model::looks_like_multipart_object() const
 {
     if (this->objects.size() <= 1)
@@ -1124,43 +1249,71 @@ std::string Model::get_auxiliary_file_temp_path()
 }
 
 // BBS: backup dir
+// A fresh backup folder for a model under parent, named by date, pid and model id.
+static std::string new_backup_path(const std::string &parent, size_t model_id)
+{
+    std::time_t t = std::time(0);
+    std::tm* now_time = std::localtime(&t);
+    std::stringstream buf;
+    buf << "/snapmaker_orca_model/";
+    buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
+    buf << get_current_pid() << "#";
+    buf << model_id;
+    return boost::filesystem::path(parent).string() + buf.str();
+}
+
 std::string Model::get_backup_path()
 {
+    bool generated = false;
     if (backup_path.empty())
     {
-        auto pid = get_current_pid();
-        boost::filesystem::path parent_path(temporary_dir());
-        std::time_t t = std::time(0);
-        std::tm* now_time = std::localtime(&t);
-        std::stringstream buf;
-        buf << "/snapmaker_orca_model/";
-        buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
-        buf << pid << "#";
-        buf << this->id().id;
-
-        backup_path = parent_path.string() + buf.str();
+        backup_path = new_backup_path(temporary_dir(), this->id().id);
+        generated = true;
         BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, backup_path empty, set to %3%")%this%this->id().id%backup_path;
-        boost::filesystem::path temp_path(backup_path);
-        if (boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
-            boost::filesystem::remove_all(temp_path);
-        }
     }
-    boost::filesystem::path temp_path(backup_path);
-    try {
-        if (!boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/3D/Objects");
-            BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/Metadata");
-            BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
-            save_string_file(backup_path + "/lock.txt",
-                boost::lexical_cast<std::string>(get_current_pid()));
+    auto create_backup_dirs = [this, generated]() -> bool {
+        boost::filesystem::path temp_path(backup_path);
+        try {
+            if (generated && boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
+                boost::filesystem::remove_all(temp_path);
+            }
+            if (!boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/3D/Objects");
+                BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/Metadata");
+                BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
+                save_string_file(backup_path + "/lock.txt",
+                    boost::lexical_cast<std::string>(get_current_pid()));
+            }
+            return true;
+        } catch (std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+            return false;
         }
-    } catch (std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+    };
+    if (!create_backup_dirs() && generated) {
+        // temporary_dir() is unset or not writable (unset, the path is "/snapmaker_orca_model", read-only
+        // on macOS). The 3MF importer extracts the project settings into this folder, so fall back to the
+        // system temp folder rather than hand out one nothing can be written to.
+        boost::system::error_code ec;
+        const boost::filesystem::path system_temp = boost::filesystem::temp_directory_path(ec);
+        if (!ec && !system_temp.empty()) {
+#ifdef _WIN32
+            // Wide path to UTF-8: path::string() is a narrow ACP conversion on Windows and mangles a
+            // non-ASCII %TEMP% (an accented user name). wstring() can throw under a C locale on POSIX,
+            // so this stays Windows only.
+            const std::string system_temp_utf8 = boost::nowide::narrow(system_temp.wstring());
+#else
+            const std::string system_temp_utf8 = system_temp.string();
+#endif
+            backup_path = new_backup_path(system_temp_utf8, this->id().id);
+            BOOST_LOG_TRIVIAL(warning) << boost::format("model %1%, id %2%, backup path falls back to %3%")%this%this->id().id%backup_path;
+            create_backup_dirs();
+        }
     }
 
     return backup_path;
@@ -1220,6 +1373,7 @@ void Model::load_from(Model& model)
     stl_design_country = model.stl_design_country;
     model_info  = model.model_info;
     profile_info  = model.profile_info;
+    pricing = model.pricing;
     mk_name = model.mk_name;
     mk_version = model.mk_version;
     md_name = model.md_name;
@@ -1297,6 +1451,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     //BBS: add module name
     this->module_name                 = rhs.module_name;
     this->input_file                  = rhs.input_file;
+    this->layerling_design            = rhs.layerling_design;
     // Copies the config's ID
     this->config                      = rhs.config;
     assert(this->config.id() == rhs.config.id());
@@ -1305,6 +1460,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->brim_points                 = rhs.brim_points;
     this->layer_config_ranges         = rhs.layer_config_ranges;
+    this->height_colour_patterns      = rhs.height_colour_patterns;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
@@ -1340,6 +1496,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     //BBS: add module name
     this->module_name                 = std::move(rhs.module_name);
     this->input_file                  = std::move(rhs.input_file);
+    this->layerling_design            = std::move(rhs.layerling_design);
     // Moves the config's ID
     this->config                      = std::move(rhs.config);
     assert(this->config.id() == rhs.config.id());
@@ -1348,6 +1505,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->brim_points                 = std::move(brim_points);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
+    this->height_colour_patterns      = std::move(rhs.height_colour_patterns);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
@@ -1493,6 +1651,13 @@ ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, Triang
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
+    // Airbrush P3 (A4): the boolean drops the paint, but the colour field is position-keyed, so the
+    // spray comes back on the result where it still has surface (over no other paint, as before).
+    if (old_volume->airbrush_field && new_volume->is_model_part()) {
+        const TriangleSelector::TriangleSplittingData none;
+        Airbrush::airbrush_carry_field(*new_volume, *old_volume->airbrush_field, old_volume->mesh().its, old_volume->mmu_segmentation_facets.get_data(),
+                                       new_volume->get_matrix().inverse() * old_volume->get_matrix(), &none);
+    }
 
     // The new volume takes the source's slot; the source is deleted.
     std::swap(this->volumes[src_idx], this->volumes.back());
@@ -1805,6 +1970,9 @@ indexed_triangle_set ModelObject::raw_indexed_triangle_set() const
             size_t j = out.indices.size();
             append(out.vertices, v->mesh().its.vertices);
             append(out.indices,  v->mesh().its.indices);
+            // Orca: Point the volume's triangles at its own vertices, which follow those of the volumes before it.
+            for (size_t k = j; k < out.indices.size(); ++ k)
+                out.indices[k] += stl_triangle_vertex_indices::Constant(int(i));
             const Transform3d& m = v->get_matrix();
             for (; i < out.vertices.size(); ++ i)
                 out.vertices[i] = (m * out.vertices[i].cast<double>()).cast<float>().eval();
@@ -2102,6 +2270,8 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->seam_facets.assign(volume->seam_facets);
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
+            // Airbrush P3 (A4): same triangles, same field; a unit conversion below re-bakes it.
+            vol->airbrush_field = volume->airbrush_field;
 
             // Perform conversion only if the target "imperial" state is different from the current one.
             // This check supports conversion of "mixed" set of volumes, each with different "imperial" state.
@@ -2218,6 +2388,81 @@ void ModelVolume::reset_extra_facets()
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
+    // Airbrush P3 (A4): the colour field goes with the paint it was baked into. A caller that keeps
+    // the paint (restore_painting(), Cut::finalize()) carries the field over again.
+    this->airbrush_field.reset();
+    // Texture-displacement paint data has no remap-across-topology-change support yet (see
+    // build_texture_displacement()'s documented limitation), so it must be dropped here rather
+    // than left referring to a mesh that no longer matches it.
+    for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+        this->texture_displacement_facet(i).reset();
+    // Same reasoning for the model's own UV channel: it is indexed by triangle, so against a mesh
+    // this no longer matches it would map the texture by another mesh's triangle numbering. A caller
+    // that can carry it across - see transfer_uv_channel() - puts it back after this.
+    this->reset_texture_uv();
+}
+
+// OrcaSlicer #13472 (Keep painting after cut), merge 1c0d0b89cc: save the painting of a model
+// part before its mesh is replaced, then remap it onto the new mesh by spatial lookup.
+std::optional<TriangleSelector::SavedPainting> ModelVolume::save_painting() const
+{
+    if (is_any_painted() && is_model_part() && !mesh().empty()) {
+        TriangleSelector::SavedPainting sp;
+        sp.mesh      = mesh();
+        sp.supported = supported_facets.get_data();
+        sp.seam      = seam_facets.get_data();
+        sp.mmu       = mmu_segmentation_facets.get_data();
+        sp.fuzzy     = fuzzy_skin_facets.get_data();
+        sp.airbrush_field = airbrush_field;
+        return sp;
+    }
+
+    return {};
+}
+
+void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, const bool keep_existing_paint)
+{
+    if (!keep_existing_paint) {
+        reset_extra_facets();
+    }
+
+    if (!saved) {
+        return;
+    }
+
+    auto remap_one = [&](const TriangleSelector::TriangleSplittingData& src_data,
+                         FacetsAnnotation& target_facets) {
+        if (src_data.bitstream.empty())
+            return;
+        auto result =
+            TriangleSelector::remap_painting(saved->mesh.its, src_data, mesh().its, Geometry::translation_transform(mesh().get_init_shift()),
+                                             keep_existing_paint ?
+                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{std::ref(target_facets.get_data())} :
+                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{});
+        if (!result.bitstream.empty())
+            target_facets.set_data(std::move(result));
+    };
+    remap_one(saved->supported, supported_facets);
+    remap_one(saved->seam,      seam_facets);
+    // Airbrush P3 (A4): with a colour field, carry only the paint UNDER the airbrush; the specks are
+    // baked again from the field on the new mesh (here, or by Cut::finalize() once every saved part
+    // has been remapped).
+    if (saved->airbrush_field)
+        remap_one(Airbrush::airbrush_paint_under(*saved->airbrush_field, saved->mesh.its.indices.size(), saved->mmu), mmu_segmentation_facets);
+    else
+        remap_one(saved->mmu, mmu_segmentation_facets);
+    remap_one(saved->fuzzy,     fuzzy_skin_facets);
+    if (saved->airbrush_field && !keep_existing_paint && is_model_part()) {
+        const TriangleSelector::TriangleSplittingData base = mmu_segmentation_facets.get_data();
+        Airbrush::airbrush_carry_field(*this, *saved->airbrush_field, saved->mesh.its, saved->mmu,
+                                       airbrush_saved_to_mesh(*saved), &base);
+    }
+}
+
+Transform3d ModelVolume::airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const
+{
+    // restore_painting() maps this mesh into the saved frame by its init shift.
+    return Geometry::translation_transform(-mesh().get_init_shift()) * saved.field_to_saved;
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -2246,13 +2491,19 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
         if (volume->type() != ModelVolumeType::MODEL_PART)
             continue;
 
-        // splited volume should not be text object 
-        if (volume->text_configuration.has_value())
+        // splited volume should not be text object. Its emboss shape goes too, or the part reads as an SVG
+        // (is_svg(): an emboss shape and no text configuration).
+        if (volume->text_configuration.has_value()) {
             volume->text_configuration.reset();
+            volume->emboss_shape.reset();
+        }
 
         if (!is_multi_volume_object) {
             //BBS: not multi volume object, then split mesh.
             std::vector<TriangleMesh> volume_meshes = volume->mesh().split();
+            // An SVG part cut into pieces: no piece is the shape any more.
+            if (volume_meshes.size() > 1)
+                volume->emboss_shape.reset();
             int mesh_count = 0;
             for (TriangleMesh& mesh : volume_meshes) {
                 if (mesh.facets_count() < 3)
@@ -2785,6 +3036,13 @@ void ModelVolume::update_extruder_count(size_t extruder_count)
             break;
         }
     }
+    // Orca #14103 (from BambuStudio STUDIO-15763): drop a per-part filament assignment that no longer
+    // exists after the filament count shrank (a switch to a printer with fewer filaments), so the part
+    // follows its object again and nothing downstream indexes per-filament vectors past their end.
+    // The caller (Plater::on_filaments_change) passes the total including mixed filaments, so a part
+    // on a mixed filament that still exists keeps it.
+    if (const ConfigOption *opt = this->config.option("extruder"); opt != nullptr && opt->getInt() > int(extruder_count))
+        this->config.erase("extruder");
 }
 
 void ModelVolume::update_extruder_count_when_delete_filament(size_t extruder_count, size_t filament_id, int replace_filament_id)
@@ -2999,9 +3257,12 @@ size_t ModelVolume::split(unsigned int max_extruders)
     if (meshes.size() <= 1)
         return 1;
 
-    // splited volume should not be text object
+    // splited volume should not be text object, nor an SVG one: no piece is the shape any more. With only the text
+    // configuration gone, a text part's emboss shape stayed on every piece, and the pieces read as SVG parts.
     if (text_configuration.has_value())
         text_configuration.reset();
+    if (emboss_shape.has_value())
+        emboss_shape.reset();
 
     size_t idx = 0;
     size_t ivolume = std::find(this->object->volumes.begin(), this->object->volumes.end(), this) - this->object->volumes.begin();
@@ -3010,10 +3271,20 @@ size_t ModelVolume::split(unsigned int max_extruders)
     unsigned int extruder_counter = 0;
     const Vec3d offset = this->get_offset();
 
+    // ImageMap phase 5c: each piece is re-centred below, so an image fill on this volume would be
+    // re-stretched over each piece's own box. Carry the picture's box and frame instead.
+    ImageFillParams      image_params;
+    const bool           has_image = image_fill_params_of(*this, image_params);
+    indexed_triangle_set image_old_its;
+    if (has_image)
+        image_old_its = this->mesh().its;
+
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
             continue;
+        // What center_geometry_after_creation() below will move this piece's mesh by.
+        const Vec3d piece_shift = mesh.bounding_box().center();
 
         if (idx == 0) {
             this->set_mesh(std::move(mesh));
@@ -3034,27 +3305,38 @@ size_t ModelVolume::split(unsigned int max_extruders)
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
 
-        this->object->volumes[ivolume]->set_offset(Vec3d::Zero());
-        this->object->volumes[ivolume]->center_geometry_after_creation();
-        this->object->volumes[ivolume]->translate(offset);
+        ModelVolume *piece = this->object->volumes[ivolume];
+        piece->set_offset(Vec3d::Zero());
+        piece->center_geometry_after_creation();
+        // center_geometry_after_creation() moved the piece's mesh by -shift in the part's own frame and the part by
+        // +shift in the object's, which only puts it back where it was with no rotation, scale or mirror of the
+        // part's own. Move it by the shift as the part's own transformation turns and sizes it.
+        piece->set_offset(offset + piece->get_matrix_no_offset() * piece->get_offset());
         this->object->volumes[ivolume]->name = name + "_" + std::to_string(idx + 1);
         //BBS: always set the extruder id the same as original
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
         //this->object->volumes[ivolume]->config.set("extruder", auto_extruder_id(max_extruders, extruder_counter));
         this->object->volumes[ivolume]->m_is_splittable = 0;
+        if (has_image) {
+            ImageFillParams p = image_params;
+            image_fill_rebase(p, image_old_its, Geometry::translation_transform(-piece_shift));
+            this->object->volumes[ivolume]->config.set_key_value("image_fill_params", new ConfigOptionString(p.to_string()));
+        }
         ++ idx;
     }
 
-    // discard volumes for which the convex hull was not generated or is degenerate
-    size_t i = 0;
-    while (i < this->object->volumes.size()) {
-        const std::shared_ptr<const TriangleMesh> &hull = this->object->volumes[i]->get_convex_hull_shared_ptr();
+    // Discard the pieces just made for which the convex hull was not generated or is degenerate. Only the pieces:
+    // the object's other parts are not this split's to delete (a flat part has an empty hull, and was deleted with
+    // the old loop over all volumes). The pieces are volumes [first_piece, ivolume]; go backwards so the indices
+    // stay valid, and keep the object, as this volume may be one of those deleted.
+    ModelObject *const owner       = this->object;
+    const size_t       first_piece = ivolume + 1 - idx;
+    for (size_t i = ivolume + 1; i-- > first_piece;) {
+        const std::shared_ptr<const TriangleMesh> &hull = owner->volumes[i]->get_convex_hull_shared_ptr();
         if (hull == nullptr || hull->its.vertices.empty() || hull->its.indices.empty()) {
-            this->object->delete_volume(i);
+            owner->delete_volume(i);
             --idx;
-            --i;
         }
-        ++i;
     }
 
     return idx;
@@ -3091,6 +3373,11 @@ void ModelVolume::assign_new_unique_ids_recursive()
     seam_facets.set_new_unique_id();
     mmu_segmentation_facets.set_new_unique_id();
     fuzzy_skin_facets.set_new_unique_id();
+    // As set_new_unique_id() already does: the undo/redo stack stores FacetsAnnotation contents keyed
+    // by ObjectID, so a clone left sharing these ids with its source can be handed the source's mask
+    // on an undo - after which a paint mask and the mesh it was recorded against no longer match.
+    for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+        texture_displacement_facet(i).set_new_unique_secondary_id(); // EdgeSlicer: see ObjectBase::SecondaryId
 }
 
 void ModelVolume::rotate(double angle, Axis axis)
@@ -3125,16 +3412,30 @@ void ModelVolume::mirror(Axis axis)
 // This method could only be called before the meshes of this ModelVolumes are not shared!
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small
         this->calculate_convex_hull();
     else
         const_cast<TriangleMesh*>(m_convex_hull.get())->scale(versor);
+    // Airbrush P3 (A4): the field scales with the mesh and is baked again at the printed grain.
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.scale(versor.cast<double>());
+        Airbrush::airbrush_carry_field(*this, *field, mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(mesh_trafo, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3143,10 +3444,17 @@ void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_le
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    // Airbrush P3 (A4): the field follows the mesh and is baked again.
+    if (field)
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, mesh_trafo, &under);
 }
 
 void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(matrix, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3155,6 +3463,11 @@ void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_hand
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.linear()    = matrix;
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::convert_from_imperial_units()
@@ -3305,7 +3618,7 @@ static void get_real_filament_id(const unsigned char &id, std::string &result) {
 // implementation - including the split-triangle encoding for a face whose three corners land on
 // three different filaments, which is the interesting part.
 static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned char *vertex_filament_ids,
-                                            size_t vertex_count)
+                                            size_t vertex_count, unsigned char first_extruder_id)
 {
     enum VertexColorCase {
         _3_SAME_COLOR,
@@ -3334,6 +3647,7 @@ static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned 
     // `volume` is now a parameter.
     // the caller sets the volume's extruder before painting.
     auto face_count = volume->mesh().its.indices.size();
+    volume->mmu_segmentation_facets.reset();
     volume->mmu_segmentation_facets.reserve(face_count);
     if (volume->mesh().its.vertices.size() != vertex_count) {
         return false;
@@ -3343,7 +3657,7 @@ static bool paint_volume_from_vertex_colors(ModelVolume *volume, const unsigned 
         auto filament_id0 = vertex_filament_ids[face[0]];
         auto filament_id1 = vertex_filament_ids[face[1]];
         auto filament_id2 = vertex_filament_ids[face[2]];
-        if (filament_id0 <= 1 && filament_id1 <= 1 && filament_id2 <= 2) {
+        if (filament_id0 == first_extruder_id && filament_id1 == first_extruder_id && filament_id2 == first_extruder_id) {
             continue;
         }
         if (i == 0) {
@@ -3425,7 +3739,8 @@ bool Model::obj_import_vertex_color_deal(const std::vector<unsigned char> &verte
         if (obj->volumes.size() == 1) {
             auto volume = obj->volumes[0];
             volume->config.set("extruder", first_extruder_id);
-            return paint_volume_from_vertex_colors(volume, vertex_filament_ids.data(), vertex_filament_ids.size());
+            return paint_volume_from_vertex_colors(volume, vertex_filament_ids.data(), vertex_filament_ids.size(),
+                                                   first_extruder_id);
         }
     }
     return false;
@@ -3446,8 +3761,10 @@ bool Model::import_volume_color_deal(const std::vector<unsigned char> &volume_fi
     obj->config.set("extruder", first_extruder_id);
     for (size_t i = 0; i < obj->volumes.size(); i++) {
         const unsigned char id = volume_filament_ids[i];
-        if (id <= 1)
-            continue;   // 1 is the default; the OBJ appliers skip it for the same reason
+        // Phase 5e: every part gets the filament the dialog chose for it - filament 1 included, which
+        // the old "id <= 1" skip left on the object's filament whatever that was.
+        if (id == 0)
+            continue;
         obj->volumes[i]->config.set("extruder", (int) id);
     }
     return true;
@@ -3473,7 +3790,7 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
     for (ModelVolume *volume : obj->volumes) {
         const size_t count = volume->mesh().its.vertices.size();
         volume->config.set("extruder", first_extruder_id);
-        if (!paint_volume_from_vertex_colors(volume, vertex_filament_ids.data() + offset, count))
+        if (!paint_volume_from_vertex_colors(volume, vertex_filament_ids.data() + offset, count, first_extruder_id))
             return false;
         offset += count;
     }
@@ -3485,7 +3802,7 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
 // Model::obj_import_face_color_deal so the OBJ path and the glTF texture path share one
 // implementation - the same treatment the vertex path got.
 static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned char *face_filament_ids,
-                                          size_t face_count_in)
+                                          size_t face_count_in, unsigned char first_extruder_id)
 {
     const size_t face_count = volume->mesh().its.indices.size();
     if (face_count != face_count_in) { return false; }
@@ -3494,10 +3811,16 @@ static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned ch
     // through set_triangle_from_string. Same result, one writer - and the encoder is the one the
     // Image fill dialog uses, so a painted import and a painted image cannot drift apart.
     //
-    // The `<= 1` skip is kept exactly: id 1 is the part's own filament and was never painted.
+    // Phase 5e: a face is left unpainted when its filament is the PART's own one - the
+    // `first_extruder_id` the caller sets as the volume's extruder - because it prints with that
+    // anyway. Every other filament is painted, filament 1 included. The old rule skipped id 1
+    // whatever the part's filament was, so with the colour dialog's first cluster on, say,
+    // filament 3, every face meant for filament 1 printed in filament 3.
     std::vector<int> states(face_count, 0);
-    for (size_t i = 0; i < face_count; ++i)
-        states[i] = face_filament_ids[i] <= 1 ? 0 : int(face_filament_ids[i]);
+    for (size_t i = 0; i < face_count; ++i) {
+        const int id = int(face_filament_ids[i]);
+        states[i]    = (id <= 0 || id == int(first_extruder_id)) ? 0 : id;
+    }
     TriangleSelector sel(volume->mesh());
     sel.deserialize(image_fill_encode(face_count, 0, states), /*needs_reset=*/true);
     volume->mmu_segmentation_facets.set(sel);
@@ -3509,10 +3832,12 @@ static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned ch
 // colour dialog decided on, with the colour each stands for.
 static bool paint_volume_from_sub_face_colors(ModelVolume *volume, const std::vector<std::array<float, 3>> &sub_colors,
                                               const std::vector<std::array<float, 3>> &palette,
-                                              const std::vector<int> &palette_ids, int depth)
+                                              const std::vector<int> &palette_ids, int depth,
+                                              unsigned char first_extruder_id)
 {
+    // Phase 5e: the part's own filament is the background - a leaf it wins stays unpainted.
     const ImageFillResult res = image_fill_from_face_colors(volume->mesh().its, sub_colors, palette,
-                                                            palette_ids, /*background=*/0, depth);
+                                                            palette_ids, /*background=*/int(first_extruder_id), depth);
     if (!res.ok)
         return false;
     TriangleSelector sel(volume->mesh());
@@ -3531,7 +3856,7 @@ bool Model::obj_import_face_color_deal(const std::vector<unsigned char> &face_fi
         if (obj->volumes.size() == 1) {
             auto volume        = obj->volumes[0];
             volume->config.set("extruder", first_extruder_id);
-            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size());
+            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size(), first_extruder_id);
         }
     }
     return false;
@@ -3557,7 +3882,7 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
     for (ModelVolume *volume : obj->volumes) {
         const size_t count = volume->mesh().its.indices.size();
         volume->config.set("extruder", first_extruder_id);
-        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count))
+        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count, first_extruder_id))
             return false;
         offset += count;
     }
@@ -3596,8 +3921,12 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
     std::vector<size_t>               counts;
     for (size_t i = 0; i < face_filament_ids.size(); ++i) {
         const int id = int(face_filament_ids[i]);
-        if (id <= 1)
-            continue;   // id 1 is the part's own filament: not painted, and not a palette entry
+        // Phase 5e: every filament the dialog chose is a palette entry, the part's own one and
+        // filament 1 included. Leaving id 1 out (the old rule) meant a leaf whose colour was
+        // filament 1's could only be painted with the nearest OTHER filament. Which leaves stay
+        // unpainted is decided by the background, i.e. the part's own filament.
+        if (id <= 0)
+            continue;
         auto it = std::find(ids.begin(), ids.end(), id);
         size_t k;
         if (it == ids.end()) {
@@ -3631,7 +3960,7 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
             const RGBA &c = sub_face_colors[offset * per + i];
             slice.push_back({c[0], c[1], c[2]});
         }
-        if (!paint_volume_from_sub_face_colors(volume, slice, palette, ids, depth))
+        if (!paint_volume_from_sub_face_colors(volume, slice, palette, ids, depth, first_extruder_id))
             return false;
         offset += count;
     }
@@ -3651,6 +3980,8 @@ double Model::findMaxSpeed(const ModelObject* object) {
     double topSolidInfillSpeedObj = Model::printSpeedMap.topSolidInfillSpeed;
     double supportSpeedObj = Model::printSpeedMap.supportSpeed;
     double smallPerimeterSpeedObj = Model::printSpeedMap.smallPerimeterSpeed;
+    double smallSupportPerimeterSpeedObj = Model::printSpeedMap.smallSupportPerimeterSpeed;
+    std::optional<FloatOrPercent> smallSupportPerimeterSpeedOpt;
     for (std::string objectKey : objectKeys) {
         if (objectKey == "inner_wall_speed"){
             perimeterSpeedObj = object->config.get().opt_float(objectKey, 0);
@@ -3672,8 +4003,18 @@ double Model::findMaxSpeed(const ModelObject* object) {
                 smallPerimeterSpeedObj = v.percent ? v.value / 100.0 * perimeterSpeedObj : v.value;
             }
         }
+        // OrcaSlicer #13459 / #15232: a FloatOrPercent; a percentage is of the support speed, which is
+        // resolved after the loop (the keys come sorted, "small_support..." before "support_speed").
+        if (objectKey == "small_support_perimeter_speed") {
+            if (const auto *opt = object->config.get().option<ConfigOptionFloatsOrPercents>(objectKey))
+                smallSupportPerimeterSpeedOpt = opt->get_at(0);
+        }
     }
-    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, objMaxSpeed)))))));
+    if (smallSupportPerimeterSpeedOpt)
+        smallSupportPerimeterSpeedObj = smallSupportPerimeterSpeedOpt->percent ?
+                                            smallSupportPerimeterSpeedOpt->value / 100.0 * supportSpeedObj :
+                                            smallSupportPerimeterSpeedOpt->value;
+    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, std::max(smallSupportPerimeterSpeedObj, objMaxSpeed))))))));
     if (objMaxSpeed <= 0) objMaxSpeed = 250.;
     return objMaxSpeed;
 }
@@ -3855,6 +4196,14 @@ void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConf
         // id==0 means follow previous material, so need not be recorded
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
         if (op2 && (extruder_id = op2->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
+    } else if (const ConfigOption *stab = object->config.has("stabilizer_supports") ? object->config.option("stabilizer_supports") :
+                                                                                     config_global.option("stabilizer_supports");
+               // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+               stab && stab->type() == coEnum && static_cast<StabilizerMode>(stab->getInt()) != smOff) {
+        // Side stabilizers print with the support filament even with supports off.
+        auto op1 = object->get_config_value<ConfigOptionInt>(config_global, "support_filament");
+        int extruder_id;
+        if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
     }
 
     if (ret.extrude_ids.empty()) //the default extruder
@@ -4255,6 +4604,48 @@ bool model_has_advanced_features(const Model &model)
             	return true;
     }
     return false;
+}
+
+// Orca #14591: a project may store only the bare filename of a source (the default), while the file read
+// back from disk carries its full path (or the reverse), so compare the exact path first and then the
+// filename alone, case-insensitively.
+static bool same_reload_source(const std::string &new_input_file, const std::string &old_input_file)
+{
+    return new_input_file == old_input_file ||
+           boost::algorithm::iequals(boost::filesystem::path(new_input_file).filename().string(),
+                                     boost::filesystem::path(old_input_file).filename().string());
+}
+
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume)
+{
+    // The volume at the indices the old volume remembers, when it still comes from the same file.
+    int source_object = -1, source_volume = -1;
+    if (file_matches_source) {
+        const int o = old_volume.source.object_idx, v = old_volume.source.volume_idx;
+        if (o >= 0 && o < int(new_model.objects.size()) && v >= 0 && v < int(new_model.objects[o]->volumes.size()) &&
+            same_reload_source(new_model.objects[o]->volumes[v]->source.input_file, old_volume.source.input_file)) {
+            source_object = o;
+            source_volume = v;
+        }
+    }
+    // Trust the remembered indices only while they still point at a volume of that name.
+    if (source_object >= 0 && (old_volume.name.empty() || new_model.objects[source_object]->volumes[source_volume]->name == old_volume.name))
+        return {source_object, source_volume};
+
+    if ((file_matches_source || file_named_like_volume) && !old_volume.name.empty()) {
+        for (int o = 0; o < int(new_model.objects.size()); ++o) {
+            const ModelObject *obj = new_model.objects[o];
+            for (int v = 0; v < int(obj->volumes.size()); ++v)
+                if (obj->volumes[v]->name == old_volume.name)
+                    return {o, v};
+            // A STEP model loaded as one volume: the object carries the name.
+            if (obj->name == old_volume.name)
+                return {o, -1};
+        }
+    }
+    // Nothing of that name: the volume was renamed, so the remembered indices are all there is.
+    return {source_object, source_volume};
 }
 
 #ifndef NDEBUG

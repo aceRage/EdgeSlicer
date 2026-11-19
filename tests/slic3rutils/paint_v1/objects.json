@@ -1,0 +1,39 @@
+{
+  "max_triangles": 10000000,
+  "objects": [
+    {
+      "airbrushed": false,
+      "extruder": 1,
+      "key": "o?",
+      "name": "Cube",
+      "obj": 0,
+      "paintable": true,
+      "painted": true,
+      "plate": 0,
+      "size_estimate": 252,
+      "triangles": 12,
+      "volumes": [
+        {
+          "airbrushed": false,
+          "extruder": 1,
+          "image_fill": false,
+          "index": 0,
+          "name": "Cube",
+          "painted": true,
+          "triangles": 12,
+          "type": "model_part"
+        },
+        {
+          "airbrushed": false,
+          "extruder": 1,
+          "image_fill": false,
+          "index": 1,
+          "name": "Modifier",
+          "painted": false,
+          "triangles": 12,
+          "type": "modifier"
+        }
+      ]
+    }
+  ]
+}

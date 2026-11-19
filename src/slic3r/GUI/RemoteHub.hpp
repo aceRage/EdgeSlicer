@@ -1,10 +1,13 @@
 #pragma once
 
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -65,13 +68,25 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
-Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it
+// Decide, once at start-up, whether this copy may start or take over the hub (HubHandover::decide_hub_mode:
+// --take-hub > --no-hub > env > marker file next to the exe > normal) and log which rule applied.
+void init_hub_mode(bool no_hub_flag, bool take_hub_flag);
+// True when this copy is a client only: ensure_running() just asks for the running hub, set_phone() /
+// new_link() / post_state() / quit() leave it alone. The GUI says so instead of starting one.
+bool no_hub();
+void disable_spawn(); // from now on ensure_running() never spawns a hub and returns a dead Info (CLI render jobs)
+Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
+                                                                 // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
                                                         // token seeds a hub that has none yet
 Info new_link();                                        // replace the phone link (explicit only):
                                                         // saved links, QR codes and home-screen
                                                         // icons made from the old one stop working
 bool post_state(const std::string& json); // full Stream-tab state; remembered for a hub started later
+// Spike (opt-in "liveview_go2rtc"): make sure the hub's go2rtc has a stream for this Bambu camera
+// (see Testing::own_camera_stream) without touching the Stream tab's camera list. Returns the HTTP
+// status and the hub's JSON answer ({"name","mode"} on 200, {"error"} otherwise).
+std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code);
 // The camera list the Stream tab last saved: from the running hub, else what this process last
 // posted, else <datadir>/hub/streams.json. Empty when there is none. Every window's Stream tab
 // opens with this rather than its own localStorage, which is per port and so per window.
@@ -80,9 +95,25 @@ std::string saved_state();
 // POST /hub/event on the loopback control plane. Fire and forget: with no hub running it is a
 // failed connect and false, never an error anybody sees. The hub assigns the id and the time.
 bool post_event(const std::string& event_json);
+// The hub's remembered printer rows (GET /hub/printers on the loopback control plane): what the
+// app's /summary is built from, each row with age_s / stale and, once a window has reported its
+// list, `configured`. {http status, body}; 503 with no hub running.
+std::pair<int, std::string> hub_printers();
+// Forget one leftover row (POST /hub/printers/<id>/forget): 200, 404 (no such row) or 409 (still
+// set up in the slicer). {http status, body}.
+// `removed`: the printer was just removed at its source on the Printers tab, so the hub drops the
+// row even though its last configured list still names it (POST ...?removed=1), and takes the id
+// off that list.
+std::pair<int, std::string> forget_printer(const std::string& printer_id, bool removed = false);
 void quit();
 
 std::string hub_dir();
+// <datadir>/hub/removed_printers.json: the printers a person removed on the Printers tab, which
+// discovery must not re-add (PrintersMonitor::tombstoned).
+std::string removed_printers_path();
+// <datadir>/hub/printer_aliases.json: the person's own names for printers (Printers tab "Rename"),
+// put on the /api/printers rows (PrintersMonitor::apply_aliases).
+std::string printer_aliases_path();
 std::string instances_dir();
 std::string uploads_dir();
 std::string saves_dir();
@@ -112,9 +143,10 @@ int serve_status_target_port(const std::string& serve_status_json_text);
 // --json` said into exactly one of these, so the page never has to re-derive "installed but not
 // signed in" out of three separate booleans.
 enum class RemoteAccessState {
-    NotInstalled,  // no tailscale CLI on this PC -> offer the download
+    NotInstalled,  // no tailscale CLI on this computer -> offer the download
     NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
     NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
+    NoAnswer,      // installed, but the CLI ran too long and was stopped (not the same as missing)
     HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
     Serving,       // running, certificates on, Serve is pointed at this hub: the URL works
     Ready,         // running, certificates on, remote access simply switched off
@@ -138,6 +170,10 @@ const char* remote_access_state_name(RemoteAccessState s); // "not_installed", "
 // the root to our loopback port", `on` is the hub's own remote_on switch, `error` is whatever the
 // CLI printed (only used for RemoteAccessState::Error).
 RemoteAccessInfo classify_remote_access(bool installed, const std::string& backend, bool https,
+                                        bool serving, bool on, const std::string& error);
+// The same for a named platform (the wording says "Mac"/"menu bar" there and the install link goes
+// to that platform's download page); the one above uses the platform this build runs on.
+RemoteAccessInfo classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend, bool https,
                                         bool serving, bool on, const std::string& error);
 
 // ---- hub identity (design_hosted_relay.md section 2) ----
@@ -177,6 +213,18 @@ HubIdentity  identity_from_seed_hex(const std::string& private_hex);
 // looks at them.
 bool trusted_proxy_headers(bool peer_is_loopback, bool via_relay);
 
+// What a request on the main listener is, as far as Tailscale Serve goes. Serve always marks what
+// it forwards (X-Forwarded-Host / -For, X-Forwarded-Proto on HTTPS, Tailscale-Funnel-Request on a
+// Funnel request) and adds Tailscale-User-Login only for a signed-in tailnet user - never for a
+// tagged device and never for Funnel. So a request with Serve's marks and no login is somebody the
+// allow-list cannot check, and it is refused (it used to fall through to the token alone).
+//   Local   - not through Serve (or headers not trusted): the LAN / loopback rules apply
+//   Tailnet - through Serve with a login: the allow-list decides
+//   NoLogin - through Serve with no login (tagged device, Funnel): refused
+// `headers_trusted` is trusted_proxy_headers(); when false everything else is ignored.
+enum class ServeRequest { Local, Tailnet, NoLogin };
+ServeRequest classify_serve_request(bool headers_trusted, const std::string& ts_login, bool forwarded, bool funnel);
+
 // ---- the pairing document's identity and origins ----
 // The part of pair_json() that is pure: the three named origins and this hub's identity. Pulled
 // out so the shape the apps read generically can be exercised without a running hub. `relay` is
@@ -211,6 +259,69 @@ struct CameraCandidate
 std::string camera_for_printer(const std::string& printer_id, const std::string& printer_ip,
                                const std::vector<CameraCandidate>& cams);
 
+// ---- a printer's running-job picture (/printers/<id>/thumbnail.png) ----
+// The picture is the plate image of a job this PC sent, out of the G-code archive's sidecars. It is
+// only shown for the job the printer says it is running: a printer running something this PC never
+// sent (another PC, the phone, the SD card) has no picture, not the previous job's.
+struct ArchiveRecord
+{
+    std::string printer;   // the sidecar's printer.id
+    std::string id;        // the record id, which is also the picture's file stem
+    std::string sent_name; // the name the printer was given
+    std::string file;      // the archived file name
+    long long   time { 0 };
+    std::string title;      // project_title: the project the plate came from
+    int         plate { -1 }; // 0-based plate index, -1 = unknown
+    std::string plate_name; // the plate's own name, "" = none
+};
+// Whether a printer's reported job name is this archived name. A Bambu printer reports its
+// subtask_name without the ".gcode.3mf" it was sent with, and a cloud / Bambu Studio send names
+// the job "<project>_plate_<n>.3mf" with characters such as '%' turned into '_', so names are
+// compared without the extension, case-insensitively, with everything but letters, digits and
+// - ( ) + . read as '_'.
+bool same_job_name(const std::string& reported, const std::string& archived);
+// Whether a reported job name is this record's plate: "<project>_plate_<n>" (n 1-based) or
+// "<project>_<plate name>", or the bare project for a record of a one-plate project (plate 0, no name).
+bool same_project_plate(const std::string& reported, const ArchiveRecord& r);
+// printer id -> record id for the job in `jobs` (printer id -> job name), in this order, newest
+// record within a step:
+//   1. a record of that printer whose sent / archived name is the job (same_job_name);
+//   2. a record of that printer whose project and plate are the job (same_project_plate);
+//   3. a record sent to another printer with the same name, or of the same project and plate - the
+//      same plate's picture, when the file was sliced here and reached this printer some other way
+//      (Bambu Studio, Handy, the SD card, a copy of the file sent to a second U1);
+//   4. none. Printers with no job are absent.
+std::map<std::string, std::string> pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                       const std::map<std::string, std::string>& jobs);
+// The `?job=` value on a row's thumbnail URL: a short hash of the job name and the record behind
+// the picture, so a client caching by URL sees a new URL for every job.
+std::string thumbnail_version(const std::string& job, const std::string& record_id);
+
+// ---- the Device tab's own live view (spike, opt-in "liveview_go2rtc") ----
+// The go2rtc stream a Bambu printer's camera plays through, for the desktop camera panel.
+//
+// The name is the one stream_center.html gives the same camera ('s' + hashStr(src), FNV-1a 32 in
+// unpadded lower-case hex, over src built with encodeURIComponent), so a printer that is also on
+// the Stream tab / phone camera wall is ONE go2rtc stream with one connection to the printer, not
+// a second one. That only holds when the Stream tab entry used the same address and access code.
+//
+//   kind "rtsps" (X1/X1C/X1E/H2D/H2C/H2S/P2S, LAN Liveview on): rtspx:// to port 322, played as MSE.
+//   kind "rtsp"  (plain RTSP, port 554 - rare): rtsp://, played as MSE.
+//   kind "local" (P1/A1, the JPEG-over-TLS stream on port 6000): go2rtc pulls the hub's own
+//                BambuCamRelay MJPEG (http://127.0.0.1:<relay_port>/bambu?...), played as mjpeg -
+//                go2rtc then fans one relay connection out to every viewer. relay_port 0 = none.
+// Anything invalid (an address with characters BambuCamRelay refuses, an empty or over-long
+// code, an unknown kind) gives an empty `name`.
+struct OwnCameraStream
+{
+    std::string name;
+    std::string src;
+    std::string mode; // the player's ?mode=: "mse" or "mjpeg"
+};
+OwnCameraStream own_camera_stream(const std::string& kind, const std::string& ip, const std::string& code, int relay_port);
+std::string     js_encode_uri_component(const std::string& s); // JavaScript's encodeURIComponent, byte-wise
+std::string     js_hash_str(const std::string& s);             // stream_center.html's hashStr (ASCII input)
+
 // ---- one printer reported by several windows (poll_printers) ----
 // Every slicer window lists every Bambu printer it knows, but a Bambu LAN printer reports only to
 // the one window holding its MQTT session (the network plug-in has one LAN session per window):
@@ -231,6 +342,31 @@ struct MergedPrinterRow
 MergedPrinterRow merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                    const std::string& incoming_row_json, long incoming_instance);
 
+// ---- leftover printers (poll_printers / load_printers / POST .../printers/<id>/forget) ----
+// The hub remembers every printer a slicer window ever reported. A row stays only while the
+// printer is still set up in the slicer: each window's /api/printers carries `configured`, every
+// printer id it knows (bound or saved Bambu printers, LAN Snapmakers, saved print hosts - offline
+// ones included), and the hub keeps the union of the live windows' lists. A row missing from it
+// for `grace_ms` is dropped; load_printers applies the list saved with the rows at once (grace 0).
+//
+// `kind` is the row's kind, except that a cloud-bound Bambu row (kind bambu, lan_mode false) is
+// judged as "bambu_cloud": a window that is not signed in to Bambu cannot list those, so it says
+// so in `unsure_kinds` and such rows are kept rather than judged.
+//
+// Returns the row's new `unconfigured_since`: 0 while the printer is configured (or its kind
+// cannot be judged), the time it was first found missing while it is, and -1 once it has been
+// missing for grace_ms - the row goes.
+long long configured_row_fate(const std::string& id, const std::string& kind, const std::set<std::string>& configured,
+                              const std::set<std::string>& unsure_kinds, long long unconfigured_since, long long now_ms,
+                              long long grace_ms);
+// The kind configured_row_fate judges a cached row by (see there).
+std::string configured_judge_kind(const std::string& row_json);
+// POST .../printers/<id>/forget: 200 (the row goes), 404 (no such row) or 409 (the printer is still
+// set up in the slicer, by the last list a window gave - forgetting it would only last until the
+// next poll). With no list known yet (no window has reported one) a row can always be forgotten.
+int forget_printer_status(const std::string& id, bool row_exists, const std::set<std::string>& configured,
+                          bool configured_known);
+
 // What a new phone link (HubServer::new_link) revokes besides the token itself: every native-app
 // push device (AppPush) and every phone-page Web Push subscription (WebPush), all of which were
 // registered under the old token. Without this, a phone that lost its link kept receiving this
@@ -242,6 +378,70 @@ struct LinkRevocation
     int web_subscriptions { 0 };
 };
 LinkRevocation revoke_push_for_old_link();
+
+// ---- go2rtc stream registration (HubServer::register_streams) ----
+// go2rtc 1.9.14 builds a NEW stream object on every PUT of a name, even an unchanged one; viewers
+// already watching stay on the old object and its upstream connection, and the next viewer opens a
+// second connection to the camera (measured: tests/phone/go2rtc_share_probe.py). DELETE only
+// unlists a stream - its producer runs on until its last viewer leaves - and PATCH of a name that
+// exists does not touch the running connection. So the hub registers a stream only when go2rtc
+// does not have it or its source really changed, and never re-PUTs one that is unchanged.
+
+// One stream as go2rtc's GET /api/streams lists it: the first producer's URL and whether that
+// producer is connected right now. An idle producer reports exactly the source it was given; a
+// connected one reports its connection's URL, which for some sources (ffmpeg:, rtspx:) is not the
+// registered string, so `url` is only compared while `active` is false.
+struct Go2rtcLiveStream
+{
+    std::string url;
+    bool        active { false };
+};
+// Parse GET /api/streams (a JSON object, name -> {producers, consumers}). False on anything that
+// is not such an object, with `out` untouched.
+bool parse_go2rtc_streams(const std::string& body, std::map<std::string, Go2rtcLiveStream>& out);
+
+// What register_streams() does to bring go2rtc to `desired` (name -> source, every Stream-tab
+// camera and its quality variants). `registered` is what this hub itself put into this go2rtc
+// (name -> source); `live` is go2rtc's own list, or nullptr when it could not be read.
+//
+//   add     - go2rtc does not have the name: PUT it.
+//   replace - the name exists with a different source (ours with a changed source, or one we did
+//             not register that is idle with another source): DELETE, PUT, then end the hub's
+//             viewer tunnels on it so the old producer closes and the players reconnect to the new
+//             one. A quality variant (`ffmpeg:<name>#...`) of a replaced stream is replaced too,
+//             because its ffmpeg is a viewer of the old stream object.
+//   remove  - registered by us and no longer wanted (a camera taken off the Stream tab, or one
+//             whose source - and so its s<hash> name - changed): DELETE and end its viewers.
+//   adopt   - already in go2rtc and not ours: idle with this very source, or connected (viewers
+//             are on it - never disturbed). Recorded as ours, nothing sent to go2rtc.
+// Unchanged streams of ours appear in none of the lists: nothing is sent and no viewer notices.
+struct StreamSyncPlan
+{
+    std::vector<std::pair<std::string, std::string>> add;     // name, source
+    std::vector<std::pair<std::string, std::string>> replace; // name, new source
+    std::vector<std::string>                         remove;  // name
+    std::vector<std::pair<std::string, std::string>> adopt;   // name, source
+};
+StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desired,
+                                const std::map<std::string, std::string>& registered,
+                                const std::map<std::string, Go2rtcLiveStream>* live);
+
+// The `desired` map plan_stream_sync() is given: every Stream-tab camera (and its variants) plus
+// every camera the Device tab's live view ("New Bambu LiveView", POST /hub/camera) has asked for
+// in this go2rtc run. Taking the live-view cameras into `desired` is what makes a Stream-tab save
+// unable to delete or replace a stream the Device tab is playing: a camera taken off the Stream
+// tab that the Device tab also plays under the same s<hash> name is still wanted, so it is
+// "unchanged", not "remove". On a name both lists have, the Stream tab's source wins (the names are
+// hashes of the sources, so the two only differ on a hash collision).
+std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
+                                                         const std::map<std::string, std::string>& live_view);
+
+// ---- what the phone link exposes (slice_v1 and earlier) ----
+// Whether the hub proxies `method` `sub` (an /api/... path of a slicer instance, no query) through
+// /r/<token>/i/<pid>/api/...: the explicit allow-list, one entry per route of the instance manifest.
+bool instance_api_allowed(const std::string& method, const std::string& sub);
+// The `features` list /pair answers with.
+std::vector<std::string> pair_features();
 
 } // namespace Testing
 

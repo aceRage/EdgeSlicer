@@ -22,6 +22,7 @@
 #include "BoundingBox.hpp"
 #include "PaintDepth.hpp"
 #include <algorithm>
+#include <set>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -41,8 +42,10 @@ enum GCodeFlavor : unsigned char {
 enum class FuzzySkinType {
     None,
     External,
+    Hole,
     All,
     AllWalls,
+    Disabled_fuzzy,
 };
 
 enum class FuzzySkinMode {
@@ -51,12 +54,34 @@ enum class FuzzySkinMode {
     Combined,
 };
 
+// ORCA: direction in which top_surface_expansion grows the top surfaces.
+enum class TopSurfaceExpansionDirection {
+    InwardAndOutward,
+    Inward,
+    Outward,
+};
+
+enum class CenterOfSurfacePattern {
+    Each_Surface,
+    Each_Model,
+    Each_Assembly,
+};
+
 enum class NoiseType {
     Classic,
     Perlin,
     Billow,
     RidgedMulti,
     Voronoi,
+    Ripple,
+};
+
+// Orca #12781: which wipe tower generator a printer uses. Type1 is the Bambu Lab planner
+// (WipeTower), Type2 is WipeTower2. Bambu Lab printers always get Type1 whatever the config says;
+// Print::wipe_tower_type() and resolve_wipe_tower_type() apply that rule.
+enum class WipeTowerType {
+    Type1 = 0,
+    Type2 = 1,
 };
 
 enum PrintHostType {
@@ -75,10 +100,70 @@ enum InfillPattern : int {
     ipCubic, ipAdaptiveCubic, ipQuarterCubic, ipSupportCubic, ipLightning,
     ipHoneycomb, ip3DHoneycomb, ipLateralHoneycomb, ipLateralLattice,
     ipCrossHatch, ipTpmsD, ipTpmsFK, ipGyroid,
-    ipConcentric, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
+    ipConcentric, ipSpiralInset, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
     ipSupportBase, ipConcentricInternal,
     ipCount,
 };
+
+// Orca: Infill patterns that the "separated_infills" option can center on each connected body.
+inline bool is_separable_infill_pattern(InfillPattern pattern)
+{
+    switch (pattern) {
+    case ipMonotonic:
+    case ipMonotonicLine:
+    case ipRectilinear:
+    case ipAlignedRectilinear:
+    case ipZigZag:
+    case ipCrossZag:
+    case ipLockedZag:
+    case ipLine:
+    case ipGrid:
+    case ipTriangles:
+    case ipStars:          // tri-hexagon
+    case ipCubic:
+    case ipQuarterCubic:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipLateralHoneycomb:
+    case ipLateralLattice:
+    case ipCrossHatch:
+    case ipTpmsD:
+    case ipTpmsFK:
+    case ipGyroid:
+    case ipHilbertCurve:
+    case ipArchimedeanChords:
+    case ipOctagramSpiral:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Orca: Infill patterns laid out by an octree, which each connected body always gets of its own.
+inline bool is_octree_infill_pattern(InfillPattern pattern) { return pattern == ipAdaptiveCubic || pattern == ipSupportCubic; }
+
+// Orca: Infill patterns graded by the "adaptive_infill_mode" option.
+inline bool is_adaptive_infill_pattern(InfillPattern pattern) { return pattern == ipGyroid || pattern == ipTpmsD || pattern == ipTpmsFK; }
+
+// Orca: Infill patterns that round their corners by the "sparse_infill_smooth_factor" option.
+// EdgeSlicer: upstream also lists Grid, Triangles and Tri-hexagon with more than one line per infill
+// wall, which smooth in their trapezoidal form (FillRectilinear::fill_surface_trapezoidal, from the
+// Clipper2 multiline infill #11435). We do not carry that form, so they are not smoothable here.
+inline bool is_smoothable_infill_pattern(InfillPattern pattern, int /* multiline */ = 1)
+{
+    switch (pattern) {
+    case ipHilbertCurve:
+    case ipOctagramSpiral:
+    case ipLightning:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipConcentric:
+    case ipCrossHatch:
+        return true;
+    default:
+        return false;
+    }
+}
 
 enum class IroningType {
     NoIroning,
@@ -91,6 +176,18 @@ enum class IroningType {
 // Smallest usable ironing line spacing. Anything tighter yields an unprintable number of lines,
 // and zero stops the fillers from making progress.
 constexpr double IRONING_SPACING_MIN = 0.05;
+
+// Orca #11194: the filament_ironing_* override for a 1-based filament id, or process_value when
+// the override is nil. Edge: an id outside the vector (a mixed / virtual filament id, or a
+// config carrying fewer filament slots than the print) also falls back to the process value,
+// instead of borrowing filament 1's override the way ConfigOptionVector::get_at() would.
+template<class TVectorOption>
+double ironing_filament_override(const TVectorOption &opt, int filament_id, double process_value)
+{
+    if (filament_id < 1 || size_t(filament_id) > opt.values.size() || opt.is_nil(size_t(filament_id - 1)))
+        return process_value;
+    return double(opt.get_at(size_t(filament_id - 1)));
+}
 
 //BBS
 enum class WallInfillOrder {
@@ -117,6 +214,44 @@ enum class WallDirection
     CounterClockwise,
     Clockwise,
     Count,
+};
+
+// Orca: print order of surface fill loops/fragments for center-based fill patterns
+// (Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).
+enum class SurfaceFillOrder {
+    Default,
+    Outward,
+    Inward,
+    Count,
+};
+
+// Orca #11582 / #11616: what the slicer does about the printer's power loss recovery.
+// PrinterConfiguration writes nothing and leaves the printer's own setting; Enable / Disable write
+// M1003 S1 / S0 (Bambu Lab) or M413 S1 / S0 (Marlin 2) at the start of the second layer.
+enum class PowerLossRecoveryMode {
+    PrinterConfiguration,
+    Enable,
+    Disable,
+};
+
+// Orca: what the adaptive TPMS density follows: the 3D shape of the object, or its 2D sections normal to an axis.
+enum class AdaptiveInfillMode {
+    Disabled,
+    DistanceWarp,
+    SmoothBlend,
+    SteppedShells,
+    Lobes,
+    NormalZ,
+    NormalY,
+    NormalX,
+    Count,
+};
+
+// Orca: how the adaptive TPMS density changes from the object surface to its deepest point.
+enum class AdaptiveInfillGradient {
+    Linear,
+    Quadratic,
+    Exponential,
 };
 
 //BBS
@@ -152,7 +287,7 @@ enum SupportMaterialPattern {
 };
 
 enum SupportMaterialStyle {
-    smsDefault, smsGrid, smsSnug, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic,
+    smsDefault, smsGrid, smsSnug, smsTreeOrganic, smsTreeSlim, smsTreeStrong, smsTreeHybrid,
 };
 
 enum LongRectrationLevel
@@ -163,7 +298,7 @@ enum LongRectrationLevel
 };
 
 enum SupportMaterialInterfacePattern {
-    smipAuto, smipRectilinear, smipConcentric, smipRectilinearInterlaced, smipGrid
+    smipAuto, smipRectilinear, smipConcentric, smipSpiralInset, smipRectilinearInterlaced, smipGrid
 };
 
 // BBS
@@ -245,6 +380,13 @@ enum LayerTimeSlowdownScope {
     ltssExcludeOuterWalls   = 1
 };
 
+// Edge: where the head waits during a minimum layer time pause (min_layer_time_pause).
+enum MinLayerTimePausePark {
+    mltpAway        = 0,
+    mltpPrimeTower  = 1,
+    mltpCustom      = 2
+};
+
 enum LiftType {
     NormalLift,
     SpiralLift,
@@ -306,6 +448,11 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
+// EdgeSlicer, curved tops P4: the solid fill of the curved layers (CurvedTops.cpp). P5 adds Spiral.
+enum CurvedTopsPattern {
+    ctpMonotonic, ctpConcentric, ctpSpiral
+};
+
 // Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
 // painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
 enum StabilizerMode {
@@ -325,6 +472,17 @@ enum class PerimeterGeneratorType
     // Perimeter generator with variable extrusion width based on the paper
     // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling" ported from Cura.
     Arachne
+};
+
+// EdgeSlicer, Fine detail (tests/design_arachne_thin_features.md, P2): how thin a line the walls may use for
+// features narrower than a wall. Off is the walls as they always were; the floors of the named levels are in
+// FineDetail.hpp. Custom takes thin_feature_line_width / thin_feature_min_size as set.
+enum class FineDetailLevel
+{
+    Off,
+    Balanced,
+    FineText,
+    Custom
 };
 
 // Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
@@ -398,6 +556,22 @@ enum PrinterStructure {
     psDelta
 };
 
+enum class InputShaperType : unsigned char {
+    Default = 0,
+    MZV,
+    ZV,
+    ZVD,
+    ZVDD,
+    ZVDDD,
+    EI,
+    EI2,
+    TwoHumpEI,
+    EI3,
+    ThreeHumpEI,
+    DAA,
+    Disable
+};
+
 // BBS
 enum ZHopType {
     zhtAuto = 0,
@@ -432,6 +606,7 @@ enum NozzleVolumeType {
     nvtHighFlow,
     nvtHybrid,
     nvtTPUHighFlow,
+    nvtTPU285 = 4,     // BBS 2.9.1: 2.85 mm TPU path (H3C rack slot); value matches Bambu's
     nvtE3DHighFlow = 5,
     nvtMaxNozzleVolumeType = nvtE3DHighFlow
 };
@@ -570,10 +745,107 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// ---- Per-nozzle process values (per-nozzle process P1, tests/design_per_nozzle_process.md D1) -------
+// The process keys of per_nozzle_process_options() may hold one value per (extruder, variant) slot in
+// Bambu's layout: print_extruder_id / print_extruder_variant name the slots, extruder-major (an H2D
+// process: E1 Standard, E1 High Flow, E1 E3D High Flow, E2 Standard, ...). A vector of any other length
+// is a flow-mode vector read through get_config_idx(Process), as before.
+//
+// The slicer reads a filament's extruder slot only when process_extruder_values is set: by the user on
+// a process split per nozzle (left / right edits), or by fill_nozzle_process_slots() for a per-nozzle
+// process with values of its own. Without it every reader takes get_config_idx(Process) exactly as
+// before - whatever the other slots hold (the X2D's system Bowden slots differ) - so stock jobs, older
+// presets and per-object overrides slice unchanged.
+
+// The keys a per-nozzle process supplies: process_flow_variant_options() without the four the slicer
+// reads once for the whole print (slow_down_layers and the extrusion-rate smoothing keys, read at
+// values.front()); those always come from the plate's process.
+const std::vector<std::string>& per_nozzle_process_options();
+bool is_per_nozzle_process_option(const std::string &key);
+
+// fvtStandard / fvtHighFlow for "<Direct Drive|Bowden> Standard|High Flow", -1 for any other variant
+// (E3D High Flow, TPU High Flow, TPU285...).
+int process_variant_flow_mode(const std::string &variant);
+// The flow mode a slot is filled from (D6): the variant's own mode, TPU High Flow -> Standard, any other
+// "... High Flow" -> High Flow, anything else -> Standard.
+FilamentVolumeType process_variant_fill_mode(const std::string &variant);
+
+// The slots of each extruder (extruder e's at [e]) of the print_extruder_id / print_extruder_variant
+// layout, or empty unless both have the same length, the ids run 1, 1, .., 2, .., n and n >= 2.
+std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase &config);
+
+// The physical extruder (0-based) printing filament `filament_idx` (0-based) on a machine with
+// `extruder_count` extruders: filament_map on a Bambu grouping machine (two extruders that offer
+// several nozzle variants, DynamicPrintConfig::support_different_extruders) or when filaments outnumber
+// extruders, else the filament's own tool (a toolchanger such as the U1).
+size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count);
+// Whether a machine of `extruder_count` extruders is one of Bambu's grouping machines (H2D / H2C / X2D): at most
+// two extruders whose extruder_variant_list entries name more than one variant between them.
+bool is_bambu_grouping_machine(const ConfigBase &config, size_t extruder_count);
+
+// The index of a process option holding `opt_size` values that filament `filament_idx` (0-based) reads:
+// its extruder's slot for the flow mode get_config_idx(Process) picks when process_extruder_values is
+// set and opt_size is the layout's length, else get_config_idx(Process).
+size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx);
+
+// Whether some extruder's Standard / High Flow slot of a per_nozzle_process_options() key differs from
+// extruder 1's.
+bool process_extruder_slots_differ(const ConfigBase &config);
+
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
+// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
+// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
+// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
+// the last known value.
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
+// Edge (Orca #11582 / #11616): a 3MF project (or its embedded printer preset) written before
+// enable_power_loss_recovery existed has no value for it, and the default ("printer configuration",
+// nothing written) would drop the M1003 S1 a Bambu Lab printer was always sliced with. Such a config
+// gets "enable" when its printer_model is a Bambu Lab one, which is what it was sliced with before.
+// Returns true when it set the value.
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config);
+
+// The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+
+// The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
+// (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
+// `extruder_idx`. The printer tab binds its extruder pages to it.
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
 {
+    if (domain == ConfigFlowDomain::Process)
+        return opt.get_at(process_config_idx(config, opt.values.size(), filament_id));
     return opt.get_at(get_config_idx(config, domain, filament_id));
 }
 
@@ -586,6 +858,14 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
         return 1.0;
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
+
+// BBS: how far a filament's nozzle cools below its print temperature before the BBL wipe tower
+// (filament_cooling_before_tower at the filament's flow-variant slot; nil reads as 0, no cooling).
+// with_switcher_extra adds Bambu Studio's 10 degrees for a filament switcher that feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower), which Bambu applies to
+// the toolchange through the tower. GCode's M620.15 C and the tower's "Wipe tower reheat before wipe"
+// both read this, so a toolchange that cools always heats back.
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
@@ -622,9 +902,18 @@ inline bool filament_flow_variants_active(const ConfigBase &config)
 // option lookups and get_config_idx on every path. The *_for accessors return the
 // same value the uncached expression gives, falling back to it for an id outside
 // the resolved range, so the G-code is identical either way.
+// process_config_idx is the slot get_config_idx(config, Process, id) picks, which
+// GCode::process_flow_value used to recompute (two string-keyed option lookups and a
+// variant-name search) for every option it read, a few dozen times per extrusion path
+// (the config-lookup caching of Orca #16028, adapted to the flow-variant lookup).
 struct ResolvedFilamentFlow
 {
     bool                       variants_active{false};
+    std::vector<size_t>        process_config_idx;
+    // Per-nozzle process P1: the extruder slot process_config_idx(config, process_layout_size, id) picks,
+    // read for an option of process_layout_size values (0 when process_extruder_values is off).
+    std::vector<size_t>        process_extruder_idx;
+    size_t                     process_layout_size{0};
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
@@ -637,6 +926,19 @@ struct ResolvedFilamentFlow
     static double uncached_max_volumetric_speed(const ConfigBase &config, unsigned int filament_id);
     static bool   uncached_enable_pressure_advance(const ConfigBase &config, unsigned int filament_id);
 
+    size_t process_config_idx_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
+                                                         get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
+    // The slot of an option holding opt_size values: what process_config_idx(config, opt_size, id) gives.
+    size_t process_config_idx_for(const ConfigBase &config, size_t opt_size, unsigned int filament_id) const
+    {
+        if (process_layout_size == 0 || opt_size != process_layout_size)
+            return process_config_idx_for(config, filament_id);
+        return filament_id < process_extruder_idx.size() ? process_extruder_idx[filament_id] :
+                                                           Slic3r::process_config_idx(config, opt_size, filament_id);
+    }
     double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
     {
         return filament_id < flow_ratio.size() ? flow_ratio[filament_id] : uncached_flow_ratio(config, filament_id);
@@ -681,6 +983,12 @@ enum CounterboreHoleBridgingOption {
      wtwCone,
      wtwRib
  };
+
+// Bambu Studio 2.9.1 prime_tower_side_scrape_face: the pair of tower walls the side scrape runs on.
+enum SideScrapeFace : int {
+    sssfLeftRight = 0,
+    sssfFrontBack
+};
 
 // Which prime tower tool changes count as a "tower interface" (a material printed onto a
 // different one) for the wipe_tower_interface_* options. Bambu Studio decides this per layer from
@@ -783,7 +1091,10 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrinterTechnology)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CenterOfSurfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -796,6 +1107,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSlowdownScope)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(MinLayerTimePausePark)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
@@ -804,7 +1116,9 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PaintDepthMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TimelapseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InputShaperType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CurvedTopsPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
@@ -813,25 +1127,31 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SideScrapeFace)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FineDetailLevel)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillGradient)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
 class DynamicPrintConfig;
 
 // While one of these is alive on a thread, configs loaded on that thread keep the shipped meaning
-// of two Bambu Studio keys that the vendor presets under resources/profiles carry:
-// enable_tower_interface_features is not fanned out into the wipe_tower_interface_* options
-// (PrintConfigDef::handle_legacy_composite) and prime_tower_skip_points is not read into
-// wipe_tower_wall_gap (Format/BambuKeyAliases.cpp). PresetBundle::load_vendor_configs_from_json
-// holds one, so the bundled system presets print exactly as before these mappings existed, while
-// a Bambu project, a Bambu preset the user imports and a loose preset file are still mapped.
+// of a Bambu Studio key that the vendor presets under resources/profiles carry:
+// prime_tower_skip_points is not read into wipe_tower_wall_gap (Format/BambuKeyAliases.cpp).
+// PresetBundle::load_vendor_configs_from_json holds one, so the bundled system presets print
+// exactly as before that mapping existed, while a Bambu project, a Bambu preset the user imports
+// and a loose preset file are still mapped. (enable_tower_interface_features used to be fanned out
+// into the wipe_tower_interface_* options here too; it is Bambu Studio's own switch again.)
 // Set kMapSystemPresetTowerKeys to true to map the bundled presets as well.
 class SystemPresetTowerKeysScope
 {
@@ -843,7 +1163,7 @@ public:
     SystemPresetTowerKeysScope(const SystemPresetTowerKeysScope &) = delete;
     SystemPresetTowerKeysScope &operator=(const SystemPresetTowerKeysScope &) = delete;
 
-    // True while the keys above are to be left as the vendor preset has them.
+    // True while the key above is to be left as the vendor preset has it.
     static bool active() { return s_active; }
 
 private:
@@ -860,6 +1180,20 @@ public:
 
     static void handle_legacy(t_config_option_key &opt_key, std::string &value);
     static void handle_legacy_composite(DynamicPrintConfig &config);
+
+    // Keys a bundled or user preset file may carry although this build deliberately does not load
+    // them into presets (yet). They are dropped on load exactly like any other key that is not part
+    // of the preset type, but they are expected, so Preset::remove_invalid_keys() reports them once
+    // per session at info level instead of one error per file. A genuinely unknown key is not listed
+    // here and keeps logging as an error. This is a "known to be absent" list, not a support list:
+    // adding a key here never changes a loaded value or the G-code.
+    enum class ForeignKeyOrigin {
+        BambuStudio,   // Bambu Studio option this fork has not implemented in presets (see docs/bambu-flush-keys.md)
+        ProjectScoped, // option that lives in the project config; older saves also wrote it into preset files
+    };
+    // True (and the origin) when opt_key is such a key.
+    static bool unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin = nullptr);
+    static const char *foreign_key_origin_label(ForeignKeyOrigin origin);
 
     // Array options growing with the number of extruders
     const std::vector<std::string>& extruder_option_keys() const { return m_extruder_option_keys; }
@@ -900,6 +1234,36 @@ extern const PrintConfigDef print_config_def;
 // include Print.hpp.
 // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.5.
 const std::vector<std::string>& part_support_keys();
+
+// Keys the slicer must never see: visual only (Showcase, Preview look, swatches). Every one is a
+// per-filament-slot project option (s_project_options) kept in step with filament_multi_colors.
+// Print::apply() erases them before it compares or stores anything, and GCode::append_full_config()
+// bans them from the config block as a second guard, so they can never change G-code or invalidate
+// a slice. Not in the static PrintConfig. tests/design_multicolour_filament_view.md 4.2 / 6.1.
+// A later visual-only key (glow G1, the gradient cycle length of P6) joins this list and is then
+// stripped, banned, resized, erased and moved with the others without further code.
+const std::set<std::string>& visual_only_option_keys();
+inline bool is_visual_only_option(const std::string &key) { return visual_only_option_keys().count(key) != 0; }
+
+// The slot helpers for the visual-only keys (PresetBundle calls them next to filament_multi_colors).
+// Each works on every vector key of visual_only_option_keys(), whatever its type.
+// Size every visual-only key to n slots, creating a missing key and filling new slots with the default.
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n);
+// Remove slot index from every visual-only key that has it.
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index);
+// Move slot from to position to (the others shift), in every visual-only key that has both.
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to);
+// Erase every visual-only key (what Print::apply() does to the config it is handed).
+void strip_visual_only_options(DynamicPrintConfig &config);
+// Copy every visual-only key the config holds (a printer switch saves them before update_selections()
+// re-sizes the slots, as it saves filament_multi_colors).
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config);
+// Put a snapshot back (keys it lacks are erased) and size the keys to n slots.
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n);
+// A slot whose colours were replaced (AMS sync, the colour picker, a recommended palette) starts again
+// with an equal split; its angle and twist stay, as they belong to the feed path (design 4.5). Compares
+// filament_multi_colors now with old_multi_colors, slot by slot.
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors);
 
 class StaticPrintConfig;
 
@@ -971,13 +1335,18 @@ public:
 
     //BBS special case Support G/ Support W
     std::string get_filament_type(std::string &displayed_filament_type, int id = 0);
+    // Entry `id` of the per-filament text list `opt_key`, or `fallback` when the config has no such
+    // list or the list is empty: a project written by another tool may leave filament_ids out, and
+    // get_at() on an empty list reads past it. An index past the end reads the first entry, as
+    // get_at() does.
+    std::string filament_string_at(const std::string &opt_key, int id, const std::string &fallback) const;
 
     bool is_custom_defined();
 
     // Ultra (dual-nozzle): returns true when the printer's extruders carry more than one distinct
     // extruder variant (H2D/H2C/X2D), i.e. it is a multi-nozzle grouping machine. extruder_count is
     // filled with the nozzle count. Single-nozzle machines and same-variant toolchangers (U1) → false.
-    bool support_different_extruders(int& extruder_count);
+    bool support_different_extruders(int& extruder_count) const;
 };
 
 void handle_legacy_sla(DynamicPrintConfig &config);
@@ -1241,18 +1610,19 @@ protected: \
 PRINT_CONFIG_CLASS_DEFINE(
     PrintObjectConfig,
 
-    // Ultra (dual-nozzle): process-scope extruder-variant expansion keys.
-    ((ConfigOptionInts,                print_extruder_id))
-    ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               brim_object_gap))
+    ((ConfigOptionFloat,               brim_flow_ratio))
+    ((ConfigOptionBool,                brim_use_efc_outline))
     ((ConfigOptionEnum<BrimType>,      brim_type))
     ((ConfigOptionFloat,               brim_width))
     ((ConfigOptionFloat,               brim_ears_detection_length))
     ((ConfigOptionFloat,               brim_ears_max_angle))
+    ((ConfigOptionBool,                brim_ears_outer_only))
     ((ConfigOptionFloat,               skirt_start_angle))
     ((ConfigOptionBool,                bridge_no_support))
     ((ConfigOptionFloat,               elefant_foot_compensation))
     ((ConfigOptionInt,                 elefant_foot_compensation_layers))
+    ((ConfigOptionPercent,             elefant_foot_layers_density))
     ((ConfigOptionFloat,               max_bridge_length))
     ((ConfigOptionFloatOrPercent,      line_width))
     // Force the generation of solid shells between adjacent materials/volumes.
@@ -1314,6 +1684,35 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                seam_prefer_part_joints))
     ((ConfigOptionFloat,               slice_closing_radius))
     ((ConfigOptionEnum<SlicingMode>,   slicing_mode))
+    // EdgeSlicer: curved (non-planar) top surfaces, see src/libslic3r/CurvedTops.cpp.
+    ((ConfigOptionBool,                curved_tops_enabled))
+    ((ConfigOptionInt,                 curved_tops_layers))
+    ((ConfigOptionFloat,               curved_tops_max_angle))
+    // EdgeSlicer, curved tops P4.
+    ((ConfigOptionFloat,               curved_tops_nozzle_tolerance))
+    ((ConfigOptionEnum<CurvedTopsPattern>, curved_tops_pattern))
+    // EdgeSlicer, curved tops P3: developer overrides (Developer mode only, see CurvedTops.hpp).
+    ((ConfigOptionFloat,               curved_tops_dev_angle_ceiling))
+    ((ConfigOptionFloat,               curved_tops_dev_head_lowest_part))
+    ((ConfigOptionFloat,               curved_tops_dev_clearance_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_flank_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_land_tolerance))
+    ((ConfigOptionFloat,               curved_tops_dev_reach_margin))
+    ((ConfigOptionFloat,               curved_tops_dev_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_wipe_speed_cap))
+    ((ConfigOptionFloat,               curved_tops_dev_safe_lift))
+    ((ConfigOptionBool,                curved_tops_dev_contact_warning_only))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multiple_objects))
+    ((ConfigOptionBool,                curved_tops_dev_allow_by_object))
+    ((ConfigOptionBool,                curved_tops_dev_allow_multi_filament))
+    ((ConfigOptionBool,                curved_tops_dev_allow_supports_in_reach))
+    ((ConfigOptionBool,                curved_tops_dev_allow_material_beside))
+    ((ConfigOptionBool,                curved_tops_dev_allow_z_contouring))
+    ((ConfigOptionBool,                curved_tops_dev_allow_raft))
+    ((ConfigOptionBool,                curved_tops_dev_allow_variable_layer_height))
+    ((ConfigOptionBool,                curved_tops_dev_allow_tall_skirt))
+    ((ConfigOptionBool,                curved_tops_dev_allow_unverified_head))
+    ((ConfigOptionBool,                curved_tops_dev_nozzle_tolerance_unrecorded))
     ((ConfigOptionBool,                enable_support))
     // Automatic supports (generated based on support_threshold_angle).
     ((ConfigOptionEnum<SupportType>,   support_type))
@@ -1327,9 +1726,18 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 enforce_support_layers))
     ((ConfigOptionInt,                 support_filament))
     ((ConfigOptionFloatOrPercent,      support_line_width))
+    // Per-nozzle process P2: per filament, the support line width of the filament's nozzle process.
+    ((ConfigOptionFloatsOrPercents,    nozzle_support_line_width))
     ((ConfigOptionBool,                support_interface_not_for_body))
+    // EdgeSlicer: support interface interlock (woven band under the top contact layer).
+    ((ConfigOptionBool,                support_interface_interlock))
+    ((ConfigOptionInt,                 support_interface_interlock_layers))
+    ((ConfigOptionInt,                 support_interface_interlock_beam_lines))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
+    // EdgeSlicer: the support interface filament's nozzle temperature, 0 = its own temperatures
+    // (Print::support_interface_temperatures()).
+    ((ConfigOptionInt,                 support_interface_nozzle_temperature))
     // Chameleon: when enabled, support material matches the filament of the model
     // geometry it touches or stands beside (interfaces/ironing/walls), instead of
     // always using the configured support filament.
@@ -1345,6 +1753,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
     ((ConfigOptionFloats,               support_speed))
+    // OrcaSlicer #13459
+    ((ConfigOptionFloatsOrPercents,     small_support_perimeter_speed))
+    ((ConfigOptionFloats,               small_support_perimeter_threshold))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
     // BBS
     //((ConfigOptionBool,                independent_support_layer_height))
@@ -1364,12 +1775,20 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
     ((ConfigOptionFloat,               support_ironing_spacing))
+    // Bambu Studio 2.9.1.
+    ((ConfigOptionFloat,               support_ironing_inset))
+    ((ConfigOptionFloat,               support_ironing_speed))
+    ((ConfigOptionFloat,               support_ironing_direction))
     // Ultra (over-support surfaces): over_support_surfaces / _flow / _speed used to live here.
     // Stage 5 of the support-sets plan moved them to PrintRegionConfig so a PART can carry them:
     // they describe the OBJECT's own bottom shell, not the support, and a part's own region is
     // where the fork already puts such a value. See the block in PrintRegionConfig below.
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
+    // Bambu Studio 2.9.1: auto circle contour-hole compensation (coefficients are per filament, PrintConfig).
+    ((ConfigOptionBool,                enable_circle_compensation))
+    ((ConfigOptionFloat,               circle_compensation_manual_offset))
+    ((ConfigOptionBool,                apply_scarf_seam_on_circles))
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
@@ -1382,7 +1801,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              tree_support_branch_diameter_angle))
     ((ConfigOptionFloat,              tree_support_angle_slow))
     ((ConfigOptionInt,                tree_support_wall_count))
-    ((ConfigOptionBool,               tree_support_adaptive_layer_height))
     ((ConfigOptionBool,               tree_support_auto_brim))
     ((ConfigOptionFloat,              tree_support_brim_width))
     // Side stabilizers (Support/Stabilizers.hpp)
@@ -1415,8 +1833,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_feature_size))
     ((ConfigOptionPercent,            initial_layer_min_bead_width))
     ((ConfigOptionPercent,            min_bead_width))
+    // EdgeSlicer (Fine detail P2, Cura's separate minimums): the line widths that decide when one wall line
+    // splits into two (odd) and when a centre line is added between two (even). 0 = min_bead_width, as before.
+    ((ConfigOptionPercent,            min_odd_wall_line_width))
+    ((ConfigOptionPercent,            min_even_wall_line_width))
 
     // Orca
+    ((ConfigOptionFloat,              wall_maximum_resolution))
+    ((ConfigOptionFloat,              wall_maximum_deviation))
     ((ConfigOptionFloat,              make_overhang_printable_angle))
     ((ConfigOptionFloat,              make_overhang_printable_hole_size))
     ((ConfigOptionFloat,              tree_support_branch_distance_organic))
@@ -1434,6 +1858,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              initial_layer_acceleration))
     ((ConfigOptionFloatsOrPercents,     bridge_acceleration))
     ((ConfigOptionFloats,              travel_acceleration))
+    // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
+    ((ConfigOptionFloats,              initial_layer_travel_acceleration)) // BBS 2.9.1, per process variant; 0 = unset
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
@@ -1444,6 +1871,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              top_surface_jerk))
     ((ConfigOptionFloats,              initial_layer_jerk))
     ((ConfigOptionFloats,              travel_jerk))
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
     ((ConfigOptionFloats,              default_junction_deviation))
         
@@ -1470,7 +1898,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  bottom_color_penetration_layers))
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
+    ((ConfigOptionBool,                 relative_bridge_angle)) // ORCA: Relative bridge angle flag
+    ((ConfigOptionFloat,                bridge_expansion_extra))
     ((ConfigOptionFloat,                bridge_flow))
+    ((ConfigOptionFloatOrPercent,       bridge_line_width))
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloats,                bridge_speed))
     ((ConfigOptionFloatsOrPercents,       internal_bridge_speed))
@@ -1492,21 +1923,49 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  top_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  undertop_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  bottom_surface_pattern))
+    ((ConfigOptionEnum<SurfaceFillOrder>, top_surface_fill_order))
+    ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
+    // Per-nozzle process P2: per FILAMENT (index filament - 1), the line width the per-nozzle process of the
+    // filament's nozzle gives each role; a missing or 0 entry leaves the region's own width
+    // (stamp_nozzle_line_widths in region_config_from_model_volume).
+    ((ConfigOptionFloatsOrPercents,     nozzle_outer_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_inner_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_sparse_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_internal_solid_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_top_surface_line_width))
+    // Per-nozzle process P5: the locked-zag skin / skeleton widths, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_skin_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_skeleton_infill_line_width))
+    // Per-nozzle process P6: the bridge width, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_bridge_line_width))
+    // Per-nozzle process P8: per FILAMENT (index filament - 1), the region keys the process of the filament's tool
+    // gives ("key = value" lines, nozzle_region_option_keys()); empty without per-tool processes
+    // (stamp_nozzle_region_values in region_config_from_model_volume).
+    ((ConfigOptionStrings,              nozzle_region_values))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
+    ((ConfigOptionFloat,                top_layer_direction))
+    ((ConfigOptionFloat,                bottom_layer_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
     ((ConfigOptionBool,                 symmetric_infill_y_axis))
+    ((ConfigOptionBool,                 infill_complete_top))
     ((ConfigOptionFloat,                infill_shift_step))
     ((ConfigOptionString,               sparse_infill_rotate_template))
     ((ConfigOptionPercent,              sparse_infill_density))
     ((ConfigOptionEnum<InfillPattern>,  sparse_infill_pattern))
+    ((ConfigOptionPercent,              sparse_infill_smooth_factor))
     ((ConfigOptionFloat,                lateral_lattice_angle_1))
     ((ConfigOptionFloat,                lateral_lattice_angle_2))
     ((ConfigOptionFloat,                infill_overhang_angle))
+    ((ConfigOptionFloat,                lightning_overhang_angle))
+    ((ConfigOptionFloat,                lightning_prune_angle))
+    ((ConfigOptionFloat,                lightning_straightening_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
+    ((ConfigOptionEnum<CenterOfSurfacePattern>, center_of_surface_pattern))
+    ((ConfigOptionBool,                 separated_infills))
     // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
     ((ConfigOptionBool,                 hollow_interior))
     ((ConfigOptionFloat,                hollow_shell_thickness))
@@ -1521,6 +1980,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionBool,                 fuzzy_skin_skip_overhangs))
+    ((ConfigOptionInt,                  fuzzy_skin_ripples_per_layer))
+    ((ConfigOptionPercent,              fuzzy_skin_ripple_offset))
+    ((ConfigOptionInt,                  fuzzy_skin_layers_between_ripple_offset))
     ((ConfigOptionFloats,                gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
@@ -1545,6 +2007,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Orca:
     ((ConfigOptionFloatOrPercent,                infill_combination_max_layer_height))
     ((ConfigOptionInt,                  fill_multiline))
+    ((ConfigOptionEnum<AdaptiveInfillMode>, adaptive_infill_mode))
+    ((ConfigOptionPercent,              adaptive_infill_interior_density))
+    ((ConfigOptionEnum<AdaptiveInfillGradient>, adaptive_infill_gradient))
+    ((ConfigOptionBool,                 gyroid_optimized))
     // Ironing options
     ((ConfigOptionEnum<IroningType>, ironing_type))
     ((ConfigOptionEnum<InfillPattern>, ironing_pattern))
@@ -1554,12 +2020,22 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    ((ConfigOptionBool, ironing_angle_fixed))
+    // Orca #11194: filament ironing overrides (per filament, nil = use the process value)
+    ((ConfigOptionPercentsNullable, filament_ironing_flow))
+    ((ConfigOptionFloatsNullable, filament_ironing_spacing))
+    ((ConfigOptionFloatsNullable, filament_ironing_inset))
+    ((ConfigOptionFloatsNullable, filament_ironing_speed))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
     ((ConfigOptionBool, unsupported_wall_last))
     ((ConfigOptionInt, wall_filament))
     // Ultra: 0 = same as wall_filament
     ((ConfigOptionInt, outer_wall_filament))
+    // Per modifier only (never in a preset): inside the modifier its filament wins over colour painting.
+    // region_config_from_model_volume() keeps it only on a modifier that sets a filament; PrintApply keeps it
+    // only on a painted part; painted regions are then never built over such a region.
+    ((ConfigOptionBool, override_paint))
     ((ConfigOptionFloatOrPercent, inner_wall_line_width))
     ((ConfigOptionFloats, inner_wall_speed))
     // Total number of perimeters.
@@ -1571,15 +2047,26 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.
     ((ConfigOptionBool, detect_thin_wall))
+    // EdgeSlicer, Fine detail (P2): region keys, so a modifier can carry them. See FineDetail.hpp.
+    ((ConfigOptionEnum<FineDetailLevel>, fine_detail))
+    ((ConfigOptionPercent, thin_feature_line_width))
+    ((ConfigOptionPercent, thin_feature_min_size))
+    ((ConfigOptionFloat, fine_detail_speed))
     // Ultra: offset layers (interlocked half-layer-shifted odd walls)
     ((ConfigOptionBool, offset_layers))
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
+    ((ConfigOptionFloat, top_surface_expansion))
+    ((ConfigOptionFloat, top_surface_expansion_margin))
+    ((ConfigOptionEnum<TopSurfaceExpansionDirection>, top_surface_expansion_direction))
     ((ConfigOptionInt, top_color_penetration_layers))
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
     ((ConfigOptionBools,                 enable_overhang_speed))
+    ((ConfigOptionBool,                  overhang_shadow_inner_wall))
+    ((ConfigOptionPercent,               overhang_shadow_speed_ratio))
+    ((ConfigOptionPercent,               overhang_shadow_distance))
     ((ConfigOptionFloatsOrPercents,       overhang_1_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_2_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_3_4_speed))
@@ -1597,6 +2084,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 wipe_inward))
     ((ConfigOptionFloatOrPercent,        wipe_inward_distance))
     ((ConfigOptionBool,                 wipe_before_external_loop))
+    ((ConfigOptionBool,                 retract_after_outer_wall))
     ((ConfigOptionEnum<WallInfillOrder>, wall_infill_order))
     ((ConfigOptionBool,                 precise_outer_wall))
     ((ConfigOptionPercent,              bridge_density))
@@ -1615,6 +2103,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 hole_to_polyhole))
     ((ConfigOptionFloatOrPercent,       hole_to_polyhole_threshold))
     ((ConfigOptionBool,                 hole_to_polyhole_twisted))
+    ((ConfigOptionInt,                  hole_to_polyhole_max_edges))
     ((ConfigOptionBool,                 overhang_reverse))
     ((ConfigOptionBool,                 overhang_reverse_internal_only))
     ((ConfigOptionFloatOrPercent,       overhang_reverse_threshold))
@@ -1643,6 +2132,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                zaa_min_z))
     ((ConfigOptionFloat,                zaa_minimize_perimeter_height))
     ((ConfigOptionBool,                 zaa_speed_scaling))
+    ((ConfigOptionFloat,                zaa_max_segment_rate))
+
+    // Edge: a layer shorter than this (after the cooling slowdown) waits parked for the rest. 0 = off.
+    ((ConfigOptionFloat,                min_layer_time_pause))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
@@ -1685,6 +2178,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 resonance_avoidance))
     ((ConfigOptionFloat,                min_resonance_avoidance_speed))
     ((ConfigOptionFloat,                max_resonance_avoidance_speed))
+
+    //Orca: Input shaping
+    ((ConfigOptionBool,                 input_shaping_emit))
+    ((ConfigOptionEnum<InputShaperType>, input_shaping_type))
+    ((ConfigOptionFloat,                input_shaping_freq_x))
+    ((ConfigOptionFloat,                input_shaping_freq_y))
+    ((ConfigOptionFloat,                input_shaping_damp_x))
+    ((ConfigOptionFloat,                input_shaping_damp_y))
 )
 
 // This object is mapped to Perl as Slic3r::Config::GCode.
@@ -1711,6 +2212,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               fan_kickstart))
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
+    // ORCA: minimum PWM (as a percent 0-100) emitted when the part-cooling fan is asked for a non-zero speed.
+    // Used to overcome the PWM start-up threshold on fans that cannot spool below a certain duty cycle.
+    // A value of 0 (the default) leaves behaviour unchanged. A fan command of 0 (off) is always honoured.
+    ((ConfigOptionInt,                 part_cooling_fan_min_pwm))
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionStrings,             filament_type))
@@ -1722,24 +2227,45 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_z_offset))
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
+    ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
+    ((ConfigOptionFloats,              filament_prime_volume))   //BBS 2.9.1: per-filament tower prime (Bambu Lab Type 1 towers)
+    ((ConfigOptionFloats,              filament_prime_volume_nc))   // Orca #14800: the prime after a hotend change on one extruder
+    // Orca #10780: the Type 1 tower purges each adhesiveness category into its own block.
+    ((ConfigOptionInts,                filament_adhesiveness_category))
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionInts,                filament_flush_temp))  // Ultra: BBS 2.x flush temp (0 = use nozzle_temperature_range_high)
-    ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
-    ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
+    // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
+    // stored per flow variant (read them with get_value_at, ConfigFlowDomain::Filament).
+    ((ConfigOptionIntsNullable,        filament_flush_temp))  // 0 = use nozzle_temperature_range_high
+    ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
+    ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
+    ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    // BBS 2.9.1: the tower's nozzle-change ramming (WipeTower::ramming): length rammed by the outgoing filament
+    // on an extruder change / a hotend change, the reverse travel after it, its volumetric speed (-1 = the
+    // filament's maximum), and the idle-travel cooling that replaces a zero-length ramming on hotend_as_extruder.
+    ((ConfigOptionFloats,              filament_change_length))
+    ((ConfigOptionFloats,              filament_change_length_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time))
+    ((ConfigOptionFloatsNullable,      filament_ramming_travel_time_nc))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed))
+    ((ConfigOptionFloatsNullable,      filament_ramming_volumetric_speed_nc))
+    ((ConfigOptionBools,               filament_idle_travel_cooling_enabled))
+    ((ConfigOptionBools,               filament_pre_heating_enabled))  // BBS 2.9.1 H3C: pre-heat this filament's hotend
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
     // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.
     ((ConfigOptionFloatsNullable,      filament_retract_length_nc))
     ((ConfigOptionInts,                required_nozzle_HRC))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
+    ((ConfigOptionEnum<PowerLossRecoveryMode>, enable_power_loss_recovery)) // Orca #11582 / #11616
     ((ConfigOptionPoints,              thumbnail_size))
     // ((ConfigOptionBool,                spaghetti_detector))
     ((ConfigOptionBool,                gcode_add_line_number))
     ((ConfigOptionBool,                bbl_bed_temperature_gcode))
     ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
+    ((ConfigOptionBool,                gcode_skip_config_block))
 
     ((ConfigOptionFloat,               time_cost)) 
     ((ConfigOptionString,              layer_change_gcode))
@@ -1756,9 +2282,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,             layer_time_speed_max_slowdown))
     ((ConfigOptionPercent,             layer_time_speed_max_time_increase))
     ((ConfigOptionEnum<LayerTimeSlowdownScope>, layer_time_speed_slowdown_scope))
+    // Edge: where a minimum layer time pause waits (min_layer_time_pause is per region). G-code export only.
+    ((ConfigOptionEnum<MinLayerTimePausePark>, min_layer_time_pause_park))
+    ((ConfigOptionFloat,               min_layer_time_pause_park_x))
+    ((ConfigOptionFloat,               min_layer_time_pause_park_y))
 
     
     ((ConfigOptionPercents,            retract_before_wipe))
+    // Orca
+    ((ConfigOptionPercents,            retract_after_wipe))
     ((ConfigOptionFloats,              retraction_length))
     ((ConfigOptionFloats,              retract_length_toolchange))
     ((ConfigOptionInt,                 enable_long_retraction_when_cut))
@@ -1779,6 +2311,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              retract_restart_extra))
     ((ConfigOptionFloats,              retract_restart_extra_toolchange))
     ((ConfigOptionFloats,              retraction_speed))
+    ((ConfigOptionString,              file_start_gcode))
     ((ConfigOptionString,              machine_start_gcode))
     ((ConfigOptionStrings,             filament_start_gcode))
     ((ConfigOptionBool,                single_extruder_multi_material))
@@ -1788,8 +2321,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,              toolchange_cyclic_order))
     ((ConfigOptionBool,                toolchange_cyclic_first_layer))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
+    ((ConfigOptionBool,                wipe_tower_sparse_layers_combination))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
+    ((ConfigOptionString,              process_change_extrusion_role_gcode))
+    ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))
     ((ConfigOptionFloats,               travel_speed))
     ((ConfigOptionFloat,               travel_speed_z))
     ((ConfigOptionBool,                silent_mode))
@@ -1843,8 +2379,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_multitool_ramming_flow))
     ((ConfigOptionFloats,              filament_stamping_loading_speed))
     ((ConfigOptionFloats,              filament_stamping_distance))
+    ((ConfigOptionEnum<WipeTowerType>, wipe_tower_type))
     ((ConfigOptionBool,                purge_in_prime_tower))
     ((ConfigOptionBool,                enable_filament_ramming))
+    ((ConfigOptionBool,                tool_change_on_wipe_tower))
+    ((ConfigOptionBool,                wait_for_temp_on_wipe_tower))
     ((ConfigOptionFloat,                ramming_line_width_ratio))
     ((ConfigOptionBool,                enable_change_pressure_when_wiping))
     ((ConfigOptionFloat,                ramming_pressure_advance_value))
@@ -1880,6 +2419,50 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                extruder_max_nozzle_count))
     ((ConfigOptionInts,                printer_extruder_id))
     ((ConfigOptionStrings,             printer_extruder_variant))
+    // Ultra (dual-nozzle): the process-scope extruder-variant layout (Bambu's print_extruder_id /
+    // print_extruder_variant). Per-nozzle process P1: a print-level key (it was in PrintObjectConfig, where
+    // nothing read it), so the G-code writer, Fill and the wipe towers resolve per-extruder process slots.
+    ((ConfigOptionInts,                print_extruder_id))
+    ((ConfigOptionStrings,             print_extruder_variant))
+    // Per-nozzle process P1: the process preset chosen for each physical extruder ("" = the plate's
+    // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
+    ((ConfigOptionStrings,             nozzle_process_presets))
+    // Per-nozzle process P8: each tool's unsaved changes to its process ("T2" then "key = value" lines, one entry per
+    // tool) and the 1-based tools that need a process of their own and have none (Print::validate refuses them).
+    ((ConfigOptionStrings,             nozzle_process_edits))
+    ((ConfigOptionInts,                nozzle_process_missing))
+    ((ConfigOptionBool,                process_extruder_values))
+    // Per-nozzle process P6: explicit line widths per nozzle size / tool, and the nozzle the process's mm widths are for.
+    ((ConfigOptionString,              process_nozzle_line_widths))
+    ((ConfigOptionFloat,               line_width_nozzle_diameter))
+    // Per-nozzle process P2: the 1-based physical extruder (tool) each filament prints on, 0 = its own
+    // tool (the filament's index on a toolchanger). Only toolchangers use it (physical_extruder_for_filament).
+    ((ConfigOptionInts,                filament_nozzle_assignment))
+    // Per-nozzle process P4 (ToolSlots.hpp): the diameter dimension of the process slot layout, the printer's
+    // opt-in to the per-tool slot model, the physical nozzle declaration, rack nozzle diameters (H2C), the
+    // rack nozzle size per filament, and per-nozzle filament values.
+    ((ConfigOptionFloats,              print_extruder_nozzle_diameter))
+    ((ConfigOptionBool,                tool_slot_model))
+    ((ConfigOptionBool,                support_filament_nozzle_mapping))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_diameter))
+    ((ConfigOptionFloats,              filament_rack_nozzle_diameter))
+    // Per-nozzle process P9 (H2C rack slots as tools, NozzleProcess.hpp "P9"): the rack slot each filament is pinned to
+    // (1-based, 0 = none), the process each rack slot uses ("T2.3" then the name), the rack nozzle sizes of this project
+    // (one text per extruder, "" = the printer preset's), and two internal keys filled while slicing: the slot ids that
+    // need a process and have none, and per filament the process slot it reads (-1 = the extruder's).
+    ((ConfigOptionInts,                filament_rack_nozzle_slot))
+    ((ConfigOptionInts,                filament_side_pin))
+    ((ConfigOptionStrings,             nozzle_slot_process_presets))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_override))
+    ((ConfigOptionStrings,             nozzle_slot_process_missing))
+    ((ConfigOptionInts,                nozzle_filament_process_slot))
+    // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
+    ((ConfigOptionStrings,             nozzle_filament_tool))
+    // H3C fix: per filament, the layer height of the process chosen for its nozzle, 0 = none (internal, NozzleProcess.hpp).
+    ((ConfigOptionFloatsOrPercents,    nozzle_layer_height))
+    // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
+    ((ConfigOptionFloats,              nozzle_diameter_override))
+    ((ConfigOptionStrings,             filament_nozzle_variants))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))
     ((ConfigOptionPointsGroups,        extruder_printable_area))
@@ -1887,12 +2470,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              grab_length))
     ((ConfigOptionFloats,              hotend_cooling_rate))
     ((ConfigOptionFloats,              hotend_heating_rate))
+    ((ConfigOptionFloats,              hotend_cooling_rate_on_rack)) // BBS 2.9.1 H3C: idle hotend in the rack
     ((ConfigOptionBool,                enable_pre_heating))  // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     ((ConfigOptionInts,                nozzle_flush_dataset))
     ((ConfigOptionStrings,             filament_extruder_variant))
     ((ConfigOptionInts,                filament_self_index))
     ((ConfigOptionBool,                enable_filament_dynamic_map))
     ((ConfigOptionBool,                has_filament_switcher))
+    ((ConfigOptionBool,                handle_hotend_as_extruder)) // BBS 2.9.1 H3C: rack hotends keep their filament
     ((ConfigOptionEnum<PrimeVolumeMode>, prime_volume_mode))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
@@ -1901,10 +2486,39 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_nozzle_map))
 )
 
+// Bambu Studio 2.9.1 Type 1 tower options of the H3C, a class of their own: GCodeConfig and PrintConfig are at
+// MSVC's limit of macro nesting (fatal error C1009 with one option more).
+PRINT_CONFIG_CLASS_DEFINE(
+    PrintTowerConfig,
+
+    // Bambu Studio 2.9.1 (H3C): tower speed on hotend_as_extruder printers, slowdown at the end of a tower
+    // visit, the purge-start line ironing and its speed, the side scrape after a tool change.
+    ((ConfigOptionFloat,              prime_tower_feedrate_factor))
+    ((ConfigOptionPercent,            prime_tower_tail_speed_factor))
+    ((ConfigOptionFloat,              prime_tower_tail_slowdown_volume))
+    ((ConfigOptionBool,               prime_tower_line_ironing))
+    ((ConfigOptionFloat,              prime_tower_ironing_speed))
+    ((ConfigOptionBool,               prime_tower_side_scrape))
+    ((ConfigOptionEnum<SideScrapeFace>, prime_tower_side_scrape_face))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_length))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_height))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_speed))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_wall_gap))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_point_spacing))
+    ((ConfigOptionFloat,              prime_tower_side_scrape_along_length))
+    // Per-row speed multipliers of the tower purge ("" = the built-in ramp), per filament.
+    ((ConfigOptionStrings,            filament_prime_tower_speed_factor_curve))
+    // Bambu Studio 2.9.1 tower interface features (enable_tower_interface_features): the firmware purge of a contact
+    // layer tool change (M620.13 L in the H2 / H3C change_filament_gcode), per filament.
+    ((ConfigOptionFloats,             filament_tower_interface_purge_volume))
+    // Orca #12266: set the print temperature back as an interface purge starts, so the nozzle cools during it.
+    ((ConfigOptionBool,               enable_tower_interface_cooldown_during_tower))
+)
+
 // This object is mapped to Perl as Slic3r::Config::Print.
 PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
-    (MachineEnvelopeConfig, GCodeConfig),
+    (MachineEnvelopeConfig, GCodeConfig, PrintTowerConfig),
 
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
@@ -1951,6 +2565,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // by-object collision and arrange keep extruder_clearance_radius.
     ((ConfigOptionFloat,              extruder_clearance_max_radius))
     ((ConfigOptionFloat,              nozzle_height))
+    // EdgeSlicer, curved tops on any printer: the user's own print head values (HeadClearance.hpp, HeadUserValues).
+    ((ConfigOptionFloat,              head_nozzle_protrusion))
+    ((ConfigOptionFloat,              head_max_surface_angle))
+    ((ConfigOptionFloat,              head_nozzle_contact_record))
     ((ConfigOptionStrings,            extruder_colour))
     ((ConfigOptionPoints,             extruder_offset))
     ((ConfigOptionBools,              reduce_fan_stop_start_freq))
@@ -1960,9 +2578,16 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionStrings,            filament_multi_colors))
     ((ConfigOptionInts,               filament_colour_mode))
     ((ConfigOptionBools,              activate_air_filtration))
+    ((ConfigOptionBools,              activate_air_filtration_during_print))
+    ((ConfigOptionBools,              activate_air_filtration_on_completion))
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
+    // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
+    // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
+    ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
+    // Per-nozzle process P6: per FILAMENT, line_width for the filament's nozzle (the skirt's fallback width).
+    ((ConfigOptionFloatsOrPercents,   nozzle_line_width))
     ((ConfigOptionFloat,              initial_layer_print_height))
     ((ConfigOptionFloats,              initial_layer_speed))
 
@@ -1970,6 +2595,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,              initial_layer_infill_speed))
     ((ConfigOptionInts,               nozzle_temperature_initial_layer))
     ((ConfigOptionInts,               full_fan_speed_layer))
+    // ORCA: explicit override for the part cooling fan speed on the first printed layer.
+    ((ConfigOptionInts,               initial_layer_fan_speed))
     ((ConfigOptionFloats,               fan_max_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionFloats,               fan_min_speed))
@@ -1998,6 +2625,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
     ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))
@@ -2056,22 +2684,46 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_cone_angle))
     ((ConfigOptionPercent,            wipe_tower_extra_spacing))
     ((ConfigOptionFloat,              wipe_tower_max_purge_speed))
+    // Bambu Studio 2.9.1 prime tower options honoured by the Type 1 tower (0 = off).
+    ((ConfigOptionFloat,              prime_tower_acceleration))
+    ((ConfigOptionFloat,              prime_tower_line_width))
+    ((ConfigOptionFloat,              prime_tower_wipe_speed))
+    ((ConfigOptionFloat,              prime_tower_wipe_distance))
+    // Orca #10780 / #15035: Type 1 tower block planner (purge line gap, internal ribs, flat ironing).
+    ((ConfigOptionPercent,            prime_tower_infill_gap))
+    ((ConfigOptionBool,               prime_tower_enable_framework))
+    ((ConfigOptionBool,               prime_tower_flat_ironing))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    ((ConfigOptionBool,               wipe_tower_stagger_toolchange_start))
     // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
     ((ConfigOptionBool,               wipe_tower_interface_temp))
     ((ConfigOptionBool,               wipe_tower_interface_run_in))
     ((ConfigOptionBool,               wipe_tower_interface_extra_prime))
     ((ConfigOptionEnum<TowerInterfaceTrigger>, wipe_tower_interface_trigger))
-    // Bambu Studio's single switch for its interface bundle. Load-only: handle_legacy_composite
-    // fans it out into the options above; nothing reads it otherwise.
+    // Bambu Studio 2.9.1's switch for its tower interface features on contact layers: the Type 1 tower
+    // (WipeTower) and change_filament_gcode (is_prime_tower_interface) read it. The options above stay
+    // off on that tower while it is on; WipeTower2 ignores it.
     ((ConfigOptionBool,               enable_tower_interface_features))
     ((ConfigOptionInts,               filament_tower_interface_print_temp))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_length))
+    // Bambu Studio 2.9.1: auto circle compensation coefficients, one value per filament.
+    ((ConfigOptionFloats,             circle_compensation_speed))
+    ((ConfigOptionFloats,             diameter_limit))
+    ((ConfigOptionFloats,             counter_coef_1))
+    ((ConfigOptionFloats,             counter_coef_2))
+    ((ConfigOptionFloats,             counter_coef_3))
+    ((ConfigOptionFloats,             hole_coef_1))
+    ((ConfigOptionFloats,             hole_coef_2))
+    ((ConfigOptionFloats,             hole_coef_3))
+    ((ConfigOptionFloats,             counter_limit_min))
+    ((ConfigOptionFloats,             counter_limit_max))
+    ((ConfigOptionFloats,             hole_limit_min))
+    ((ConfigOptionFloats,             hole_limit_max))
     ((ConfigOptionInt,                wipe_tower_filament))
     ((ConfigOptionFloats,             wiping_volumes_extruders))
     ((ConfigOptionInts,       idle_temperature))
@@ -2091,6 +2743,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,             thumbnails))
     // BBS: move from PrintObjectConfig
     ((ConfigOptionBool, independent_support_layer_height))
+    ((ConfigOptionBool,               combine_brims))
     // BBS port: Z overrides X/Y support distance
     ((ConfigOptionBool, top_z_overrides_xy_distance))
     // SoftFever
@@ -2098,6 +2751,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercents,            filament_shrinkage_compensation_z))
     ((ConfigOptionBool,                gcode_label_objects))
     ((ConfigOptionBool,                exclude_object))
+    ((ConfigOptionFloat,               exclude_object_tolerance))
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionInts,                 slow_down_layers))
     ((ConfigOptionInts,                support_material_interface_fan_speed))
@@ -2357,6 +3011,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 // P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
 bool has_nozzle_rack(const PrintConfig &config);
 
+// Bambu Studio 2.9.1 handle_hotend_as_extruder (H3C): every rack hotend keeps its own filament, so
+// a change to a hotend that already holds the next filament is a hotend swap, not an unload + load,
+// and needs no flush. True when the printer sets the key, or for a single extruder with a rack
+// (extruder_max_nozzle_count > 1), which also covers projects saved before the key was read.
+bool hotend_as_extruder(const PrintConfig &config);
+
 // Mixed nozzle sizes (Phase 1): map a 1-based FILAMENT index to the 0-based PHYSICAL extruder
 // (nozzle) that filament prints through. nozzle_diameter, min_layer_height / max_layer_height and
 // the rest of the per-extruder printer options are indexed by physical extruder, not by filament:
@@ -2367,6 +3027,22 @@ bool has_nozzle_rack(const PrintConfig &config);
 // Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
 // Flow.cpp::physical_extruder_for_filament.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
+// The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
+// preset bundle (the support overhang highlight in the 3D view).
+// `assignment` is filament_nozzle_assignment (per-nozzle process P2): a filament with an entry 1..nozzle_count
+// prints on that tool before any other rule.
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id,
+                                      const std::vector<int> &assignment = {});
+// The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
+int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
+// Per-nozzle process P4: the nozzle diameter 1-based `filament_id` prints with: nozzle_diameter of its physical
+// extruder (physical_extruder_for_filament), or the rack nozzle size it is pinned to (filament_rack_nozzle_diameter)
+// when that extruder declares rack nozzle diameters (extruder_rack_nozzle_diameter, H2C). Without rack diameters
+// it is exactly nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id)). ToolSlots.cpp.
+double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// Per-nozzle process P4: the smallest physical nozzle, rack nozzles (extruder_rack_nozzle_diameter) included; the
+// smallest nozzle_diameter when no rack diameters are declared. ToolSlots.cpp.
+double min_physical_nozzle_diameter(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder
@@ -2389,10 +3065,9 @@ bool has_mixed_nozzle_diameters(const ConfigBase &config);
 std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters);
 std::string nozzle_diameter_summary(const ConfigBase &config);
 
-// The nozzle diameter that filament slot `filament_id` (1-based) prints through, resolved via
-// physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
-// per-slot filament preset compatibility rule measures against.
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int), the nozzle diameter filament slot `filament_id`
+// (1-based) prints through, is declared above (per-nozzle process P4: rack-aware). It is what the per-slot filament
+// preset compatibility rule measures against.
 
 // CLI --uptodate_settings / --downward_check: load_config_file() uses
 // ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits.
@@ -2562,6 +3237,15 @@ bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
 // a flush, which leaves the executable G-code byte-identical.
 std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
 
+// The 0-based toolhead a sliced plate's metadata (slice_info.config's <filament group_id>) reports
+// filament `filament_id` (0-based) on: identity_filament_map over ALL of the project's filaments
+// (filament_colour), the same map slice_info.config's filament_maps is written from. 0 where that
+// map says nothing (not an identical multi-toolhead machine, a negative id, an id past the
+// project's filaments). The map is indexed by filament number, so it must not be sized by the
+// number of filaments a plate uses: with filaments 2-7 of 7 used, a six-long map put filament 7
+// on toolhead 0.
+int identity_filament_group(const ConfigBase &cfg, int filament_id);
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
@@ -2571,6 +3255,11 @@ Points get_bed_shape(const SLAPrinterConfig &cfg);
 // validation, arrange, the plate's "object inside" check and the timelapse picker agree; see
 // bed_exclude_area_is_rectangles() in PrintConfig.cpp for the rule.
 bool bed_exclude_area_is_rectangles(const Pointfs &points);
+// OrcaSlicer #17209: whether a bed_exclude_area can be used at all. A rectangle list is valid; one
+// polygon must have finite points, a non-zero area and no crossing edges (edges may touch, so the
+// Kobra 3 ring with its zero-width connector stays valid). The readers below exclude nothing for
+// an invalid list, and the GUI refuses to take or load one.
+bool is_valid_bed_exclude_area(const Pointfs &points);
 // The excluded region as hole-free, counter-clockwise, scaled polygons (zero-area pieces dropped).
 Slic3r::Polygons bed_exclude_area_polygons(const Pointfs &points);
 // Unscaled boxes for the GUI, which works in boxes (PartPlate exclusion boxes, arrange's fixed

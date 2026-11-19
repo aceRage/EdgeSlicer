@@ -21,6 +21,7 @@ constexpr int eSendToPrinterAll    = 6;
 constexpr int eUploadGcode         = 7;
 constexpr int eExportAllSlicedFile = 8;
 constexpr int ePrintMultiMachine   = 9;
+constexpr int eSendToBambuConnect  = 10;
 
 // Only the print-host flow depends on a configured print host. Exporting G-code (or a sliced
 // file) writes a file and never needs one, so a restored "Export G-code file" must not be greyed
@@ -43,6 +44,7 @@ inline const char *key(int type)
     case eSendToPrinter:       return "send_to_printer";
     case eSendToPrinterAll:    return "send_to_printer_all";
     case ePrintMultiMachine:   return "print_multi_machine";
+    case eSendToBambuConnect:  return "send_to_bambu_connect";
     case eUploadGcode:         break;
     }
     return "";
@@ -86,6 +88,10 @@ inline bool from_key(const std::string &saved, int &out)
     }
     if (saved == "print_multi_machine") {
         out = ePrintMultiMachine;
+        return true;
+    }
+    if (saved == "send_to_bambu_connect") {
+        out = eSendToBambuConnect;
         return true;
     }
     return false;

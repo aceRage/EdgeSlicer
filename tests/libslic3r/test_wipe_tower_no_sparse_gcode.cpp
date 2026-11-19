@@ -3,21 +3,28 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/GCode/WipeTower.hpp"
 
 #include "../fff_print/test_data.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <map>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include <boost/filesystem.hpp>
+#include <boost/system/error_code.hpp>
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 
+#include <fstream>
 #include <iostream>
 
 using namespace Slic3r;
@@ -269,6 +276,746 @@ TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a sup
         DYNAMIC_SECTION("wall " << wall) { check_no_sparse_tower(wall); }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Orca #15917: final purge on the tower's own last layer, not the object's top (mid-air).
+// Edge extras: lazy change_layer must not drop Z over the object; no-sparse sits on the last
+// printed compacted Z (including sparse layer 0); SEMM rams on the extra layer; non-SEMM
+// without multitool ramming skips the final purge (U1).
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+DynamicPrintConfig final_purge_config(bool semm, bool no_sparse)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "layer_height",                   0.3 },
+        { "initial_layer_print_height",     0.3 },
+        { "wall_loops",                     1 },
+        { "sparse_infill_density",          "0%" },
+        { "bottom_shell_layers",            2 },
+        { "top_shell_layers",               0 },
+        { "enable_support",                 false },
+        { "skirt_loops",                    0 },
+        { "enable_prime_tower",             true },
+        { "prime_tower_width",              30 },
+        { "wipe_tower_x",                   "140" },
+        { "wipe_tower_y",                   "140" },
+        { "purge_in_prime_tower",           "1" },
+        { "gcode_comments",                 true },
+        { "gcode_flavor",                   semm ? "marlin" : "klipper" },
+        // Marlin relative-E needs a per-layer G92 E0; without it Print::validate fails.
+        { "layer_change_gcode",             "G92 E0" },
+        { "single_extruder_multi_material", semm ? "1" : "0" },
+        { "enable_filament_ramming",        semm ? "1" : "0" },
+        { "wipe_tower_no_sparse_layers",    no_sparse ? "1" : "0" },
+        { "filament_multitool_ramming",     "0,0" },
+    });
+    return config;
+}
+
+struct FinalPurgeSlice
+{
+    std::string gcode;
+    double      purge_z;
+    bool        has_final_purge;
+    bool        final_purge_drop;
+    double      obj_xmin, obj_xmax, obj_ymin, obj_ymax;
+};
+
+FinalPurgeSlice slice_final_purge_model(Print &print, Model &model, const DynamicPrintConfig &config)
+{
+    print.apply(model, config);
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    print.process();
+    FinalPurgeSlice out;
+    out.has_final_purge = print.wipe_tower_data().final_purge && !print.wipe_tower_data().final_purge->gcode.empty();
+    out.final_purge_drop = print.wipe_tower_data().final_purge_drop;
+    out.purge_z         = out.has_final_purge ? print.wipe_tower_data().final_purge->print_z : 0.;
+    out.gcode           = Slic3r::Test::gcode(print);
+    return out;
+}
+
+FinalPurgeSlice slice_final_purge(const DynamicPrintConfig &config, double size_xy = 10., double size_z = 10.,
+                                  Vec3d offset = Vec3d(40., 40., 0.), double filament2_top = 2.0)
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(make_cube(size_xy, size_xy, size_z));
+    object->add_instance()->set_offset(offset);
+    object->ensure_on_bed();
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("extruder", new ConfigOptionInt(2));
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(config.opt_float("layer_height")));
+    object->layer_config_ranges[{0.0, filament2_top}].assign_config(std::move(range_config));
+    print.auto_assign_extruders(object);
+    FinalPurgeSlice out = slice_final_purge_model(print, model, config);
+    out.obj_xmin = offset.x();
+    out.obj_xmax = offset.x() + size_xy;
+    out.obj_ymin = offset.y();
+    out.obj_ymax = offset.y() + size_xy;
+    return out;
+}
+
+// After the last per-layer ;Z: comment, a descent below that layer's print height must not start
+// with XY still over the object. That is the final-unload drop (object top → tower).
+//
+// retract_after_outer_wall (Orca #16982; off by default in EdgeSlicer) retracts and Z-hops on a short travel off the
+// last outer wall. The hop restore is a small Z drop back to the last layer height, still over the
+// object, and is not mid-air. Only a drop that goes below last-layer Z is the unload.
+struct FinalZDropScan
+{
+    bool saw_unload_drop     = false;
+    bool midair_over_object  = false;
+};
+
+FinalZDropScan scan_final_z_drops(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+{
+    FinalZDropScan     out;
+    const size_t       last_z_cmt = gcode.rfind(";Z:");
+    REQUIRE(last_z_cmt != std::string::npos);
+    const double       last_layer_z = std::atof(gcode.c_str() + last_z_cmt + 3);
+    std::istringstream in(gcode.substr(last_z_cmt));
+    std::string        line;
+    // ;Z: is a comment, not a move. Seed modal Z from it so the first G1 Z below that height
+    // counts as a drop even if no G1 has restated layer Z yet.
+    double             x = 0, y = 0, z = last_layer_z;
+    bool               have_xy = false;
+    const std::regex   word("([XYZ])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, nz = z;
+        bool   has_z = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': nz = v; has_z = true; break;
+            }
+        }
+        if (has_z && have_xy && nz < z - 1e-3 && nz < last_layer_z - 1e-3) {
+            const bool start_in_object = x + 1e-3 >= obj_xmin && x - 1e-3 <= obj_xmax && y + 1e-3 >= obj_ymin && y - 1e-3 <= obj_ymax;
+            INFO("Unload Z drop from " << z << " to " << nz << " starting at XY " << x << "," << y
+                                       << " (last layer Z " << last_layer_z << ")");
+            out.saw_unload_drop = true;
+            if (start_in_object)
+                out.midair_over_object = true;
+        }
+        if (std::abs(nx - x) > 1e-9 || std::abs(ny - y) > 1e-9)
+            have_xy = true;
+        x = nx;
+        y = ny;
+        z = nz;
+    }
+    return out;
+}
+
+void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+{
+    const FinalZDropScan scan = scan_final_z_drops(gcode, obj_xmin, obj_xmax, obj_ymin, obj_ymax);
+    CHECK(scan.saw_unload_drop);
+    CHECK_FALSE(scan.midair_over_object);
+}
+
+int count_g1_x_and_e_positive(const std::string &block)
+{
+    int                count = 0;
+    std::istringstream in(block);
+    std::string        line;
+    const std::regex   word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G1 ", 0) != 0)
+            continue;
+        bool   has_x = false;
+        double e     = 0;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            if (axis == 'X')
+                has_x = true;
+            else if (axis == 'E')
+                e = v;
+        }
+        if (has_x && e > 1e-6)
+            ++count;
+    }
+    return count;
+}
+
+double last_tower_extrusion_z(const std::string &gcode)
+{
+    const std::vector<TowerMove> moves = tower_moves(gcode);
+    if (moves.empty())
+        return 0.;
+    return std::max_element(moves.begin(), moves.end(), [](const TowerMove &a, const TowerMove &b) { return a.z < b.z; })->z;
+}
+
+double z_on_comment_line(const std::string &gcode, const char *needle)
+{
+    const size_t at = gcode.rfind(needle);
+    if (at == std::string::npos)
+        return 0.;
+    const size_t line_start = gcode.rfind('\n', at);
+    const size_t begin      = line_start == std::string::npos ? 0 : line_start + 1;
+    const size_t line_end   = gcode.find('\n', at);
+    const std::string line  = gcode.substr(begin, (line_end == std::string::npos ? gcode.size() : line_end) - begin);
+    const std::string code  = line.substr(0, line.find(';'));
+    std::smatch       m;
+    if (std::regex_search(code, m, std::regex("Z(-?[0-9]*\\.?[0-9]+)")))
+        return std::atof(m[1].str().c_str());
+    return 0.;
+}
+
+} // namespace
+
+// The mid-air helper must still flag an unload that starts over the object, and must not treat a
+// last-layer Z-hop restore (retract_after_outer_wall + default z_hop) as that unload.
+TEST_CASE("Wipe-tower mid-air check ignores hop restores and flags an unload over the object", "[WipeTower][GCode][FinalPurge]")
+{
+    const double xmin = 40., xmax = 50., ymin = 40., ymax = 50.;
+    SECTION("hop restore over the object then unload over the tower")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45 Z10.4\n"
+            "G1 Z10\n"
+            "G1 X140 Y140\n"
+            "G1 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK_FALSE(scan.midair_over_object);
+    }
+    SECTION("unload Z drop starts over the object")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45\n"
+            "G1 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK(scan.midair_over_object);
+    }
+    SECTION("combined XY+Z unload starting over the object")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45\n"
+            "G1 X140 Y140 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK(scan.midair_over_object);
+    }
+}
+
+TEST_CASE("The final unload prints on the tower's last layer, never mid-air", "[WipeTower][GCode][FinalPurge]")
+{
+    const bool no_sparse = GENERATE(true, false);
+    DYNAMIC_SECTION((no_sparse ? "SEMM no-sparse" : "SEMM sparse-on"))
+    {
+        const FinalPurgeSlice slice = slice_final_purge(final_purge_config(true, no_sparse));
+        REQUIRE(slice.has_final_purge);
+        CHECK(slice.final_purge_drop);
+        // Filament 2 only on [0, 2] of a 10 mm cube: the tower's last active layer is ~2 mm,
+        // not the object's 10 mm top.
+        CHECK(slice.purge_z < 5.0);
+        CHECK(slice.purge_z > 0.2);
+
+        const size_t last_layer_z_comment = slice.gcode.rfind(";Z:");
+        REQUIRE(last_layer_z_comment != std::string::npos);
+
+        const size_t unload = slice.gcode.find("; CP TOOLCHANGE UNLOAD", last_layer_z_comment);
+        REQUIRE(unload != std::string::npos);
+
+        check_no_z_drop_over_object(slice.gcode, slice.obj_xmin, slice.obj_xmax, slice.obj_ymin, slice.obj_ymax);
+    }
+}
+
+TEST_CASE("Final SEMM ramming extrudes X+E on the extra tower layer", "[WipeTower][GCode][FinalPurge]")
+{
+    const FinalPurgeSlice slice = slice_final_purge(final_purge_config(true, false));
+    REQUIRE(slice.has_final_purge);
+    REQUIRE(slice.final_purge_drop);
+    const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
+    REQUIRE(last_unload != std::string::npos);
+    const size_t ramming_start = slice.gcode.find("Ramming start", last_unload);
+    REQUIRE(ramming_start != std::string::npos);
+    const int xe = count_g1_x_and_e_positive(slice.gcode.substr(last_unload, ramming_start - last_unload));
+    INFO("G1 X+E>0 count between last UNLOAD and Ramming start: " << xe);
+    CHECK(xe > 0);
+}
+
+TEST_CASE("A tall object near the tower blocks the final-purge Z drop", "[WipeTower][GCode][FinalPurge][Stagger]")
+{
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = final_purge_config(true, false);
+        config.set_deserialize_strict({
+            { "extruder_clearance_radius",            72.5 },
+            { "extruder_clearance_height_to_rod",     27.5 },
+            { "nozzle_height",                        2.5 },
+            { "prime_tower_width",                    30 },
+            { "wipe_tower_x",                         "140" },
+            { "wipe_tower_y",                         "140" },
+            { "wipe_tower_stagger_toolchange_start",  stagger ? "1" : "0" },
+        });
+        // 20 mm cube sharing the tower's Y band, 40 mm away in X: inside the 72.5 mm toolhead radius.
+        const FinalPurgeSlice slice = slice_final_purge(config, 20., 20., Vec3d(80., 140., 0.), 2.0);
+        REQUIRE(slice.has_final_purge);
+        CHECK_FALSE(slice.final_purge_drop);
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+        CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+        // N1: without the on-tower flag, the extra set_layer still trips is_over_tower_height, so
+        // ramming must not extrude X+E at object-top height. Stagger must not add a Y hop that
+        // then rams (force_travel is gone; finalize unloads at current Z when drop is blocked).
+        const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
+        REQUIRE(last_unload != std::string::npos);
+        size_t block_end = slice.gcode.find("Ramming start", last_unload);
+        if (block_end == std::string::npos)
+            block_end = slice.gcode.size();
+        CHECK(count_g1_x_and_e_positive(slice.gcode.substr(last_unload, block_end - last_unload)) == 0);
+    }
+}
+
+TEST_CASE("No-sparse final purge Z sits one layer above the last printed tower layer, including sparse layer 0",
+          "[WipeTower][GCode][FinalPurge]")
+{
+    DynamicPrintConfig config = final_purge_config(true, true);
+    config.set_deserialize_strict({
+        { "layer_height",               0.16 },
+        { "initial_layer_print_height", 0.32 },
+    });
+    const FinalPurgeSlice slice = slice_final_purge(config, 10., 10., Vec3d(40., 40., 0.), 2.0);
+    REQUIRE(slice.has_final_purge);
+    const double last_z = last_tower_extrusion_z(slice.gcode);
+    REQUIRE(last_z > 0.1);
+    const double drop_z = z_on_comment_line(slice.gcode, "Travel down to the last wipe tower layer");
+    INFO("last printed tower z " << last_z << ", drop z " << drop_z);
+    REQUIRE(drop_z > 0.);
+    // Layer 0 is sparse (first layer uses only the highest-numbered filament) but the non-BBL
+    // emitter still prints it. The extra set_layer sits one regular layer on that printed top,
+    // not one first-layer height below it.
+    CHECK(std::abs(drop_z - (last_z + 0.16)) < 0.05);
+}
+
+TEST_CASE("A tower that reaches the object top does not emit Travel back up", "[WipeTower][GCode][FinalPurge]")
+{
+    DynamicPrintConfig config = final_purge_config(true, false);
+    Print              print;
+    Model              model;
+    auto add_cube = [&](const char *name, double x, int extruder) {
+        ModelObject *object = model.add_object();
+        object->name        = name;
+        object->add_volume(make_cube(10., 10., 6.));
+        object->add_instance()->set_offset(Vec3d(x, 40., 0.));
+        object->ensure_on_bed();
+        object->config.set("extruder", extruder);
+    };
+    add_cube("cube_a.stl", 40., 1);
+    add_cube("cube_b.stl", 70., 2);
+    print.auto_assign_extruders(model.objects.front());
+    print.auto_assign_extruders(model.objects.back());
+    const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
+    REQUIRE(slice.has_final_purge);
+    const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
+    REQUIRE(last_unload != std::string::npos);
+    CHECK(slice.gcode.find("Travel back up to the topmost object layer.", last_unload) == std::string::npos);
+}
+
+TEST_CASE("Non-SEMM without multitool ramming skips the final purge", "[WipeTower][GCode][FinalPurge]")
+{
+    const FinalPurgeSlice slice = slice_final_purge(final_purge_config(false, false));
+    CHECK_FALSE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
+    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+}
+
+// A multi-tool printer that changes tool where the nozzle is (no ramming, "Tool change on wipe tower"
+// off) with no sparse layers: append_tcr2() took the nozzle down to the tower's height right there,
+// over the part, before the tool change, and only went back up for change_filament_gcode.
+TEST_CASE("No-sparse in-place tool change does not take the nozzle down over the part", "[WipeTower][GCode][NoSparseLayers]")
+{
+    DynamicPrintConfig config = final_purge_config(false, true);
+    config.set_deserialize_strict({ { "tool_change_on_wipe_tower", "0" }, { "filament_multitool_ramming", "0,0" } });
+    Print print;
+    Model model;
+    // The post is half filament 2 from 3 to 4 mm and from 9 to 10 mm, so those layers change
+    // filament in the middle of the layer, with the nozzle over the post.
+    ModelObject *post = model.add_object();
+    post->name        = "halves.stl";
+    double bottom = 0.;
+    for (const auto &[height, split] : std::vector<std::pair<double, bool>>{ { 3., false }, { 1., true }, { 5., false }, { 1., true }, { 2., false } }) {
+        // add_volume() centres the mesh on its own origin, so each box is placed by its centre.
+        for (int half = 0; half < (split ? 2 : 1); ++half) {
+            ModelVolume *v = post->add_volume(make_cube(split ? 10. : 20., 20., height));
+            v->set_offset(Vec3d(split ? 5. + 10. * half : 10., 10., bottom + 0.5 * height));
+            v->config.set("extruder", half + 1);
+        }
+        bottom += height;
+    }
+    post->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    post->ensure_on_bed();
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    const std::string gcode = Slic3r::Test::gcode(print);
+    // The tower really is lower than the part when a tool change comes.
+    REQUIRE(gcode.find("Force restore layer Z") != std::string::npos);
+
+    // Every position the nozzle takes over the post (40..60 in x and y), against the highest the
+    // post has been printed so far.
+    std::istringstream in(gcode);
+    std::string        line;
+    double             x = 0, y = 0, z = 0, e = 0, top = 0;
+    bool               in_tower = false, relative_e = false;
+    int                below = 0;
+    double             worst = 0;
+    const std::regex   word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
+        if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, de = 0;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': z = v; break;
+            case 'E': de = relative_e ? v : v - e; if (!relative_e) e = v; break;
+            }
+        }
+        x = nx;
+        y = ny;
+        const bool over_post = x > 40. + 0.5 && x < 60. - 0.5 && y > 40. + 0.5 && y < 60. - 0.5;
+        if (!in_tower && de > 1e-6 && over_post)
+            top = std::max(top, z);
+        if (over_post && z < top - 0.05) {
+            ++below;
+            if (top - z > worst) {
+                worst = top - z;
+                INFO("nozzle at x " << x << " y " << y << " z " << z << " over the post printed to " << top << ": " << line);
+                CHECK(below == 0);
+            }
+        }
+    }
+    INFO(below << " moves below the printed post, deepest " << worst << " mm");
+    CHECK(below == 0);
+}
+
+TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCode][FinalPurge]")
+{
+    const std::string saved_data_dir = data_dir();
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("u1_final_purge_%%%%-%%%%");
+    boost::filesystem::create_directories(scratch);
+    ScopeGuard restore_data_dir([&] {
+        set_data_dir(saved_data_dir);
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(scratch, ec);
+    });
+    set_data_dir(scratch.string());
+    const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    // Inherit flattening still needs the Orca filament library plus the Snapmaker vendor;
+    // there is no per-preset load API. Selecting the U1 printer/process/filament below is
+    // what the test actually uses.
+    static std::unique_ptr<PresetBundle> library;
+    if (!library) {
+        library = std::make_unique<PresetBundle>();
+        library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+    }
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(profiles, "Snapmaker", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, library.get());
+    REQUIRE(bundle.printers.select_preset_by_name("Snapmaker U1 (0.4 nozzle)", true));
+    REQUIRE(bundle.prints.select_preset_by_name("0.20mm Standard @Snapmaker U1 (0.4 nozzle)", true));
+    REQUIRE(bundle.filaments.select_preset_by_name("Generic PLA @U1 0.4 nozzle", true));
+    bundle.filament_presets = { "Generic PLA @U1 0.4 nozzle" };
+    bundle.set_num_filaments(3, std::vector<std::string>{ "#E01919", "#1943E0", "#19E043" });
+    bundle.filament_presets = std::vector<std::string>(3, "Generic PLA @U1 0.4 nozzle");
+    DynamicPrintConfig config = bundle.full_config_secure();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",         "1" },
+        { "wipe_tower_x",               30 },
+        { "wipe_tower_y",               210 },
+        { "wipe_tower_rotation_angle",  0 },
+        { "gcode_comments",             true },
+        { "layer_change_gcode",         "G92 E0" },
+        { "skirt_loops",                0 },
+        { "enable_support",             false },
+    });
+    REQUIRE(config.opt_bool("single_extruder_multi_material") == false);
+    REQUIRE(config.opt_bool("enable_filament_ramming") == false);
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 3; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + 25. * i, 40., 0.));
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.is_BBL_printer() = false;
+    const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
+    CHECK_FALSE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
+    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+}
+
+namespace {
+
+DynamicPrintConfig n2_clearance_config(bool no_sparse, bool stagger = false)
+{
+    DynamicPrintConfig config = final_purge_config(true, no_sparse);
+    config.set_deserialize_strict({
+        { "extruder_clearance_radius",           72.5 },
+        { "extruder_clearance_height_to_rod",    27.5 },
+        { "nozzle_height",                       2.5 },
+        { "wipe_tower_stagger_toolchange_start", stagger ? "1" : "0" },
+    });
+    return config;
+}
+
+void add_final_purge_cube(Model &model, Print &print, double size_xy, double size_z, const Vec3d &offset,
+                          double filament2_top, double layer_height)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(make_cube(size_xy, size_xy, size_z));
+    object->add_instance()->set_offset(offset);
+    object->ensure_on_bed();
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("extruder", new ConfigOptionInt(2));
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
+    object->layer_config_ranges[{0.0, filament2_top}].assign_config(std::move(range_config));
+    print.auto_assign_extruders(object);
+}
+
+int last_unload_xe(const std::string &gcode)
+{
+    const size_t last_unload = gcode.rfind("; CP TOOLCHANGE UNLOAD");
+    if (last_unload == std::string::npos)
+        return -1;
+    size_t block_end = gcode.find("Ramming start", last_unload);
+    if (block_end == std::string::npos)
+        block_end = gcode.size();
+    return count_g1_x_and_e_positive(gcode.substr(last_unload, block_end - last_unload));
+}
+
+void check_no_drop_no_ram(const FinalPurgeSlice &slice)
+{
+    CHECK_FALSE(slice.final_purge_drop);
+    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+    // Mid-print no-sparse returns also use "Travel down to the last wipe tower layer".
+    // Only the suffix after the last object layer is the final-purge drop.
+    const size_t last_z_cmt = slice.gcode.rfind(";Z:");
+    if (last_z_cmt != std::string::npos)
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer", last_z_cmt) == std::string::npos);
+    else
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+    CHECK(last_unload_xe(slice.gcode) == 0);
+}
+
+void check_drop_taken(const FinalPurgeSlice &slice)
+{
+    REQUIRE(slice.has_final_purge);
+    CHECK(slice.final_purge_drop);
+    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") != std::string::npos);
+}
+
+} // namespace
+
+TEST_CASE("Moving the object next to the tower after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
+{
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
+
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
+
+        model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
+        model.objects.front()->ensure_on_bed();
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
+    }
+}
+
+TEST_CASE("Moving the tower next to the object after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
+{
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
+
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
+
+        config.set_deserialize_strict({
+            { "wipe_tower_x", "100" },
+            { "wipe_tower_y", "40" },
+        });
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
+    }
+}
+
+TEST_CASE("Moving the object far from the tower after a near slice restores the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
+{
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(80., 140., 0.), 2.0, 0.3);
+
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
+
+        model.objects.front()->instances.front()->set_offset(Vec3d(40., 40., 0.));
+        model.objects.front()->ensure_on_bed();
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
+    }
+}
+
+TEST_CASE("A one-layer tower with a blocked drop suppresses ramming", "[WipeTower][GCode][FinalPurge]")
+{
+    // no-sparse + filament 2 only on layer 0 => m_plan.size()==1. Extra set_layer then
+    // resets the layer counter (is_first_layer stays true), so the height guard never
+    // trips. The no-drop variant must use set_suppress_ramming or a blocked drop still rams.
+    //
+    // Compacted pre-slice validate() uses full object_top and would reject a near layout;
+    // process()'s post-slice check only sees layer 0 (rise ~0) and lets the slice through.
+    // Slice far first so validate() passes, then move next to the tower and skip validate.
+    DynamicPrintConfig config = n2_clearance_config(true);
+    Print              print;
+    Model              model;
+    add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 0.3, 0.3);
+
+    const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+    REQUIRE(far_slice.has_final_purge);
+    CHECK(far_slice.final_purge_drop);
+
+    model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
+    model.objects.front()->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    FinalPurgeSlice near_slice;
+    near_slice.has_final_purge  = print.wipe_tower_data().final_purge && !print.wipe_tower_data().final_purge->gcode.empty();
+    near_slice.final_purge_drop = print.wipe_tower_data().final_purge_drop;
+    near_slice.gcode            = Slic3r::Test::gcode(print);
+    REQUIRE(near_slice.has_final_purge);
+    check_no_drop_no_ram(near_slice);
+}
+
+TEST_CASE("No-sparse Print purge Z matches the G-code drop Z", "[WipeTower][GCode][FinalPurge]")
+{
+    DynamicPrintConfig config = final_purge_config(true, true);
+    config.set_deserialize_strict({
+        { "layer_height",               0.16 },
+        { "initial_layer_print_height", 0.32 },
+    });
+    Print print;
+    Model model;
+    add_final_purge_cube(model, print, 10., 10., Vec3d(40., 40., 0.), 2.0, 0.16);
+    print.apply(model, config);
+    print.apply(model, config);
+    REQUIRE(print.validate().string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.wipe_tower_data().final_purge);
+    REQUIRE(print.wipe_tower_data().final_purge_drop);
+    const double layer_height = print.wipe_tower_data().final_purge_layer_height;
+    REQUIRE(layer_height > EPSILON);
+
+    const std::string gcode  = Slic3r::Test::gcode(print);
+    const double      last_z = last_tower_extrusion_z(gcode);
+    REQUIRE(last_z > 0.1);
+    // Finalize adds Print's stored extra-layer height to the last printed tower Z.
+    // Search after the last object layer so mid-print compacted descents do not win.
+    const size_t last_z_cmt = gcode.rfind(";Z:");
+    REQUIRE(last_z_cmt != std::string::npos);
+    const double drop_z = z_on_comment_line(gcode.substr(last_z_cmt), "Travel down to the last wipe tower layer");
+    INFO("last printed tower z " << last_z << ", Print layer_height " << layer_height << ", G-code drop z " << drop_z);
+    REQUIRE(drop_z > 0.);
+    CHECK(std::abs(drop_z - (last_z + layer_height)) < 0.05);
+}
+
+TEST_CASE("SEMM with ramming off does not drop onto the tower", "[WipeTower][GCode][FinalPurge]")
+{
+    DynamicPrintConfig config = final_purge_config(true, false);
+    config.set_deserialize_strict({ { "enable_filament_ramming", "0" } });
+    const FinalPurgeSlice slice = slice_final_purge(config);
+    REQUIRE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
+    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+}
+
+TEST_CASE("Widening the toolhead radius after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge]")
+{
+    // Soft 3: clearance keys only invalidate G-code. The pick must use the current radius.
+    DynamicPrintConfig config = final_purge_config(true, false);
+    config.set_deserialize_strict({
+        { "extruder_clearance_radius",        20. },
+        { "extruder_clearance_height_to_rod", 27.5 },
+        { "nozzle_height",                    2.5 },
+    });
+    Print print;
+    Model model;
+    add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
+
+    const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+    check_drop_taken(far_slice);
+
+    config.set_deserialize_strict({ { "extruder_clearance_radius", 200. } });
+    const FinalPurgeSlice blocked = slice_final_purge_model(print, model, config);
+    REQUIRE(blocked.has_final_purge);
+    check_no_drop_no_ram(blocked);
+}
+
 // Owner report (H2D, PR #226 test copy, but main does it too): with "no sparse layers" on, slicing
 // stopped with "Conflicts of G-code paths have been found ... (WipeTower <-> Assembly)" although
 // the tower stood well clear of every object. The plate's second filament only started far up the
@@ -395,4 +1142,231 @@ TEST_CASE("No-sparse Bambu tower: rib slice stress", "[.NoSparseStress]")
         INFO("iteration " << i << ", first difference at line " << diff);
         REQUIRE(diff == -1);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A post in filament 1 with bands of filament 2 at 3-4 mm and 9-10 mm ("bands", found by the
+// EdgeSlicerRS port of the Bambu Lab tower). With no sparse layers the tower is laid only on the
+// four print layers that change filament, each one directly on the last.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Per laid tower layer (keyed by the Z it is extruded at): line length, x extent and the
+// extrusion per mm of every tower line.
+struct TowerLayerStats
+{
+    double              length = 0.;
+    double              xmin = 1e9, xmax = -1e9;
+    std::vector<double> e_per_mm;
+    double span() const { return xmax - xmin; }
+};
+
+std::map<double, TowerLayerStats> tower_layer_stats(const std::string &gcode)
+{
+    std::map<double, TowerLayerStats> out;
+    std::istringstream in(gcode);
+    std::string        line;
+    double             x = 0, y = 0, z = 0, e = 0;
+    bool               in_tower = false, relative_e = false;
+    const std::regex   word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
+        if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, de = 0;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': z = v; break;
+            case 'E': de = relative_e ? v : v - e; if (!relative_e) e = v; break;
+            }
+        }
+        const double len = std::hypot(nx - x, ny - y);
+        if (in_tower && de > 1e-6 && len > 1e-6) {
+            TowerLayerStats &s = out[std::round(z * 1000.) / 1000.];
+            s.length += len;
+            s.xmin = std::min(s.xmin, std::min(x, nx));
+            s.xmax = std::max(s.xmax, std::max(x, nx));
+            s.e_per_mm.push_back(de / len);
+        }
+        x = nx;
+        y = ny;
+    }
+    return out;
+}
+
+// EDGE_NSS_DUMP=<dir> keeps each slice's G-code there for a look by hand.
+std::string dump_gcode(const std::string &gcode, const std::string &name)
+{
+    static int n = 0;
+    if (const char *dir = std::getenv("EDGE_NSS_DUMP")) {
+        std::ofstream out(std::string(dir) + "/" + name + "_" + std::to_string(++n) + ".gcode");
+        out << gcode;
+    }
+    return gcode;
+}
+
+// One object of boxes, each given by its size, its low corner and its filament.
+struct Box { Vec3d size, corner; int extruder; };
+void add_boxes(Model &model, const char *name, const std::vector<Box> &boxes, const Vec3d &offset)
+{
+    ModelObject *object = model.add_object();
+    object->name        = name;
+    for (const Box &b : boxes) {
+        ModelVolume *v = object->add_volume(make_cube(b.size.x(), b.size.y(), b.size.z()));
+        // add_volume() centres the mesh on its own origin; place each box by its centre.
+        v->set_offset(b.corner + 0.5 * b.size);
+        v->config.set("extruder", b.extruder);
+    }
+    object->add_instance()->set_offset(offset);
+    object->ensure_on_bed();
+}
+
+// The bands post: 20 x 20 x 12 mm, filament 2 from 3 to 4 mm and from 9 to 10 mm.
+void add_bands_post(Model &model, const Vec3d &offset)
+{
+    std::vector<Box> boxes;
+    double z = 0.;
+    for (const auto &[height, extruder] : std::vector<std::pair<double, int>>{ { 3., 1 }, { 1., 2 }, { 5., 1 }, { 1., 2 }, { 2., 1 } }) {
+        boxes.push_back({ Vec3d(20., 20., height), Vec3d(0., 0., z), extruder });
+        z += height;
+    }
+    add_boxes(model, "bands.stl", boxes, offset);
+}
+
+DynamicPrintConfig bands_bbl_config(double layer_height, bool no_sparse)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "change_filament_gcode", "G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n" },
+        { "layer_height", layer_height },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops", 2 },
+        { "sparse_infill_density", "15%" },
+        { "enable_support", false },
+        { "skirt_loops", 0 },
+        { "enable_prime_tower", true },
+        { "wipe_tower_no_sparse_layers", no_sparse },
+        { "wipe_tower_wall_type", "rectangle" },
+        { "prime_tower_width", 35 },
+        { "prime_tower_brim_width", 3 },
+        { "wipe_tower_x", "140" },
+        { "wipe_tower_y", "140" },
+        { "travel_speed", 500 },
+        { "retraction_length", "0.8,0.8" },
+    });
+    return config;
+}
+
+std::string slice_bands_bbl(const DynamicPrintConfig &config)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    add_bands_post(model, Vec3d(40., 40., 0.));
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    return dump_gcode(Slic3r::Test::gcode(print), "bands_bbl");
+}
+
+} // namespace
+
+// The brim chamfer steps one loop in per layer the tower lays. It counted the print layers in between
+// instead, laid or not, so the tower's second layer (five print layers up) kept one loop of the
+// chamfer and the layers above it none.
+TEST_CASE("No-sparse Bambu tower: the brim chamfer steps one loop per laid tower layer", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, true)));
+    REQUIRE(layers.size() == 4);
+    std::vector<double> spans;
+    for (const auto &[z, s] : layers) {
+        INFO("tower layer z " << z << ": span " << s.span() << " mm, " << s.length << " mm of lines");
+        spans.push_back(s.span());
+    }
+    // Loops per side, counted from the tower body (35 mm between wall centres) at the brim pitch.
+    auto loops = [&spans](size_t i, double pitch) { return int(std::lround((spans[i] - 35.) / (2. * pitch))); };
+    const double pitch = (spans[1] - spans[2]) / 2.;
+    INFO("spans " << spans[0] << " " << spans[1] << " " << spans[2] << " " << spans[3] << ", pitch " << pitch);
+    // Each laid layer above the first is one loop per side narrower than the one below it, with
+    // the chamfer still running on the fourth laid layer (it is at most 3 mm, six or so loops).
+    CHECK(pitch > 0.3);
+    CHECK(pitch < 0.6);
+    CHECK(std::abs((spans[2] - spans[3]) / 2. - pitch) < 0.02);
+    CHECK(loops(1, pitch) == std::min(loops(0, pitch), int(3. / pitch)) - 1);
+    CHECK(loops(3, pitch) >= 1);
+}
+
+// The same on the other generator (WipeTower2), which lays the print's first layer too and steps its
+// chamfer from there.
+TEST_CASE("No-sparse tower (WipeTower2): the brim chamfer steps one loop per laid tower layer", "[WipeTower][NoSparseLayers]")
+{
+    DynamicPrintConfig config = final_purge_config(false, true);
+    config.set_deserialize_strict({ { "prime_tower_brim_width", 3 }, { "prime_tower_brim_chamfer", "1" } });
+    Print print;
+    Model model;
+    add_bands_post(model, Vec3d(40., 40., 0.));
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(dump_gcode(Slic3r::Test::gcode(print), "bands_type2"));
+    std::vector<double> spans;
+    std::ostringstream  all;
+    for (const auto &[z, s] : layers) {
+        all << " z " << z << ": " << s.span();
+        spans.push_back(s.span());
+    }
+    INFO("tower layer spans:" << all.str());
+    // The four layers that change filament (the print's first is not laid here).
+    REQUIRE(spans.size() == 4);
+    // Brim loops still on the third laid layer, and one loop per side fewer on each laid layer.
+    CHECK(spans[1] > spans[2] + 0.5);
+    CHECK(spans[2] > spans[3] + 0.5);
+}
+
+// "Solid fill for the first layer" went to print layer 0, which the tower does not lay when it has
+// no tool change, and the tower's real first layer on the bed got its rows spread out to the
+// stability depth instead. Its first layer should be about as solid as with the option off.
+TEST_CASE("No-sparse Bambu tower: the first layer laid on the bed is solid", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> on  = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, true)));
+    const std::map<double, TowerLayerStats> off = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.2, false)));
+    REQUIRE(!on.empty());
+    REQUIRE(!off.empty());
+    const double first_on = on.begin()->second.length, first_off = off.begin()->second.length;
+    INFO("first tower layer: " << first_on << " mm of lines with no sparse layers (z " << on.begin()->first << "), " << first_off
+                               << " mm with every layer (z " << off.begin()->first << ")");
+    CHECK(std::abs(on.begin()->first - 0.2) < 1e-3);
+    CHECK(first_on > 0.9 * first_off);
+}
+
+// A row over the open part of the tower's layer below is laid at bridge flow (layers thinner than
+// 0.2 mm). "The layer below" was the print's, laid on the tower or not: one with no tool change
+// left out reads as all open, so rows lying on the solid first layer were laid at bridge flow too.
+TEST_CASE("No-sparse Bambu tower: no bridge flow over the solid first layer", "[WipeTower][NoSparseLayers]")
+{
+    const std::map<double, TowerLayerStats> layers = tower_layer_stats(slice_bands_bbl(bands_bbl_config(0.1, true)));
+    REQUIRE(layers.size() == 4);
+    auto second = std::next(layers.begin());
+    std::vector<double> e = second->second.e_per_mm;
+    REQUIRE(!e.empty());
+    std::vector<double> sorted = e;
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    const size_t heavy  = std::count_if(e.begin(), e.end(), [median](double v) { return v > 1.4 * median; });
+    INFO("second laid tower layer z " << second->first << ": " << heavy << " of " << e.size() << " lines over 1.4x the median "
+                                      << median << " mm of filament per mm");
+    CHECK(heavy == 0);
 }

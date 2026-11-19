@@ -1118,6 +1118,7 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
         // for system/default/external presets we should take an edited name
         //BBS: add project embedded preset logic and refine is_external
         bool save_to_project = false;
+        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep;
         if (preset.is_system || preset.is_default) {
         //if (preset.is_system || preset.is_default || preset.is_external) {
             SavePresetDialog save_dlg(this, preset.type);
@@ -1127,10 +1128,11 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
             }
             name = save_dlg.get_name();
             save_to_project = save_dlg.get_save_to_project_selection(preset.type);
+            project_printers = save_dlg.get_project_printers_selection(preset.type);
         }
 
         //BBS: add project embedded preset relate logic
-        PresetData preset_data(name, preset.type, save_to_project);
+        PresetData preset_data(name, preset.type, save_to_project, project_printers);
         names_and_types.emplace_back(preset_data);
         //names_and_types.emplace_back(make_pair(name, preset.type));
     }
@@ -1169,6 +1171,7 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
                 if (!name.empty())
                     nt.name = name;
                 nt.save_to_project = save_dlg.get_save_to_project_selection(nt.type);
+                nt.project_printers = save_dlg.get_project_printers_selection(nt.type);
             }
             //for (std::pair<std::string, Preset::Type>& nt : names_and_types) {
             //    const std::string& name = save_dlg.get_name(nt.second);
@@ -2278,7 +2281,8 @@ void DiffPresetDialog::update_tree()
         }
 
         // Collect dirty options.
-        const bool deep_compare = (type == Preset::TYPE_PRINTER || type == Preset::TYPE_SLA_MATERIAL);
+        const bool deep_compare = (type == Preset::TYPE_PRINTER ||
+                                   type == Preset::TYPE_FILAMENT || type == Preset::TYPE_SLA_MATERIAL);
         auto dirty_options = type == Preset::TYPE_PRINTER && left_pt == ptFFF &&
                              left_config.opt<ConfigOptionStrings>("extruder_colour")->values.size() < right_congig.opt<ConfigOptionStrings>("extruder_colour")->values.size() ?
                              presets->dirty_options(right_preset, left_preset, deep_compare) :
@@ -2332,13 +2336,15 @@ void DiffPresetDialog::update_tree()
             wxString left_val = get_string_value(opt_key, left_config);
             wxString right_val = get_string_value(opt_key, right_congig);
 
-            Search::Option option = searcher.get_option(opt_key, get_full_label(opt_key, left_config), type);
-            if (option.opt_key() != opt_key) {
-                // temporary solution, just for testing
-                m_tree->Append(opt_key, type, "Undef category", "Undef group", opt_key, left_val, right_val, "undefined"); // ORCA: use low resolution compatible icon
-                // When founded option isn't the correct one.
-                // It can be for dirty_options: "default_print_profile", "printer_model", "printer_settings_id",
-                // because of they don't exist in searcher
+            const std::string lookup_key = get_pure_opt_key(opt_key);
+            Search::Option option = searcher.get_option(lookup_key, type);
+            if (get_pure_opt_key(option.opt_key()) != lookup_key)
+                option = searcher.get_option(opt_key, get_full_label(opt_key, left_config), type);
+            if (get_pure_opt_key(option.opt_key()) != lookup_key) {
+                // When the found option is not the requested one.
+                // This can happen for dirty_options such as:
+                // "default_print_profile", "printer_model", "printer_settings_id",
+                // because they do not exist in the searcher.
                 continue;
             }
             m_tree->Append(opt_key, type, option.category_local, option.group_local, option.label_local,

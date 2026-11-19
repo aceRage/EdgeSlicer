@@ -15,13 +15,37 @@ namespace BambuSendMapping {
 
 using nlohmann::json;
 
-int auto_map(MachineObject* obj, const std::vector<FilamentInfo>& filaments, const std::vector<int>& filament_map,
+bool is_external_spool(const FilamentInfo& f)
+{
+    return BambuExtruderMap::is_external_spool_ams_id(f.tray_id) && f.ams_id == std::to_string(f.tray_id);
+}
+
+bool use_ams(const std::vector<FilamentInfo>& result, bool current)
+{
+    bool has_ext = false, has_ams = false;
+    for (const FilamentInfo& f : result) {
+        if (f.tray_id < 0 || f.ams_id.empty())
+            continue;
+        if (is_external_spool(f))
+            has_ext = true;
+        else
+            has_ams = true;
+    }
+    if (!has_ext)
+        return current; // no external spool in the job: the send dialog's choice, as before
+    return has_ams;     // BambuStudio: AMS and external -> true, external only -> false
+}
+
+int auto_map(MachineObject* obj,const std::vector<FilamentInfo>& filaments, const std::vector<int>& filament_map,
              const std::vector<int>& physical_extruder_map, std::vector<FilamentInfo>& result)
 {
     if (!obj)
         return -1;
-    if (filament_map.empty())
-        return obj->ams_filament_mapping(filaments, result);
+    if (filament_map.empty()) {
+        const int rc = obj->ams_filament_mapping(filaments, result);
+        obj->strip_blocked_mapping(result); // never a rack AMS slot (H3C AMS 3H) yet
+        return rc;
+    }
 
     /* Two-extruder job: a filament can only be fed from an AMS connected to the extruder the
      * G-code prints it with, so map each side against its own AMS units, as BambuStudio's
@@ -46,6 +70,7 @@ int auto_map(MachineObject* obj, const std::vector<FilamentInfo>& filaments, con
         result.insert(result.end(), side_result.begin(), side_result.end());
     }
     std::sort(result.begin(), result.end(), [](const FilamentInfo& a, const FilamentInfo& b) { return a.id < b.id; });
+    obj->strip_blocked_mapping(result); // never a rack AMS slot (H3C AMS 3H) yet
     return rc;
 }
 
@@ -58,9 +83,14 @@ std::vector<int> wrong_extruder(MachineObject* obj, const std::vector<FilamentIn
     for (const FilamentInfo& f : result) {
         if (f.tray_id < 0 || f.ams_id.empty())
             continue;
+        if (is_external_spool(f)) {
+            // Each extruder has its own holder: Ext-R (255) feeds the right one only.
+            mapped.push_back({ f.id, BambuExtruderMap::external_spool_physical_extruder(f.tray_id) });
+            continue;
+        }
         auto ams_it = obj->amsList.find(f.ams_id);
         if (ams_it == obj->amsList.end() || !ams_it->second)
-            continue; // external spool or unknown unit: no AMS binding to check
+            continue; // unknown unit: no AMS binding to check
         mapped.push_back({ f.id, ams_it->second->nozzle });
     }
     return BambuExtruderMap::filaments_on_wrong_extruder(filament_map, physical_extruder_map, mapped);
@@ -79,11 +109,30 @@ static int task_nozzle_id(int nozzle_id)
     return nozzle_id;
 }
 
+static bool compose_checked(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
+                            std::string& v0, std::string& v1, std::string& info);
+
 bool compose(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
              std::string& v0, std::string& v1, std::string& info)
 {
     if (result.empty())
         return false;
+    // The last gate before the strings reach a printer: an entry naming a blocked unit (a rack AMS,
+    // the H3C's AMS 3H, or a rack spool holder) goes out as "no tray", whatever chose it.
+    std::vector<FilamentInfo> checked = result;
+    for (FilamentInfo& r : checked)
+        if (!r.ams_id.empty() && in.blocked_ams_ids.count(r.ams_id) != 0) {
+            BOOST_LOG_TRIVIAL(warning) << "BambuSendMapping::compose: filament " << r.id << " was mapped to a slot that cannot be sent to yet, left unmapped";
+            r.tray_id = -1;
+            r.ams_id.clear();
+            r.slot_id.clear();
+        }
+    return compose_checked(checked, filaments, in, v0, v1, info);
+}
+
+static bool compose_checked(const std::vector<FilamentInfo>& result, const std::vector<FilamentInfo>& filaments, const ComposeInput& in,
+                            std::string& v0, std::string& v1, std::string& info)
+{
     bool   valid   = true;
     size_t invalid = 0;
     for (const FilamentInfo& r : result)
@@ -118,6 +167,11 @@ bool compose(const std::vector<FilamentInfo>& result, const std::vector<Filament
                 item["nozzleId"] = task_nozzle_id(in.nozzle_filament_map[i]);
             item["sourceColor"] = k < filaments.size() ? filaments[k].color : result[k].color;
             item["targetColor"] = result[k].color;
+            /* An external spool holder is not an AMS tray: the v0 list carries -1 for it, while
+             * ams_mapping_info keeps 254/255 and the v1 list names it {ams_id 254/255, slot_id 0}
+             * (BambuStudio get_ams_mapping_result). */
+            if (is_external_spool(result[k]))
+                tray_id = -1;
             try {
                 if (result[k].ams_id.empty() || result[k].slot_id.empty()) { // invalid case
                     item1["ams_id"]  = 255;

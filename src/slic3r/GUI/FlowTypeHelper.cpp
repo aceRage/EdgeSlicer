@@ -6,6 +6,7 @@
 #include "PartPlate.hpp"
 #include "Plater.hpp"
 #include "RemoteAccess.hpp"
+#include "Tab.hpp"
 
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -25,8 +26,16 @@ static size_t nozzle_count()
     return diameters != nullptr && !diameters->values.empty() ? diameters->values.size() : 1;
 }
 
+// The printer tab's extruder pages edit the per-variant retraction slot of each nozzle's flow type.
+static void refresh_printer_tab()
+{
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
+        static_cast<TabPrinter *>(tab)->update_extruder_variant_pages();
+}
+
 static void notify_plater()
 {
+    refresh_printer_tab();
     Plater *plater = wxGetApp().plater();
     if (plater == nullptr)
         return;
@@ -109,6 +118,19 @@ static void save_nozzle_volume_types_to_app_config()
     wxGetApp().app_config->set(APP_CONFIG_NOZZLE_FLOW_SECTION,
                                wxGetApp().preset_bundle->printers.get_selected_preset_name(),
                                boost::algorithm::join(display, ","));
+    // Owner bugs 2026-11-06: the per-printer nozzle memory (NozzleRackMemory.hpp) carries the flow types too, so a Flow combo
+    // change (H2C left / right) is back after a restart.
+    wxGetApp().preset_bundle->remember_nozzle_rack(*wxGetApp().app_config);
+}
+
+// Snap #1000: mark grouping dirty in the same call as the volume-type write.
+// notify_plater() eventually invalidates a sliced plate, but a fast follow-up
+// Slice can run before that valid→invalid transition, so the grouping popup
+// is skipped and the last slice's High Flow mapping sticks.
+static void mark_filament_group_dirty()
+{
+    if (Plater *plater = wxGetApp().plater())
+        plater->get_partplate_list().set_filament_group_dirty(true);
 }
 
 void set_nozzle_volume_type(size_t nozzle_idx, const std::string &volume_type)
@@ -122,6 +144,7 @@ void set_nozzle_volume_type(size_t nozzle_idx, const std::string &volume_type)
     for (const std::string &t : types)
         opt->values.push_back(filament_volume_type_from_string(t));
     save_nozzle_volume_types_to_app_config();
+    mark_filament_group_dirty();
     notify_plater();
 }
 
@@ -137,6 +160,7 @@ void set_nozzle_volume_types(const std::vector<std::string> &volume_types)
     for (const std::string &type : volume_types)
         opt->values.push_back(type == FLOW_MODE_HIGH_FLOW ? fvtHighFlow : fvtStandard);
     save_nozzle_volume_types_to_app_config();
+    mark_filament_group_dirty();
     notify_plater();
 }
 
@@ -178,6 +202,7 @@ bool adopt_device_nozzle_volume_types(const std::vector<int> &volume_types)
         // Remember the printer's nozzles like a combo pick, so the per-printer memory does not
         // hand back the previous choice.
         save_nozzle_volume_types_to_app_config();
+        refresh_printer_tab();
     }
     // The flow types the slice will use follow the adopted nozzles right away (no FilamentGroupDialog,
     // no notification: the caller is about to slice).

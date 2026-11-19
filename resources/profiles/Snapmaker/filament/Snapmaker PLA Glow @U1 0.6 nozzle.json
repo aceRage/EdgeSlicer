@@ -5,7 +5,8 @@
   "name": "Snapmaker PLA Glow @U1 0.6 nozzle",
   "inherits": "Snapmaker PLA Glow @U1 base",
   "compatible_printers": [
-    "Snapmaker U1 (0.6 nozzle)"
+    "Snapmaker U1 (0.6 nozzle)",
+    "Snapmaker U1 (0.4+0.6 nozzle)"
   ],
   "additional_cooling_fan_speed": [
     "90"
@@ -134,10 +135,10 @@
   "compatible_prints": [],
   "compatible_prints_condition": "",
   "cool_plate_temp": [
-    "0"
+    "35"
   ],
   "cool_plate_temp_initial_layer": [
-    "0"
+    "35"
   ],
   "default_filament_colour": [
     ""

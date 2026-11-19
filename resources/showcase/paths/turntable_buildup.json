@@ -1,0 +1,17 @@
+{
+  "format": "edgeslicer-showcase-path",
+  "version": 1,
+  "name": "Turntable build-up",
+  "description": "The print grows layer by layer (the slice's toolpaths when the plate is sliced, else the model cut by a plane) while it turns once, then rests finished.",
+  "fps": 30,
+  "start": "iso",
+  "moves": [
+    { "op": "turntable", "deg": 360, "duration": 8, "ease": "linear" },
+    { "op": "wait", "duration": 2 }
+  ],
+  "events": [
+    { "type": "build", "from": 0, "to": 8, "start": 0, "end": 1, "ease": "ease_out" },
+    { "type": "callouts", "at": 0, "action": "hide" },
+    { "type": "callouts", "at": 8.2, "transition": 0.6, "action": "show" }
+  ]
+}

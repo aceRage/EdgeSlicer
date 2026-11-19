@@ -50,7 +50,12 @@ static wxString get_default_name(wxString filament_name, CalibMode mode){
         break;
     case Slic3r::CalibMode::Calib_Input_shaping_damp:
         break;
-    case Slic3r::CalibMode::Calib_Junction_Deviation:
+    case Slic3r::CalibMode::Calib_Cornering:
+        break;
+    case Slic3r::CalibMode::Calib_Ironing_Flow:
+        break;
+    case Slic3r::CalibMode::Calib_Temp_Retract_Grid:
+        filament_name += " Temp Retract Calibrated";
         break;
     default:
         break;

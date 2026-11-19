@@ -1,6 +1,7 @@
 #include "FanMover.hpp"
 
 #include "GCodeReader.hpp"
+#include "../Geometry/ArcWelder.hpp"
 
 #include <iomanip>
 /*
@@ -33,7 +34,11 @@ const std::string& FanMover::process_gcode(const std::string& gcode, bool flush)
 
     if (flush) {
         while (!m_buffer.empty()) {
-            m_process_output += m_buffer.front().raw + "\n";
+            BufferData &front = m_buffer.front();
+            m_process_output += front.raw + "\n";
+            // Orca: Keep the emitted fan state in sync when flushing buffered fan commands.
+            if (front.fan_speed >= 0)
+                m_front_buffer_fan_speed = front.fan_speed;
             remove_from_buffer(m_buffer.begin());
         }
     }
@@ -117,7 +122,7 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
         // doesn't really need to be split, print it before
         //will also print before if line_to_split.time == 0
         m_buffer.insert(item_to_split, line_to_write);
-    } else if (item_to_split->raw.size() > 2
+    } else if (!item_to_split->is_custom && item_to_split->raw.size() > 2
         && item_to_split->raw[0] == 'G' && item_to_split->raw[1] == '1' && item_to_split->raw[2] == ' ') {
         float percent = nb_sec_since_itemtosplit_start / item_to_split->time;
         BufferData before = *item_to_split;
@@ -166,15 +171,14 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
 
 void FanMover::_print_in_middle_G1(BufferData& line_to_split, float nb_sec, const std::string &line_to_write) {
     if (nb_sec < line_to_split.time * 0.1) {
-        // doesn't really need to be split, print it after
-        m_process_output += line_to_split.raw + "\n";
+        // Doesn't need to be split: the insertion point is at the start.
         m_process_output += line_to_write + (line_to_write.back() == '\n'?"":"\n");
-    } else if (nb_sec > line_to_split.time * 0.9) {
-        // doesn't really need to be split, print it before
-        //will also print before if line_to_split.time == 0
-        m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
         m_process_output += line_to_split.raw + "\n";
-    }else if(line_to_split.raw.size() > 2
+    } else if (nb_sec > line_to_split.time * 0.9) {
+        // Doesn't need to be split: the insertion point is at the end.
+        m_process_output += line_to_split.raw + "\n";
+        m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
+    }else if(!line_to_split.is_custom && line_to_split.raw.size() > 2
         && line_to_split.raw[0] == 'G' && line_to_split.raw[1] == '1' && line_to_split.raw[2] == ' ') {
         float percent = nb_sec / line_to_split.time;
         std::string before = line_to_split.raw;
@@ -226,7 +230,10 @@ void FanMover::_remove_slow_fan(int16_t min_speed, float past_sec) {
 
 std::string FanMover::_set_fan(int16_t speed) {
     //const Tool* tool = m_writer.get_tool(m_currrent_extruder < 20 ? m_currrent_extruder : 0);
-    return GCodeWriter::set_fan(m_writer.config.gcode_flavor.value, speed);
+    // ORCA: apply the per-printer non-zero fan PWM floor so reposted fan commands respect the clamp too.
+    const int floor_pct = m_writer.config.part_cooling_fan_min_pwm.value;
+    const unsigned int part_cooling_fan_min_pwm = floor_pct > 0 ? static_cast<unsigned int>(floor_pct) : 0u;
+    return GCodeWriter::set_fan(m_writer.config.gcode_flavor.value, speed, part_cooling_fan_min_pwm);
 }
 
 
@@ -246,6 +253,41 @@ bool parse_number(const std::string_view sv, int& out)
             return false;
         }
     }
+}
+
+// EDGE: the length of a G2/G3 arc from where the reader is: its turn about its centre (I and J, or R) and
+// any rise. An arc that ends where it starts is a whole turn (a spiral lift). As GCodeProcessor::process_G2_G3
+// reads arcs, so the fan is moved by the time the print takes.
+static double arc_length(const GCodeReader &reader, const GCodeReader::GCodeLine &line, bool clockwise)
+{
+    const Vec2d start(reader.x(), reader.y());
+    const Vec2d end(line.has(X) ? line.x() : reader.x(), line.has(Y) ? line.y() : reader.y());
+    const double dz = line.dist_Z(reader);
+    const bool   full_turn = std::abs(end.x() - start.x()) < EPSILON && std::abs(end.y() - start.y()) < EPSILON;
+    Vec2d center;
+    float r = 0.f;
+    if (line.has_value('R', r)) {
+        if (r == 0.f || full_turn)
+            return std::abs(dz); // no centre can be found
+        center = Geometry::ArcWelder::arc_center(start, end, double(r), !clockwise);
+    } else if (line.has(I) || line.has(J)) {
+        center = start + Vec2d(line.has(I) ? line.i() : 0., line.has(J) ? line.j() : 0.);
+    } else {
+        return std::abs(dz);
+    }
+    const Vec2d  from  = start - center;
+    const Vec2d  to    = end - center;
+    double       angle = 2. * PI;
+    if (!full_turn) {
+        // The counter-clockwise turn from `from` to `to`, then the other way round for G2.
+        angle = std::atan2(from.x() * to.y() - from.y() * to.x(), from.dot(to));
+        if (angle < 0.)
+            angle += 2. * PI;
+        if (clockwise)
+            angle = 2. * PI - angle;
+    }
+    const double along = angle * from.norm();
+    return std::sqrt(along * along + dz * dz);
 }
 
 //FIXME: add other firmware
@@ -295,6 +337,12 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                     dist = std::sqrt(dist);
                     time = dist / m_current_speed;
                 }
+            } else if (::atoi(&cmd[1]) == 2 || ::atoi(&cmd[1]) == 3) {
+                // EDGE: an arc takes time too. Counted as none, a fan command after arcs (arc fitting, spiral
+                // lift) was moved back by fan_speedup_time plus the time of every arc on the way.
+                const double dist = arc_length(reader, line, ::atoi(&cmd[1]) == 2);
+                if (dist > 0)
+                    time = dist / m_current_speed;
             }
             break;
         }
@@ -420,6 +468,14 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                 std::string extrusion_string = line.raw().substr(6, line.raw().size() - 6);
                 current_role = ExtrusionEntity::string_to_role(extrusion_string);
             }
+            // Orca #15904: upstream brackets the tool change G-code with these internal markers (only when
+            // FanMover runs) and drops them here. We write the visible "; custom gcode start/end" markers
+            // below instead (#170, #397), but honour upstream's too, so G-code or templates carrying them
+            // keep their moves whole. Like upstream, they are read and dropped from the output.
+            if (line.raw().rfind(";_FAN_MOVER_SKIP_", 0) == 0) {
+                m_is_custom_gcode = line.raw().rfind(";_FAN_MOVER_SKIP_START", 0) == 0;
+                time = -1;
+            }
             if (line.raw().size() > 16) {
                 if (line.raw().rfind("; custom gcode", 0) != std::string::npos) {
                     if (line.raw().rfind("; custom gcode end", 0) != std::string::npos)
@@ -433,6 +489,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
 
     if (time >= 0) {
         BufferData& new_data = put_in_buffer(BufferData(line.raw(), time, fan_speed));
+        // EDGE (#170): tool change G-code is bracketed as custom G-code so that it is never split.
+        new_data.is_custom = m_is_custom_gcode;
         if (line.has(Axis::X)) {
             new_data.x = reader.x();
             new_data.dx = line.dist_X(reader);
@@ -487,6 +545,11 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     if (time >= 0) {
         while (!m_buffer.empty() && (need_flush || m_buffer_time_size - m_buffer.front().time > nb_seconds_delay - EPSILON) ){
             BufferData& frontdata = m_buffer.front();
+            // A fan command repeating m_front_buffer_fan_speed is dropped here. EDGE note: that includes the
+            // deliberate repeat CoolingBuffer writes after ";_FORCE_RESUME_FAN_SPEED" (tool change G-code may have
+            // set the fan). It survives only because FanMover also reads the tool change G-code's own M106/M107;
+            // a template that sets the fan with a command FanMover cannot read (M106 P0, SET_FAN_SPEED, a
+            // firmware macro) gets the repeat dropped. FanMover is off in every shipped BBL / Snapmaker profile.
             if (frontdata.fan_speed < 0 || frontdata.fan_speed != m_front_buffer_fan_speed || frontdata.is_kickstart) {
                 if (frontdata.is_kickstart && frontdata.fan_speed < m_front_buffer_fan_speed) {
                     //you have to slow down! not kickstart! rewrite the fan speed.

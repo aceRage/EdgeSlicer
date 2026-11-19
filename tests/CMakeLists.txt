@@ -8,6 +8,7 @@ add_library(Catch2 INTERFACE)
 list (APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules/Catch2)
 target_include_directories(Catch2 INTERFACE ${CMAKE_CURRENT_LIST_DIR})
 add_library(Catch2::Catch2 ALIAS Catch2)
+target_compile_definitions(Catch2 INTERFACE -DCATCH_CONFIG_ENABLE_BENCHMARKING)
 if (APPLE)
 	# OSX builds targeting OSX 10.9 do not support new std::uncought_exception()
 	# see https://github.com/catchorg/Catch2/issues/1218
@@ -17,9 +18,30 @@ include(Catch)
 
 set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments for catch2 test suites.")
 
+# The source-tree paths the tests read fixtures from live in ONE generated translation unit
+# (test_data_paths) instead of -D values on every test source. With the paths on every compile line,
+# the ~500 test objects differed per worktree and a compiler cache (sccache on the build VM) could
+# never share them. edge_test_paths.hpp is force-included into every test source, so TEST_DATA_DIR,
+# SLIC3R_TEST_RESOURCES_DIR, SLICE_V1_FIXTURES_DIR and PAINT_V1_FIXTURES_DIR keep working as before,
+# except that they are now const char * expressions rather than string literals (no TEST_DATA_DIR "/x").
+set(EDGE_TEST_DATA_DIR "${TEST_DATA_DIR}")
+set(EDGE_TEST_RESOURCES_DIR "${PROJECT_SOURCE_DIR}/resources")
+set(EDGE_TEST_SLICE_V1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/slic3rutils/slice_v1")
+set(EDGE_TEST_PAINT_V1_DIR "${CMAKE_CURRENT_SOURCE_DIR}/slic3rutils/paint_v1")
+configure_file(edge_test_paths.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/edge_test_paths.cpp" @ONLY)
+add_library(test_data_paths STATIC "${CMAKE_CURRENT_BINARY_DIR}/edge_test_paths.cpp" edge_test_paths.hpp)
+target_include_directories(test_data_paths PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+set_property(TARGET test_data_paths PROPERTY FOLDER "tests")
+
 add_library(test_common INTERFACE)
-target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" CATCH_CONFIG_FAST_COMPILE)
-target_link_libraries(test_common INTERFACE Catch2::Catch2)
+target_compile_definitions(test_common INTERFACE CATCH_CONFIG_FAST_COMPILE)
+target_link_libraries(test_common INTERFACE Catch2::Catch2 test_data_paths)
+# Force-included by name; found through the tests/ include directory (test_data_paths, Catch2).
+if (MSVC)
+    target_compile_options(test_common INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/FIedge_test_paths.hpp>)
+else ()
+    target_compile_options(test_common INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include edge_test_paths.hpp>")
+endif ()
 
 if (APPLE)
     target_link_libraries(test_common INTERFACE "-liconv -framework IOKit" "-framework CoreFoundation" -lc++)

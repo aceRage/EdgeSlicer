@@ -1,7 +1,14 @@
 #include <stdio.h>
 #include <numeric>
+#include <limits>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include "../AABBTreeLines.hpp"
 #include "../ClipperUtils.hpp"
 #include "../EdgeGrid.hpp"
 #include "../Geometry.hpp"
@@ -14,6 +21,7 @@
 
 #include "FillBase.hpp"
 #include "FillConcentric.hpp"
+#include "FillSpiralInset.hpp"
 #include "FillHoneycomb.hpp"
 #include "Fill3DHoneycomb.hpp"
 #include "FillGyroid.hpp"
@@ -40,6 +48,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
 {
     switch (type) {
     case ipConcentric:          return new FillConcentric();
+    case ipSpiralInset:         return new FillSpiralInset();
     case ipHoneycomb:           return new FillHoneycomb();
     case ipLateralHoneycomb:         return new FillLateralHoneycomb();
     case ip3DHoneycomb:         return new Fill3DHoneycomb();
@@ -105,6 +114,13 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
 {
     // Perform offset.
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
+    // Orca: Separated infills move the box center onto each body; origin-aligned patterns follow it.
+    // EdgeSlicer: not while an adaptive density field grades the pattern (Gyroid / TPMS, OD6): the
+    // field is sampled at the region's own coordinates, which the shift would move off the object.
+    const bool  graded = params.adaptive_infill_mode != AdaptiveInfillMode::Disabled && this->adaptive_infill_field != nullptr;
+    const Point shift  = this->aligned_to_origin() && this->align_to_box_center && ! graded && ! empty(this->bounding_box) ?
+                             this->bounding_box.center() : Point(0, 0);
+    translate(expp, -shift);
     // Create the infills for each of the regions.
     Polylines polylines_out;
     for (size_t i = 0; i < expp.size(); ++ i)
@@ -114,6 +130,8 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
             _infill_direction(surface),
             std::move(expp[i]),
             polylines_out);
+    for (Polyline &pl : polylines_out)
+        pl.translate(shift);
     return polylines_out;
 }
 
@@ -164,7 +182,11 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
         // ORCA: special flag for flow rate calibration
         auto is_flow_calib = params.extrusion_role == erTopSolidInfill && this->print_object_config->has("calib_flowrate_topinfill_special_order") &&
                              this->print_object_config->option("calib_flowrate_topinfill_special_order")->getBool();
-        if (is_flow_calib) {
+        // Orca: a forced surface fill order must survive the G-code path planner, which would
+        // otherwise re-chain and possibly reverse the paths. The same applies to the flow rate
+        // calibration's special toolpath order.
+        const bool keep_fill_order = params.fill_order != SurfaceFillOrder::Default;
+        if (is_flow_calib || keep_fill_order) {
             eec->no_sort = true;
         }
         size_t idx   = eec->entities.size();
@@ -179,7 +201,7 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
                 params.extrusion_role,
                 flow_mm3_per_mm, float(flow_width), params.flow.height());
         }
-        if (!params.can_reverse || is_flow_calib) {
+        if (!params.can_reverse || is_flow_calib || keep_fill_order) {
             for (size_t i = idx; i < eec->entities.size(); i++)
                 eec->entities[i]->set_reverse();
         }
@@ -187,6 +209,121 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
         // Orca: run gap fill
         this->_create_gap_fill(surface, params, eec);
     }
+}
+
+// Orca: inserts the gap fills of a fill whose extrusions keep their order (monotonic surfaces, a forced fill
+// order) where they add the least travel, ported from Bambu Studio. The fill's own extrusions keep their order
+// and direction. The result is kept only if it travels less than printing the gap fills after the fill.
+void insert_gap_fill(const ThickPolylines &all_gaps, const Flow &flow, ExtrusionEntitiesPtr &entities)
+{
+    if (entities.empty()) {
+        variable_width(all_gaps, erGapFill, flow, entities);
+        return;
+    }
+    // EdgeSlicer: each gap fill goes through variable_width() on its own below, which skips the near-duplicate
+    // closed loop removal (#375) for a single polyline. Remove them here, or such loops would print twice.
+    const ThickPolylines gaps = remove_near_duplicate_gap_fill_loops(all_gaps);
+    static constexpr size_t npos = size_t(-1);
+    // An extrusion of the fill, or gaps[gap], with the points where the nozzle enters and leaves it.
+    struct Item { Point in, out; size_t gap; bool reversed; };
+    auto distance = [](const Point &a, const Point &b) { return (b - a).cast<double>().norm(); };
+    auto closed   = [&gaps](size_t gap) { return gaps[gap].first_point() == gaps[gap].last_point(); };
+    // GCode::extrude_loop starts a loop at its point nearest the nozzle. This relies on variable_width() emitting
+    // a closed gap fill as an ExtrusionLoop (its paths start and end on the same point); an open one is an
+    // ExtrusionPath per width step, printed from the end the slot chose.
+    auto travel = [&](const std::vector<Item> &seq) {
+        double sum = 0.;
+        Point  at  = seq.front().out;
+        for (auto it = seq.begin() + 1; it != seq.end(); ++ it) {
+            const Point in = it->gap != npos && closed(it->gap) ? *gaps[it->gap].closest_point(at) : it->in;
+            sum += distance(at, in);
+            at = it->gap != npos && closed(it->gap) ? in : it->out;
+        }
+        return sum;
+    };
+
+    // Orca #17223: the last extrusion of the fill that borders each gap: the gap fill goes after it.
+    std::vector<size_t> after(gaps.size(), npos);
+    {
+        Lines               lines;
+        std::vector<size_t> owner;
+        for (size_t i = 0; i < entities.size(); ++ i)
+            for (const Polyline &pl : entities[i]->as_polylines())
+                for (const Line &line : pl.lines()) {
+                    lines.push_back(line);
+                    owner.push_back(i);
+                }
+        const AABBTreeLines::LinesDistancer<Line> distancer(std::move(lines));
+        const double spacing = flow.scaled_spacing();
+        for (size_t gap = 0; gap < gaps.size(); ++ gap) {
+            const ThickPolyline &pl = gaps[gap];
+            if (pl.width.empty())
+                continue;
+            const double radius = 0.5 * *std::max_element(pl.width.begin(), pl.width.end()) + spacing;
+            for (size_t j = 0; j + 1 < pl.points.size(); ++ j) {
+                const Vec2d  a     = pl.points[j].cast<double>();
+                const Vec2d  b     = pl.points[j + 1].cast<double>();
+                const size_t steps = std::max<size_t>(1, size_t(std::ceil((b - a).norm() / (0.5 * spacing))));
+                for (size_t k = 0; k <= steps; ++ k)
+                    for (size_t line : distancer.all_lines_in_radius(Point((a + double(k) / double(steps) * (b - a)).cast<coord_t>()), radius))
+                        if (after[gap] == npos || owner[line] > after[gap])
+                            after[gap] = owner[line];
+            }
+        }
+    }
+
+    std::vector<Item> items, appended;
+    items.reserve(entities.size() + gaps.size());
+    for (const ExtrusionEntity *ee : entities)
+        items.push_back({ ee->first_point(), ee->last_point(), npos, false });
+    appended = items;
+    for (size_t gap = 0; gap < gaps.size(); ++ gap) {
+        appended.push_back({ gaps[gap].first_point(), gaps[gap].last_point(), gap, false });
+        double best      = std::numeric_limits<double>::max();
+        size_t best_slot = 0;
+        Item   best_item{};
+        size_t extrusions_before = 0;
+        for (size_t slot = 0; slot <= items.size(); ++ slot) {
+            if (slot > 0 && items[slot - 1].gap == npos)
+                ++ extrusions_before;
+            if (after[gap] != npos && extrusions_before <= after[gap])
+                continue;
+            const Point *prev = slot > 0 ? &items[slot - 1].out : nullptr;
+            const Point *next = slot < items.size() ? &items[slot].in : nullptr;
+            auto consider = [&](const Point &in, const Point &out, bool reversed) {
+                const double added = (prev ? distance(*prev, in) : 0.) + (next ? distance(out, *next) : 0.) - (prev && next ? distance(*prev, *next) : 0.);
+                if (added < best) {
+                    best      = added;
+                    best_slot = slot;
+                    best_item = { in, out, gap, reversed };
+                }
+            };
+            if (closed(gap)) {
+                const Point &entry = *gaps[gap].closest_point(prev ? *prev : *next);
+                consider(entry, entry, false);
+            } else {
+                consider(gaps[gap].first_point(), gaps[gap].last_point(), false);
+                consider(gaps[gap].last_point(), gaps[gap].first_point(), true);
+            }
+        }
+        items.insert(items.begin() + best_slot, best_item);
+    }
+    if (travel(appended) <= travel(items))
+        items = std::move(appended);
+
+    ExtrusionEntitiesPtr out;
+    out.reserve(entities.size() + gaps.size());
+    size_t next_entity = 0;
+    for (const Item &item : items)
+        if (item.gap == npos)
+            out.push_back(entities[next_entity ++]);
+        else {
+            ThickPolylines gap { gaps[item.gap] };
+            if (item.reversed)
+                gap.front().reverse();
+            variable_width(gap, erGapFill, flow, out);
+        }
+    entities = std::move(out);
 }
 
 // Orca: Dedicated function to calculate gap fill lines for the provided surface, according to the print object parameters
@@ -239,7 +376,11 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
             }), polylines.end());
 
             // Append in-place. out->append(lvalue) would clone every path and leak the originals.
-            variable_width(polylines, erGapFill, params.flow, out->entities);
+            // Orca: a fill that keeps its order would otherwise print all of its gap fills after its last line.
+            if (out->no_sort)
+                insert_gap_fill(polylines, params.flow, out->entities);
+            else
+                variable_width(polylines, erGapFill, params.flow, out->entities);
         }
     }
 }
@@ -1565,13 +1706,18 @@ BoundaryInfillGraph create_boundary_infill_graph(const Polylines &infill_ordered
 // The extended bounding box of the whole object that covers any rotation of every layer.
 BoundingBox Fill::extended_object_bounding_box() const
 {
-    BoundingBox out = bounding_box;
+    // Orca: Extend about the box center, which separated infills move off the origin.
+    const Point c   = this->bounding_box.center();
+    BoundingBox out = this->bounding_box;
+    out.translate(-c.x(), -c.y());
     out.merge(Point(out.min.y(), out.min.x()));
     out.merge(Point(out.max.y(), out.max.x()));
 
     // The bounding box is scaled by sqrt(2.) to ensure that the bounding box
     // covers any possible rotations.
-    return out.scaled(sqrt(2.));
+    out = out.scaled(sqrt(2.));
+    out.translate(c.x(), c.y());
+    return out;
 }
 
 void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Polygon*> &boundary_src, const BoundingBox &bbox, Polylines &polylines_out, const double spacing, const FillParams &params)
@@ -1706,6 +1852,12 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
             size_t                    polyline_idx1  = get_and_update_merged_with(((cp1 - graph.map_infill_end_point_to_boundary.data()) / 2));
             size_t                    polyline_idx2  = get_and_update_merged_with(((cp2 - graph.map_infill_end_point_to_boundary.data()) / 2));
             const Points             &contour        = graph.boundary[cp1->contour_idx];
+
+            // Orca: If multiline infill is requested, skip connections that are too short.
+            if (params.multiline > 1 && arc.arc_length < scale_(spacing) * params.multiline) {
+                continue;
+            }
+
             const std::vector<double> &contour_params = graph.boundary_params[cp1->contour_idx];
             if (polyline_idx1 != polyline_idx2) {
                 Polyline &polyline1 = infill_ordered[polyline_idx1];
@@ -2452,9 +2604,11 @@ void Fill::connect_base_support(Polylines &&infill_ordered, const std::vector<co
 #endif // INFILL_DEBUG_OUTPUT
 
     const std::vector<SupportArcCost> arches = evaluate_support_arches(infill_ordered, graph, spacing, params);
-    static const double cost_low      = line_spacing * 1.3;
-    static const double cost_high     = line_spacing * 2.;
-    static const double cost_veryhigh = line_spacing * 3.;
+    // Must not be static: line_spacing varies per call (base vs interface fills differ),
+    // and a static here would fix these to whichever call ran first, order depending on thread count.
+    const double cost_low      = line_spacing * 1.3;
+    const double cost_high     = line_spacing * 2.;
+    const double cost_veryhigh = line_spacing * 3.;
 
     {
         std::vector<const SupportArcCost*> selected;
@@ -2711,7 +2865,7 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
         const float center = (n_lines - 1) / 2.0f;
 
         for (int line = 0; line < n_lines; ++line) {
-            float offset = (static_cast<float>(line) - center) * spacing;
+            float offset = scale_((static_cast<float>(line) - center) * spacing);
 
             for (const Polyline& pl : polylines) {
                 const size_t n = pl.points.size();
@@ -2724,22 +2878,27 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
                 new_points.reserve(n);
                 for (size_t i = 0; i < n; ++i) {
                     Vec2f tangent;
-                    if (i == 0)
-                        tangent = Vec2f(pl.points[1].x() - pl.points[0].x(), pl.points[1].y() - pl.points[0].y());
-                    else if (i == n - 1)
-                        tangent = Vec2f(pl.points[n - 1].x() - pl.points[n - 2].x(), pl.points[n - 1].y() - pl.points[n - 2].y());
-                    else
-                        tangent = Vec2f(pl.points[i + 1].x() - pl.points[i - 1].x(), pl.points[i + 1].y() - pl.points[i - 1].y());
-
-                    float len = std::hypot(tangent.x(), tangent.y());
-                    if (len == 0)
-                        len = 1.0f;
-                    tangent /= len;
+                    // For the first and last point, if the polyline is a
+                    // closed loop, get the tangent from the points on either
+                    // side of the join, otherwise just use the first or last
+                    // line.
+                    if (i == 0) {
+                        if (pl.points[0] == pl.points[n-1]) {
+                            tangent = (pl.points[1] - pl.points[n-2]).template cast<float>().normalized();
+                        } else {
+                            tangent = (pl.points[1] - pl.points[0]).template cast<float>().normalized();
+                        }
+                    } else if (i == n - 1) {
+                        if (pl.points[0] == pl.points[n-1]) {
+                            tangent = (pl.points[1] - pl.points[n-2]).template cast<float>().normalized();
+                        } else {
+                            tangent = (pl.points[n-1] - pl.points[n-2]).template cast<float>().normalized();
+                        }
+                    } else
+                        tangent = (pl.points[i+1] - pl.points[i-1]).template cast<float>().normalized();
                     Vec2f normal(-tangent.y(), tangent.x());
 
-                    Point p = pl.points[i];
-                    p.x() += scale_(normal.x() * offset);
-                    p.y() += scale_(normal.y() * offset);
+                    Point p = pl.points[i] + (normal * offset).template cast<coord_t>();
                     new_points.push_back(p);
                 }
 
@@ -2748,6 +2907,145 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
         }
         polylines = std::move(all_polylines);
     }
+}
+
+// Orca: from OrcaSlicer #16492, which also calls it on all sparse infill before the extrusions are made. EdgeSlicer
+// takes only the function (that call changes every sparse infill and is held with #16492, owner decision OD-W2);
+// here it rejoins the closed rings that clipping cuts at their first point (OrcaSlicer #17334).
+void join_close_ends(Polylines &polylines, double max_gap, bool can_reverse)
+{
+    const size_t n = polylines.size();
+    if (n < 2 || max_gap <= 0.)
+        return;
+    static constexpr size_t npos = size_t(-1);
+    // End 2 * i is the first point of polyline i, 2 * i + 1 its last.
+    auto end_point = [&polylines](size_t e) -> const Point & { return (e & 1) ? polylines[e >> 1].points.back() : polylines[e >> 1].points.front(); };
+    // Ends in cells of max_gap, so the ends within max_gap of one are in its cell or the eight around it.
+    auto cell_of = [max_gap](const Point &p) { return Vec2i64(int64_t(std::floor(p.x() / max_gap)), int64_t(std::floor(p.y() / max_gap))); };
+    auto key     = [](const Vec2i64 &c) { return (uint64_t(c.x()) << 32) ^ uint64_t(uint32_t(c.y())); };
+    std::unordered_map<uint64_t, std::vector<size_t>> grid;
+    for (size_t e = 0; e < 2 * n; ++ e)
+        if (polylines[e >> 1].size() >= 2)
+            grid[key(cell_of(end_point(e)))].push_back(e);
+
+    // The end of a polyline that comes last along its overall direction, taken along the dominant axis.
+    std::vector<char> backwards(n, 0);
+    for (size_t i = 0; i < n; ++ i)
+        if (polylines[i].size() >= 2) {
+            const Vec2d dir = (polylines[i].points.back() - polylines[i].points.front()).cast<double>();
+            backwards[i] = std::abs(dir.x()) >= std::abs(dir.y()) ? dir.x() < 0. : dir.y() < 0.;
+        }
+    auto trailing = [&backwards](size_t e) { return bool(e & 1) != bool(backwards[e >> 1]); };
+    // Ends that meet first, then shortest gaps between leading ends, then the others: the copies of neighboring multiline
+    // groups are all joined at the same side, which leaves their open ends next to each other rather than on alternating walls.
+    std::vector<std::tuple<bool, bool, double, size_t, size_t>> gaps;
+    for (const auto &[cell_key, ends] : grid) {
+        const Vec2i64 c = cell_of(end_point(ends.front()));
+        for (int64_t dx = -1; dx <= 1; ++ dx)
+            for (int64_t dy = -1; dy <= 1; ++ dy)
+                if (auto it = grid.find(key(c + Vec2i64(dx, dy))); it != grid.end())
+                    for (size_t a : ends)
+                        for (size_t b : it->second)
+                            if (a < b && (a >> 1) != (b >> 1) && (can_reverse || (a & 1) != (b & 1)))
+                                if (const double d = (end_point(a) - end_point(b)).cast<double>().norm(); d <= max_gap)
+                                    gaps.emplace_back(d > SCALED_EPSILON, d > SCALED_EPSILON && (trailing(a) || trailing(b)), d, a, b);
+    }
+    if (gaps.empty())
+        return;
+    std::sort(gaps.begin(), gaps.end());
+
+    std::vector<size_t> partner(2 * n, npos), parent(n);
+    std::iota(parent.begin(), parent.end(), 0);
+    auto find = [&parent](size_t i) {
+        while (parent[i] != i)
+            i = parent[i] = parent[parent[i]];
+        return i;
+    };
+    // A join may not cross a line or another join; touching them at its own ends is fine, as where a line ends on another.
+    // Only the segments through a cell next to a candidate join can cross one.
+    std::unordered_set<uint64_t> near_gaps;
+    for (const auto &[apart, trail, d, a, b] : gaps)
+        for (size_t e : { a, b })
+            for (int64_t dx = -1; dx <= 1; ++ dx)
+                for (int64_t dy = -1; dy <= 1; ++ dy)
+                    near_gaps.insert(key(cell_of(end_point(e)) + Vec2i64(dx, dy)));
+    Lines near_lines;
+    for (const Polyline &pl : polylines)
+        for (size_t i = 1; i < pl.size(); ++ i) {
+            const Vec2i64 c0 = cell_of(pl.points[i - 1]), c1 = cell_of(pl.points[i]);
+            const Vec2i64 lo = c0.cwiseMin(c1), hi = c0.cwiseMax(c1);
+            bool is_near = (hi - lo).maxCoeff() > 3;
+            for (int64_t x = lo.x(); x <= hi.x() && ! is_near; ++ x)
+                for (int64_t y = lo.y(); y <= hi.y() && ! is_near; ++ y)
+                    is_near = near_gaps.count(key(Vec2i64(x, y))) > 0;
+            if (is_near)
+                near_lines.emplace_back(pl.points[i - 1], pl.points[i]);
+        }
+    const AABBTreeLines::LinesDistancer<Line> lines(std::move(near_lines));
+    auto crosses = [&](size_t a, size_t b) {
+        const Vec2d  p = end_point(a).cast<double>(), q = end_point(b).cast<double>();
+        const double length = (q - p).norm();
+        if (length <= 2. * SCALED_EPSILON)
+            return false;
+        const Vec2d dir = (q - p) / length;
+        const Line  inner(Point((p + SCALED_EPSILON * dir).cast<coord_t>()), Point((q - SCALED_EPSILON * dir).cast<coord_t>()));
+        if (! lines.get_lines().empty() && ! lines.intersections_with_line<false>(inner).empty())
+            return true;
+        const Vec2i64 c = cell_of(end_point(a));
+        for (int64_t dx = -3; dx <= 3; ++ dx)
+            for (int64_t dy = -3; dy <= 3; ++ dy)
+                if (auto it = grid.find(key(c + Vec2i64(dx, dy))); it != grid.end())
+                    for (size_t e : it->second)
+                        if (partner[e] != npos && Geometry::segments_intersect(inner.a, inner.b, end_point(e), end_point(partner[e])))
+                            return true;
+        return false;
+    };
+    for (const auto &[apart, trail, d, a, b] : gaps)
+        if (partner[a] == npos && partner[b] == npos && find(a >> 1) != find(b >> 1) && ! crosses(a, b)) {
+            partner[a] = b;
+            partner[b] = a;
+            parent[find(a >> 1)] = find(b >> 1);
+        }
+
+    // Walk each group from a polyline with a free end, entering the next polyline at the end joined to the last one.
+    Polylines         out;
+    std::vector<char> done(n, 0);
+    auto walk = [&](size_t first_end) {
+        Polyline joined;
+        for (size_t e = first_end; e != npos;) {
+            Polyline &pl = polylines[e >> 1];
+            done[e >> 1] = 1;
+            if (e & 1)
+                pl.reverse();
+            joined.points.insert(joined.points.end(), pl.points.begin() + (! joined.empty() && joined.points.back() == pl.points.front()), pl.points.end());
+            e = partner[e ^ 1];
+        }
+        out.emplace_back(std::move(joined));
+    };
+    for (size_t i = 0; i < n; ++ i)
+        if (! done[i] && partner[2 * i] == npos)
+            walk(2 * i);
+    for (size_t i = 0; i < n; ++ i)
+        if (! done[i] && partner[2 * i + 1] == npos)
+            walk(2 * i + 1);
+    polylines = std::move(out);
+}
+
+// EdgeSlicer: the closed rings among the paths are clipped on their own, and the two pieces of each ring that meet at its
+// first point are joined back (OrcaSlicer #17334). Without a closed ring this is intersection_pl().
+Polylines intersection_pl_rejoining_rings(const Polylines &polylines, const ExPolygons &clip)
+{
+    auto is_ring = [](const Polyline &pl) { return pl.size() > 3 && pl.first_point() == pl.last_point(); };
+    if (std::none_of(polylines.begin(), polylines.end(), is_ring))
+        return intersection_pl(polylines, clip);
+    Polylines open, rings;
+    for (const Polyline &pl : polylines)
+        (is_ring(pl) ? rings : open).emplace_back(pl);
+    Polylines out        = intersection_pl(open, clip);
+    Polylines ring_parts = intersection_pl(rings, clip);
+    join_close_ends(ring_parts, SCALED_EPSILON, true);
+    append(out, std::move(ring_parts));
+    return out;
 }
 
 } // namespace Slic3r

@@ -1,0 +1,13 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: sliced toolpaths, silk", "plate_index": 0, "source": "toolpaths", "preset_base": "studio_white",
+      "background": { "type": "radial_gradient", "color1": "#FFFFFF", "color2": "#D9DCE1" },
+      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45 },
+      "materials": { "toolpath_smoothness": 0.8, "filaments": [ { "slot": 1, "finish": "silk" } ] },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

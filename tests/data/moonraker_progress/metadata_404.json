@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": 404,
+    "message": "Metadata not available for <hand_written.gcode>"
+  }
+}

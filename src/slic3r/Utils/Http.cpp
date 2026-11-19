@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <thread>
 #include <deque>
@@ -17,6 +18,8 @@
 #include <boost/algorithm/string.hpp>
 
 #include <curl/curl.h>
+
+#include "libslic3r/UntrustedInput.hpp"
 
 #ifdef OPENSSL_CERT_OVERRIDE
 #include <openssl/x509.h>
@@ -48,7 +51,6 @@ struct CurlGlobalInit
             "/etc/ssl/ca-bundle.pem"              // OpenSUSE Tumbleweed
         };
 
-        namespace fs = boost::filesystem;
         // Env var name for the OpenSSL CA bundle (SSL_CERT_FILE nomally)
         const char *const SSL_CA_FILE = X509_get_default_cert_file_env();
         const char * ssl_cafile = ::getenv(SSL_CA_FILE);
@@ -57,10 +59,14 @@ struct CurlGlobalInit
             ssl_cafile = X509_get_default_cert_file();
 
         int replace = true;
-        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile))) {
+        // ORCA: non-throwing overload; fs_ec is deliberately unread. An existing but unreadable
+        //       path (a static build's baked-in OPENSSLDIR run as another user, say) must fall
+        //       through to CA_BUNDLES, not throw out of this constructor.
+        boost::system::error_code fs_ec;
+        if (!ssl_cafile || !fs::exists(fs::path(ssl_cafile), fs_ec)) {
             const char * bundle = nullptr;
             for (const char * b : CA_BUNDLES) {
-                if (fs::exists(fs::path(b))) {
+                if (fs::exists(fs::path(b), fs_ec)) {
                     ::setenv(SSL_CA_FILE, bundle = b, replace);
                     break;
                 }
@@ -100,6 +106,15 @@ struct form_file
         : ifs(p, std::ios::in | std::ios::binary), init_offset(offset), content_length(content_length)
     {}
 };
+
+// The refusal text http_perform() hands to errorfn(). Prefixing it is what lets a caller tell a
+// refusal (a decision about where the transfer went) from a transport failure, so a retry loop can
+// stop instead of re-sending a request that will be refused in exactly the same way.
+// Plater's import retry loop (the no-retry stop on error_is_redirect_refusal) is the consumer
+// that depends on this exact prefix. The text is asserted in
+// tests/slic3rutils/http_body_redirect_tests.cpp, so rewording it breaks that test rather than
+// silently changing behaviour.
+static const char REDIRECT_REFUSAL_PREFIX[] = "the download was refused: ";
 
 struct Http::priv
 {
@@ -145,6 +160,9 @@ struct Http::priv
 	size_t body_seen { 0 };        // bytes handed to bodyfn
 	bool body_refused { false };   // bodyfn said stop (as opposed to the size limit)
 	bool follow_location { true };
+	// restrict_redirects(): cap the hops (curl's CURLOPT_MAXREDIRS), keep them on https, and look at
+	// where the transfer actually ended before calling it a success.
+	bool check_final_url { false };
 
 	priv(const std::string &url);
 	~priv();
@@ -167,6 +185,7 @@ struct Http::priv
 	void set_put_body(const fs::path &path);
 	void set_del_body(const std::string& body);
     void set_range(const std::string &range);
+	void restrict_redirects(long max_redirects);
 
 	std::string curl_error(CURLcode curlcode);
 	std::string body_size_error();
@@ -276,7 +295,6 @@ Http::priv::priv(const std::string &url)
 #ifdef __WINDOWS__
 	::curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_MAX_TLSv1_2);
 #endif
-	::curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
 	// The certificate checks are set in http_perform(), from `url` and tls_policy (see
 	// apply_tls_options below). Until 2026-09-22 they were switched off here for every request.
 
@@ -519,6 +537,32 @@ void Http::priv::set_range(const std::string& range)
 	::curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
 }
 
+void Http::priv::restrict_redirects(long max_redirects)
+{
+	if (max_redirects < 0)
+		max_redirects = 0;
+	::curl_easy_setopt(curl, CURLOPT_MAXREDIRS, max_redirects);
+#if LIBCURL_VERSION_NUM >= 0x075500
+	::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+	// The bundled libcurl is 7.75 (deps/CURL/CURL.cmake), so this is the branch that compiles;
+	// the _STR form above arrived in 7.85 and makes the deprecated option go away.
+	::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+	// REDIR_PROTOCOLS only governs where a redirect may go; the first request itself is checked
+	// against CURLOPT_PROTOCOLS. An address that is already https has no business being served
+	// to us over plain http either, so pin that one too. A plain-http start is left alone: that is
+	// a printer or another LAN device, which the caller would not have restricted anyway.
+	if (Http::url_scheme_is(url, "https")) {
+#if LIBCURL_VERSION_NUM >= 0x075500
+		::curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+#else
+		::curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+	}
+	check_final_url = true;
+}
+
 std::string Http::priv::curl_error(CURLcode curlcode)
 {
 	return (boost::format("curl:%1%:\n%2%\n[Error %3%]")
@@ -585,6 +629,26 @@ void Http::priv::http_perform()
 	CURLcode res = ::curl_easy_perform(curl);
 
     putFile.reset();
+
+	// restrict_redirects(): curl keeps the hops on https by itself, but an https -> https redirect
+	// onto this computer or the LAN is still one it will follow, and the checks the caller made on
+	// the original link never see the address the transfer ended on. So look at where it went, and
+	// refuse it if that is somewhere the original link would have been refused. The decision itself
+	// lives in redirect_end_refusal(), which the tests run directly.
+	if (res == CURLE_OK && check_final_url) {
+		long  redirects = 0;
+		char *final_url = nullptr;
+		::curl_easy_getinfo(curl, CURLINFO_REDIRECT_COUNT, &redirects);
+		if (::curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url) != CURLE_OK)
+			final_url = nullptr;
+		const std::string why = Http::redirect_end_refusal(redirects, final_url != nullptr ? std::string(final_url) : std::string());
+		if (!why.empty()) {
+			BOOST_LOG_TRIVIAL(error) << "Http: refused " << Http::url_host(url) << " after " << redirects
+			                         << " redirect(s) to " << (final_url != nullptr ? final_url : "(unknown)") << ": " << why;
+			if (errorfn) { errorfn(std::string(), std::string(REDIRECT_REFUSAL_PREFIX) + why, 0); }
+			return;
+		}
+	}
 
 	if (res != CURLE_OK) {
 		if (res == CURLE_ABORTED_BY_CALLBACK) {
@@ -687,6 +751,12 @@ Http& Http::set_range(const std::string& range)
 	return *this;
 }
 
+Http& Http::restrict_redirects(long max_redirects)
+{
+	if (p) { p->restrict_redirects(max_redirects); }
+	return *this;
+}
+
 Http& Http::header(std::string name, const std::string &value)
 {
 	if (!p) { return * this; }
@@ -755,6 +825,78 @@ Http& Http::tls_policy(TlsPolicy policy)
 {
 	if (p) { p->tls_policy = policy; }
 	return *this;
+}
+
+std::string Http::redirect_end_refusal(long redirect_count, const std::string &effective_url)
+{
+	// A transfer that never left the address it was given has nothing to re-check: the caller
+	// checked that one itself.
+	if (redirect_count <= 0)
+		return std::string();
+	if (effective_url.empty())
+		return "where the download was redirected to is unknown";
+	return untrusted::redirect_target_refusal(effective_url);
+}
+
+bool Http::error_is_redirect_refusal(const std::string &error)
+{
+	return error.compare(0, std::strlen(REDIRECT_REFUSAL_PREFIX), REDIRECT_REFUSAL_PREFIX) == 0;
+}
+
+bool Http::url_scheme_is(const std::string &url, const char *scheme)
+{
+	const size_t sep = url.find("://");
+	if (sep == std::string::npos)
+		return false;
+	return boost::iequals(url.substr(0, sep), scheme);
+}
+
+std::string Http::url_without_userinfo(const std::string &url)
+{
+    const size_t scheme_end = url.find("://");
+    const size_t start      = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    const size_t end        = std::min(url.find_first_of("/?#", start), url.size());
+    // The last '@' of the authority: a password may hold an '@' of its own.
+    const size_t at = url.rfind('@', end == 0 ? 0 : end - 1);
+    if (at == std::string::npos || at < start)
+        return url;
+    return url.substr(0, start) + url.substr(at + 1);
+}
+
+std::string Http::url_for_log(const std::string &url)
+{
+    std::string out = url_without_userinfo(url);
+    const size_t q = out.find('?');
+    if (q == std::string::npos)
+        return out;
+    const size_t frag = out.find('#', q);
+    const size_t qend = frag == std::string::npos ? out.size() : frag;
+    std::string result = out.substr(0, q + 1);
+    size_t pos = q + 1;
+    while (pos <= qend) {
+        size_t amp = out.find('&', pos);
+        if (amp == std::string::npos || amp > qend)
+            amp = qend;
+        const std::string pair = out.substr(pos, amp - pos);
+        const size_t eq = pair.find('=');
+        if (eq == std::string::npos) {
+            result += pair;
+        } else {
+            const std::string key = pair.substr(0, eq);
+            std::string lkey = key;
+            boost::algorithm::to_lower(lkey);
+            static const char *secret_keys[] = {"apikey", "api_key", "api-key", "key", "token", "access_token", "auth", "password", "passwd", "pwd", "secret", "access_code", "code"};
+            bool secret = false;
+            for (const char *k : secret_keys)
+                if (lkey == k) { secret = true; break; }
+            result += key + "=" + (secret ? std::string("***") : pair.substr(eq + 1));
+        }
+        if (amp >= qend)
+            break;
+        result += '&';
+        pos = amp + 1;
+    }
+    return result + out.substr(qend);
 }
 
 std::string Http::url_host(const std::string &url)
@@ -894,15 +1036,16 @@ bool Http::tls_host_is_private(const std::string &host_in)
     if (host.find('.') == std::string::npos)
         return true;
 
-    // Names that only exist on a LAN. ts.net is Tailscale MagicDNS: those hosts are reached through
-    // the WireGuard tunnel (already authenticated and encrypted end to end), and a device there
-    // serves its own self-signed certificate unless Tailscale Serve fronts it.
-    static const char *const private_suffixes[] = {
-        ".local", ".lan", ".home", ".internal", ".intranet", ".localdomain", ".home.arpa", ".ts.net",
-    };
-    for (const char *suffix : private_suffixes)
-        if (boost::algorithm::ends_with(host, suffix))
+    // Names that only exist on a LAN. untrusted::local_host_suffixes() is the authority.
+    // Match the dotted form only: this predicate decides whether TLS verification is skipped,
+    // so a bare apex like ts.net or home.arpa must keep its certificate checked even though
+    // the suffix itself counts as local for refusal purposes. host_is_or_under() would also
+    // match those two apexes, which is correct for refusal and wrong here.
+    for (const std::string &suffix : untrusted::local_host_suffixes()) {
+        const std::string dotted = "." + suffix;
+        if (boost::algorithm::ends_with(host, dotted))
             return true;
+    }
     return false;
 }
 
@@ -1116,6 +1259,14 @@ Http Http::patch(std::string url)
 {
 	Http http{ std::move(url) };
 	curl_easy_setopt(http.p->curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+	return http;
+}
+
+Http Http::custom(const std::string &method, std::string url)
+{
+	Http http{ std::move(url) };
+	// curl copies the string.
+	curl_easy_setopt(http.p->curl, CURLOPT_CUSTOMREQUEST, method.c_str());
 	return http;
 }
 

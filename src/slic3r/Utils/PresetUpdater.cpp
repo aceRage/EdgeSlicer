@@ -1,6 +1,7 @@
 #include "PresetUpdater.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -28,6 +29,8 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp"
+#include "libslic3r/StartupProfile.hpp"
+#include "slic3r/Utils/VendorInstallStamp.hpp"
 #include "common_func/common_func.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -344,13 +347,15 @@ struct PresetUpdater::priv
                        int timeout_sec = 30,
                        bool*                         cancel_flag = nullptr);
     void sync_tooltip(std::string http_url, std::string language);
-    void sync_plugins(std::string http_url, std::string plugin_version);
     void sync_printer_config(std::string http_url);
-    bool get_cached_plugins_version(std::string &cached_version, bool& force);
 
 	//BBS: refine preset update logic
 	bool install_bundles_rsrc(const std::vector<std::string>& bundles, bool snapshot) const;
 	void check_installed_vendor_profiles() const;
+	// OrcaFilamentLibrary install-on-start decision and its stamp (VendorInstallStamp.hpp).
+	fs::path                     library_install_stamp_path() const;
+	Utils::VendorInstallDecision decide_library_install() const;
+	void                         write_library_install_stamp(bool install_ok) const;
     Updates get_printer_config_updates(bool update = false) const;
 	Updates get_config_updates(const Semver& old_slic3r_version) const;
 	bool perform_updates(Updates &&updates, bool snapshot = true) const;
@@ -366,10 +371,14 @@ PresetUpdater::priv::priv()
 {
 	//BBS: refine preset updater logic
 	enabled_version_check = true;
+	Slic3r::StartupPhase profile("PresetUpdater::priv ctor");
 	set_download_prefs(GUI::wxGetApp().app_config);
+	profile.mark("set_download_prefs");
 	// Install indicies from resources. Only installs those that are either missing or older than in resources.
 	check_installed_vendor_profiles();
+	profile.mark("check_installed_vendor_profiles");
     perform_updates(get_printer_config_updates(), false);
+	profile.mark("printer config updates (resources/printers)");
 	// Load indices from the cache directory.
 	//index_db = Index::load_db();
 }
@@ -1178,202 +1187,8 @@ void PresetUpdater::priv::sync_tooltip(std::string http_url, std::string languag
     }
 }
 
-// return true means there are plugins files
-bool PresetUpdater::priv::get_cached_plugins_version(std::string& cached_version, bool &force)
-{
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto cache_folder = data_dir_path / "ota";
-    std::string network_library, player_library, live555_library;
-    bool has_plugins = false;
-
-#if defined(_MSC_VER) || defined(_WIN32)
-    network_library = cache_folder.string() + "/bambu_networking.dll";
-    player_library  = cache_folder.string() + "/BambuSource.dll";
-    live555_library = cache_folder.string() + "/live555.dll";
-#elif defined(__WXMAC__)
-    network_library = cache_folder.string() + "/libbambu_networking.dylib";
-    player_library  = cache_folder.string() + "/libBambuSource.dylib";
-    live555_library = cache_folder.string() + "/liblive555.dylib";
-#else
-    network_library = cache_folder.string() + "/libbambu_networking.so";
-    player_library  = cache_folder.string() + "/libBambuSource.so";
-    live555_library = cache_folder.string() + "/liblive555.so";
-#endif
-
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-    if (boost::filesystem::exists(network_library)
-        && boost::filesystem::exists(player_library)
-        && boost::filesystem::exists(live555_library)
-        && boost::filesystem::exists(changelog_file))
-    {
-        has_plugins = true;
-        try {
-            boost::nowide::ifstream ifs(changelog_file);
-            json j;
-            ifs >> j;
-
-            if (j.contains("version"))
-                cached_version = j["version"];
-            if (j.contains("force"))
-                force = j["force"];
-
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": cached_version = "<<cached_version<<", force = " << force;
-        }
-        catch(nlohmann::detail::parse_error &err) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": parse "<<changelog_file<<" got a nlohmann::detail::parse_error, reason = " << err.what();
-            //throw ConfigurationError(format("Failed loading json file \"%1%\": %2%", file_path, err.what()));
-        }
-    }
-
-    return has_plugins;
-}
-
-void PresetUpdater::priv::sync_plugins(std::string http_url, std::string plugin_version)
-{
-    if (plugin_version == "00.00.00.00") {
-        BOOST_LOG_TRIVIAL(info) << "non need to sync plugins for there is no plugins currently.";
-        return;
-    }
-    std::string curr_version = SLIC3R_VERSION;
-    std::string using_version = curr_version.substr(0, 9) + "00";
-
-    std::string cached_version;
-    bool force_upgrade = false;
-    get_cached_plugins_version(cached_version, force_upgrade);
-    if (!cached_version.empty()) {
-        bool need_delete_cache = false;
-        Semver current_semver = curr_version;
-        Semver cached_semver = cached_version;
-
-        int curent_patch_cc = current_semver.patch()/100;
-        int cached_patch_cc = cached_semver.patch()/100;
-        int curent_patch_dd = current_semver.patch()%100;
-        int cached_patch_dd = cached_semver.patch()%100;
-        if ((cached_semver.maj() != current_semver.maj())
-            || (cached_semver.min() != current_semver.min())
-            || (curent_patch_cc != cached_patch_cc))
-        {
-            need_delete_cache = true;
-            BOOST_LOG_TRIVIAL(info) << boost::format("cached plugins version %1% not match with current %2%")%cached_version%curr_version;
-        }
-        else if (cached_patch_dd <= curent_patch_dd) {
-            need_delete_cache = true;
-            BOOST_LOG_TRIVIAL(info) << boost::format("cached plugins version %1% not newer than current %2%")%cached_version%curr_version;
-        }
-        else {
-            BOOST_LOG_TRIVIAL(info) << boost::format("cached plugins version %1% newer than current %2%")%cached_version%curr_version;
-            plugin_version = cached_version;
-        }
-
-        if (need_delete_cache) {
-            std::string data_dir_str = data_dir();
-            boost::filesystem::path data_dir_path(data_dir_str);
-            auto cache_folder = data_dir_path / "ota";
-
-#if defined(_MSC_VER) || defined(_WIN32)
-            auto network_library = cache_folder / "bambu_networking.dll";
-            auto player_library  = cache_folder / "BambuSource.dll";
-            auto live555_library  = cache_folder / "live555.dll";
-#elif defined(__WXMAC__)
-            auto network_library = cache_folder / "libbambu_networking.dylib";
-            auto player_library = cache_folder / "libBambuSource.dylib";
-            auto live555_library = cache_folder / "liblive555.dylib";
-#else
-            auto network_library = cache_folder / "libbambu_networking.so";
-            auto player_library = cache_folder / "libBambuSource.so";
-            auto live555_library = cache_folder / "liblive555.so";
-#endif
-            auto changelog_file = cache_folder / "network_plugins.json";
-
-            if (boost::filesystem::exists(network_library))
-            {
-
-                BOOST_LOG_TRIVIAL(info) << "[remove_old_networking_plugins] remove the file "<<network_library.string();
-                try {
-                    fs::remove(network_library);
-                } catch (...) {
-                    BOOST_LOG_TRIVIAL(error) << "Failed  removing the plugins file " << network_library.string();
-                }
-            }
-            if (boost::filesystem::exists(player_library))
-            {
-
-                BOOST_LOG_TRIVIAL(info) << "[remove_old_networking_plugins] remove the file "<<player_library.string();
-                try {
-                    fs::remove(player_library);
-                } catch (...) {
-                    BOOST_LOG_TRIVIAL(error) << "Failed  removing the plugins file " << player_library.string();
-                }
-            }
-            if (boost::filesystem::exists(live555_library))
-            {
-
-                BOOST_LOG_TRIVIAL(info) << "[remove_old_networking_plugins] remove the file " << live555_library.string();
-                try {
-                    fs::remove(live555_library);
-                } catch (...) {
-                    BOOST_LOG_TRIVIAL(error) << "Failed  removing the plugins file " << live555_library.string();
-                }
-            }
-            if (boost::filesystem::exists(changelog_file))
-            {
-
-                BOOST_LOG_TRIVIAL(info) << "[remove_old_networking_plugins] remove the file "<<changelog_file.string();
-                try {
-                    fs::remove(changelog_file);
-                } catch (...) {
-                    BOOST_LOG_TRIVIAL(error) << "Failed  removing the plugins file " << changelog_file.string();
-                }
-            }
-        }
-    }
-
-#if defined(__WINDOWS__)
-    if (GUI::wxGetApp().is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
-        //set to arm64 for plugins
-        std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
-        current_headers["X-BBL-OS-Type"] = "windows_arm";
-
-        Slic3r::Http::set_extra_headers(current_headers);
-        BOOST_LOG_TRIVIAL(info) << boost::format("set X-BBL-OS-Type to windows_arm");
-    }
-#endif
-    try {
-        std::map<std::string, Resource> resources
-        {
-            {"slicer/plugins/cloud", { using_version, "", "", false, cache_path.string(), {"plugins"}}}
-        };
-        sync_resources(http_url, resources, true, plugin_version, "network_plugins.json");
-    }
-    catch (std::exception& e) {
-        BOOST_LOG_TRIVIAL(warning) << format("[Orca Updater] sync_plugins: %1%", e.what());
-    }
-#if defined(__WINDOWS__)
-    if (GUI::wxGetApp().is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
-        //set back
-        std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
-        current_headers["X-BBL-OS-Type"] = "windows";
-
-        Slic3r::Http::set_extra_headers(current_headers);
-        BOOST_LOG_TRIVIAL(info) << boost::format("set X-BBL-OS-Type back to windows");
-    }
-#endif
-
-    bool result = get_cached_plugins_version(cached_version, force_upgrade);
-    if (result) {
-        BOOST_LOG_TRIVIAL(info) << format("[Orca Updater] found new plugins: %1%, prompt to update, force_upgrade %2%", cached_version, force_upgrade);
-        if (force_upgrade) {
-            auto app_config = GUI::wxGetApp().app_config;
-            if (!app_config)
-                GUI::wxGetApp().plater()->get_notification_manager()->push_notification(GUI::NotificationType::BBLPluginUpdateAvailable);
-            else
-                app_config->set("update_network_plugin", "true");
-        }
-        else
-            GUI::wxGetApp().plater()->get_notification_manager()->push_notification(GUI::NotificationType::BBLPluginUpdateAvailable);
-    }
-}
+// Bambu's network plug-in update check (sync_plugins) and its OTA staging area used to live here.
+// EdgeSlicer never downloads Bambu's plug-in (owner decision, 2026-10), so both are gone.
 
 void PresetUpdater::priv::sync_printer_config(std::string http_url)
 {
@@ -1471,9 +1286,14 @@ bool PresetUpdater::priv::install_bundles_rsrc(const std::vector<std::string>& b
         // Guard against empty / missing source: never clear target unless we do have source content to copy.
         if (source_dir_valid && source_dir_has_entries) {
             fs::path print_folder(print_in_vendors);
-            if (fs::exists(print_folder))
-                fs::remove_all(print_folder);
-            fs::create_directories(print_folder);
+            {
+                Slic3r::StartupScopedTimer t("PresetUpdater::install_bundles_rsrc step=remove_old_dir");
+                if (Slic3r::startup_profile_enabled())
+                    t.note("vendor=" + bundle);
+                if (fs::exists(print_folder))
+                    fs::remove_all(print_folder);
+                fs::create_directories(print_folder);
+            }
 		    updates.updates.emplace_back(std::move(print_in_rsrc), std::move(print_in_vendors), Version(), bundle, "", "",[](const std::string name){
             // return false if name is end with .stl, case insensitive
             return boost::iends_with(name, ".stl") || boost::iends_with(name, ".png") || boost::iends_with(name, ".svg") ||
@@ -1599,8 +1419,16 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
     const auto enabled_vendors = app_config->vendors();
 
     std::set<std::string> bundles;
-    // Orca: always install filament library
-    bundles.insert(PresetBundle::ORCA_FILAMENT_LIBRARY);
+    // Orca installed the filament library on every start. It is now reinstalled only when it is
+    // missing, older, or differs from what the last install left behind (VendorInstallStamp.hpp).
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    {
+        const Utils::VendorInstallDecision d = decide_library_install();
+        BOOST_LOG_TRIVIAL(info) << "[Orca Updater]: " << library << (d.install ? " install: " : " up to date: ") << d.reason;
+        Slic3r::startup_profile_log("PresetUpdater library_install=" + std::string(d.install ? "1" : "0") + " reason=" + d.reason);
+        if (d.install)
+            bundles.insert(library);
+    }
     for (auto &dir_entry : boost::filesystem::directory_iterator(rsrc_path)) {
         const auto &path = dir_entry.path();
         std::string file_path = path.string();
@@ -1610,6 +1438,9 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
             // Remove the .json suffix.
             vendor_name.erase(vendor_name.size() - 5);
             if (bundles.find(vendor_name) != bundles.end())continue;
+            // The library was decided above. It is not an "enabled vendor", so falling through
+            // would remove the installed copy as "not installed".
+            if (vendor_name == library) continue;
 
             const auto is_vendor_enabled = (vendor_name == PresetBundle::SM_BUNDLE) // always update configs from resource to vendor for ORCA_DEFAULT_BUNDLE
                                            || (enabled_vendors.find(vendor_name) != enabled_vendors.end());
@@ -1649,8 +1480,77 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
     }
 
     if (bundles.size() > 0) {
-        install_bundles_rsrc(std::vector(bundles.begin(), bundles.end()), false);
+        if (Slic3r::startup_profile_enabled()) {
+            std::string names;
+            for (const std::string &b : bundles)
+                names += (names.empty() ? "" : ",") + b;
+            Slic3r::startup_profile_log("PresetUpdater::check_installed_vendor_profiles bundles_to_install=" +
+                                        std::to_string(bundles.size()) + " (" + names + ")");
+        }
+        const bool ok = install_bundles_rsrc(std::vector(bundles.begin(), bundles.end()), false);
+        if (bundles.count(library) != 0)
+            write_library_install_stamp(ok);
     }
+}
+
+fs::path PresetUpdater::priv::library_install_stamp_path() const
+{
+    return fs::path(Slic3r::data_dir()) / "cache" / "vendor_install" / (std::string(PresetBundle::ORCA_FILAMENT_LIBRARY) + ".stamp");
+}
+
+Utils::VendorInstallDecision PresetUpdater::priv::decide_library_install() const
+{
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    if (const char *always = std::getenv("ORCA_LIBRARY_ALWAYS_INSTALL"); always && *always && std::string(always) != "0")
+        return {true, "ORCA_LIBRARY_ALWAYS_INSTALL is set"};
+
+    boost::system::error_code ec;
+    const fs::path rsrc_json      = rsrc_path / (library + ".json");
+    const fs::path installed_json = vendor_path / (library + ".json");
+    const fs::path installed_dir  = vendor_path / library;
+
+    Utils::VendorInstallInputs in;
+    in.installed_json_exists   = fs::exists(installed_json, ec);
+    in.installed_dir_has_files = fs::is_directory(installed_dir, ec) && fs::directory_iterator(installed_dir, ec) != fs::directory_iterator();
+    in.resource_version        = read_bundle_version_string(rsrc_json.string());
+    in.installed_version       = in.installed_json_exists ? read_bundle_version_string(installed_json.string()) : std::string();
+    // The digests stat every file on both sides; only take them when the cheap checks pass.
+    if (in.installed_json_exists && in.installed_dir_has_files &&
+        !(!in.resource_version.empty() && Utils::compare_dotted_versions(in.resource_version, in.installed_version) > 0)) {
+        Slic3r::StartupScopedTimer t("PresetUpdater::decide_library_install step=digests");
+        const fs::path stamp = library_install_stamp_path();
+        if (fs::exists(stamp, ec)) {
+            try {
+                Slic3r::load_string_file(stamp, in.stamp_record);
+            } catch (...) {
+                in.stamp_record.clear();
+            }
+        }
+        in.resource_digest  = Utils::tree_stamp_digest((rsrc_path / library).string(), rsrc_json.string());
+        in.installed_digest = Utils::tree_stamp_digest(installed_dir.string(), installed_json.string());
+    }
+    return Utils::decide_vendor_install(in);
+}
+
+void PresetUpdater::priv::write_library_install_stamp(bool install_ok) const
+{
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    const fs::path    stamp   = library_install_stamp_path();
+    boost::system::error_code ec;
+    std::string text;
+    if (install_ok)
+        text = Utils::make_vendor_install_stamp(Utils::tree_stamp_digest((rsrc_path / library).string(), (rsrc_path / (library + ".json")).string()),
+                                                Utils::tree_stamp_digest((vendor_path / library).string(), (vendor_path / (library + ".json")).string()));
+    if (text.empty()) {
+        // A failed install, or one whose result could not be listed: forget the old stamp, so the
+        // next start installs again.
+        fs::remove(stamp, ec);
+        return;
+    }
+    fs::create_directories(stamp.parent_path(), ec);
+    std::string err;
+    if (!Slic3r::write_file_atomically(stamp.string(), text, &err))
+        BOOST_LOG_TRIVIAL(warning) << "[Orca Updater]: could not write the library install stamp: " << err;
 }
 
 Updates PresetUpdater::priv::get_printer_config_updates(bool update) const
@@ -1898,6 +1798,9 @@ bool PresetUpdater::priv::perform_updates(Updates &&updates, bool snapshot) cons
         for (const auto &update : updates.updates) {
             BOOST_LOG_TRIVIAL(info) << '\t' << update;
 
+            Slic3r::StartupScopedTimer t("PresetUpdater::perform_updates install");
+            if (Slic3r::startup_profile_enabled())
+                t.note("vendor=" + update.vendor + " dir=" + (update.is_directory ? "1" : "0") + " target=" + update.target.filename().string());
             if (update.can_install && !update.install()) {
                 BOOST_LOG_TRIVIAL(error) << "[Orca Updater] Update install failed: " << update;
                 return false;
@@ -1965,19 +1868,13 @@ void PresetUpdater::sync(std::string http_url, std::string language, std::string
 	});
 }
 
-bool PresetUpdater::sync_bambu(std::string http_url, std::string plugin_version, bool plugin_check)
+bool PresetUpdater::sync_bambu(std::string http_url)
 {
 	if (!p->enabled_version_check && !p->enabled_config_update) { return false; }
 	if (p->bambu_started)
 		return false;
 	p->bambu_started = true;
-	p->bambu_thread = std::thread([this, http_url, plugin_version, plugin_check]() {
-		if (p->cancel)
-			return;
-		// UltraNet replaces the Bambu network plug-in, so asking Bambu whether a newer one of theirs
-		// exists has no use there (and a "force" answer would stage their package in ota/).
-		if (plugin_check)
-			this->p->sync_plugins(http_url, plugin_version);
+	p->bambu_thread = std::thread([this, http_url]() {
 		if (p->cancel)
 			return;
 		this->p->sync_printer_config(http_url);

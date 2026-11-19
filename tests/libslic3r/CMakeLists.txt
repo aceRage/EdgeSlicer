@@ -3,18 +3,44 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
+	test_model_rotate_center.cpp
+	test_orient.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_multicolour_filament.cpp
+	test_multicolour_glsl.cpp
+	test_glow_filament.cpp
+	test_connect_filament_maps.cpp
+	test_bambu_multi_diameter.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
 	test_untrusted_input.cpp
+	test_post_process_packed_gcode.cpp
+	test_zip_entry_path.cpp
+	test_zip_cleaner.cpp
+	test_zip_extract.cpp
+	test_zip_open.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_layerling.cpp
+	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
+	test_arrange_seq_print.cpp
+	test_arrange_scoring.cpp
+	test_arrange_compacted_tower.cpp
+	test_arrange_results.cpp
+	test_arrange_exclusion.cpp
+	test_arrange_nozzle_reach.cpp
 	test_appconfig_trailing_newline.cpp
+	test_appconfig_auto_slice.cpp
+	test_appconfig_recent_projects.cpp
+	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_lightning.cpp
+	test_arachne_walls.cpp
+	test_skirt_distance.cpp
 	test_ams_lookup.cpp
 	test_assembly_face_pick.cpp
 	test_assembly_exact_footprint.cpp
@@ -23,61 +49,118 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
+	test_paint_wire.cpp
+	test_paint_remap.cpp
+	test_spread_paint.cpp
+	test_airbrush.cpp
+	test_airbrush_p2.cpp
+	test_airbrush_p3.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp
 	test_emboss_bend.cpp
+	test_svg_surface_modifier.cpp
 	test_inline_shapes.cpp
 	test_inline_text.cpp
 	test_simple_shape.cpp
+	test_image_trace.cpp
+	test_dxf.cpp
+	test_svg_split.cpp
+	test_svg_import.cpp
 	test_image_fill.cpp
 	test_image_row_transform.cpp
 	test_image_row_dialog.cpp
+	test_obj_texture_p5d.cpp
+	test_image_fill_p5c.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
+	test_config_range.cpp
+	test_support_interface_settings.cpp
 	test_contour_z.cpp
+	test_head_clearance.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
+	test_height_colour_pattern.cpp
+	test_height_pattern_input.cpp
+	test_cut_paint.cpp
+	test_cut_groove.cpp
+	test_cut.cpp
+	test_cut_mesh_caps.cpp
+	test_cut_halves.cpp
 	test_config_include.cpp
+	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
+	test_filament_delete.cpp
 	test_default_bed_type.cpp
+	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
+	test_filament_inventory.cpp
+	test_nozzle_locale.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
 	test_cut_retraction_range.cpp
 	test_wipe_tower_no_sparse_gcode.cpp
 	test_gcodewriter_feedrate_guard.cpp
+	test_core_guards.cpp
 	# test_ec_retraction.cpp slices a real two-filament plate, so it needs the
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
+	test_sliced_plate_metadata.cpp
 	test_bambu_extruder_map.cpp
 	test_bambu_dual_nozzle_sync.cpp
 	test_bambu_idle_precool.cpp
 	test_export_stl_part.cpp
 	test_step_export.cpp
+	test_step_names.cpp
 	test_cad_edit.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
+	test_fill_plane_path.cpp
+	test_fill_corner_smoothing.cpp
+	test_adaptive_infill_field.cpp
 	test_elegoo_cc2_profiles.cpp
 	test_elegoo_cc2_toolchange.cpp
 	test_flexi_joint.cpp
+	test_pushfit.cpp
+	test_pushfit_cut.cpp
+	test_tac_joint_persistence.cpp
+	test_tac_joint.cpp
+	test_tac_joint_cut.cpp
+	test_cut_connector_surface.cpp
+	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
+	test_arc_fitting.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp
 	test_h2d_byobject_toolchange.cpp
 	test_h2d_timelapse.cpp
 	test_extruder_areas.cpp
+	test_split_to_volume.cpp
 	test_by_object_max_clearance.cpp
 	test_filament_map_reapply.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_mixed_sublayer.cpp
+	test_cli_preset_slots.cpp
+	test_cli_output.cpp
+	test_preset_compat_and_cli.cpp
 	test_mixed_nozzle.cpp
+	test_nozzle_process.cpp
+	test_tool_slots.cpp
+	test_nozzle_editing.cpp
+	test_nozzle_widths.cpp
+	test_nozzle_override.cpp
+	test_nozzle_tool_process.cpp
+	test_nozzle_rack_slots.cpp
+	test_h2c_rack_group_id.cpp
+	test_nozzle_strip_model.cpp
+	test_nozzle_rack_memory.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
@@ -86,54 +169,115 @@ add_executable(${_TEST_NAME}_tests
 	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
+	test_gcode_template_lint.cpp
 	test_polygon.cpp
+	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
+	test_preset_normalize.cpp
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
+	test_preset_variant_load.cpp
+	test_preset_renamed_parent.cpp
+	test_preset_extra_extruders.cpp
+	test_preset_detached_children.cpp
+	test_u1_tag_filament_match.cpp
+	test_preset_user_load_prefetch.cpp
+	test_filament_remap.cpp
+	test_calib_settings.cpp
+	test_calib.cpp
+	test_preset_printer_type.cpp
+	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
+	test_printer_model_specs.cpp
+	test_preset_printer_clone_names.cpp
+	test_process_preset_export.cpp
+	test_preset_import_order.cpp
+	test_preset_manager_model.cpp
+	test_preset_rename.cpp
 	test_project_preset_switch.cpp
+	test_project_preset_state.cpp
+	test_preset_printer_own_presets.cpp
+	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
+	test_minimum_spanning_tree.cpp
 	test_gltf.cpp
 	test_obj_color_match.cpp
 	test_scale_to_volume.cpp
 	test_slice_compare.cpp
 	test_stl.cpp
 	test_support_set.cpp
+	test_support_interlock.cpp
+	test_startup_sound.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
 	test_mesh_round.cpp
 	test_quad_remesh.cpp
 	test_meshboolean.cpp
+	test_adaptive_layer_merge.cpp
+	test_adaptive_region_merge.cpp
 	test_lay_on_face.cpp
-	# test_marchingsquares.cpp
+	test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_utils.cpp
 	test_instance_lock.cpp
 	TestMD5.cpp
+	test_nozzle_sync.cpp
+	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
+    test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_tower_alm.cpp
     test_bbl_rib_tower.cpp
+    test_prime_tower_defaults.cpp
+    test_fine_detail.cpp
+    test_thin_features.cpp
+    test_bbl_h3c.cpp
+    test_bs29_keys_import.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
     test_shortest_path.cpp
     test_gcode_import.cpp
+    test_cost_estimate.cpp
+    test_cost_overrides.cpp
+    test_cost_pricing.cpp
+    test_showcase_scene.cpp
+    test_showcase_materials.cpp
+    test_showcase_callouts.cpp
+    test_showcase_video.cpp
+    test_showcase_path.cpp
+    test_showcase_tone.cpp
+    test_showcase_glsl.cpp
+    test_showcase_hdr.cpp
+    test_showcase_panel_rules.cpp
+    test_showcase_lens.cpp
+    test_showcase_skin.cpp
+    test_showcase_realism.cpp
+    test_showcase_blender.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
+    test_connected_bodies.cpp
+    test_texture_displacement.cpp
+    test_texture_displacement_edge.cpp
     ../libnest2d/printer_parts.cpp
 	)
 
 if (TARGET OpenVDB::openvdb)
-    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_hollowing.cpp test_voxel_remesh.cpp)
 endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)
+# Edge: test_fuzzy_skin.cpp checks libnoise's value noise itself ([FuzzySkin][VoronoiNoise]). libslic3r
+# links noise::noise privately, so the headers do not reach the tests through it.
+find_package(libnoise REQUIRED)
+target_link_libraries(${_TEST_NAME}_tests noise::noise)
 if (WIN32)
     target_link_libraries(${_TEST_NAME}_tests bcrypt.lib crypt32.lib)
 endif()
