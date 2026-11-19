@@ -493,6 +493,154 @@ TEST_CASE("Tool change on wipe tower forces the travel to the Type 2 tower befor
     CHECK(travels_on + 1 >= tools_on);
 }
 
+// Type 2 tower with no sparse layers, so the tower is below the layer on changes after skipped
+// layers: a U1-like toolchanger, two 20 mm cubes, the second in filament 2 below 1 mm and between
+// 6 and 7 mm. The tool change goes over the tower (tool_change_on_wipe_tower).
+static std::string slice_toolchanger_low_tower(bool ramming)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values         = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values          = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values           = {0.4, 0.4};
+    config.option<ConfigOptionBools>("filament_multitool_ramming")->values = {ramming, ramming};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.option<ConfigOptionBool>("tool_change_on_wipe_tower")->value      = true;
+    config.set_deserialize_strict({
+        {"wipe_tower_no_sparse_layers", "1"},
+        // The objects rise far above the compacted tower; let "No sparse layers" accept that.
+        {"extruder_clearance_height_to_lid", "40"},
+        {"extruder_clearance_height_to_rod", "40"},
+        {"skirt_loops",                 0},
+        {"brim_type",                   "no_brim"},
+        {"gcode_comments",              "1"},
+        {"machine_start_gcode",         ""},
+        {"change_filament_gcode",       ""},
+        {"layer_height",                "0.2"},
+        {"initial_layer_print_height",  "0.2"},
+    });
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->config.set("extruder", 1);
+        // Beyond the toolhead radius from the tower, so only the lid and rod clearances limit them.
+        object->add_instance()->set_offset(Vec3d(110. + 40. * i, 120., 0.));
+        object->ensure_on_bed();
+        if (i == 1)
+            for (const t_layer_height_range range : {t_layer_height_range{0., 1.}, t_layer_height_range{6., 7.}}) {
+                DynamicPrintConfig range_config;
+                range_config.set_key_value("extruder", new ConfigOptionInt(2));
+                range_config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+                object->layer_config_ranges[range].assign_config(std::move(range_config));
+            }
+    }
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE_FALSE(print.is_BBL_printer());
+    REQUIRE(print.has_wipe_tower());
+    return Test::gcode(print);
+}
+
+struct LowTowerChange
+{
+    double layer_z      = 0.; // the layer the change is made on
+    double min_z_before = 0.; // lowest nozzle Z from the layer's last print move up to the Tn line
+    bool   extruded_low = false; // something was extruded below the layer before the Tn line
+    double min_z_after  = 0.; // lowest nozzle Z from the Tn line to the end of the tool change block
+};
+
+static std::vector<LowTowerChange> low_tower_changes(const std::string &gcode)
+{
+    std::vector<LowTowerChange> out;
+    std::istringstream          in(gcode);
+    std::string                 line;
+    double                      z = 0., layer_z = -1., window_min = DBL_MAX;
+    bool                        window_low_extrusion = false;
+    LowTowerChange             *open                 = nullptr;
+    auto                        read = [](const std::string &l, char axis, double &v) {
+        size_t p = l.find(std::string(" ") + axis);
+        if (p == std::string::npos)
+            return false;
+        v = std::atof(l.c_str() + p + 2);
+        return true;
+    };
+    while (std::getline(in, line)) {
+        const std::string code = line.substr(0, line.find(';'));
+        if (line.rfind(";Z:", 0) == 0) {
+            layer_z              = std::atof(line.c_str() + 3);
+            window_min           = DBL_MAX;
+            window_low_extrusion = false;
+            continue;
+        }
+        if (line.find("; CP TOOLCHANGE END") != std::string::npos) {
+            open                 = nullptr;
+            window_min           = DBL_MAX;
+            window_low_extrusion = false;
+            continue;
+        }
+        if (code.size() >= 2 && code[0] == 'T' && std::isdigit(static_cast<unsigned char>(code[1])) && layer_z > 0.) {
+            // Only the moves since the window opened: ";Z:" comes before the move up to the layer.
+            out.push_back({layer_z, window_min == DBL_MAX ? z : window_min, window_low_extrusion, z});
+            open = &out.back();
+            continue;
+        }
+        if (code.rfind("G1 ", 0) != 0 && code.rfind("G0 ", 0) != 0)
+            continue;
+        double     v;
+        const bool zmove = read(code, 'Z', v);
+        if (zmove)
+            z = v;
+        const bool xy = read(code, 'X', v) || read(code, 'Y', v);
+        if (! zmove && ! xy)
+            continue; // a retract or a feedrate: the nozzle does not move
+        double     e  = 0.;
+        const bool extrudes = xy && read(code, 'E', e) && e > 0.;
+        if (open != nullptr) {
+            open->min_z_after = std::min(open->min_z_after, z);
+        } else {
+            window_min = std::min(window_min, z);
+            if (extrudes && z < layer_z - 0.5)
+                window_low_extrusion = true;
+        }
+    }
+    return out;
+}
+
+TEST_CASE("A tool change with no ram does not go down to a lower Type 2 tower before the change", "[GCode][WipeTower][U1C]")
+{
+    const std::vector<LowTowerChange> changes = low_tower_changes(slice_toolchanger_low_tower(false));
+    size_t below = 0;
+    for (const LowTowerChange &c : changes) {
+        CAPTURE(c.layer_z, c.min_z_before, c.min_z_after);
+        // Nothing is laid at the tower before the change: the nozzle stays at the layer's height up to Tn.
+        CHECK(c.min_z_before >= c.layer_z - 1e-3);
+        CHECK_FALSE(c.extruded_low);
+        if (c.min_z_after < c.layer_z - 1.)
+            ++below;
+    }
+    // The case is exercised: some changes print on a tower more than 1 mm below the layer.
+    CHECK(below > 0);
+}
+
+TEST_CASE("A tool change with a ram still goes down to a lower Type 2 tower to ram there", "[GCode][WipeTower][U1C]")
+{
+    const std::vector<LowTowerChange> changes = low_tower_changes(slice_toolchanger_low_tower(true));
+    size_t rammed_low = 0;
+    for (const LowTowerChange &c : changes)
+        if (c.extruded_low)
+            ++rammed_low;
+    CHECK(rammed_low > 0);
+}
+
 // Orca #16422: firmwares read the compatibility header lines, so they must describe the filament
 // the plate prints, not filament 1. Edge keeps first_layer_bed_temperature as the max of used
 // filaments (U1 always heats to the highest bed temp).

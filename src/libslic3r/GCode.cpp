@@ -1955,7 +1955,14 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // "Force restore layer Z" below takes the nozzle down once it is there.
     const bool changes_in_place = !travel_to_tower_now && !tcr.priming && new_extruder_id >= 0 && needs_toolchange &&
                                   gcodegen.config().enable_prime_tower;
-    if (will_go_down && !changes_in_place) {
+    // Edge: a tool change with no ram lays nothing at the tower before the change: the unload is only
+    // a planner sync, and "Restore layer Z before toolchange" below would lift the nozzle straight
+    // back up for the change. Stay at the layer's height; "Force restore layer Z" takes the nozzle
+    // down to the tower after the change, as for an in-place change.
+    const bool no_ram_before_change = !tcr.priming && new_extruder_id >= 0 && needs_toolchange && !is_ramming &&
+                                      gcodegen.config().enable_prime_tower;
+    const bool goes_down_before_change = will_go_down && !changes_in_place && !no_ram_before_change;
+    if (goes_down_before_change) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
         gcode += gcodegen.writer().unretract();
@@ -1997,7 +2004,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         // docking a tool, etc.), so restore Z to the real layer height before running it,
         // otherwise that travel can collide with already-printed parts taller than the tower.
         // deretraction_str (below) brings Z back down to resume printing the wipe tower.
-        if (will_go_down && !changes_in_place && gcodegen.config().enable_prime_tower) {
+        if (goes_down_before_change && gcodegen.config().enable_prime_tower) {
             restore_layer_z_str += gcodegen.writer().retract();
             restore_layer_z_str += gcodegen.writer().travel_to_z(current_z,
                 "Restore layer Z before toolchange to avoid collision with printed parts");
