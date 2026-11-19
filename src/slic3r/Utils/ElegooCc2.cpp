@@ -155,6 +155,36 @@ bool parse_upload_reply(const std::string& body, std::string& error)
     return true;
 }
 
+std::string describe_upload_failure(const std::string& body, const std::string& our_md5, size_t total)
+{
+    const json j = parse_object(body);
+    if (j.is_null())
+        return std::string();
+    const int code = int_at(j, "error_code", -1);
+    if (code == 0)
+        return std::string();
+    std::string out = error_text(code);
+    std::string md5 = str_at(j, "md5");
+    std::transform(md5.begin(), md5.end(), md5.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto it = j.find("offset");
+    const bool has_offset = it != j.end() && (it->is_number_integer() || it->is_number_unsigned());
+    if (has_offset || !md5.empty()) {
+        out += " (the printer reported";
+        if (has_offset)
+            out += " offset " + std::to_string(it->get<long long>()) + " of " + std::to_string(total) + " bytes sent";
+        if (!md5.empty()) {
+            out += std::string(has_offset ? ", " : " ") + "checksum " + md5;
+            if (!our_md5.empty())
+                out += md5 == our_md5 ? " (same as ours)" : " (ours is " + our_md5 + ")";
+        }
+        out += ")";
+    }
+    const std::string message = str_at(j, "message");
+    if (!message.empty())
+        out += ": " + message;
+    return out;
+}
+
 std::string content_range(size_t offset, size_t length, size_t total)
 {
     const size_t last = length == 0 ? offset : offset + length - 1;
@@ -348,6 +378,7 @@ std::string error_text(int error_code)
     case ERR_INVALID_PARAMETER:
     case ERR_INVALID_PARAMETER2: return "the printer refused the request as invalid";
     case ERR_BUSY: return "the printer is busy";
+    case ERR_UPLOAD_REJECTED: return "the printer rejected the uploaded file (error 9004)";
     case ERR_FILE_NOT_FOUND: return "the printer cannot find the uploaded file";
     case ERR_MISSING_BED_LEVELING: return "the printer has no bed leveling data";
     case -1: return "the printer did not say whether it worked";

@@ -180,6 +180,14 @@ TEST_CASE("CC2 /system/info and /upload answers", "[ElegooCc2]")
     CHECK_FALSE(ElegooCc2::parse_upload_reply(R"({"code":"000000"})", error)); // the CC1's answer is not the CC2's
     CHECK_FALSE(ElegooCc2::parse_upload_reply("", error));
 
+    const std::string d = ElegooCc2::describe_upload_failure(R"({"error_code":9004,"md5":"ABCDEF","offset":1143531})", "abcdef", 1143531);
+    CHECK(d.find("error 9004") != std::string::npos);
+    CHECK(d.find("offset 1143531 of 1143531") != std::string::npos);
+    CHECK(d.find("same as ours") != std::string::npos);
+    CHECK(ElegooCc2::describe_upload_failure(R"({"error_code":9004,"md5":"0000"})", "abcdef", 5).find("ours is abcdef") != std::string::npos);
+    CHECK(ElegooCc2::describe_upload_failure(R"({"error_code":0})", "x", 1).empty());
+    CHECK(ElegooCc2::describe_upload_failure("<html>", "x", 1).empty());
+
     CHECK(ElegooCc2::content_range(0, 1048576, 2500000) == "bytes 0-1048575/2500000");
     CHECK(ElegooCc2::content_range(2097152, 402848, 2500000) == "bytes 2097152-2499999/2500000");
 }

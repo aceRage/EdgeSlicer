@@ -685,10 +685,14 @@ namespace Slic3r {
                 .set_post_body(chunk)
                 .on_complete([&](std::string body, unsigned status) {
                     std::string why;
+                    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: CC2 chunk %2%/%3% Content-Range `%4%`, file %5% bytes, md5 %6%: HTTP %7%, answer `%8%`") %
+                                                   name % (i + 1) % packageCount % ElegooCc2::content_range(offset, length, total) % total % md5 % status % body;
                     if (ElegooCc2::parse_upload_reply(body, why))
                         res = true;
-                    else
-                        error_fn(format_error(body, why, status));
+                    else {
+                        const std::string detail = ElegooCc2::describe_upload_failure(body, md5, total);
+                        error_fn(format_error(body, detail.empty() ? why : detail, status));
+                    }
                 })
                 .on_error([&](std::string body, std::string error, unsigned status) {
                     BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading CC2 chunk: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
