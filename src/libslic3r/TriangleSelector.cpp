@@ -299,10 +299,12 @@ static float min_barycentric(const Vec3f &pt, const Vec3f &a, const Vec3f &b, co
     return std::min({ 1.f - v - w, v, w });
 }
 
-EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area) const
+EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area, int *leaf_idx) const
 {
     if (leaf_area)
         *leaf_area = 0.f;
+    if (leaf_idx)
+        *leaf_idx = -1;
     if (facet_idx < 0 || facet_idx >= m_orig_size_indices || ! m_triangles[facet_idx].valid())
         return EnforcerBlockerType::NONE;
     int idx = facet_idx;
@@ -326,6 +328,8 @@ EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &
         const std::array<int, 3> &v = m_triangles[idx].verts_idxs;
         *leaf_area = 0.5f * (m_vertices[v[1]].v - m_vertices[v[0]].v).cross(m_vertices[v[2]].v - m_vertices[v[0]].v).norm();
     }
+    if (leaf_idx && idx != facet_idx)
+        *leaf_idx = idx;
     return m_triangles[idx].get_state();
 }
 
@@ -347,10 +351,19 @@ struct ResamplePlanner
         const S     sab = sampler(mab), sbc = sampler(mbc), sca = sampler(mca);
         const float area = 0.5f * (b - a).cross(c - a).norm();
 
-        bool  uniform  = true;
-        float min_leaf = 0.f;
+        bool    uniform  = true;
+        float   min_leaf = 0.f;
+        int64_t leaf     = -1;
         for (const S *s : { &centre, &sa, &sb, &sc, &sab, &sbc, &sca }) {
             uniform = uniform && s->state == centre.state && (s->leaf_area <= 0.f || area <= s->leaf_area);
+            // Samples in different pieces of split painting: a border of the same state's pieces
+            // can hide a stroke of another state between the samples.
+            if (s->leaf >= 0) {
+                if (leaf < 0)
+                    leaf = s->leaf;
+                else if (s->leaf != leaf)
+                    uniform = false;
+            }
             if (s->leaf_area > 0.f && (min_leaf <= 0.f || s->leaf_area < min_leaf))
                 min_leaf = s->leaf_area;
         }
