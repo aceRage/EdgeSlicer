@@ -953,6 +953,43 @@ TEST_CASE("neutralize_settings puts back the baseline or the default", "[Untrust
     CHECK(joined_post_process(cfg2).empty());
 }
 
+TEST_CASE("A slicing pipeline plugin or plugin settings from a file are flagged unless the user has them", "[Untrusted][Settings][plugins]")
+{
+    // Empty or blank values (every OFF build's default) are never flagged.
+    DynamicPrintConfig blank = DynamicPrintConfig::full_print_config();
+    blank.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"", "  "}));
+    blank.set_key_value("print_plugin_config_overrides", new ConfigOptionString(" "));
+    CHECK(find_untrusted_settings(blank, "p", TrustedValues{}).empty());
+
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"Stamp", " Other "}));
+    cfg.set_key_value("print_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"Stamp\"}]"));
+    cfg.set_key_value("filament_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"F\"}]"));
+    cfg.set_key_value("printer_plugin_config_overrides", new ConfigOptionString("[{\"name\":\"P\"}]"));
+    auto found = find_untrusted_settings(cfg, "p", TrustedValues{});
+    std::vector<std::string> keys;
+    for (const auto &f : found) {
+        CHECK(f.risk == SettingRisk::RunsPlugins);
+        keys.push_back(f.key);
+    }
+    CHECK(keys == plugin_selection_keys());
+    CHECK(plugin_selection_value(cfg, "slicing_pipeline_plugin") == "Stamp\nOther");
+
+    // The user's own choices are not flagged; a different plugin is.
+    TrustedValues mine;
+    for (const std::string &key : plugin_selection_keys())
+        mine.plugin_values.insert(key + "=" + plugin_selection_value(cfg, key));
+    CHECK(find_untrusted_settings(cfg, "p", mine).empty());
+    cfg.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"Evil"}));
+    found = find_untrusted_settings(cfg, "p", mine);
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].key == "slicing_pipeline_plugin");
+
+    // Removing them puts the defaults (nothing selected) back.
+    CHECK(neutralize_settings(cfg, found, nullptr) == 1);
+    CHECK(plugin_selection_value(cfg, "slicing_pipeline_plugin").empty());
+}
+
 // ---- a project 3MF that carries scripts ----------------------------------------------------------------
 
 namespace {

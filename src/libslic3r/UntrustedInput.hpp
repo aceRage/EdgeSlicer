@@ -289,8 +289,11 @@ constexpr std::size_t SVG_MAX_FLAT_POINTS   = 2000000;  // polygon points after 
 // Options a file we did not write may not set silently:
 //   post_process      runs programs on this computer when G-code is exported (for Bambu Lab
 //                     printers already when a plate is sliced);
-//   filename_format   the output name; flagged when it would leave the output folder.
-enum class SettingRisk { RunsPrograms, WritesOutsideOutputFolder, NetworkEndpoint };
+//   filename_format   the output name; flagged when it would leave the output folder;
+//   slicing_pipeline_plugin and the *_plugin_config_overrides
+//                     pick which installed Python plugin runs while slicing and with what
+//                     settings (RunsPlugins); a file must never switch one on silently.
+enum class SettingRisk { RunsPrograms, WritesOutsideOutputFolder, NetworkEndpoint, RunsPlugins };
 
 struct UntrustedSetting
 {
@@ -310,10 +313,18 @@ bool filename_format_leaves_folder(const std::string &format);
 // Keys that point the app at a network endpoint or carry credentials for one.
 const std::vector<std::string> &network_endpoint_keys();
 
+// Keys that choose a Python plugin to run during slicing, or configure one:
+// slicing_pipeline_plugin and the print / printer / filament *_plugin_config_overrides.
+const std::vector<std::string> &plugin_selection_keys();
+// The value of one of plugin_selection_keys() as text (list entries joined by a newline,
+// trimmed, blank entries dropped); empty when cfg does not set it.
+std::string plugin_selection_value(const DynamicPrintConfig &cfg, const std::string &key);
+
 struct TrustedValues
 {
     std::set<std::string> post_process;     // joined_post_process() of the user's own presets
     std::set<std::string> filename_format;  // filename_format of the user's own presets
+    std::set<std::string> plugin_values;    // key + '=' + plugin_selection_value() of the user's own presets
 };
 
 // Lists what cfg carries that the user has not already got in one of their own presets.

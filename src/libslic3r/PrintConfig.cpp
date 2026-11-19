@@ -7181,6 +7181,34 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
 
+    def = this->add("plugins", coStrings);
+    def->label = L("Plugins Used");
+    def->tooltip = L("Plugin capabilities referenced by this preset, stored as name;uuid;capability.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings());
+
+    def = this->add("slicing_pipeline_plugin", coStrings);
+    def->label = L("Slicing Pipeline Plugin");
+    def->tooltip = L("Python plugins invoked at each slicing pipeline step to read and modify intermediate slicing data, "
+                   "including a final G-code post-processing step. Early steps run unsandboxed in-process.");
+    def->gui_type = ConfigOptionDef::GUIType::plugin_picker;
+    def->plugin_type = "slicing-pipeline";
+    def->full_width = true;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionStrings());
+
+    for (const char* key : {"print_plugin_config_overrides", "printer_plugin_config_overrides", "filament_plugin_config_overrides"}) {
+        def = this->add(key, coString);
+        def->label = L("Capabilities");
+        def->tooltip = L("Configuration for the plugin capabilities this preset uses, overriding the global "
+                         "Capabilities configuration. Stored as a raw JSON array and edited through the dialog "
+                         "behind the button, never typed in directly.");
+        def->gui_type = ConfigOptionDef::GUIType::plugin_config;
+        def->mode = comAdvanced;
+        def->cli = ConfigOptionDef::nocli;
+        def->set_default_value(new ConfigOptionString(""));
+    }
+
     def = this->add("mixed_color_layer_height_a", coFloat);
     def->label = L("Dithering cadence height A");
     def->category = L("Others");
@@ -12665,6 +12693,25 @@ const std::set<std::string>& visual_only_option_keys()
         "filament_glow_intensity",
         "filament_gradient_dwell",
         "filament_gradient_transition",
+    };
+    return s_keys;
+}
+
+const std::set<std::string_view>& gcode_full_config_banned_keys()
+{
+    // OrcaSlicer #13507: filament_colour_type crashes the Anycubic Kobra 3 config parser. This fork
+    // has no such option yet; the ban keeps the block safe once a profile sync or port brings it in.
+    static const std::set<std::string_view> s_keys{
+        "compatible_printers",
+        "compatible_prints",
+        "filament_colour_type",
+        "print_host",
+        "print_host_webui",
+        "printhost_apikey",
+        "printhost_cafile",
+        "printhost_user",
+        "printhost_password",
+        "printhost_port",
     };
     return s_keys;
 }

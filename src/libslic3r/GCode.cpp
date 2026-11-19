@@ -11049,17 +11049,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
     const DynamicPrintConfig& cfg = tool_space_cfg.empty() ? print.full_print_config() : tool_space_cfg;
     std::vector<int> grouped_nozzle_map, grouped_volume_map;
     const bool       use_grouped_maps = grouping_header_maps(print, grouped_nozzle_map, grouped_volume_map);
-    // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
-    // OrcaSlicer #13507: filament_colour_type crashes the Anycubic Kobra 3 config parser. This fork
-    // has no such option yet; the ban keeps the block safe once a profile sync or port brings it in.
-    static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "filament_colour_type"sv, "print_host"sv,
-                                                         "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
-                                                         "printhost_user"sv, "printhost_password"sv, "printhost_port"sv});
+    // Sorted list of config keys, which shall not be stored into the G-code.
     // Visual-only keys (visual_only_option_keys()) are banned too: Print::apply() already strips them, this
-    // keeps the block clean should a later path build the config without it.
-    auto                                    is_banned = [](const std::string& key) {
-        return banned_keys.find(key) != banned_keys.end() || is_visual_only_option(key);
-    };
+    // keeps the block clean should a later path build the config without it. Shared with
+    // PluginHostClient::config_snapshot via is_gcode_full_config_banned().
     // BBS: the idle-nozzle pre-heating keys are dumped (as Bambu Studio does) only for a printer that
     // pre-heats; every other printer's config block stays as it was before the keys existed.
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
@@ -11105,7 +11098,11 @@ void GCode::append_full_config(const Print& print, std::string& str)
             continue;
         if (!dump_mass_model_keys && mass_model_keys.find(key) != mass_model_keys.end())
             continue;
-        if (!is_banned(key) && !cfg.option(key)->is_nil()) {
+        // Plugin keys only when a job names a plugin or override, so OFF (and ON with
+        // nothing selected) G-code headers stay byte-identical to main. Empty is not nil.
+        if (ConfigBase::plugin_option_is_empty(key, cfg.option(key)))
+            continue;
+        if (!is_gcode_full_config_banned(key) && !cfg.option(key)->is_nil()) {
             if (key == "wipe_tower_x" || key == "wipe_tower_y") {
                 ss << std::fixed << std::setprecision(3) << "; " << key << " = "
                    << dynamic_cast<const ConfigOptionFloats*>(cfg.option(key))->get_at(print.get_plate_index()) << "\n";

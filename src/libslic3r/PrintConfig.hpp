@@ -23,6 +23,7 @@
 #include "PaintDepth.hpp"
 #include <algorithm>
 #include <set>
+#include <string_view>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -1265,6 +1266,15 @@ const std::vector<std::string>& part_support_keys();
 // stripped, banned, resized, erased and moved with the others without further code.
 const std::set<std::string>& visual_only_option_keys();
 inline bool is_visual_only_option(const std::string &key) { return visual_only_option_keys().count(key) != 0; }
+
+// Keys GCode::append_full_config omits from the G-code config block (print-host
+// credentials, compatible_* lists, filament_colour_type). PluginHostClient::config_snapshot
+// uses the same list. Visual-only keys are banned too via is_gcode_full_config_banned().
+const std::set<std::string_view>& gcode_full_config_banned_keys();
+inline bool is_gcode_full_config_banned(const std::string &key)
+{
+    return gcode_full_config_banned_keys().count(key) != 0 || is_visual_only_option(key);
+}
 
 // The slot helpers for the visual-only keys (PresetBundle calls them next to filament_multi_colors).
 // Each works on every vector key of visual_only_option_keys(), whatever its type.
@@ -2635,6 +2645,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               ooze_prevention))
     ((ConfigOptionString,             filename_format))
     ((ConfigOptionStrings,            post_process))
+    ((ConfigOptionStrings,            slicing_pipeline_plugin))
+    ((ConfigOptionString,             print_plugin_config_overrides))
     ((ConfigOptionFloat,              mixed_color_layer_height_a))
     ((ConfigOptionFloat,              mixed_color_layer_height_b))
     ((ConfigOptionBool,               mixed_filament_gradient_mode))

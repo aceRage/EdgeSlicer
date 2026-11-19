@@ -28,23 +28,26 @@ function(encoding_check TARGET)
         # Obtain target source files
         get_target_property(T_SOURCES ${TARGET} SOURCES)
 
-        # Define top-level encoding check target for this ${TARGET}
-        add_custom_target(encoding-check-${TARGET}
-            DEPENDS encoding-check ${T_SOURCES}
-            COMMENT "Checking source files encodings for target ${TARGET}"
-        )
-
-        # Add checking of each source file as a subcommand of encoding-check-${TARGET}
+        # Stamp file so the check is not an always-out-of-date UTILITY target.
+        # add_dependencies(libslic3r_gui global-encoding-check) used to relink
+        # edge-plugin-host on every build (PE timestamp → hash churn on Windows).
+        set(_enc_stamp "${CMAKE_CURRENT_BINARY_DIR}/encoding-check-${TARGET}.stamp")
+        set(_enc_cmds)
         foreach(file ${T_SOURCES})
-            add_custom_command(TARGET encoding-check-${TARGET} PRE_BUILD
-                COMMAND $<TARGET_FILE:encoding-check> ${TARGET} ${file}
-                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            )
+            list(APPEND _enc_cmds COMMAND $<TARGET_FILE:encoding-check> ${TARGET} ${file})
         endforeach()
+        add_custom_command(
+            OUTPUT ${_enc_stamp}
+            ${_enc_cmds}
+            COMMAND ${CMAKE_COMMAND} -E touch ${_enc_stamp}
+            DEPENDS encoding-check ${T_SOURCES}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Checking source files encodings for target ${TARGET}"
+            VERBATIM
+        )
+        add_custom_target(encoding-check-${TARGET} DEPENDS ${_enc_stamp})
 
-        # This adds dependency on encoding-check-${TARGET} to ${TARET}
-        # via the global-encoding-check
         add_dependencies(global-encoding-check encoding-check-${TARGET})
-        add_dependencies(${TARGET} global-encoding-check)
+        add_dependencies(${TARGET} encoding-check-${TARGET})
     endif()
 endfunction()
