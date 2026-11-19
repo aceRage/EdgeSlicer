@@ -12,7 +12,7 @@ Scanned:
 - Upstream [OrcaSlicer/OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) `main` `9612260bb5` (6 November 2026, 20:53 UTC, “Fix multiline infill paths…”). Plugin tree, CMake Python/`uv` wiring, `docs/HLSD/plugin-permissions.md`, `PluginsDialog.hpp`, tests, and `Print.hpp` pipeline seams were read from that tip. The r4 plan cited code-search tip `6b0d50bf`; this map is against a later `main`.
 - This Cloud Agent Linux host (kernel `6.12.113+`, x86_64): Landlock, seccomp, bubblewrap, OpenSSL Ed25519, and system Python ABI.
 
-Spike code lives under `src/slic3r/plugin/spike/` and is compiled only when `EDGE_PYTHON_PLUGINS_SPIKE=ON`. Default builds do not link it. Nothing in this phase hooks `Print`, `PostProcessor`, or G-code export.
+The Phase 0 spike (`src/slic3r/plugin/spike/`, `EDGE_PYTHON_PLUGINS_SPIKE`) was removed when the stack landed (L10); it stays in the history of `feature/plugins-p0-spike`. Default builds do not link it. Nothing in this phase hooks `Print`, `PostProcessor`, or G-code export.
 
 ## 1. Settled decisions this map respects
 
