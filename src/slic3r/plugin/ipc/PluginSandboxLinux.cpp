@@ -37,6 +37,7 @@ bool probe_linux_sandbox(SandboxProbe& probe)
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <linux/types.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -391,6 +392,18 @@ bool install_seccomp(bool allow_network, bool allow_exec, std::string& error)
 #endif
     }
 
+#if defined(__NR_ioctl) && defined(TIOCSTI) && defined(TIOCLINUX)
+    // M1: no typing into a terminal (TIOCSTI, on kernels that still allow it) and no console
+    // control (TIOCLINUX), whatever fd the child got hold of.
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 6, static_cast<uint32_t>(__NR_ioctl));
+    emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, args[1]));
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(TIOCSTI));
+    emit(BPF_RET | BPF_K, 0, 0, deny);
+    emit(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, static_cast<uint32_t>(TIOCLINUX));
+    emit(BPF_RET | BPF_K, 0, 0, deny);
+    emit(BPF_LD | BPF_W | BPF_ABS, 0, 0, offsetof(struct seccomp_data, nr));
+#endif
+
 #ifdef __NR_socketpair
     // socketpair(AF_UNIX, SOCK_STREAM) stays: asyncio and the inherited IPC fd. SOCK_DGRAM
     // pairs can sendto() journald; restrict the type. AF_UNIX socket() is still denied.
@@ -519,8 +532,13 @@ bool apply_linux_sandbox(const SandboxSpec& spec, SandboxReport& report, std::st
 
     // System trees CPython and libpython need. Read+execute only. Do not grant all of
     // /proc (other pids' environ) or /run (session bus sockets).
-    for (const char* p : {"/usr", "/lib", "/lib64", "/lib32", "/opt", "/etc", "/dev", "/sys"})
+    for (const char* p : {"/usr", "/lib", "/lib64", "/lib32", "/opt", "/etc", "/sys"})
         add_opt(p, false);
+    // M1: only the harmless devices, never all of /dev (terminals, /dev/input, /dev/video*,
+    // /dev/hidraw* for users in those groups). /dev/null is also writable.
+    for (const char* p : {"/dev/zero", "/dev/random", "/dev/urandom"})
+        add_opt(p, false);
+    add_opt("/dev/null", true);
     for (const char* p : {"/proc/self", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/filesystems", "/proc/version"})
         add_opt(p, false);
     // systemd-resolved: /etc/resolv.conf is often a symlink into this directory.

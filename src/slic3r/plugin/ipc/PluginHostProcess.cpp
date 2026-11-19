@@ -858,6 +858,16 @@ bool spawn_host_fork(SpawnedHost&                   out,
             ::_exit(127);
         if (stderrw != STDERR_FILENO)
             ::close(stderrw);
+        // M1: stdin and stdout are /dev/null, never the terminal EdgeSlicer was started from.
+        {
+            const int devnull = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+            if (devnull < 0 || ::dup2(devnull, STDIN_FILENO) < 0 || ::dup2(devnull, STDOUT_FILENO) < 0)
+                ::_exit(127);
+            if (devnull != STDIN_FILENO && devnull != STDOUT_FILENO)
+                ::close(devnull);
+            clear_cloexec(STDIN_FILENO);
+            clear_cloexec(STDOUT_FILENO);
+        }
         clear_cloexec(3);
         clear_cloexec(4);
         // Error pipe must stay CLOEXEC so execv closes it and the parent's
