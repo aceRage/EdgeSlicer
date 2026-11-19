@@ -1968,6 +1968,30 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         gcode += gcodegen.writer().unretract();
     }
 
+    // WipeTower2 emits no acceleration, so the tower would print at whatever the travel to it or
+    // the last object extrusion left (on Klipper one ACCEL serves travel too). Use what _extrude()
+    // picks for a role without an acceleration of its own, matching Type 1 ramming in append_tcr:
+    // first layer / priming at initial_layer_acceleration, later layers at prime_tower_acceleration
+    // when set (Type 1's tower writer emits that; Type 2 does not) else default_acceleration.
+    // Call again after any later travel into the tower so the writer's last acceleration follows
+    // the G-code order, then restore the previous print acceleration after the tower G-code.
+    auto tower_acceleration = [&gcodegen, &tcr]() -> std::string {
+        if (gcodegen.writer().extruder() == nullptr)
+            return {};
+        const double default_acc = gcodegen.process_flow_value(gcodegen.m_config.default_acceleration);
+        if (default_acc <= 0.)
+            return {};
+        double       acc       = default_acc;
+        const double first_acc = gcodegen.process_flow_value(gcodegen.m_config.initial_layer_acceleration);
+        if ((tcr.priming || gcodegen.on_first_layer()) && first_acc > 0.)
+            acc = first_acc;
+        else if (gcodegen.m_config.prime_tower_acceleration.value > 0.)
+            acc = gcodegen.m_config.prime_tower_acceleration.value;
+        return gcodegen.writer().set_print_acceleration((unsigned int) std::floor(acc + 0.5));
+    };
+    const unsigned int prev_print_accel = gcodegen.writer().last_print_acceleration();
+    gcode += tower_acceleration();
+
     std::string toolchange_gcode_str;
     std::string deretraction_str;
     std::string restore_layer_z_str;
@@ -2022,6 +2046,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                 gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
                 std::string travel = travel_to_tower_gap(gcodegen, route_start, start_wipe_pos, gap_entry_pos);
                 travel += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
+                travel += tower_acceleration();
                 check_add_eol(travel);
                 toolchange_gcode_str += travel;
                 gcodegen.set_last_pos(start_wipe_pos);
@@ -2054,6 +2079,11 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
+    // Restore the print acceleration that was in effect before the tower, so later object
+    // features re-state their own. Type 1 invalidates after the tower when prime_tower_acceleration
+    // wrote M204 behind the writer's back; Type 2 went through GCodeWriter, so restore the value.
+    if (prev_print_accel > 0)
+        gcode += gcodegen.writer().set_print_acceleration(prev_print_accel);
     check_add_eol(toolchange_gcode_str);
 
     // SoftFever: set new PA for new filament (flow-variant column, not raw filament id)
