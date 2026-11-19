@@ -25,9 +25,6 @@ class PrintObject;
 class LayerTools;
 namespace CustomGCode { struct Item; }
 class PrintRegion;
-class ExtrusionEntity;
-class ExtrusionEntityCollection;
-enum ExtrusionRole : uint8_t;
 
 // Object of this class holds information about whether an extrusion is printed immediately
 // after a toolchange (as part of infill/perimeter wiping) or not. One extrusion can be a part

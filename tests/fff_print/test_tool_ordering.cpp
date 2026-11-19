@@ -1,9 +1,10 @@
 #include <catch2/catch.hpp>
 
+// Print.hpp first: it brings in ExtrusionEntity.hpp, which ToolOrdering.hpp expects to be declared.
+#include "libslic3r/Print.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
